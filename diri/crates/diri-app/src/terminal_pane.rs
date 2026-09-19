@@ -131,10 +131,16 @@ pub enum TerminalPaneEvent {
     ExternalDropFeedback {
         message: String,
     },
+    /// A session strip chip asks for the panel's Preview surface.
+    OpenPreview {
+        url: String,
+    },
 }
 
 #[path = "session_links.rs"]
 mod session_links;
+#[path = "session_strip.rs"]
+mod session_strip;
 use session_links::SessionLinks;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4595,7 +4601,11 @@ impl Render for TerminalPane {
                 .bg(colors.terminal_surface())
                 .when(!self.header_hidden, |pane| {
                     pane.child(self.render_header(&session, sidebar_colors, cx))
-                });
+                })
+                .when_some(
+                    self.render_session_strip(&session, sidebar_colors, cx),
+                    |pane, strip| pane.child(strip),
+                );
             let mut terminal_surface = div()
                 .relative()
                 .min_h(px(0.0))
@@ -6149,7 +6159,10 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let session = fixture_session();
+        let mut session = fixture_session();
+        if scene == "strip" {
+            session_strip::seed_strip_fixture(&mut session);
+        }
         let id = session.id.clone();
         {
             let mut store = runtime.store.write().unwrap();
