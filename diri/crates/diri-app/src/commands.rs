@@ -35,7 +35,6 @@ actions!(
         NewCodexSession,
         ToggleCommandPalette,
         ToggleQuickOpen,
-        OpenInEditor,
         ToggleHistory,
         ToggleNotifications,
         ToggleOverview,
@@ -137,7 +136,6 @@ pub enum CommandId {
     NewCodexSession,
     ToggleCommandPalette,
     ToggleQuickOpen,
-    OpenInEditor,
     ToggleHistory,
     ToggleNotifications,
     ToggleOverview,
@@ -389,16 +387,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Open project…",
         "folder",
         "folder project directory jump goto find"
-    ),
-    spec!(
-        OpenInEditor,
-        "open-in-editor",
-        None,
-        None,
-        Some(APP_CONTEXT),
-        "Open project in editor",
-        "chevron.left.forwardslash.chevron.right",
-        "editor cursor code vscode zed open project files source"
     ),
     spec!(
         ToggleHistory,
@@ -1172,7 +1160,6 @@ impl CommandSpec {
             CommandId::NewCodexSession => KeyBinding::new(key, NewCodexSession, context),
             CommandId::ToggleCommandPalette => KeyBinding::new(key, ToggleCommandPalette, context),
             CommandId::ToggleQuickOpen => KeyBinding::new(key, ToggleQuickOpen, context),
-            CommandId::OpenInEditor => KeyBinding::new(key, OpenInEditor, context),
             CommandId::ToggleHistory => KeyBinding::new(key, ToggleHistory, context),
             CommandId::ToggleNotifications => KeyBinding::new(key, ToggleNotifications, context),
             CommandId::ToggleOverview => KeyBinding::new(key, ToggleOverview, context),
@@ -1635,11 +1622,6 @@ impl CommandId {
                 description: "Find and open a project folder",
                 category: Navigation,
             },
-            Self::OpenInEditor => ShortcutMetadata {
-                title: "Open project in editor",
-                description: "Open the active session's project in Cursor, VS Code, or Zed",
-                category: Workspace,
-            },
             Self::SelectPreviousSession => ShortcutMetadata {
                 title: "Previous session",
                 description: "Select the previous session in the sidebar",
@@ -1841,7 +1823,6 @@ impl CommandId {
             Self::NewCodexSession => Box::new(NewCodexSession),
             Self::ToggleCommandPalette => Box::new(ToggleCommandPalette),
             Self::ToggleQuickOpen => Box::new(ToggleQuickOpen),
-            Self::OpenInEditor => Box::new(OpenInEditor),
             Self::ToggleHistory => Box::new(ToggleHistory),
             Self::ToggleNotifications => Box::new(ToggleNotifications),
             Self::ToggleOverview => Box::new(ToggleOverview),
