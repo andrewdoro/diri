@@ -14,6 +14,7 @@ mod delegation;
 mod dev_build;
 mod diagnostics;
 pub mod diff;
+mod editor;
 mod empty_workbench;
 mod external_drop;
 mod floating;
