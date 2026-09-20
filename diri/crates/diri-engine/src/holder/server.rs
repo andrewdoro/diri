@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 
+use crate::holder::HolderPaths;
 use crate::log::OutputLog;
 use crate::pty::{Pty, PtySpec};
 
@@ -24,9 +25,9 @@ use super::guard::GroupGuard;
 use super::process_tree;
 use super::protocol::{
     HOLDER_OUTPUT_STREAM_VERSION, HOLDER_STREAM_ACK, HOLDER_STREAM_INPUT,
-    HOLDER_STREAM_MAX_PAYLOAD, HOLDER_STREAM_RESIZE, HOLDER_STREAM_VERSION, HolderExitMarker,
-    HolderExitReason, HolderExitStatus, HolderLaunchSpec, HolderOperation, HolderRequest,
-    HolderResponse, HolderStat,
+    HOLDER_STREAM_MAX_PAYLOAD, HOLDER_STREAM_RESIZE, HOLDER_STREAM_VERSION, HolderChildRecord,
+    HolderExitMarker, HolderExitReason, HolderExitStatus, HolderLaunchSpec, HolderOperation,
+    HolderRequest, HolderResponse, HolderStat,
 };
 use super::socket;
 use super::{HolderError, HolderResult};
@@ -193,6 +194,17 @@ impl HolderServer {
         // Armed at once: registering after the child has exited fails on
         // macOS, which the exit path treats as "already exited".
         let exit_watcher = diri_pty::ExitWatcher::new(child_pid as u32).ok();
+        // Recorded before the socket exists, so anyone who can reach this
+        // Holder, or finds only its log, can also learn which child it forked.
+        // Failure is not fatal: the run is then bindable only by a live stat.
+        let _ = HolderChildRecord {
+            child_pid,
+            child_identity: pty.child_identity(),
+            epoch_offset,
+        }
+        .write(&HolderPaths::child_record_beside(Path::new(
+            &spec.pid_file_path,
+        )));
 
         // Nonblocking master: the reader drains in bursts, and writes bound
         // their patience with poll rather than blocking the control loop.
@@ -979,15 +991,28 @@ fn write_pty(shared: &Shared, data: &[u8]) -> HolderResult<()> {
 }
 
 fn current_stat(shared: &Shared) -> HolderStat {
-    if let Some(expected) = shared.child_identity
-        && let Ok(mut stat) = diri_pty::process_identity::inspect_verified(&expected, || {
-            Ok(current_stat_without_identity(shared))
-        })
-    {
+    let Some(expected) = shared.child_identity else {
+        return current_stat_without_identity(shared);
+    };
+    if let Ok(mut stat) = diri_pty::process_identity::inspect_verified(&expected, || {
+        Ok(current_stat_without_identity(shared))
+    }) {
         stat.child_identity = Some(expected);
         return stat;
     }
-    current_stat_without_identity(shared)
+    // The child can no longer be inspected: it exited, or a stranger now
+    // occupies its PID. Neither changes which child this Holder spawned, and
+    // the identity it recorded at birth is the Engine's only way to bind the
+    // run's retained terminal. A child that exits within a millisecond, as
+    // `sh -c 'exit 3'` does on Linux, is gone before the Engine's first stat.
+    // Keep vouching for the birth identity while `alive` says the process
+    // itself cannot be read; a stranger on the PID never reads as alive here
+    // because `finished` is already set once the child was reaped.
+    let mut stat = current_stat_without_identity(shared);
+    if !stat.alive {
+        stat.child_identity = Some(expected);
+    }
+    stat
 }
 
 fn current_stat_without_identity(shared: &Shared) -> HolderStat {
