@@ -67,6 +67,7 @@ url.workspace = true
 
 [dev-dependencies]
 diri-engine.workspace = true
+diri-terminal-state.workspace = true
 gpui = { workspace = true, features = ["test-support", "bench"] }
 gpui_platform = { workspace = true, features = ["test-support"] }
 # Pauses the clock so the notification settle window is exercised without

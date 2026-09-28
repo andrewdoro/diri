@@ -21,10 +21,13 @@ use gpui::{
     SharedString, Task, Window, div, ease_out_quint, point, prelude::*, px, rgba,
 };
 
+#[path = "overview_calm.rs"]
+mod overview_calm;
 #[path = "tab_peek_surface.rs"]
 mod tab_peek_surface;
 #[path = "workspace_peek_surface.rs"]
 mod workspace_peek_surface;
+pub(crate) use overview_calm::OverviewVariant;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PeekItem {
@@ -70,6 +73,8 @@ pub struct SessionSurfaces {
     overview_was_visible: bool,
     overview_generation: usize,
     overview_list_scroll: ScrollHandle,
+    /// Phase-1 design exploration: which overview layout renders.
+    pub(crate) overview_variant: OverviewVariant,
     /// This view is `.cached()` in RootView, so ambient window redraws no
     /// longer reach it: store changes must notify it directly.
     _store_changes: Task<()>,
@@ -184,6 +189,7 @@ impl SessionSurfaces {
             overview_was_visible: false,
             overview_generation: 0,
             overview_list_scroll: ScrollHandle::new(),
+            overview_variant: OverviewVariant::default(),
             _store_changes: store_changes,
         }
     }
@@ -646,6 +652,9 @@ impl SessionSurfaces {
     }
 
     fn render_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.overview_variant != OverviewVariant::Current {
+            return self.render_calm_overview(self.overview_variant, window, cx);
+        }
         let (sessions, state) = {
             let mut store = self.store.write().expect("session store lock poisoned");
             (store.ordered_sessions(), store.overview_state().clone())
@@ -2520,6 +2529,217 @@ mod tests {
             });
             cx.new(|_| OverviewHarness { surfaces, background_scrolls: Arc::new(AtomicUsize::new(0)) })
         }).unwrap();
+        cx.run_until_parked();
+        cx.capture_screenshot(window.into())
+            .unwrap()
+            .save(output)
+            .unwrap();
+    }
+
+    /// Phase-1 design exploration. `DIRI_VISUAL_VARIANT` = current | a | b | c.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes calm overview design screenshots"]
+    fn render_calm_overview_screenshot() {
+        use crate::overview_fixture as fx;
+        use gpui::HeadlessAppContext;
+        let output = std::env::var("DIRI_VISUAL_OUTPUT").expect("set DIRI_VISUAL_OUTPUT");
+        let light = std::env::var_os("DIRI_VISUAL_LIGHT").is_some();
+        fx::LIGHT.store(light, std::sync::atomic::Ordering::Relaxed);
+        let variant =
+            OverviewVariant::from_env(&std::env::var("DIRI_VISUAL_VARIANT").unwrap_or_default());
+        let dim = |key: &str, default: f32| {
+            std::env::var(key)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(default)
+        };
+        let (width, height) = (
+            dim("DIRI_VISUAL_WIDTH", 1440.0),
+            dim("DIRI_VISUAL_HEIGHT", 900.0),
+        );
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| {
+            crate::fonts::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let fleet: Vec<(&str, &str, ProtoAgentKind, &str, String)> = vec![
+            (
+                "diri",
+                "Make the session overview calm",
+                ProtoAgentKind::CLAUDE_CODE,
+                "working",
+                fx::claude_working(),
+            ),
+            (
+                "anara",
+                "Fix the login redirect loop",
+                ProtoAgentKind::CLAUDE_CODE,
+                "input",
+                fx::claude_permission(),
+            ),
+            (
+                "diri",
+                "Fix the flaky reconnect test",
+                ProtoAgentKind::CODEX,
+                "done",
+                fx::codex_done(),
+            ),
+            (
+                "anara",
+                "Web dev server",
+                ProtoAgentKind::SHELL,
+                "working",
+                fx::vite_server(),
+            ),
+            (
+                "diri",
+                "Release 0.8.9",
+                ProtoAgentKind::SHELL,
+                "working",
+                fx::cargo_release(),
+            ),
+            (
+                "diri",
+                "System monitor",
+                ProtoAgentKind::SHELL,
+                "idle",
+                fx::htop(),
+            ),
+            (
+                "anara",
+                "Onboarding copy pass",
+                ProtoAgentKind::GEMINI,
+                "asleep",
+                fx::gemini_asleep(),
+            ),
+            (
+                "diri",
+                "Tidy branch history",
+                ProtoAgentKind::CODEX,
+                "idle",
+                fx::git_graph(),
+            ),
+            (
+                "diri",
+                "overview_layout.rs",
+                ProtoAgentKind::SHELL,
+                "idle",
+                fx::vim_review(),
+            ),
+        ];
+        let window = cx
+            .open_window(size(px(width), px(height)), |_, cx| {
+                let runtime = Arc::new(StoreRuntime::inert());
+                let sessions: Vec<_> = fleet
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (project, title, kind, status, _))| {
+                        let mut s = session(i);
+                        s.title = (*title).into();
+                        s.kind = kind.clone();
+                        s.project_id = ProjectId::new(*project);
+                        s.cwd = format!("/work/{project}");
+                        s.status = match *status {
+                            "working" => SessionStatus::Working,
+                            "input" => {
+                                SessionStatus::NeedsInput(diri_proto::NeedsInputKind::Permission)
+                            }
+                            _ => SessionStatus::Idle,
+                        };
+                        if *status == "done" {
+                            s.last_turn_completed_at = Some(DateMillis(10.0));
+                        }
+                        if *status == "idle" {
+                            s.last_turn_completed_at = Some(DateMillis(1.0));
+                            s.last_seen_at = Some(DateMillis(2.0));
+                        }
+                        if *status == "asleep" {
+                            s.hibernation = Some(diri_proto::HibernationInfo {
+                                since: DateMillis(0.0),
+                                reason: diri_proto::HibernationReason::Idle,
+                                tree_pids: vec![],
+                                tree_start_times: None,
+                            });
+                        }
+                        s
+                    })
+                    .collect();
+                {
+                    let mut store = runtime.store.write().unwrap();
+                    let projects = ["diri", "anara"]
+                        .into_iter()
+                        .map(|name| diri_proto::Project {
+                            id: ProjectId::new(name),
+                            root: format!("/work/{name}"),
+                            name: name.into(),
+                            pinned_order: None,
+                            host: None,
+                        })
+                        .collect();
+                    store.hydrate(SessionListResult { sessions, projects });
+                    store
+                        .update_preferences(|p| {
+                            p.terminal_theme = if light {
+                                "dirijor-light"
+                            } else {
+                                "dirijor-dark"
+                            }
+                            .into();
+                            p.window_material = crate::store::WindowMaterial::Opaque;
+                        })
+                        .unwrap();
+                }
+                let surfaces = cx.new(|cx| {
+                    let mut view = SessionSurfaces::new(runtime, None, cx);
+                    view.overview_variant = variant;
+                    {
+                        let mut store = view.store.write().unwrap();
+                        store.select(session(2).id);
+                        store.toggle_overview();
+                        if let Ok(query) = std::env::var("DIRI_VISUAL_QUERY") {
+                            store.append_overview_query(&query);
+                        }
+                    }
+                    for (i, (_, _, kind, _, screen)) in fleet.iter().enumerate() {
+                        let buffer = if *kind == ProtoAgentKind::SHELL {
+                            fx::screen(screen)
+                        } else {
+                            fx::screen_bottom(screen)
+                        };
+                        let text: String = buffer
+                            .cells
+                            .chunks(usize::from(buffer.cols))
+                            .map(|row| {
+                                row.iter()
+                                    .map(|cell| {
+                                        char::from_u32(cell.scalar)
+                                            .filter(|c| *c != '\0')
+                                            .unwrap_or(' ')
+                                    })
+                                    .collect::<String>()
+                                    .trim_end()
+                                    .to_owned()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        view.screens
+                            .insert(session(i).id, ScreenPreview::Ready(screen_excerpt(&text)));
+                        view.set_resident_buffer(session(i).id, Arc::new(RwLock::new(buffer)));
+                    }
+                    view
+                });
+                cx.new(|_| OverviewHarness {
+                    surfaces,
+                    background_scrolls: Arc::new(AtomicUsize::new(0)),
+                })
+            })
+            .unwrap();
         cx.run_until_parked();
         cx.capture_screenshot(window.into())
             .unwrap()

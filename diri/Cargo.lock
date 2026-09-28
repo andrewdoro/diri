@@ -1547,6 +1547,7 @@ dependencies = [
  "diri-engine",
  "diri-proto",
  "diri-term",
+ "diri-terminal-state",
  "diri-ui",
  "diri-updater",
  "diri-usage",

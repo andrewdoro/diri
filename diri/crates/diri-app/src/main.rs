@@ -40,6 +40,8 @@ pub mod navigation;
 mod notification_feed;
 pub mod notifications;
 mod number_flow;
+#[cfg(test)]
+mod overview_fixture;
 pub mod palette;
 mod palette_chrome;
 mod palette_workspace;
