@@ -384,6 +384,46 @@ fn safe_agent_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+/// The Claude conversation a relaunch of this tab can actually re-enter.
+///
+/// Hooks report a session id before Claude has written a line for it: a fresh
+/// tab before its first prompt, `/clear`, and Claude versions that mint a new
+/// id on `--resume`. The record's `transcript_path` only follows ids whose file
+/// exists, so the two drift apart, and `--resume <unwritten id>` makes Claude
+/// print "No conversation found" and drop the tab into a bare shell. Prefer
+/// the reported id when its transcript exists (in any project directory, so a
+/// worktree move or a cwd Claude slugs differently still counts), fall back to
+/// the last verified transcript, and return `None` when neither exists.
+pub(crate) fn claude_resumable_conversation(
+    projects_roots: &[PathBuf],
+    agent_session_id: Option<&str>,
+    transcript_path: Option<&str>,
+) -> Option<String> {
+    let written = |path: &Path| {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+    };
+    if let Some(id) = agent_session_id.filter(|id| safe_agent_id(id)) {
+        let file = format!("{id}.jsonl");
+        let found = projects_roots.iter().any(|root| {
+            std::fs::read_dir(root).is_ok_and(|projects| {
+                projects
+                    .filter_map(Result::ok)
+                    .any(|project| written(&project.path().join(&file)))
+            })
+        });
+        if found {
+            return Some(id.to_owned());
+        }
+    }
+    let path = Path::new(transcript_path?);
+    let id = path
+        .file_name()?
+        .to_str()?
+        .strip_suffix(".jsonl")
+        .filter(|id| safe_agent_id(id))?;
+    written(path).then(|| id.to_owned())
+}
+
 fn open_trusted_regular_file(root: &Path, path: &Path) -> Option<File> {
     let canonical_root = root.canonicalize().ok()?;
     let file = open_regular_readonly(path)?;
