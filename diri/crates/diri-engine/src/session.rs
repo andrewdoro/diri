@@ -3016,9 +3016,14 @@ fn held_foreground_sample_due(
         || since_sample.is_none_or(|since| since >= LIVENESS_INTERVAL)
 }
 
-/// Rescans the visible screen for artifact URLs every ~2s, only when the
-/// content actually changed and only when it plausibly contains a URL —
-/// most screens never pay more than a substring check.
+/// Rows of scrollback each artifact scan covers besides the screen. Output
+/// that scrolls off between two scans is still read, so a PR link printed
+/// just before a long diff is not lost; the bound keeps a scan cheap.
+const ARTIFACT_SCAN_HISTORY_ROWS: usize = 400;
+
+/// Rescans the screen and recent scrollback for artifact URLs every ~2s,
+/// only when the content actually changed and only when it plausibly
+/// contains a URL — most screens never pay more than a substring check.
 fn scan_artifacts_if_due(
     shared: &Shared,
     last_scan_at: &mut Option<std::time::Instant>,
@@ -3028,21 +3033,21 @@ fn scan_artifacts_if_due(
         return;
     }
     *last_scan_at = Some(std::time::Instant::now());
-    let (seq, text) = {
+    let (seq, source) = {
         let screen = shared.screen.lock().expect("screen");
         let seq = screen.content_seq();
         if seq == *last_scan_seq {
             return;
         }
-        (seq, screen.lines().join("\n"))
+        (seq, screen.link_source(ARTIFACT_SCAN_HISTORY_ROWS))
     };
     *last_scan_seq = seq;
-    if !(text.contains("http") || text.contains("github.com") || text.contains("linear.app")) {
+    if !crate::artifacts::may_contain_links(&source) {
         return;
     }
     let now = diri_proto::DateMillis::from(SystemTime::now());
     let mut artifacts = shared.artifacts.lock().expect("artifacts");
-    *artifacts = crate::artifacts::scan(&text, &artifacts, now);
+    *artifacts = crate::artifacts::scan(&source, &artifacts, now);
 }
 
 /// Follows one remote Holder through any number of short-lived SSH Bridges.

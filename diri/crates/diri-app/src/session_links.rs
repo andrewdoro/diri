@@ -1,6 +1,5 @@
 //! One contextual home for session links. Status is always attached by URL.
 use super::*;
-use crate::fuzzy::{FuzzyMatcher, FuzzyQuery, PreparedText};
 use crate::palette_chrome::{PaletteTooltip, scroll_fades};
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
 use diri_proto::{ArtifactKind, PrCheck, PullRequestStatus, SessionArtifact};
@@ -188,7 +187,7 @@ fn artifact_row(artifact: &SessionArtifact) -> LinkRow {
                 }
                 "figma.com" | "www.figma.com" => "Figma design".into(),
                 _ if host.ends_with(".notion.site") => "Notion page".into(),
-                _ => host,
+                _ => link_title(&host, &artifact.url),
             },
             IconName::ExternalLink,
         ),
@@ -205,6 +204,29 @@ fn artifact_row(artifact: &SessionArtifact) -> LinkRow {
         action: LinkAction::Open(artifact.url.clone()),
         details: None,
     }
+}
+/// A title that tells two links on one host apart: `owner/repo#12` for a
+/// GitHub issue, else the last path segment that reads as a name
+/// (`perfectly_nineties.ttf`), else the host.
+fn link_title(host: &str, url: &str) -> String {
+    let path = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default();
+    let segments: Vec<&str> = path.split('/').skip(1).filter(|s| !s.is_empty()).collect();
+    if matches!(host, "github.com" | "www.github.com") {
+        return match segments.as_slice() {
+            [owner, repo, "issues", number, ..] => format!("{owner}/{repo}#{number}"),
+            [owner, repo, ..] => format!("{owner}/{repo}"),
+            _ => host.to_owned(),
+        };
+    }
+    segments
+        .last()
+        .filter(|segment| segment.len() <= 64 && segment.chars().any(|c| c.is_ascii_alphabetic()))
+        .map_or_else(|| host.to_owned(), |segment| (*segment).to_owned())
 }
 // The closed toolbar counts borrowed URLs; it does not clone titles, checks,
 // or build any menu rows on terminal updates.
@@ -267,29 +289,70 @@ fn session_rows(session: &SessionRecord) -> Vec<LinkRow> {
     }
     rows
 }
-/// Rows matching `query` across what the row shows and where it goes, best
-/// match first; ties keep the chat's order.
+/// Rows matching `query`, best match first; ties keep the chat's order.
+///
+/// Every word of the query must appear somewhere in what the row shows, where
+/// it goes, or what kind of link it is ("pr", "linear", "preview", "failed").
+/// Substrings rather than fuzzy subsequences: a subsequence finds almost any
+/// short query somewhere in a long URL, so a fuzzy search over URLs matched
+/// nearly every row and appeared not to filter at all.
 fn filter_rows(rows: Vec<LinkRow>, query: &str) -> Vec<LinkRow> {
-    let query = FuzzyQuery::new(query);
-    if query.is_empty() {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
         return rows;
     }
-    let mut matcher = FuzzyMatcher::text();
     let mut scored: Vec<_> = rows
         .into_iter()
         .filter_map(|row| {
-            let url = match &row.action {
-                LinkAction::Open(url) | LinkAction::PullRequest(url) => url.as_str(),
-                LinkAction::Account => "",
-            };
-            let haystack = PreparedText::new(&format!("{} {} {url}", row.title, row.subtitle));
-            query
-                .score(&haystack, &mut matcher)
-                .map(|score| (score, row))
+            let score = row_score(&row, &words)?;
+            Some((score, row))
         })
         .collect();
     scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored.into_iter().map(|(_, row)| row).collect()
+}
+
+/// How well `row` matches every one of `words`, or `None` when one is missing.
+/// A word at the start of a title word scores highest, then anywhere in the
+/// title, then the subtitle, then the destination and kind.
+fn row_score(row: &LinkRow, words: &[String]) -> Option<u32> {
+    let title = row.title.to_lowercase();
+    let subtitle = row.subtitle.to_lowercase();
+    let url = match &row.action {
+        LinkAction::Open(url) | LinkAction::PullRequest(url) => url.to_lowercase(),
+        LinkAction::Account => String::new(),
+    };
+    let kind = match row.icon {
+        IconName::PullRequest | IconName::Merge => "pull request pr github",
+        IconName::Checklist => "linear issue",
+        IconName::Monitor => "preview localhost",
+        _ => "link",
+    };
+    let status = row
+        .status
+        .as_ref()
+        .map(|(label, _)| label.to_lowercase())
+        .unwrap_or_default();
+    words.iter().try_fold(0, |total, word| {
+        let score = if title
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|part| part.starts_with(word.as_str()))
+        {
+            4
+        } else if title.contains(word.as_str()) {
+            3
+        } else if subtitle.contains(word.as_str()) {
+            2
+        } else if url.contains(word.as_str())
+            || kind.contains(word.as_str())
+            || status.contains(word.as_str())
+        {
+            1
+        } else {
+            return None;
+        };
+        Some(total + score)
+    })
 }
 fn detail_rows(pr: &PullRequestStatus) -> Vec<LinkRow> {
     let mut rows = vec![LinkRow {
@@ -374,25 +437,37 @@ impl TerminalPane {
     }
     /// Applies a keystroke to the search field when it is a text edit.
     fn links_edit_query(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(edit) = query_editor::edit_for(&event.keystroke) else {
+        match query_editor::edit_for(&event.keystroke) {
+            Some(Edit::Local(local)) => {
+                if self.session_links.query.apply(local) {
+                    self.session_links.selected = 0;
+                }
+            }
+            Some(Edit::Clipboard(edit)) => self.links_clipboard(edit, cx),
+            None => {}
+        }
+    }
+    /// A clipboard edit of the search field; the PR detail page has none.
+    fn links_clipboard(&mut self, edit: ClipboardEdit, cx: &mut Context<Self>) {
+        if self.session_links.pull_request.is_some() {
             return;
-        };
+        }
         let query = &mut self.session_links.query;
         let changed = match edit {
-            Edit::Local(local) => query.apply(local),
-            Edit::Clipboard(ClipboardEdit::Copy) => {
+            ClipboardEdit::Copy => {
                 query_editor::copy_selection(query, cx);
                 false
             }
-            Edit::Clipboard(ClipboardEdit::Cut) => query_editor::cut_selection(query, cx),
-            Edit::Clipboard(ClipboardEdit::Paste) => cx
+            ClipboardEdit::Cut => query_editor::cut_selection(query, cx),
+            ClipboardEdit::Paste => cx
                 .read_from_clipboard()
                 .and_then(|item| item.text())
-                .is_some_and(|text| query.insert(&text)),
+                .is_some_and(|text| query.insert(text.trim())),
         };
         if changed {
             self.session_links.selected = 0;
         }
+        cx.notify();
     }
     pub(super) fn close_session_links(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.session_links.close();
@@ -1037,6 +1112,16 @@ impl TerminalPane {
             .inset_0()
             .track_focus(&self.session_links.focus)
             .on_key_down(cx.listener(Self::links_key_down))
+            // ⌘V and ⌘C are terminal bindings, and bindings run before key
+            // listeners: without these the search field pasted into the agent.
+            .on_action(cx.listener(|this, _: &Paste, _, cx| {
+                this.links_clipboard(ClipboardEdit::Paste, cx);
+                cx.stop_propagation();
+            }))
+            .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
+                this.links_clipboard(ClipboardEdit::Copy, cx);
+                cx.stop_propagation();
+            }))
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(div().absolute().inset_0().occlude().on_mouse_down(
                 MouseButton::Left,
@@ -1372,6 +1457,74 @@ mod tests {
         );
         assert!(filter_rows(session_rows(&session), "zzzz-nothing").is_empty());
         assert_eq!(filter_rows(session_rows(&session), "  ").len(), 4);
+    }
+
+    #[test]
+    fn links_on_one_host_get_distinct_titles() {
+        let title = |url: &str| link_title(&url_host(url), url);
+        assert_eq!(
+            title("https://static.anara.com/fonts/perfectly_nineties.ttf"),
+            "perfectly_nineties.ttf"
+        );
+        assert_eq!(title("https://static.anara.com/"), "static.anara.com");
+        assert_eq!(title("https://docs.dev/items/12345?x=1"), "docs.dev");
+        assert_eq!(title("https://github.com/o/r/issues/12#top"), "o/r#12");
+        assert_eq!(title("https://github.com/o/r"), "o/r");
+    }
+
+    #[test]
+    fn search_words_must_all_appear_rather_than_scatter_through_urls() {
+        let session = fixture();
+        let titles = |query: &str| -> Vec<String> {
+            filter_rows(session_rows(&session), query)
+                .into_iter()
+                .map(|row| row.title)
+                .collect()
+        };
+        // A fuzzy subsequence finds "w", "o", "r", "k" in every long URL.
+        assert_eq!(
+            titles("work"),
+            ["Make the workspace feel at home", "Notion page"]
+        );
+        assert_eq!(
+            titles("pull request"),
+            [
+                "Make the workspace feel at home",
+                "Keep conversations close"
+            ]
+        );
+        assert_eq!(titles("failed"), ["Make the workspace feel at home"]);
+        assert_eq!(titles("preview"), ["Preview"]);
+        assert_eq!(titles("181"), ["Make the workspace feel at home"]);
+        assert_eq!(titles("home 181"), ["Make the workspace feel at home"]);
+        assert!(titles("home 180").is_empty());
+        // Title hits rank above URL hits.
+        assert_eq!(titles("keep")[0], "Keep conversations close");
+    }
+
+    #[gpui::test]
+    fn command_v_pastes_into_the_search_not_the_terminal(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_reduce_motion(true);
+            crate::commands::bind_keys(cx, &Default::default());
+        });
+        let (runtime, tokio) = runtime(fixture());
+        let (pane, cx) =
+            cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
+        cx.simulate_resize(size(px(900.0), px(700.0)));
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("session-links-trigger").unwrap().center();
+        cx.simulate_click(trigger, Modifiers::default());
+        cx.run_until_parked();
+        cx.write_to_clipboard(ClipboardItem::new_string(" notion \n".into()));
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        assert_eq!(
+            pane.read_with(cx, |p, _| p.session_links.query.text().to_owned()),
+            "notion"
+        );
+        assert!(cx.debug_bounds("session-link-0").is_some());
+        assert!(cx.debug_bounds("session-link-1").is_none());
     }
     #[gpui::test]
     fn typing_filters_links_and_escape_clears_before_closing(cx: &mut TestAppContext) {

@@ -230,6 +230,19 @@ fn validate_grid(grid: &GridUpdate) -> Result<(), MirrorError> {
     Ok(())
 }
 
+/// Screen text and hyperlink targets for the artifact scanner; see
+/// [`HeadlessScreen::link_source`].
+#[derive(Clone, Debug, Default)]
+pub struct LinkSource {
+    /// Logical lines: soft-wrapped rows are joined without a newline.
+    pub text: String,
+    /// OSC 8 targets in screen order, consecutive duplicates collapsed.
+    pub hyperlinks: Vec<String>,
+    /// Terminal width, so the scanner can recognize a row an application
+    /// filled and broke by hand.
+    pub cols: usize,
+}
+
 /// Plain-text terminal state consumed by the local status detector.
 #[derive(Clone, Debug, Default)]
 pub struct ScreenSnapshot {
@@ -1351,6 +1364,58 @@ impl HeadlessScreen {
         lines
     }
 
+    /// What a link scanner needs from the screen and the newest `history_rows`
+    /// of scrollback: text with soft-wrapped rows rejoined (a URL longer than
+    /// the terminal is one logical line), and every OSC 8 hyperlink target,
+    /// which is often the only place the URL of a `[title](url)` link exists.
+    pub fn link_source(&self, history_rows: usize) -> LinkSource {
+        let grid = self.term.grid();
+        let history = grid.history_size().min(history_rows);
+        let cols = self.geometry.cols;
+        let mut source = LinkSource {
+            text: String::with_capacity((history + self.geometry.rows) * (cols + 1)),
+            hyperlinks: Vec::new(),
+            cols,
+        };
+        let mut row_text = String::with_capacity(cols);
+        for index in -(history as i32)..self.geometry.rows as i32 {
+            let row = &grid[Line(index)];
+            row_text.clear();
+            let mut wrapped = false;
+            for column in 0..cols {
+                let cell = &row[Column(column)];
+                if column + 1 == cols {
+                    wrapped = cell.flags.contains(Flags::WRAPLINE);
+                }
+                if let Some(link) = cell.hyperlink() {
+                    let uri = link.uri();
+                    if source.hyperlinks.last().is_none_or(|last| last != uri)
+                        && uri.len() <= diri_proto::grid::MAX_LINK_URI_BYTES
+                    {
+                        source.hyperlinks.push(uri.to_owned());
+                    }
+                }
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                row_text.push(cell.c);
+                if let Some(combining) = cell.zerowidth() {
+                    row_text.extend(combining.iter().copied());
+                }
+            }
+            if wrapped {
+                source.text.push_str(&row_text);
+            } else {
+                source.text.push_str(row_text.trim_end());
+                source.text.push('\n');
+            }
+        }
+        source
+    }
+
     /// A snapshot for the detection engine.
     pub fn snapshot(&self) -> ScreenSnapshot {
         ScreenSnapshot {
@@ -1908,6 +1973,32 @@ mod tests {
             !screen.flush_expired_sync(),
             "releasing it once clears the deadline"
         );
+    }
+
+    #[test]
+    fn link_source_rejoins_wrapped_rows_and_keeps_hyperlinks_and_history() {
+        let mut screen = HeadlessScreen::new(20, 4);
+        screen.feed(b"first https://a.dev/0123456789abcdef end\r\n");
+        screen.feed(b"\x1b]8;;https://github.com/o/r/pull/9\x1b\\PR #9\x1b]8;;\x1b\\\r\n");
+        for n in 0..6 {
+            screen.feed(format!("line {n}\r\n").as_bytes());
+        }
+        // Both links have scrolled off the 4-row screen.
+        let without_history = screen.link_source(0);
+        assert!(!without_history.text.contains("a.dev"));
+        assert!(without_history.hyperlinks.is_empty());
+
+        let source = screen.link_source(100);
+        assert_eq!(source.cols, 20);
+        assert!(
+            source
+                .text
+                .contains("first https://a.dev/0123456789abcdef end\n"),
+            "{:?}",
+            source.text
+        );
+        assert!(source.text.contains("PR #9\n"));
+        assert_eq!(source.hyperlinks, ["https://github.com/o/r/pull/9"]);
     }
 
     #[test]

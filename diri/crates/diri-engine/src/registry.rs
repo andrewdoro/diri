@@ -1556,6 +1556,11 @@ impl Registry {
             record.listening_ports = Some(ports);
             ports_changed = true;
         }
+        // A session's own list restarts empty when the daemon does, so a
+        // sample adds to what the record already holds rather than replacing it.
+        let artifacts = artifacts.map(|artifacts| {
+            crate::artifacts::merge(record.artifacts.iter().flatten().cloned().chain(artifacts))
+        });
         if let Some(artifacts) = artifacts
             && record.artifacts.as_deref().unwrap_or_default() != artifacts
         {
@@ -2586,6 +2591,36 @@ mod tests {
         let governed = registry.governed_records();
         assert_eq!(governed.len(), 1, "what it clones now");
         assert_eq!(governed[0].id.0, "frozen");
+    }
+
+    #[test]
+    fn a_restarted_session_adds_links_instead_of_forgetting_old_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut registry = Registry::new(engine(), temp.path().join("state.json"));
+        registry.records.insert("s".into(), record("s"));
+        let link = |url: &str, at: f64| diri_proto::SessionArtifact {
+            kind: diri_proto::ArtifactKind::Link,
+            url: url.into(),
+            first_seen_at: DateMillis(at),
+        };
+        registry.apply_resource_sample("s", None, None, Some(vec![link("https://a.dev/x", 1.0)]));
+        // After a daemon restart the session's own list starts over.
+        let event = registry
+            .apply_resource_sample("s", None, None, Some(vec![link("https://b.dev/y", 2.0)]))
+            .expect("the new link is an update");
+        let urls: Vec<_> = event
+            .artifacts
+            .unwrap()
+            .into_iter()
+            .map(|artifact| artifact.url)
+            .collect();
+        assert_eq!(urls, ["https://a.dev/x", "https://b.dev/y"]);
+        assert!(
+            registry
+                .apply_resource_sample("s", None, None, Some(vec![link("https://a.dev/x", 3.0)]))
+                .is_none(),
+            "a link the record already holds changes nothing"
+        );
     }
 
     #[test]
