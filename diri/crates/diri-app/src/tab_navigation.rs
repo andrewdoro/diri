@@ -72,7 +72,7 @@ pub fn selected_project_tabs(store: &mut impl TabNavigationStore) -> ProjectTabs
     }
 }
 
-/// Pinch previews span the active fleet, keeping the current project's tabs
+/// Tab peek previews span the active fleet, keeping the current project's tabs
 /// together at the front. Horizontal tab navigation retains its project scope.
 pub fn preview_sessions(store: &mut impl TabNavigationStore) -> Vec<Arc<SessionRecord>> {
     let selection = store.tab_selection();

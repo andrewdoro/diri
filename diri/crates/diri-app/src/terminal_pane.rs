@@ -70,8 +70,8 @@ use crate::session_surfaces::switcher_key;
 use crate::store::StoreRuntime;
 use crate::surface_shell::UtilitySurfaces;
 
-const GRID_HORIZONTAL_PADDING: f32 = 24.0;
-const GRID_VERTICAL_PADDING: f32 = 12.0;
+pub(crate) const GRID_HORIZONTAL_PADDING: f32 = 24.0;
+pub(crate) const GRID_VERTICAL_PADDING: f32 = 12.0;
 // The outer terminal card has a one-pixel border on both sides and the pane
 // adds its own left divider. These pixels are outside TerminalElement's actual
 // paint bounds and therefore cannot be offered to the PTY as a text column.

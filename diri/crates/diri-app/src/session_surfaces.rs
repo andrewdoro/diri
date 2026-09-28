@@ -16,11 +16,13 @@ use diri_ui::{
     StatusState,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, Context, Entity, FocusHandle,
-    FontWeight, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, ScrollHandle,
-    SharedString, Task, Window, div, ease_out_quint, point, prelude::*, px, rgba,
+    AnyElement, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
+    KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, ScrollHandle, SharedString, Task,
+    Window, div, point, prelude::*, px, rgba,
 };
 
+#[path = "overview_zoom_surface.rs"]
+mod overview_zoom_surface;
 #[path = "tab_peek_surface.rs"]
 mod tab_peek_surface;
 #[path = "workspace_peek_surface.rs"]
@@ -68,8 +70,9 @@ pub struct SessionSurfaces {
     screens: HashMap<SessionId, ScreenPreview>,
     screen_requests: HashMap<SessionId, ScreenRequest>,
     overview_was_visible: bool,
-    overview_generation: usize,
     overview_list_scroll: ScrollHandle,
+    /// Safari-style zoom between the page and the overview grid.
+    zoom: overview_zoom_surface::ZoomPresentation,
     /// This view is `.cached()` in RootView, so ambient window redraws no
     /// longer reach it: store changes must notify it directly.
     _store_changes: Task<()>,
@@ -182,8 +185,8 @@ impl SessionSurfaces {
             screens: HashMap::new(),
             screen_requests: HashMap::new(),
             overview_was_visible: false,
-            overview_generation: 0,
             overview_list_scroll: ScrollHandle::new(),
+            zoom: Default::default(),
             _store_changes: store_changes,
         }
     }
@@ -244,6 +247,8 @@ impl SessionSurfaces {
         store.cancel_switcher();
         store.dismiss_overview();
         drop(store);
+        self.reset_overview_zoom(cx);
+        self.overview_was_visible = false;
         cx.notify();
     }
 }
@@ -277,13 +282,24 @@ impl Render for SessionSurfaces {
                 store.switcher_state().is_visible(),
             )
         };
-        if !overview_visible && self.overview_was_visible {
+        let viewport_width = f32::from(window.viewport_size().width);
+        if switcher_visible || self.peek.paint_visible() {
+            // Another surface took over; never fly the overview underneath it.
+            self.reset_overview_zoom(cx);
+        } else if overview_visible != self.overview_was_visible {
+            self.follow_overview_visibility(overview_visible, viewport_width, cx);
+        }
+        self.advance_zoom(window, cx);
+        if !overview_visible
+            && !self.zoom_painting()
+            && !(self.screens.is_empty() && self.screen_requests.is_empty())
+        {
+            // Previews refresh on every open; drop them once nothing shows them.
             self.screen_requests.clear();
             self.screens.clear();
         }
         if overview_visible && !self.overview_was_visible {
-            self.overview_generation = self.overview_generation.wrapping_add(1);
-            self.overview_grid_scroll.scroll_to_item(0);
+            self.reveal_zoom_slot(viewport_width);
             self.overview_list_scroll.scroll_to_item(0);
         }
         self.overview_was_visible = overview_visible;
@@ -309,6 +325,8 @@ impl Render for SessionSurfaces {
             .on_modifiers_changed(cx.listener(Self::handle_modifiers_changed));
         if self.peek.paint_visible() {
             root.inset_0().child(self.render_tab_peek(window, cx))
+        } else if self.zoom_painting() {
+            root.inset_0().child(self.render_overview_zoom(window, cx))
         } else if overview_visible {
             root.inset_0().child(self.render_overview(window, cx))
         } else if switcher_visible {
@@ -646,6 +664,8 @@ impl SessionSurfaces {
     }
 
     fn render_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Thumbnails re-measure themselves as they paint below.
+        self.zoom.slots.borrow_mut().clear();
         let (sessions, state) = {
             let mut store = self.store.write().expect("session store lock poisoned");
             (store.ordered_sessions(), store.overview_state().clone())
@@ -895,18 +915,9 @@ impl SessionSurfaces {
                 content.child(self.bulk_close_bar(state.selection().len(), visible_count, cx))
             });
 
-        let content = if cx.reduce_motion() {
-            content.into_any_element()
-        } else {
-            content
-                .with_animation(
-                    ("overview-entry", self.overview_generation),
-                    Animation::new(std::time::Duration::from_millis(120))
-                        .with_easing(ease_out_quint()),
-                    |view, value| view.opacity(value),
-                )
-                .into_any_element()
-        };
+        // The entrance is the zoom from the page (overview_zoom_surface), so
+        // the grid itself no longer fades in on its own.
+        let content = content.into_any_element();
 
         div()
             .id("overview-scrim")
@@ -1178,7 +1189,14 @@ impl SessionSurfaces {
         let id = session.id.clone();
         let close_id = id.clone();
         let status = self.status_glyph(session, 14.0, colors, window, cx);
-        let preview = self.overview_preview(session, colors, cx);
+        // The page you pinched away from stays a live miniature so it lands
+        // in its slot without a swap; while it is in flight the slot is empty.
+        let preview = match self.zoom_card_role(&session.id) {
+            Some(true) => div().size_full().into_any_element(),
+            Some(false) => self.page_miniature(session, self.zoom.zoom.slot_scale(), colors),
+            None => self.overview_preview(session, colors, cx),
+        };
+        let probe = self.slot_probe(session.id.clone());
 
         let mut thumbnail = div()
             .relative()
@@ -1192,7 +1210,8 @@ impl SessionSurfaces {
             .when(session.hibernation.is_some(), |thumbnail| {
                 thumbnail.opacity(0.68)
             })
-            .child(preview);
+            .child(preview)
+            .child(probe);
         if selected {
             thumbnail = thumbnail.child(
                 div()

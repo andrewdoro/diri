@@ -116,6 +116,15 @@ The source and target remain visible, remote targets carry a Remote badge, and
 nothing is sent until you activate **Send handoff** or press Return. Esc cancels
 without sending and restores any unfinished Command-N draft.
 
+### Trackpad pinch
+
+Pinch in on a session to shrink it into its place in the overview, the way
+Safari opens Tab Overview. The session follows your fingers; let go past about
+halfway (or with a quick pinch) to finish, or pinch back out to return. In the
+overview, pinch out over a session to open it the same way. ⇧⌘O, Esc, Return
+and clicking a session play the same transition without the gesture. With
+Reduce Motion the overview cross-fades instead of zooming.
+
 ### Inside the overview
 
 | Shortcut | Keys | Action |

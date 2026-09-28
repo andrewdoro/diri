@@ -244,7 +244,6 @@ pub struct RootView {
     terminal: Option<Entity<TerminalPane>>,
     navigation: Option<Entity<NavigationOverlay>>,
     session_surfaces: Option<Entity<SessionSurfaces>>,
-    tab_pinch: crate::tab_peek::TabPinch,
     utility_surfaces: Option<Entity<UtilitySurfaces>>,
     usage_share_overlay_open: bool,
     launcher: Entity<LauncherOverlay>,
@@ -948,9 +947,11 @@ impl RootView {
             if !window.is_window_active() {
                 let effect = this.held_hints.deactivated();
                 this.apply_held_hint_effect(effect, window, cx);
-                this.tab_pinch.cancel();
                 if let Some(surfaces) = &this.session_surfaces {
-                    surfaces.update(cx, |s, cx| s.cancel_tab_peek_immediately(cx));
+                    surfaces.update(cx, |s, cx| {
+                        s.cancel_overview_pinch(cx);
+                        s.cancel_tab_peek_immediately(cx);
+                    });
                 }
             }
             this.window_store
@@ -1280,9 +1281,6 @@ impl RootView {
             cx.observe(surfaces, move |_this, surfaces, cx| {
                 let visible = surfaces.read(cx).tab_peek_visible();
                 let offset = surfaces.read(cx).tab_peek_offset(cx);
-                if was_visible && !visible {
-                    _this.tab_pinch.cancel();
-                }
                 // Output only repaints the preview entity. Root layout needs
                 // invalidation solely when terminal placement changes.
                 if was_visible != visible || previous_offset != offset {
@@ -1322,7 +1320,6 @@ impl RootView {
             terminal,
             navigation,
             session_surfaces,
-            tab_pinch: Default::default(),
             utility_surfaces,
             usage_share_overlay_open: false,
             launcher,
@@ -3425,6 +3422,7 @@ impl RootView {
             surfaces.update(cx, |surfaces, cx| {
                 surfaces.sync_resident_buffers(buffers);
                 surfaces.set_tab_peek_region(sidebar_width, tabs_height, card_width, cx);
+                surfaces.set_page_region(sidebar_width, tabs_height, card_width, card_height);
                 surfaces.set_workspace_peek(
                     self.active_workspace.clone(),
                     crate::workspace_geometry::Rect {
@@ -4421,7 +4419,8 @@ impl RootView {
 }
 
 impl RootView {
-    fn handle_tab_pinch(
+    /// Trackpad pinch: Safari's pinch between the page and the overview.
+    fn handle_pinch(
         &mut self,
         event: &gpui::PinchEvent,
         window: &mut Window,
@@ -4447,21 +4446,18 @@ impl RootView {
             return;
         };
         if !allowed {
-            self.tab_pinch.cancel();
+            surfaces.update(cx, |surfaces, cx| surfaces.cancel_overview_pinch(cx));
             return;
         }
-        let now = cx.background_executor().now();
-        let position = surfaces.update(cx, |surfaces, _| surfaces.tab_peek_position(now));
-        let frame = self.tab_pinch.sample(event, position, now);
-        if self.tab_pinch.take_feedback() {
-            // The pinch crossed between the strip and the overview.
-            haptics::perform(Haptic::LevelChange, haptics::key("tab-pinch", ()));
+        let (taken, crossed) = surfaces.update(cx, |surfaces, cx| {
+            let taken = surfaces.overview_pinch(event, window, cx);
+            (taken, surfaces.take_zoom_feedback())
+        });
+        if crossed {
+            // The pinch crossed the point where releasing commits.
+            haptics::perform(Haptic::LevelChange, haptics::key("overview-pinch", ()));
         }
-        if let Some(frame) = frame {
-            surfaces.update(cx, |surfaces, cx| {
-                surfaces.tab_gesture_at(frame, now, cx);
-                surfaces.sync_tab_peek_focus(window, cx);
-            });
+        if taken {
             cx.stop_propagation();
         }
     }
@@ -4673,7 +4669,7 @@ impl Render for RootView {
         let mut root = div()
             .id("root")
             .key_context(key_context)
-            .capture_pinch(cx.listener(Self::handle_tab_pinch))
+            .capture_pinch(cx.listener(Self::handle_pinch))
             .relative()
             .size_full()
             // Real SF Pro (registered from SFNS.ttf at startup) for every UI
@@ -9181,7 +9177,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_pinch_keeps_its_one_tick_as_a_level_change(cx: &mut gpui::TestAppContext) {
+    fn the_overview_pinch_ticks_once_at_the_commit_threshold(cx: &mut gpui::TestAppContext) {
         let services = test_services();
         let (root, cx) = cx.add_window_view(move |window, cx| {
             RootView::new(services, false, PreviewScenario::Typical, window, cx)
@@ -9198,7 +9194,7 @@ mod tests {
                     modifiers: Modifiers::default(),
                     phase,
                 };
-                root.handle_tab_pinch(&event, window, cx);
+                root.handle_pinch(&event, window, cx);
             };
             pinch(0.0, gpui::TouchPhase::Started);
             assert_eq!(
@@ -9206,18 +9202,18 @@ mod tests {
                 [],
                 "starting a pinch is not a threshold"
             );
-            // In past the strip, back out across it, and in again.
+            // In past the commit point, back out across it, and in again.
             for _ in 0..3 {
-                for _ in 0..5 {
-                    pinch(-0.08, gpui::TouchPhase::Moved);
+                for _ in 0..8 {
+                    pinch(-0.1, gpui::TouchPhase::Moved);
                 }
-                pinch(0.4, gpui::TouchPhase::Moved);
+                pinch(1.5, gpui::TouchPhase::Moved);
             }
         });
         assert_eq!(
             haptics::testing::take(),
-            [(Haptic::LevelChange, haptics::key("tab-pinch", ()))],
-            "one boundary, one tick per gesture"
+            [(Haptic::LevelChange, haptics::key("overview-pinch", ()))],
+            "one threshold, one tick per gesture"
         );
     }
 
