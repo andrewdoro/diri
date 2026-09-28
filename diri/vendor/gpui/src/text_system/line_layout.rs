@@ -414,12 +414,35 @@ struct FrameCache {
     used_wrapped_lines_by_hash: Vec<Arc<HashedCacheKey>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub(crate) struct LineLayoutIndex {
     lines_index: usize,
     wrapped_lines_index: usize,
     lines_by_hash_index: usize,
     wrapped_lines_by_hash_index: usize,
+}
+
+// DIRI PATCH: see `PrepaintStateIndex::relative_to` in window.rs.
+impl LineLayoutIndex {
+    pub(crate) fn relative_to(&self, base: &Self) -> Self {
+        Self {
+            lines_index: self.lines_index - base.lines_index,
+            wrapped_lines_index: self.wrapped_lines_index - base.wrapped_lines_index,
+            lines_by_hash_index: self.lines_by_hash_index - base.lines_by_hash_index,
+            wrapped_lines_by_hash_index: self.wrapped_lines_by_hash_index
+                - base.wrapped_lines_by_hash_index,
+        }
+    }
+
+    pub(crate) fn rebased_on(&self, base: &Self) -> Self {
+        Self {
+            lines_index: self.lines_index + base.lines_index,
+            wrapped_lines_index: self.wrapped_lines_index + base.wrapped_lines_index,
+            lines_by_hash_index: self.lines_by_hash_index + base.lines_by_hash_index,
+            wrapped_lines_by_hash_index: self.wrapped_lines_by_hash_index
+                + base.wrapped_lines_by_hash_index,
+        }
+    }
 }
 
 impl LineLayoutCache {

@@ -836,6 +836,10 @@ pub(crate) struct Frame {
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
+    /// DIRI PATCH: insertion order of `debug_bounds`, so a reused cached view
+    /// can replay the selectors it painted (upstream dropped them).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) debug_bounds_history: Vec<(String, Bounds<Pixels>)>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -843,7 +847,7 @@ pub(crate) struct Frame {
     pub(crate) tab_stops: TabStopMap,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub(crate) struct PrepaintStateIndex {
     hitboxes_index: usize,
     tooltips_index: usize,
@@ -853,7 +857,7 @@ pub(crate) struct PrepaintStateIndex {
     line_layout_index: LineLayoutIndex,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub(crate) struct PaintIndex {
     scene_index: usize,
     mouse_listeners_index: usize,
@@ -862,6 +866,93 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_index: usize,
+}
+
+// DIRI PATCH (nested view caching): a cached view stores its prepaint/paint
+// ranges relative to the start of its nearest cached ancestor's ranges. Every
+// reuse copies a range element-for-element, so when an ancestor is reused
+// wholesale (and its descendants are not visited), the relative offsets stay
+// valid; they are rebased onto the ancestor's previous-frame position the next
+// time that ancestor re-renders. See vendor/gpui/DIRI_PATCHES.md.
+impl PrepaintStateIndex {
+    pub(crate) fn relative_to(&self, base: &Self) -> Self {
+        Self {
+            hitboxes_index: self.hitboxes_index - base.hitboxes_index,
+            tooltips_index: self.tooltips_index - base.tooltips_index,
+            deferred_draws_index: self.deferred_draws_index - base.deferred_draws_index,
+            dispatch_tree_index: self.dispatch_tree_index - base.dispatch_tree_index,
+            accessed_element_states_index: self.accessed_element_states_index
+                - base.accessed_element_states_index,
+            line_layout_index: self.line_layout_index.relative_to(&base.line_layout_index),
+        }
+    }
+
+    pub(crate) fn rebased_on(&self, base: &Self) -> Self {
+        Self {
+            hitboxes_index: self.hitboxes_index + base.hitboxes_index,
+            tooltips_index: self.tooltips_index + base.tooltips_index,
+            deferred_draws_index: self.deferred_draws_index + base.deferred_draws_index,
+            dispatch_tree_index: self.dispatch_tree_index + base.dispatch_tree_index,
+            accessed_element_states_index: self.accessed_element_states_index
+                + base.accessed_element_states_index,
+            line_layout_index: self.line_layout_index.rebased_on(&base.line_layout_index),
+        }
+    }
+}
+
+impl PaintIndex {
+    pub(crate) fn relative_to(&self, base: &Self) -> Self {
+        Self {
+            scene_index: self.scene_index - base.scene_index,
+            mouse_listeners_index: self.mouse_listeners_index - base.mouse_listeners_index,
+            input_handlers_index: self.input_handlers_index - base.input_handlers_index,
+            cursor_styles_index: self.cursor_styles_index - base.cursor_styles_index,
+            accessed_element_states_index: self.accessed_element_states_index
+                - base.accessed_element_states_index,
+            tab_handle_index: self.tab_handle_index - base.tab_handle_index,
+            line_layout_index: self.line_layout_index.relative_to(&base.line_layout_index),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: self.debug_bounds_index - base.debug_bounds_index,
+        }
+    }
+
+    pub(crate) fn rebased_on(&self, base: &Self) -> Self {
+        Self {
+            scene_index: self.scene_index + base.scene_index,
+            mouse_listeners_index: self.mouse_listeners_index + base.mouse_listeners_index,
+            input_handlers_index: self.input_handlers_index + base.input_handlers_index,
+            cursor_styles_index: self.cursor_styles_index + base.cursor_styles_index,
+            accessed_element_states_index: self.accessed_element_states_index
+                + base.accessed_element_states_index,
+            tab_handle_index: self.tab_handle_index + base.tab_handle_index,
+            line_layout_index: self.line_layout_index.rebased_on(&base.line_layout_index),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: self.debug_bounds_index + base.debug_bounds_index,
+        }
+    }
+}
+
+/// Who a cached view's relative ranges are measured from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CachedViewBaseOwner {
+    /// No cached ancestor: ranges are absolute frame indices.
+    Root,
+    /// The nearest enclosing cached view.
+    View(EntityId),
+    /// A deferred draw prepainted or painted fresh this frame.
+    Deferred,
+}
+
+/// One level of the cached-view nesting stack for the prepaint or paint pass.
+pub(crate) struct CachedViewBase<I> {
+    pub(crate) owner: CachedViewBaseOwner,
+    /// Where this level's ranges started in the previous frame, if known. Only
+    /// then can a nested cached view locate its previous ranges for reuse.
+    pub(crate) previous_start: Option<I>,
+    /// Where this level's ranges start in the frame being drawn.
+    pub(crate) start: I,
 }
 
 impl Frame {
@@ -883,6 +974,8 @@ impl Frame {
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_history: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -911,6 +1004,7 @@ impl Frame {
         #[cfg(any(test, feature = "test-support"))]
         {
             self.debug_bounds.clear();
+            self.debug_bounds_history.clear();
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1009,6 +1103,10 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    /// DIRI PATCH: nesting stacks of cached views for the prepaint and paint
+    /// passes. See [`CachedViewBase`].
+    pub(crate) cached_view_prepaint_bases: Vec<CachedViewBase<PrepaintStateIndex>>,
+    pub(crate) cached_view_paint_bases: Vec<CachedViewBase<PaintIndex>>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
@@ -1721,6 +1819,8 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            cached_view_prepaint_bases: Vec::new(),
+            cached_view_paint_bases: Vec::new(),
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -3084,6 +3184,14 @@ impl Window {
 
                 let prepaint_start = self.prepaint_index();
                 if let Some(mut element) = element {
+                    // DIRI PATCH: a fresh deferred draw is a cached-view level
+                    // with no known previous position, so cached views inside it
+                    // re-render and record ranges relative to it.
+                    self.cached_view_prepaint_bases.push(CachedViewBase {
+                        owner: CachedViewBaseOwner::Deferred,
+                        previous_start: None,
+                        start: prepaint_start.clone(),
+                    });
                     self.with_rendered_view(current_view, |window| {
                         window.with_rem_size(Some(rem_size), |window| {
                             window.with_absolute_element_offset(absolute_offset, |window| {
@@ -3091,6 +3199,7 @@ impl Window {
                             });
                         });
                     });
+                    self.cached_view_prepaint_bases.pop();
                     self.next_frame.deferred_draws[deferred_draw_ix].element = Some(element);
                 } else {
                     self.reuse_prepaint(prepaint_range);
@@ -3128,13 +3237,19 @@ impl Window {
             let paint_start = self.paint_index();
             let content_mask = deferred_draw.content_mask;
             if let Some(element) = deferred_draw.element.as_mut() {
+                self.cached_view_paint_bases.push(CachedViewBase {
+                    owner: CachedViewBaseOwner::Deferred,
+                    previous_start: None,
+                    start: paint_start.clone(),
+                });
                 self.with_rendered_view(deferred_draw.current_view, |window| {
                     window.with_content_mask(content_mask, |window| {
                         window.with_rem_size(Some(deferred_draw.rem_size), |window| {
                             element.paint(window, cx);
                         });
                     })
-                })
+                });
+                self.cached_view_paint_bases.pop();
             } else {
                 self.reuse_paint(deferred_draw.paint_range.clone());
             }
@@ -3223,7 +3338,52 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: self.next_frame.debug_bounds_history.len(),
         }
+    }
+
+    /// DIRI PATCH: the innermost cached-view level of the prepaint pass, or
+    /// the frame root.
+    pub(crate) fn cached_view_prepaint_base(
+        &self,
+    ) -> (
+        CachedViewBaseOwner,
+        Option<PrepaintStateIndex>,
+        PrepaintStateIndex,
+    ) {
+        match self.cached_view_prepaint_bases.last() {
+            Some(base) => (base.owner, base.previous_start.clone(), base.start.clone()),
+            None => (
+                CachedViewBaseOwner::Root,
+                Some(PrepaintStateIndex::default()),
+                PrepaintStateIndex::default(),
+            ),
+        }
+    }
+
+    /// DIRI PATCH: the innermost cached-view level of the paint pass, or the
+    /// frame root.
+    pub(crate) fn cached_view_paint_base(
+        &self,
+    ) -> (CachedViewBaseOwner, Option<PaintIndex>, PaintIndex) {
+        match self.cached_view_paint_bases.last() {
+            Some(base) => (base.owner, base.previous_start.clone(), base.start.clone()),
+            None => (
+                CachedViewBaseOwner::Root,
+                Some(PaintIndex::default()),
+                PaintIndex::default(),
+            ),
+        }
+    }
+
+    /// Records a `debug_selector`'s bounds for this frame (test support).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn insert_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
+        self.next_frame
+            .debug_bounds_history
+            .push((selector.clone(), bounds));
+        self.next_frame.debug_bounds.insert(selector, bounds);
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
@@ -3262,6 +3422,18 @@ impl Window {
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
         );
+        #[cfg(any(test, feature = "test-support"))]
+        for (selector, bounds) in self.rendered_frame.debug_bounds_history
+            [range.start.debug_bounds_index..range.end.debug_bounds_index]
+            .iter()
+        {
+            self.next_frame
+                .debug_bounds_history
+                .push((selector.clone(), *bounds));
+            self.next_frame
+                .debug_bounds
+                .insert(selector.clone(), *bounds);
+        }
     }
 
     /// Push a text style onto the stack, and call a function with that style active.

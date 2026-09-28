@@ -5417,66 +5417,6 @@ mod tests {
         cx.run_until_parked();
     }
 
-    /// Pins the GPUI caching rule that decides how the sidebar can be split:
-    /// a cached view that re-renders re-renders every cached view inside it,
-    /// because it lays its subtree out with `window.refreshing` set. Only a
-    /// cached view whose ancestors all render uncached is reused on its own.
-    #[gpui::test]
-    fn nested_cached_views_rerender_with_their_cached_parent(cx: &mut gpui::TestAppContext) {
-        struct Leaf(std::rc::Rc<std::cell::Cell<usize>>);
-        impl Render for Leaf {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                self.0.set(self.0.get() + 1);
-                div().size_full()
-            }
-        }
-        struct Middle(Entity<Leaf>);
-        impl Render for Middle {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().child(
-                    self.0
-                        .clone()
-                        .cached(StyleRefinement::default().size_full()),
-                )
-            }
-        }
-        struct Top {
-            middle: Entity<Middle>,
-            cached: bool,
-        }
-        impl Render for Top {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let middle = self.middle.clone();
-                div().size_full().map(|top| {
-                    if self.cached {
-                        top.child(middle.cached(StyleRefinement::default().size_full()))
-                    } else {
-                        top.child(middle)
-                    }
-                })
-            }
-        }
-        for cached in [true, false] {
-            let renders = std::rc::Rc::new(std::cell::Cell::new(0));
-            let counter = std::rc::Rc::clone(&renders);
-            let (top, cx) = cx.add_window_view(move |_, cx| {
-                let leaf = cx.new(|_| Leaf(counter));
-                let middle = cx.new(|_| Middle(leaf));
-                Top { middle, cached }
-            });
-            cx.run_until_parked();
-            let middle = top.read_with(cx, |top, _| top.middle.clone());
-            let before = renders.get();
-            middle.update(cx, |_, cx| cx.notify());
-            cx.run_until_parked();
-            assert_eq!(
-                renders.get() - before,
-                usize::from(cached),
-                "cached={cached}: an undirtied leaf is reused only under an uncached parent"
-            );
-        }
-    }
-
     /// Render cost of the sidebar under a busy fleet: 51 sessions over five
     /// projects, four of them working, mounted in the real RootView and
     /// painted by headless Metal. Measures one activity-mark tick and one

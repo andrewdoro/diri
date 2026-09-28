@@ -3,11 +3,10 @@ use crate::{
     Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintIndex,
     Pixels, PrepaintStateIndex, Render, RenderOnce, Style, StyleRefinement, TextStyle, WeakEntity,
 };
-use crate::{Empty, Window};
+use crate::{CachedViewBase, CachedViewBaseOwner, Empty, Window};
 use anyhow::Result;
 use collections::FxHashSet;
 use refineable::Refineable;
-use std::mem;
 use std::{any::TypeId, fmt, ops::Range};
 
 /// A dynamically-typed view handle that can be downcast to a specific `Entity<V>`.
@@ -283,8 +282,14 @@ impl<V: View> IntoElement for ViewElement<V> {
 }
 
 struct ViewElementState {
+    /// DIRI PATCH: relative to the start of `base_owner`'s ranges.
     prepaint_range: Range<PrepaintStateIndex>,
+    /// DIRI PATCH: relative to the start of `base_owner`'s ranges.
     paint_range: Range<PaintIndex>,
+    /// Where this view painted last frame (relative), carried from a cache
+    /// miss in prepaint to the paint pass so reused children can find theirs.
+    previous_paint_start: Option<PaintIndex>,
+    base_owner: CachedViewBaseOwner,
     cache_key: ViewElementCacheKey,
     accessed_entities: FxHashSet<EntityId>,
 }
@@ -293,6 +298,13 @@ struct ViewElementCacheKey {
     bounds: Bounds<Pixels>,
     content_mask: ContentMask<Pixels>,
     text_style: TextStyle,
+    /// DIRI PATCH: painted opacity is baked into replayed primitives.
+    opacity: f32,
+}
+
+struct PreviousRanges {
+    prepaint: Range<PrepaintStateIndex>,
+    paint_start: PaintIndex,
 }
 
 impl<V: View> Element for ViewElement<V> {
@@ -382,26 +394,68 @@ impl<V: View> Element for ViewElement<V> {
                     |element_state, window| {
                         let content_mask = window.content_mask();
                         let text_style = window.text_style();
+                        let opacity = window.element_opacity;
+
+                        // DIRI PATCH (nested view caching): ranges are stored
+                        // relative to the nearest cached ancestor. Locate the
+                        // previous frame's ranges only when this view was
+                        // measured against the same ancestor and that ancestor
+                        // knows where it was drawn last frame.
+                        let (base_owner, base_previous, base_start) =
+                            window.cached_view_prepaint_base();
+                        let previous = element_state.as_ref().and_then(|state| {
+                            let base = base_previous.as_ref()?;
+                            (state.base_owner == base_owner).then(|| PreviousRanges {
+                                prepaint: state.prepaint_range.start.rebased_on(base)
+                                    ..state.prepaint_range.end.rebased_on(base),
+                                paint_start: state.paint_range.start.clone(),
+                            })
+                        });
 
                         if let Some(mut element_state) = element_state
+                            && let Some(previous) = previous.as_ref()
                             && element_state.cache_key.bounds == bounds
                             && element_state.cache_key.content_mask == content_mask
                             && element_state.cache_key.text_style == text_style
+                            && element_state.cache_key.opacity == opacity
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
                         {
                             let prepaint_start = window.prepaint_index();
-                            window.reuse_prepaint(element_state.prepaint_range.clone());
+                            window.reuse_prepaint(previous.prepaint.clone());
                             cx.entities
                                 .extend_accessed(&element_state.accessed_entities);
                             let prepaint_end = window.prepaint_index();
-                            element_state.prepaint_range = prepaint_start..prepaint_end;
+                            debug_assert_eq!(
+                                element_state
+                                    .prepaint_range
+                                    .end
+                                    .relative_to(&element_state.prepaint_range.start),
+                                prepaint_end.relative_to(&prepaint_start),
+                                "a reused view's prepaint range must keep its length",
+                            );
+                            element_state.prepaint_range = prepaint_start.relative_to(&base_start)
+                                ..prepaint_end.relative_to(&base_start);
 
                             return (None, element_state);
                         }
 
-                        let refreshing = mem::replace(&mut window.refreshing, true);
+                        // Upstream forces every nested cached view to
+                        // re-render here. Keep that only while an
+                        // accessibility tree is being built, because a reused
+                        // subtree contributes no accessibility nodes.
+                        let refreshing = window.refreshing;
+                        if window.a11y.is_active() {
+                            window.refreshing = true;
+                        }
                         let prepaint_start = window.prepaint_index();
+                        window.cached_view_prepaint_bases.push(CachedViewBase {
+                            owner: CachedViewBaseOwner::View(entity_id),
+                            previous_start: previous
+                                .as_ref()
+                                .map(|previous| previous.prepaint.start.clone()),
+                            start: prepaint_start.clone(),
+                        });
                         let (mut element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                             let mut element = self
                                 .view
@@ -413,6 +467,7 @@ impl<V: View> Element for ViewElement<V> {
                             element.prepaint_at(bounds.origin, window, cx);
                             element
                         });
+                        window.cached_view_prepaint_bases.pop();
 
                         let prepaint_end = window.prepaint_index();
                         window.refreshing = refreshing;
@@ -421,12 +476,16 @@ impl<V: View> Element for ViewElement<V> {
                             Some(element),
                             ViewElementState {
                                 accessed_entities,
-                                prepaint_range: prepaint_start..prepaint_end,
+                                prepaint_range: prepaint_start.relative_to(&base_start)
+                                    ..prepaint_end.relative_to(&base_start),
                                 paint_range: PaintIndex::default()..PaintIndex::default(),
+                                previous_paint_start: previous.map(|previous| previous.paint_start),
+                                base_owner,
                                 cache_key: ViewElementCacheKey {
                                     bounds,
                                     content_mask,
                                     text_style,
+                                    opacity,
                                 },
                             },
                         )
@@ -464,19 +523,39 @@ impl<V: View> Element for ViewElement<V> {
                         global_id.unwrap(),
                         |element_state, window| {
                             let mut element_state = element_state.unwrap();
+                            let (_, base_previous, base_start) = window.cached_view_paint_base();
 
                             let paint_start = window.paint_index();
 
                             if let Some(element) = element {
-                                let refreshing = mem::replace(&mut window.refreshing, true);
+                                // DIRI PATCH: children reused during prepaint
+                                // find their previous paint ranges from where
+                                // this view painted last frame.
+                                let previous_start = element_state
+                                    .previous_paint_start
+                                    .take()
+                                    .zip(base_previous)
+                                    .map(|(start, base)| start.rebased_on(&base));
+                                window.cached_view_paint_bases.push(CachedViewBase {
+                                    owner: CachedViewBaseOwner::View(entity_id),
+                                    previous_start,
+                                    start: paint_start.clone(),
+                                });
                                 element.paint(window, cx);
-                                window.refreshing = refreshing;
+                                window.cached_view_paint_bases.pop();
                             } else {
-                                window.reuse_paint(element_state.paint_range.clone());
+                                // Prepaint reused this view, which requires a
+                                // known previous position for its ancestor.
+                                let base = base_previous
+                                    .expect("a reused cached view needs its ancestor's last paint");
+                                let previous = element_state.paint_range.start.rebased_on(&base)
+                                    ..element_state.paint_range.end.rebased_on(&base);
+                                window.reuse_paint(previous);
                             }
 
                             let paint_end = window.paint_index();
-                            element_state.paint_range = paint_start..paint_end;
+                            element_state.paint_range = paint_start.relative_to(&base_start)
+                                ..paint_end.relative_to(&base_start);
 
                             ((), element_state)
                         },

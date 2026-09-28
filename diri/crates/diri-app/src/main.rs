@@ -22,6 +22,8 @@ pub mod fuzzy;
 #[cfg(test)]
 mod gesture_delivery;
 mod git_review;
+#[cfg(test)]
+mod gpui_view_cache_tests;
 mod haptics;
 mod held_hints;
 mod herdr_import;
