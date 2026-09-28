@@ -567,8 +567,33 @@ impl SessionStore {
         let known = self.sessions.get(&event.session_id).is_some_and(|session| {
             !session.is_archived() && session.created_at == event.session_created_at
         });
-        let fresh = (now_millis().0 - event.occurred_at.0).abs() <= MAX_AGE_MS;
-        known && fresh && self.app_is_active && self.terminal_clipboard.send(event.text).is_ok()
+        let age_ms = now_millis().0 - event.occurred_at.0;
+        let fresh = age_ms.abs() <= MAX_AGE_MS;
+        let size = crate::telemetry::size_bucket(event.text.len());
+        let session = diri_telemetry::id(&event.session_id.0);
+        let accepted = known
+            && fresh
+            && self.app_is_active
+            && self.terminal_clipboard.send(event.text).is_ok();
+        diri_telemetry::event!(
+            "clipboard.copy",
+            source = "osc52",
+            outcome = if accepted {
+                "relayed"
+            } else if !known {
+                "unknown_session"
+            } else if !fresh {
+                "stale"
+            } else if !self.app_is_active {
+                "app_inactive"
+            } else {
+                "no_listener"
+            },
+            size = size,
+            age_ms = age_ms,
+            session = session
+        );
+        accepted
     }
 
     fn notification_change(&self, dismiss: Vec<String>) {

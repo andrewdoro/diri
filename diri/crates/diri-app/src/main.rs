@@ -68,6 +68,7 @@ pub mod switcher;
 mod tab_navigation;
 mod tab_peek;
 mod tab_preview;
+mod telemetry;
 pub mod terminal_pane;
 mod tooltip_warmth;
 pub mod transcript;
@@ -130,6 +131,7 @@ const USAGE_RECONCILE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// desktop cannot implement.
 fn install_app_menus(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &commands::ReportProblem, cx| telemetry::report_problem(cx));
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &CloseWindow, cx| {
@@ -173,6 +175,10 @@ pub(crate) fn refresh_app_menus(cx: &mut App) {
             MenuItem::action("Reopen Closed Session", ReopenSession),
             MenuItem::action("Close Window", CloseWindow),
         ]),
+        Menu::new("Help").items([MenuItem::action(
+            "Report a Problem…",
+            commands::ReportProblem,
+        )]),
     ]);
     #[cfg(not(target_os = "macos"))]
     cx.set_menus([
@@ -191,6 +197,10 @@ pub(crate) fn refresh_app_menus(cx: &mut App) {
             MenuItem::action("Reopen Closed Session", ReopenSession),
             MenuItem::action("Close Window", CloseWindow),
         ]),
+        Menu::new("Help").items([MenuItem::action(
+            "Report a Problem…",
+            commands::ReportProblem,
+        )]),
     ]);
 }
 
@@ -238,6 +248,9 @@ fn main() {
         .ok()
         .or_else(|| preview_value.filter(|value| value != "1"));
     let scenario = PreviewScenario::from_env(scenario_value.as_deref());
+    // Headless previews and fixtures never record; everything else does,
+    // before the first window so launch time and early panics are covered.
+    telemetry::start(preview);
     #[cfg(target_os = "macos")]
     let bundle_id = macos::bundle_identifier();
     #[cfg(target_os = "macos")]
@@ -408,6 +421,7 @@ fn main() {
     });
     app.run(move |cx: &mut App| {
         load_system_fonts(cx);
+        telemetry::install(cx);
         // Menus and popovers open as blurred panels under glass; DIRI_FLOATING_PANELS=0
         // keeps them inside the window for comparison or when a panel misbehaves.
         if std::env::var_os("DIRI_FLOATING_PANELS").is_none_or(|value| value != "0") {
@@ -471,6 +485,7 @@ fn main() {
         let release_owned_daemon =
             !preview && std::env::var_os(diri_proto::paths::ENV_SOCKET).is_none();
         cx.on_app_quit(move |cx| {
+            telemetry::quitting();
             let quit_services = Arc::clone(&quit_services);
             let quit_updates = quit_updates.clone();
             // Windows are still open here; this is the one moment the full

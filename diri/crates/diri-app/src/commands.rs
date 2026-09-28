@@ -19,7 +19,10 @@ pub type ShortcutOverrides = BTreeMap<String, Option<String>>;
 
 static ACTIVE_SHORTCUT_OVERRIDES: OnceLock<RwLock<ShortcutOverrides>> = OnceLock::new();
 
-actions!(diri_app, [Quit, HideApp, NewWindow, CloseWindow]);
+actions!(
+    diri_app,
+    [Quit, HideApp, NewWindow, CloseWindow, ReportProblem]
+);
 
 actions!(
     diri,

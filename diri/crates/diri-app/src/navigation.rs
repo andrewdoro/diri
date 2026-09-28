@@ -932,7 +932,9 @@ impl NavigationOverlay {
             }
             PaletteCommand::Action(id) => {
                 self.close_overlay(window, cx);
-                window.dispatch_action(id.action(), cx);
+                let action = id.action();
+                crate::telemetry::action(action.name(), "palette");
+                window.dispatch_action(action, cx);
             }
             PaletteCommand::SpawnAgent { agent, cwd, host } => {
                 {
