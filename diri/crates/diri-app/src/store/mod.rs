@@ -1805,6 +1805,12 @@ impl SessionStore {
                         && info.code == Some(0)
                         && !session.can_resume()
             )
+            // A conversation Diri cannot re-enter (an agent without resume, a
+            // pruned transcript, Stop on an agent that exits 0) still has its
+            // scrollback as the only in-app record; only a tab that never
+            // bound a conversation is disposable.
+            && session.agent_session_id.is_none()
+            && session.transcript_path.is_none()
             && previous
                 .as_deref()
                 .is_none_or(|record| !matches!(record.status, SessionStatus::Exited(_)));

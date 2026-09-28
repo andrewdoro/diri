@@ -152,14 +152,24 @@ fn main() {
     };
 
     let mut registry = Registry::new(Arc::clone(&engine), DirijorPaths::state_file(&home));
-    let state_loaded = match registry.load() {
+    let state_loaded = match load_state(&mut registry) {
         Ok(count) => {
             eprintln!("dirijord-rs: loaded {count} session record(s)");
             true
         }
-        Err(error) => {
+        // Quarantined: the records are safe in the `.corrupt` copy, so serving
+        // from an empty table cannot overwrite them.
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
             eprintln!("dirijord-rs: state load: {error}");
             false
+        }
+        // The file is still there but unreadable (EACCES, EIO, EMFILE...).
+        // Serving would persist a table rebuilt from live holders alone over
+        // every exited, archived and remote record in it. Refuse to start; the
+        // app reconnects and relaunches once the cause clears.
+        Err(error) => {
+            eprintln!("dirijord-rs: state load: {error}; refusing to start over unread state");
+            std::process::exit(1);
         }
     };
     let adopted = registry.restore(&holder, &logs_dir);
@@ -293,6 +303,22 @@ fn main() {
                 eprintln!("dirijord-rs: accept: {error}; retrying in {delay:?}");
                 std::thread::sleep(delay);
             }
+        }
+    }
+}
+
+/// Loads the state file, retrying transient read failures briefly. A parse
+/// failure is final at once: `load` has already quarantined the file.
+fn load_state(registry: &mut Registry) -> std::io::Result<usize> {
+    let mut attempt = 0;
+    loop {
+        match registry.load() {
+            Err(error) if error.kind() != std::io::ErrorKind::InvalidData && attempt < 5 => {
+                attempt += 1;
+                eprintln!("dirijord-rs: state load: {error}; retrying");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            result => return result,
         }
     }
 }

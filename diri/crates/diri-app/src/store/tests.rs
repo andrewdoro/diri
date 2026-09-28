@@ -1242,6 +1242,32 @@ fn a_real_process_exit_immediately_detaches_and_removes_the_agent() {
     assert!(store.ordered_sessions().is_empty());
 }
 
+/// Exiting 0 is not "nothing to lose" once a conversation exists: an agent
+/// Diri cannot resume (or one whose transcript is gone) keeps its row, since
+/// the scrollback is the last copy of that conversation in the app.
+#[test]
+fn a_clean_exit_with_a_conversation_keeps_its_row() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 1.0)],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    let mut exited = session("one", "p", 1.0);
+    exited.status = SessionStatus::Exited(ExitInfo {
+        reason: ExitReason::Exited,
+        code: Some(0),
+        signal: None,
+    });
+    exited.agent_session_id = Some("conversation".into());
+    exited.resumability = Resumability::NotResumable;
+    store.upsert_session(exited);
+
+    assert!(!drain(&mut effects).contains(&StoreEffect::Remove(id("one"))));
+    assert_eq!(store.ordered_sessions().len(), 1);
+}
+
 /// Closing the tab deletes the Engine record and the session's output log.
 /// A signalled death is exactly when that log matters most: macOS kills agents
 /// with SIGTERM under memory pressure, and silently deleting the row plus its
