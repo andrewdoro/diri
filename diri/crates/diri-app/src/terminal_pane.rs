@@ -992,6 +992,8 @@ impl TerminalPane {
         // below by promotion.
         self.parked_terminals
             .retain(|(id, _)| store.sessions().contains_key(id));
+        self.known_pty_size
+            .retain(|id, _| store.sessions().contains_key(id));
         drop(store);
         // Park the painted terminal of every session about to be evicted, so
         // re-selecting it paints the same element instead of flashing a new
@@ -1051,7 +1053,14 @@ impl TerminalPane {
                 .as_ref()
                 .is_some_and(|element| Arc::ptr_eq(&element.buffer(), &buffer));
             let element = if reuse_parked {
-                parked.unwrap()
+                // Clones share find and IME state, so the parked element still
+                // carries whatever Find left behind; the new resident starts
+                // with Find closed.
+                let element = parked.unwrap();
+                element.clear_find_source();
+                element.set_find_highlights(Vec::new());
+                element.set_text_input_enabled(true);
+                element
             } else {
                 TerminalElement::new(buffer)
             };
@@ -3305,10 +3314,12 @@ impl TerminalPane {
             && resident.attachment.is_controller()
             && resident.last_size != (0, 0)
             && resident.last_size == size
+            && resident.attachment.pty_may_be(size)
         {
             // The pane still matches the size this session was already using.
             // An unchanged pane must not send a resize at all. Recording that
-            // size would let the next attach replay it.
+            // size would let the next attach replay it. A view that regains
+            // the lease after another view resized the PTY still sends.
             return;
         }
         if let Some(resident) = self.residents.get_mut(&session.id)
@@ -7639,6 +7650,125 @@ mod tests {
         let hidden = qol::paste_review_preview(&mut text.chars(), true);
         assert!(!hidden.contains("hunter2"), "{hidden}");
         assert!(hidden.starts_with("8 characters"), "{hidden}");
+    }
+
+    #[gpui::test]
+    fn switching_back_after_find_restores_typing(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+        let mut a = fixture_session();
+        a.id = SessionId::new("a");
+        let mut b = fixture_session();
+        b.id = SessionId::new("b");
+        let a_id = a.id.clone();
+        let b_id = b.id.clone();
+        {
+            let mut store = runtime.store.write().unwrap();
+            store.upsert_session(a);
+            store.upsert_session(b);
+            store.select(a_id.clone());
+        }
+        let rt = Arc::clone(&runtime);
+        let (pane, cx) =
+            cx.add_window_view(move |window, cx| TerminalPane::new(rt, tokio, window, cx));
+        pane.update_in(cx, |pane, window, cx| {
+            pane.set_viewport(
+                TerminalViewport {
+                    width: 900.0,
+                    height: 600.0,
+                    ..Default::default()
+                },
+                cx,
+            );
+            window.activate_window();
+            pane.focus(window, cx);
+            pane.update_selected_geometry(window, cx);
+            pane.open_find(&OpenFind, window, cx);
+            assert!(!pane.residents[&a_id].element.text_input_enabled());
+        });
+        runtime.store.write().unwrap().select(b_id);
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx)
+        });
+        runtime.store.write().unwrap().select(a_id.clone());
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            let resident = &pane.residents[&a_id];
+            assert!(
+                resident.find.is_none(),
+                "a remounted session starts with Find closed"
+            );
+            assert!(
+                resident.element.text_input_enabled(),
+                "Find is closed, so typed text must reach the PTY again"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn regaining_the_lease_resends_this_panes_pty_size(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+        let mut session = fixture_session();
+        session.id = SessionId::new("shared");
+        let id = session.id.clone();
+        {
+            let mut store = runtime.store.write().unwrap();
+            store.upsert_session(session);
+            store.select(id.clone());
+        }
+        let rt = Arc::clone(&runtime);
+        let tk = Arc::clone(&tokio);
+        let (pane_a, cx) =
+            cx.add_window_view(move |window, cx| TerminalPane::new(rt, tk, window, cx));
+        let rt = Arc::clone(&runtime);
+        let pane_b = cx.update(|window, cx| cx.new(|cx| TerminalPane::new(rt, tokio, window, cx)));
+        let wide = TerminalViewport {
+            width: 1400.0,
+            height: 600.0,
+            ..Default::default()
+        };
+        let narrow = TerminalViewport {
+            width: 700.0,
+            height: 600.0,
+            ..Default::default()
+        };
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let size_after = |pane: &Entity<TerminalPane>,
+                          viewport: TerminalViewport,
+                          cx: &mut gpui::VisualTestContext| {
+            pane.update_in(cx, |pane, window, cx| {
+                pane.set_viewport(viewport, cx);
+                pane.focus(window, cx);
+                pane.focus(window, cx);
+                pane.last_resize_sent = Some(Instant::now() - Duration::from_secs(3));
+                pane.update_selected_geometry(window, cx);
+                pane.residents[&id].last_size
+            })
+        };
+        let a_size = size_after(&pane_a, wide, cx);
+        pane_a.update_in(cx, |pane, _, _| pane.release_layout_control());
+        let b_size = size_after(&pane_b, narrow, cx);
+        pane_b.update_in(cx, |pane, _, _| pane.release_layout_control());
+        assert_ne!(a_size, b_size);
+        size_after(&pane_a, wide, cx);
+        pane_a.read_with(cx, |pane, _| {
+            assert!(
+                !pane.residents[&id].attachment.needs_resize(a_size),
+                "pane A owns the PTY again, so it must send its own size back"
+            );
+        });
     }
 
     #[gpui::test]
