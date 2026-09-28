@@ -5735,6 +5735,106 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Strip tabs reused across terminal frames, activity ticks, no-op
+    /// store publications and a selection pill glide paint exactly what a
+    /// full re-render paints: after
+    /// the steps, a `window.refresh()` that rebuilds everything at the same
+    /// mark frame must match pixel for pixel. Eleven ticks leave the marks
+    /// mid-cycle, so a mark that failed to advance would differ too.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal pixel comparison; run explicitly on macOS"]
+    fn reused_strip_tabs_paint_like_a_full_render() {
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        let window = strip_bench_window(&mut cx, 51);
+        let root = cx
+            .update_window(window, |root, _, _| root.downcast::<RootView>().unwrap())
+            .unwrap();
+        let (sidebar, terminal) = cx.update(|cx| {
+            let root = root.read(cx);
+            (root.sidebar.clone(), root.terminal.clone())
+        });
+        // Let the strip's entry slide finish.
+        std::thread::sleep(Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.capture_screenshot(window).unwrap();
+        let draw = |cx: &mut HeadlessAppContext| {
+            cx.run_until_parked();
+            cx.update_window(window, |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        };
+        for tick in 0..11 {
+            if tick == 3 {
+                // Select the next tab and let the pill glide there over
+                // reused tabs, drawing frames the way a display link would.
+                cx.update(|cx| {
+                    root.read(cx)
+                        .window_store
+                        .write()
+                        .unwrap()
+                        .select(SessionId::new("bench-5"));
+                    sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+                });
+                draw(&mut cx);
+                let glide = Instant::now();
+                while glide.elapsed() < diri_ui::Motion::ROW_SELECT_TIME + Duration::from_millis(60)
+                {
+                    std::thread::sleep(Duration::from_millis(16));
+                    if let Some(terminal) = &terminal {
+                        cx.update(|cx| terminal.update(cx, |_, cx| cx.notify()));
+                    }
+                    draw(&mut cx);
+                }
+            }
+            cx.update(|cx| {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.advance_activity_frame_for_test(cx)
+                })
+            });
+            draw(&mut cx);
+            if tick % 2 == 0 {
+                cx.update(|cx| sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx)));
+            } else {
+                cx.update(|cx| root.update(cx, |_, cx| cx.notify()));
+            }
+            draw(&mut cx);
+            if let Some(terminal) = &terminal {
+                cx.update(|cx| terminal.update(cx, |_, cx| cx.notify()));
+                draw(&mut cx);
+            }
+        }
+        let reused = cx.capture_screenshot(window).unwrap();
+        cx.update_window(window, |_, window, _| window.refresh())
+            .unwrap();
+        cx.run_until_parked();
+        let fresh = cx.capture_screenshot(window).unwrap();
+        if let Ok(dir) = std::env::var("DIRI_VISUAL_OUTPUT_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            reused.save(dir.join("strip-reused.png")).unwrap();
+            fresh.save(dir.join("strip-fresh.png")).unwrap();
+        }
+        assert_eq!(reused.dimensions(), fresh.dimensions());
+        let differing = reused
+            .pixels()
+            .zip(fresh.pixels())
+            .filter(|(left, right)| left != right)
+            .count();
+        assert_eq!(differing, 0, "reused strip tabs painted differently");
+        drop(root);
+        drop(sidebar);
+        drop(terminal);
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     /// Horizontal tabs for the fleet `sidebar_fleet_render_cost` uses: the
     /// sidebar hidden, sessions as tabs across the top, the selected project
     /// holding a working session.

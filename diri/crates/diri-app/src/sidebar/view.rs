@@ -6,6 +6,7 @@ mod hue_tests;
 mod lineage;
 mod project_picker;
 mod rows;
+mod strip_tabs;
 mod tabs;
 mod titles;
 mod workspaces;
@@ -638,6 +639,11 @@ pub struct Sidebar {
     row_held_hint: f32,
     /// Sessions whose rows this render mounted.
     mounted_row_ids: HashSet<SessionId>,
+    /// Cached views of the horizontal strip's session tabs, by session (see
+    /// `strip_tabs.rs`).
+    strip_tab_views: HashMap<SessionId, Entity<strip_tabs::StripTabView>>,
+    /// Every strip tab renders on the next strip render.
+    tabs_stale: bool,
     _self_observer: Option<gpui::Subscription>,
     /// Project hues for the list being rendered.
     hues: crate::project_hue::ProjectHues,
@@ -826,6 +832,8 @@ impl Sidebar {
             notify_keeps_rows: false,
             row_held_hint: 0.0,
             mounted_row_ids: HashSet::new(),
+            strip_tab_views: HashMap::new(),
+            tabs_stale: true,
             _self_observer: None,
             hues: Default::default(),
             shortcut_ranks: HashMap::new(),
@@ -7833,6 +7841,12 @@ pub(crate) mod render_probe {
 
     pub(crate) fn strip_finished(elapsed: Duration) {
         STRIP_RENDERS.with(|renders| renders.set(renders.get() + 1));
+        strip_time(elapsed);
+    }
+
+    /// Strip work done outside the strip's own render call: its cached tabs
+    /// render later in the frame.
+    pub(crate) fn strip_time(elapsed: Duration) {
         STRIP_TIME.with(|time| time.set(time.get() + elapsed));
     }
 

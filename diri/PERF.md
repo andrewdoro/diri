@@ -1,5 +1,110 @@
 # diri performance record
 
+## Horizontal strip tabs re-render only when they change (2026-09-28)
+
+**Where the time went.** With horizontal tabs, the sidebar is hidden and
+`RootView` paints the tab strip inline. RootView is the window root and is
+never cached, so every window frame rebuilt, laid out, prepainted and painted
+every tab of the selected project. That includes each terminal output frame,
+each 125 ms working-mark tick and each store publication. #517 moved sidebar
+rows onto cached views and left the strip as it was.
+
+**What changed.** Each strip tab is now a cached view (`StripTabView`,
+`sidebar/view/strip_tabs.rs`) that renders from a `StripTabProps` snapshot. It
+uses the same pattern and the same vendored-GPUI nested cache as the sidebar
+rows. A tab re-renders only when:
+
+- its props change: selection, activity state or mark frame, title, kind,
+  theme, held-⌘ hint, ordering mode, or whether the shared selection pill
+  (#533) stands in for its fill;
+- it is lifted or sliding in a drag reorder, or its title is settling. These
+  tabs are forced every frame while they move;
+- its own hover changes;
+- the sidebar is notified for anything other than a store publication or its
+  own animation tick. This is the `tabs_stale` safety net.
+
+The selection pill is its own layer, drawn inline beside the tabs. Its glide
+keeps moving on reused tabs, and its frames notify the sidebar without
+marking tabs stale.
+
+GPUI's cache key still re-renders tabs whose bounds or clip change, for
+example while the strip scrolls or slides in. A drag refreshes the window on
+every pointer move. In horizontal mode the activity tick no longer marks tabs
+stale: the new mark frame reaches the working tabs through their props.
+
+**How it was measured.** `strip_fleet_render_cost` (root.rs, ignored,
+macOS) mounts the real RootView under headless Metal. It uses the fleet from
+`sidebar_fleet_render_cost`: 51 sessions over five projects, four of them
+working. Tabs are horizontal, the sidebar is hidden, and `bench-0` is
+selected, so its project shows 11 tabs, one of them working. Brand marks use
+the same cached blank raster stand-in.
+
+A step is one notify followed by the frames it causes. At this bench that is
+two root renders. The terminal output frame notifies the primary terminal
+pane. "Strip render" is the strip's own render call plus the cached tab
+renders.
+
+Numbers are release builds, 1,000 steps, with base (`main` at `a1219ae`,
+after #533, plus the bench commit) and branch binaries alternated three times
+each. Load average during the runs was 40–70, which shows in the first two
+base runs' p90 and CPU.
+
+| 51 sessions, 11 tabs | Tabs built per step | Step median | CPU per step |
+| --- | ---: | ---: | ---: |
+| Terminal output frame | 22 → 0 | 0.596–0.600 → 0.310–0.312 ms | 0.653–0.752 → 0.322–0.395 ms |
+| Activity tick | 22 → 1 | 0.595–0.601 → 0.330–0.331 ms | 0.615–0.767 → 0.350–0.446 ms |
+| Store publication (nothing changed) | 22 → 0 | 0.593–0.597 → 0.309–0.311 ms | 0.617–0.752 → 0.320–0.381 ms |
+| Root-only frame | 22 → 0 | 0.588–0.593 → 0.308–0.309 ms | 0.599–0.731 → 0.320–0.361 ms |
+
+Whole-process CPU time (`/usr/bin/time -p`, user) for the full bench, which
+is setup plus 4 × 1,020 steps, fell from 2.64–3.18 s to 1.45–1.76 s.
+
+Most of the saving is in layout, prepaint and paint of the tab elements, not
+in the render call: strip render time per step fell from 0.06 ms to 0.02 ms, a small part of the step.
+
+Scaling was measured before #533 merged, with one alternating run per size,
+terminal output frame step medians:
+
+| Sessions (tabs shown) | Before | After |
+| --- | ---: | ---: |
+| 10 (2) | 0.276 ms | 0.222 ms |
+| 51 (11) | 0.578 ms | 0.296 ms |
+| 100 (20) | 0.852 ms | 0.361 ms |
+| 250 (50) | 1.870 ms | 0.588 ms |
+
+What remains per tab is computing and comparing props, a view and its
+wrapper node, and replaying cached ranges.
+
+**Visual checks.** Pixels match `main` exactly in these cases:
+
+- `render_tab_orientation_screenshots` horizontal-dark, horizontal-light and
+  horizontal-narrow, for the typical, stress and projects scenarios;
+- the strip bench's final frame, after about 1,300 steps.
+
+The fixture's `vertical-light` frame differs from run to run on `main` itself,
+in the selected row's band (up to 6/255). It is excluded.
+
+`reused_strip_tabs_paint_like_a_full_render` checks the reuse path. It runs 11
+ticks, each interleaved with no-op publications or root frames and a terminal
+frame. Midway it selects another tab and draws the pill's whole glide over
+reused tabs. It then compares against a `window.refresh()` rebuild and
+requires zero differing pixels. It passed 12 of 12 runs. With `force_render_if(changed)`
+disabled, 216 pixels differ.
+
+`strip_tabs_rerender_only_when_they_change`,
+`sliding_strip_tabs_render_every_frame_until_they_rest`,
+`the_pill_glides_over_reused_strip_tabs` and
+`held_hints_show_and_leave_on_cached_strip_tabs` pin the re-render rules.
+
+**Not claimed:**
+
+- any installed-app CPU change;
+- GPU or present cost;
+- the strip chrome: the project control, peek and new-tab buttons, and the
+  hosted title-bar actions are still rebuilt with every root frame;
+- the rest of RootView's per-frame work.
+
+
 ## GPUI scenes give back a large frame's storage (2026-09-28)
 
 `vmmap`/`heap` on the installed app attributed about 36 MB of live heap to GPUI
