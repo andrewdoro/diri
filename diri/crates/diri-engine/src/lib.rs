@@ -56,6 +56,7 @@ pub mod session;
 pub mod session_files;
 mod state_file;
 pub mod status;
+pub mod telemetry;
 pub mod workspace;
 mod worktree_health;
 mod worktree_scan;

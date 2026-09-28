@@ -30,13 +30,18 @@ impl ControlServer {
                 "Remote profiles are chosen per conversation; the shared switch applies to this Mac.",
             ));
         }
-        match profile.agent.as_str() {
+        let agent = profile.agent.clone();
+        let result = match profile.agent.as_str() {
             AgentKind::CODEX_ID => self.switch_codex(profile),
             AgentKind::CLAUDE_CODE_ID => self.switch_claude(profile),
             _ => Err(ControlError::bad_request(
                 "Account switching supports Claude Code and Codex",
             )),
+        };
+        if let Ok(value) = &result {
+            record_switch(&agent, value);
         }
+        result
     }
 
     /// Local, unarchived tabs of `kind` that are open in a Diri workspace.
@@ -107,5 +112,35 @@ impl ControlServer {
                 }),
             }
         }
+    }
+}
+
+/// `account.switch`: how many open tabs moved to the new login, and each tab
+/// that could not (codes only; the failure message stays in the reply).
+fn record_switch(agent: &str, value: &Value) {
+    let count = |key: &str| value.get(key).and_then(Value::as_array).map_or(0, Vec::len);
+    diri_telemetry::event!(
+        "account.switch",
+        agent = diri_telemetry::id(agent),
+        switched = count("switched"),
+        unchanged = count("unchanged"),
+        deferred = count("deferred"),
+        failures = count("failures"),
+        default_changed = value.get("defaultChanged").and_then(Value::as_bool),
+    );
+    for failure in value
+        .get("failures")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        diri_telemetry::warn_event!(
+            "account.switch_failed",
+            agent = diri_telemetry::id(agent),
+            session = failure
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(diri_telemetry::id),
+        );
     }
 }

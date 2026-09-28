@@ -58,6 +58,8 @@ impl ProcessExecutor {
     ) -> io::Result<CommandOutput> {
         spec.program.clone_from(&self.ssh_executable);
         let mut command = self.command(&spec);
+        diri_telemetry::count("ssh.commands", 1);
+        let started = Instant::now();
         let mut child = command.spawn()?;
         let mut stdin = child
             .stdin
@@ -84,6 +86,7 @@ impl ProcessExecutor {
                 break status;
             }
             if Instant::now() >= deadline {
+                diri_telemetry::warn_event!("ssh.command_timeout", timeout = timeout);
                 terminate_process_group(&mut child);
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -104,6 +107,7 @@ impl ProcessExecutor {
         }
         let (stdout, stdout_truncated) = join_reader(stdout_thread)?;
         let (stderr, stderr_truncated) = join_reader(stderr_thread)?;
+        diri_telemetry::observe("ssh.command", started.elapsed());
         Ok(CommandOutput {
             status,
             stdout,
@@ -115,6 +119,7 @@ impl ProcessExecutor {
 
     pub fn open(&self, mut spec: CommandSpec) -> io::Result<SshChannel> {
         spec.program.clone_from(&self.ssh_executable);
+        diri_telemetry::count("ssh.channels", 1);
         let mut child = self.command(&spec).spawn()?;
         let input = child
             .stdin
@@ -203,10 +208,20 @@ pub struct CommandOutput {
 }
 
 impl CommandOutput {
-    pub fn require_success(self, phase: &str) -> io::Result<Self> {
+    pub fn require_success(self, phase: &'static str) -> io::Result<Self> {
         if self.status.success() {
             Ok(self)
         } else {
+            use std::os::unix::process::ExitStatusExt;
+            // 255 is OpenSSH's own failure (connect, auth, host key); any
+            // other status came from the remote command.
+            diri_telemetry::warn_event!(
+                "ssh.command_failed",
+                phase = phase,
+                exit = self.status.code(),
+                signal = self.status.signal(),
+                ssh_failure = self.status.code() == Some(255),
+            );
             Err(io::Error::other(format!(
                 "{phase} failed with {}: {}",
                 self.status,

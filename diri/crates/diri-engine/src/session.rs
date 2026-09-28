@@ -329,6 +329,15 @@ struct Shared {
     remote_grid: Mutex<Option<RemoteGridState>>,
     remote_output_offset: AtomicU64,
     grid_wake: GridWake,
+    /// The manifest this session runs, for telemetry.
+    agent: String,
+    /// When this Engine launched the child; `None` for an adopted one, whose
+    /// start this process never saw.
+    launched_at: Option<Instant>,
+    /// Set before an explicit stop, so its exit is not read as a crash.
+    terminate_requested: AtomicBool,
+    /// The exit was recorded to telemetry; later observers stay quiet.
+    exit_recorded: AtomicBool,
 }
 
 struct RemoteGridState {
@@ -942,6 +951,9 @@ pub(crate) struct RemoteStop {
 
 impl RemoteStop {
     pub(crate) fn stop(&self, grace: Duration) -> std::io::Result<Exit> {
+        self.shared
+            .terminate_requested
+            .store(true, Ordering::SeqCst);
         if !self.shared.exited.load(Ordering::SeqCst) {
             let _ = self.client.signal(libc::SIGTERM);
             let deadline = Instant::now() + grace;
@@ -1173,14 +1185,46 @@ impl Session {
     /// Spawns the child and starts watching it — through a holder when the
     /// spec carries a [`HolderConfig`], directly otherwise.
     pub fn spawn(spec: SessionSpec, engine: Arc<ManifestEngine>) -> std::io::Result<Self> {
-        if spec.remote.is_some() {
-            return Self::spawn_remote(spec, engine);
+        let started = Instant::now();
+        let id = spec.id.clone();
+        let agent = spec.manifest_id.clone();
+        let transport = match (&spec.remote, &spec.holder) {
+            (Some(_), _) => "remote",
+            (None, Some(_)) if spec.defer_launch => "held_deferred",
+            (None, Some(_)) => "held",
+            (None, None) => "direct",
+        };
+        let result = if spec.remote.is_some() {
+            Self::spawn_remote(spec, engine)
+        } else {
+            match spec.holder.clone() {
+                Some(holder) if spec.defer_launch => {
+                    Self::spawn_held_deferred(spec, &holder, engine)
+                }
+                Some(holder) => Self::spawn_held(spec, &holder, engine),
+                None => Self::spawn_direct(spec, engine),
+            }
+        };
+        match &result {
+            Ok(_) => diri_telemetry::event!(
+                "session.launch",
+                session = diri_telemetry::id(&id),
+                agent = diri_telemetry::id(&agent),
+                transport = transport,
+                ms = started.elapsed(),
+            ),
+            Err(error) => diri_telemetry::incident!(
+                "session.launch_failed",
+                session = diri_telemetry::id(&id),
+                agent = diri_telemetry::id(&agent),
+                transport = transport,
+                stage = "spawn",
+                io = diri_telemetry::io_error(error),
+                error = diri_telemetry::text(error.to_string()),
+                ms = started.elapsed(),
+            ),
         }
-        match spec.holder.clone() {
-            Some(holder) if spec.defer_launch => Self::spawn_held_deferred(spec, &holder, engine),
-            Some(holder) => Self::spawn_held(spec, &holder, engine),
-            None => Self::spawn_direct(spec, engine),
-        }
+        result
     }
 
     fn spawn_remote(mut spec: SessionSpec, engine: Arc<ManifestEngine>) -> std::io::Result<Self> {
@@ -1527,6 +1571,10 @@ impl Session {
             let logs_dir = spec.logs_dir.clone();
             let id = spec.id.clone();
             let mut pty = spec.pty.clone();
+            let return_to_shell = engine
+                .manifest(&spec.manifest_id)
+                .and_then(|manifest| manifest.agent.as_ref())
+                .is_some_and(|agent| agent.return_to_login_shell);
             std::thread::Builder::new()
                 .name(format!("diri-session-{}", spec.id))
                 .spawn(move || {
@@ -1562,16 +1610,33 @@ impl Session {
                         rows: pty.rows,
                         disk_capacity: crate::holder::protocol::DEFAULT_DISK_CAPACITY,
                     };
-                    if HolderLauncher::launch(&holder.executable, &paths, &launch).is_err() {
-                        mark_launch_failed(&shared);
+                    let exec_started = Instant::now();
+                    if let Err(error) = HolderLauncher::launch(&holder.executable, &paths, &launch)
+                    {
+                        mark_launch_failed(&shared, "holder_launch", &error);
                         return;
                     }
-                    let Ok((floor, stat)) =
-                        wait_for_holder(&client, &logs_dir, &id, pre_spawn_tail)
-                    else {
-                        mark_launch_failed(&shared);
-                        return;
-                    };
+                    let (floor, stat) =
+                        match wait_for_holder(&client, &logs_dir, &id, pre_spawn_tail) {
+                            Ok(ready) => ready,
+                            Err(error) => {
+                                mark_launch_failed(&shared, "holder_wait", &error);
+                                return;
+                            }
+                        };
+                    diri_telemetry::debug_event!(
+                        "session.exec",
+                        session = diri_telemetry::id(&id),
+                        defer_ms = shared
+                            .launched_at
+                            .map(|launched| exec_started.saturating_duration_since(launched)),
+                        ms = exec_started.elapsed(),
+                        cols = pty.cols,
+                        rows = pty.rows,
+                    );
+                    if return_to_shell {
+                        watch_early_return_to_shell(&shared, &client);
+                    }
                     let stat = stat.or_else(|| {
                         client
                             .stat()
@@ -2260,6 +2325,38 @@ impl Session {
         self.write_raw(&queued)
     }
 
+    /// The agent reported its own end (Claude's `SessionEnd` hook). A moment
+    /// later, when it has had the chance to restore the terminal, check
+    /// whether it really left its login shell behind and with which modes.
+    /// `SessionEnd` also fires on `/clear`, which is why the foreground is
+    /// asked rather than assumed.
+    pub fn note_agent_ended(&self) {
+        if !diri_telemetry::is_enabled() {
+            return;
+        }
+        let Transport::Held(client) = &self.transport else {
+            return;
+        };
+        let shared = Arc::clone(&self.shared);
+        let client = client.clone();
+        let _ = std::thread::Builder::new()
+            .name("diri-agent-end-probe".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_secs(2));
+                if shared.stop.load(Ordering::SeqCst) || shared.exited.load(Ordering::SeqCst) {
+                    return;
+                }
+                if agent_returned_to_shell(&client) == Some(true) {
+                    record_returned_to_shell(&shared, false, "session_end_hook");
+                }
+            });
+    }
+
+    /// Whether a local Holder owns this session's PTY.
+    pub fn is_held(&self) -> bool {
+        matches!(self.transport, Transport::Held(_))
+    }
+
     pub fn is_hibernated(&self) -> bool {
         self.shared.hibernated.load(Ordering::SeqCst)
     }
@@ -2628,6 +2725,9 @@ impl Session {
 
     /// Ends the session, killing the child's whole tree.
     pub fn terminate(&mut self, grace: Duration) -> std::io::Result<Exit> {
+        self.shared
+            .terminate_requested
+            .store(true, Ordering::SeqCst);
         // Killed before the deferred exec: there is no child. Cancel wakes
         // the launcher (which double-checks under the same lock, killing a
         // child it raced into existence), and the session records a kill.
@@ -2802,6 +2902,10 @@ fn new_shared(
         remote_grid: Mutex::new(None),
         remote_output_offset: AtomicU64::new(0),
         grid_wake: GridWake::new(),
+        agent: spec.manifest_id.clone(),
+        launched_at: fresh.then(Instant::now),
+        terminate_requested: AtomicBool::new(false),
+        exit_recorded: AtomicBool::new(false),
     })
 }
 
@@ -2908,6 +3012,12 @@ fn apply(shared: &Shared, outcome: &ReducerOutcome) {
         {
             let mut current = shared.status.lock().expect("status");
             if *current != *status {
+                diri_telemetry::debug_event!(
+                    "session.status",
+                    session = diri_telemetry::id(&shared.id),
+                    from = crate::telemetry::status_name(&current),
+                    to = crate::telemetry::status_name(status),
+                );
                 *current = status.clone();
                 changed = true;
             }
@@ -3120,6 +3230,10 @@ fn pump_remote(
             && !shared.stop.load(Ordering::SeqCst)
             && !shared.exited.load(Ordering::SeqCst)
         {
+            diri_telemetry::error_event!(
+                "remote.uncertain_input",
+                session = diri_telemetry::id(&shared.id),
+            );
             client.fail_closed();
             mark_remote_transport_failed(&shared);
             break;
@@ -3137,6 +3251,11 @@ fn pump_remote(
             }
             RemoteConnectionDisposition::Exited | RemoteConnectionDisposition::Stopped => break,
             RemoteConnectionDisposition::Fatal => {
+                diri_telemetry::error_event!(
+                    "remote.connection_fatal",
+                    session = diri_telemetry::id(&shared.id),
+                    reconnects = reconnects,
+                );
                 client.fail_closed();
                 mark_remote_transport_failed(&shared);
                 break;
@@ -3447,6 +3566,7 @@ fn handle_remote_message(
             if apply_remote_delta(shared, delta).is_err() {
                 // A gap is recoverable: the next Hello always reseeds with a
                 // full authoritative snapshot.
+                diri_telemetry::count("remote.delta_gaps", 1);
                 RemoteConnectionDisposition::Reconnect
             } else {
                 RemoteConnectionDisposition::Continue
@@ -3462,7 +3582,13 @@ fn handle_remote_message(
                 RemoteConnectionDisposition::Continue
             }
         }
-        RemoteMessage::ControlRevoked(_) => RemoteConnectionDisposition::Reconnect,
+        RemoteMessage::ControlRevoked(_) => {
+            diri_telemetry::warn_event!(
+                "remote.control_revoked",
+                session = diri_telemetry::id(&shared.id),
+            );
+            RemoteConnectionDisposition::Reconnect
+        }
         RemoteMessage::ProcessExit(exit) => {
             record_remote_exit(shared, exit);
             RemoteConnectionDisposition::Exited
@@ -3471,8 +3597,19 @@ fn handle_remote_message(
             client.complete_scrollback(response);
             RemoteConnectionDisposition::Continue
         }
-        RemoteMessage::Error(error) if error.fatal => RemoteConnectionDisposition::Fatal,
-        RemoteMessage::Error(_) => RemoteConnectionDisposition::Continue,
+        RemoteMessage::Error(error) => {
+            diri_telemetry::error_event!(
+                "remote.helper_error",
+                session = diri_telemetry::id(&shared.id),
+                code = diri_telemetry::id(&error.code),
+                fatal = error.fatal,
+            );
+            if error.fatal {
+                RemoteConnectionDisposition::Fatal
+            } else {
+                RemoteConnectionDisposition::Continue
+            }
+        }
         RemoteMessage::InputModes(modes) => {
             let mut remote = shared.remote_grid.lock().expect("remote grid");
             let Some(remote) = remote.as_mut() else {
@@ -3675,6 +3812,27 @@ fn set_remote_connection(shared: &Shared, state: diri_proto::RemoteConnectionSta
         if let Some(remote) = remote.as_mut()
             && remote.connection.state != state
         {
+            let event = |kind| {
+                diri_telemetry::record(
+                    kind,
+                    if state == diri_proto::RemoteConnectionState::Failed {
+                        diri_telemetry::Severity::Incident
+                    } else {
+                        diri_telemetry::Severity::Info
+                    },
+                    vec![
+                        ("session", diri_telemetry::id(&shared.id).into()),
+                        (
+                            "from",
+                            crate::telemetry::remote_state_name(remote.connection.state).into(),
+                        ),
+                        ("to", crate::telemetry::remote_state_name(state).into()),
+                    ],
+                );
+            };
+            if diri_telemetry::is_enabled() {
+                event("remote.connection");
+            }
             let keyboard_changed = state != diri_proto::RemoteConnectionState::Connected
                 && remote.keyboard.committed.is_some();
             if state != diri_proto::RemoteConnectionState::Connected {
@@ -3717,6 +3875,7 @@ fn record_remote_exit(shared: &Shared, exit: ProcessExit) {
     apply(shared, &outcome);
     shared.exited.store(true, Ordering::SeqCst);
     set_remote_connection(shared, diri_proto::RemoteConnectionState::Exited);
+    record_exit_telemetry(shared);
 }
 
 fn mark_remote_transport_failed(shared: &Shared) {
@@ -3892,6 +4051,7 @@ fn pump(
     );
     apply(&shared, &outcome);
     shared.exited.store(true, Ordering::SeqCst);
+    record_exit_telemetry(&shared);
     let _ = shared.log.lock().expect("log").flush();
 }
 
@@ -4608,6 +4768,7 @@ fn pump_held(
     );
     apply(&shared, &outcome);
     shared.exited.store(true, Ordering::SeqCst);
+    record_exit_telemetry(&shared);
 }
 
 /// The held-output follower is on the input-to-pixel path while a terminal is
@@ -4629,9 +4790,152 @@ fn set_current_thread_interactive(interactive: bool) {
 #[cfg(not(target_vendor = "apple"))]
 fn set_current_thread_interactive(_interactive: bool) {}
 
+/// The modes the screen still has on, from the same emulator that reduces
+/// status (a remote session's raw output feeds it too).
+fn terminal_modes_left(shared: &Shared) -> crate::telemetry::LeftModes {
+    let screen = shared.screen.lock().expect("screen");
+    let mouse = screen.mouse_modes();
+    crate::telemetry::LeftModes {
+        mouse: mouse.is_reporting().then_some(mouse),
+        alt_screen: screen.is_alt_screen(),
+        bracketed_paste: screen.bracketed_paste(),
+        app_cursor: screen.keyboard_state().application_cursor_keys,
+    }
+}
+
+/// Records how the child ended, once: `session.exit`, plus an incident when a
+/// launch this Engine made died on its own within [`EARLY_EXIT`].
+///
+/// [`EARLY_EXIT`]: crate::telemetry::EARLY_EXIT
+fn record_exit_telemetry(shared: &Shared) {
+    if !diri_telemetry::is_enabled() || shared.exit_recorded.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let exit = *shared.exit.lock().expect("exit");
+    let (code, signal) = match exit {
+        Some(Exit::Code(code)) => (Some(code), None),
+        Some(Exit::Signal(signal)) => (None, Some(signal)),
+        None => (None, None),
+    };
+    let requested = shared.terminate_requested.load(Ordering::SeqCst);
+    let runtime = shared.launched_at.map(|launched| launched.elapsed());
+    let left = terminal_modes_left(shared);
+    diri_telemetry::event!(
+        "session.exit",
+        session = diri_telemetry::id(&shared.id),
+        agent = diri_telemetry::id(&shared.agent),
+        code = code,
+        signal = signal,
+        requested = requested,
+        runtime_s = runtime.map(|runtime| runtime.as_secs()),
+        adopted = runtime.is_none(),
+        modes = left.any().then(|| left.fields()),
+    );
+    if requested {
+        return;
+    }
+    let failed = exit.is_none() || code.is_some_and(|code| code != 0) || signal.is_some();
+    if failed && runtime.is_some_and(|runtime| runtime < crate::telemetry::EARLY_EXIT) {
+        diri_telemetry::incident!(
+            "session.early_exit",
+            session = diri_telemetry::id(&shared.id),
+            agent = diri_telemetry::id(&shared.agent),
+            kind = "exit",
+            code = code,
+            signal = signal,
+            ms = runtime,
+        );
+    }
+    if left.corrupts_input() {
+        diri_telemetry::warn_event!(
+            "session.modes_left_on_exit",
+            session = diri_telemetry::id(&shared.id),
+            agent = diri_telemetry::id(&shared.agent),
+            kind = "pty_exit",
+            modes = left.fields(),
+        );
+    }
+}
+
+/// Whether the agent a `returnToLoginShell` wrapper started has already gone,
+/// leaving its login shell in the foreground (`<shell> -c "agent; exec
+/// <shell>"`: the agent runs in its own job, the shell's group is the
+/// child's pid). `None` when the Holder cannot say.
+fn agent_returned_to_shell(client: &HolderClient) -> Option<bool> {
+    let stat = client.stat().ok()?;
+    Some(stat.alive && stat.foreground_pid == Some(stat.child_pid))
+}
+
+fn record_returned_to_shell(shared: &Shared, early: bool, source: &'static str) {
+    let left = terminal_modes_left(shared);
+    let runtime = shared.launched_at.map(|launched| launched.elapsed());
+    if early {
+        diri_telemetry::incident!(
+            "session.early_exit",
+            session = diri_telemetry::id(&shared.id),
+            agent = diri_telemetry::id(&shared.agent),
+            kind = "returned_to_shell",
+            ms = runtime,
+            modes = left.fields(),
+        );
+    } else {
+        diri_telemetry::event!(
+            "session.agent_exited",
+            session = diri_telemetry::id(&shared.id),
+            agent = diri_telemetry::id(&shared.agent),
+            source = source,
+            runtime_s = runtime.map(|runtime| runtime.as_secs()),
+            modes = left.fields(),
+        );
+    }
+    if left.corrupts_input() {
+        diri_telemetry::warn_event!(
+            "session.modes_left_on_exit",
+            session = diri_telemetry::id(&shared.id),
+            agent = diri_telemetry::id(&shared.agent),
+            kind = "returned_to_shell",
+            modes = left.fields(),
+        );
+    }
+}
+
+/// One probe, [`EARLY_EXIT`] after a launch: an agent that is already back at
+/// its login shell by then failed to start (a resume of a conversation that
+/// was never written prints "No conversation found" and exits), even though
+/// the session itself lives on as a shell.
+///
+/// [`EARLY_EXIT`]: crate::telemetry::EARLY_EXIT
+fn watch_early_return_to_shell(shared: &Arc<Shared>, client: &HolderClient) {
+    if !diri_telemetry::is_enabled() {
+        return;
+    }
+    let shared = Arc::clone(shared);
+    let client = client.clone();
+    let _ = std::thread::Builder::new()
+        .name("diri-early-exit-probe".into())
+        .spawn(move || {
+            std::thread::sleep(crate::telemetry::EARLY_EXIT);
+            if shared.stop.load(Ordering::SeqCst) || shared.exited.load(Ordering::SeqCst) {
+                return;
+            }
+            if agent_returned_to_shell(&client) == Some(true) {
+                record_returned_to_shell(&shared, true, "launch_probe");
+            }
+        });
+}
+
 /// Records a deferred launch that never produced a child: the session
 /// reports exit 127, the spawn-failure convention the app already knows.
-fn mark_launch_failed(shared: &Shared) {
+fn mark_launch_failed(shared: &Shared, stage: &'static str, error: &dyn std::fmt::Display) {
+    diri_telemetry::incident!(
+        "session.launch_failed",
+        session = diri_telemetry::id(&shared.id),
+        agent = diri_telemetry::id(&shared.agent),
+        stage = stage,
+        error = diri_telemetry::text(error.to_string()),
+    );
+    // Already reported as a launch failure, not as an early exit.
+    shared.exit_recorded.store(true, Ordering::SeqCst);
     *shared.exit.lock().expect("exit") = Some(Exit::Code(127));
     let outcome = shared.reducer.lock().expect("reducer").reduce(
         StatusSignal::ProcessExit {
