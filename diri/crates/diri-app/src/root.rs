@@ -18,6 +18,7 @@ mod gesture_acceptance_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod gesture_schedule_profile;
 
+use crate::tooltip_warmth::WarmTooltip;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -4303,7 +4304,7 @@ impl RootView {
                     .justify_center()
                     .rounded(px(Radius::CHIP))
                     .cursor_pointer()
-                    .tooltip(move |_, cx| {
+                    .warm_tooltip(move |_, cx| {
                         cx.new(|_| crate::palette_chrome::PaletteTooltip("Dismiss".into(), colors))
                             .into()
                     })
