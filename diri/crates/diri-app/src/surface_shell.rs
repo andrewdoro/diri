@@ -4528,6 +4528,11 @@ impl UtilitySurfaces {
                             this.update_prefs(move |prefs| prefs.terminal_copy_on_select = enabled); cx.notify();
                         }))
                         .child(appearance_divider(colors))
+                        .child(toggle_row("Open links with a click", "Click a link to open it. When off, use ⌘-click.", self.prefs.terminal_open_links_on_click, "terminal_open_links_on_click", colors, cx, |this,cx| {
+                            let enabled = !this.prefs.terminal_open_links_on_click;
+                            this.update_prefs(move |prefs| prefs.terminal_open_links_on_click = enabled); cx.notify();
+                        }))
+                        .child(appearance_divider(colors))
                         .child(toggle_row("Hide pointer while typing", "Show it again when you use the mouse.", self.prefs.terminal_hide_pointer, "terminal_hide_pointer", colors, cx, |this,cx| {
                             let enabled = !this.prefs.terminal_hide_pointer;
                             this.update_prefs(move |prefs| prefs.terminal_hide_pointer = enabled); cx.notify();

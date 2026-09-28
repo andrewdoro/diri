@@ -2468,6 +2468,13 @@ impl TerminalPane {
             self.open_terminal_menu(event.position, col, row, window, cx);
             return;
         }
+        let open_links_on_click = self
+            .runtime
+            .store
+            .read()
+            .expect("store")
+            .preferences()
+            .terminal_open_links_on_click;
         let owner = {
             let Some(resident) = self.residents.get(&id) else {
                 return;
@@ -2486,6 +2493,16 @@ impl TerminalPane {
 
         match owner {
             PointerOwner::LocalSelection => {
+                // A plain press on a URL arms it like a Command-press; the
+                // release opens it only if the pointer never left that cell,
+                // so dragging out of a link still selects.
+                self.qol.pressed = (open_links_on_click
+                    && event.click_count == 1
+                    && is_plain_click(&event.modifiers))
+                .then(|| resident.element.reference_hit_at(col, row))
+                .flatten()
+                .filter(|hit| matches!(hit.reference, TerminalReference::Url(_)))
+                .map(|hit| (hit, (col, row)));
                 match event.click_count {
                     1 if event.modifiers.alt && event.modifiers.shift => {
                         resident.element.begin_rectangle_selection(col, row)
@@ -2573,6 +2590,21 @@ impl TerminalPane {
                 self.open_reference(pressed.reference, window, cx);
             }
             cx.stop_propagation();
+            return;
+        }
+        if owner == Some(PointerOwner::LocalSelection)
+            && let Some((pressed, point)) = pressed.as_ref()
+            && inside
+            && cell == Some(*point)
+            && cell
+                .and_then(|(col, row)| resident.element.reference_hit_at(col, row))
+                .as_ref()
+                == Some(pressed)
+        {
+            resident.element.clear_selection();
+            let reference = pressed.reference.clone();
+            self.open_reference(reference, window, cx);
+            cx.notify();
             return;
         }
         if owner == Some(PointerOwner::LocalSelection) {
@@ -4456,6 +4488,16 @@ fn clamp_grid_cell(col: usize, row: usize, cols: u16, rows: u16) -> Option<(u16,
     ))
 }
 
+/// Only a press with no modifier opens a link under the click-to-open
+/// preference; every modifier keeps its selection or escape-hatch meaning.
+fn is_plain_click(modifiers: &gpui::Modifiers) -> bool {
+    !(modifiers.platform
+        || modifiers.control
+        || modifiers.alt
+        || modifiers.shift
+        || modifiers.function)
+}
+
 fn pointer_owner(
     mouse: MouseModes,
     button: MouseButton,
@@ -5258,6 +5300,37 @@ mod tests {
             sent.push(at);
         }
         sent
+    }
+
+    #[test]
+    fn only_unmodified_presses_open_links_on_click() {
+        assert!(is_plain_click(&Modifiers::default()));
+        for modifiers in [
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                platform: true,
+                ..Modifiers::default()
+            },
+        ] {
+            assert!(!is_plain_click(&modifiers), "{modifiers:?}");
+        }
+        // A plain press on a reporting-off pane stays a local selection, so
+        // the release (not a new owner) decides whether a link opens.
+        assert_eq!(
+            pointer_owner(MouseModes::OFF, MouseButton::Left, &Modifiers::default()),
+            PointerOwner::LocalSelection
+        );
     }
 
     #[test]
