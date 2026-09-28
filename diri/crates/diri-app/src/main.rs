@@ -43,6 +43,7 @@ mod number_flow;
 pub mod palette;
 mod palette_chrome;
 mod palette_workspace;
+mod path_picker;
 mod peek_settle;
 mod phone_access;
 mod platform;

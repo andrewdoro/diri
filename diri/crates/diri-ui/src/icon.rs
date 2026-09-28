@@ -73,6 +73,7 @@ pub enum IconName {
     Cube,
     Download,
     ExternalLink,
+    File,
     Folder,
     Grid,
     Keyboard,
@@ -114,7 +115,7 @@ pub enum IconName {
 }
 
 impl IconName {
-    pub const ALL: [Self; 65] = [
+    pub const ALL: [Self; 66] = [
         Self::Account,
         Self::Activity,
         Self::Archive,
@@ -142,6 +143,7 @@ impl IconName {
         Self::Cube,
         Self::Download,
         Self::ExternalLink,
+        Self::File,
         Self::Folder,
         Self::Grid,
         Self::Keyboard,
@@ -211,6 +213,7 @@ impl IconName {
             Self::Cube => "icons/cube.svg",
             Self::Download => "icons/download.svg",
             Self::ExternalLink => "icons/external-link.svg",
+            Self::File => "icons/file.svg",
             Self::Folder => "icons/folder.svg",
             Self::Grid => "icons/grid.svg",
             Self::Keyboard => "icons/keyboard.svg",
@@ -283,6 +286,7 @@ impl IconName {
             "cube" => Self::Cube,
             "arrow.down.circle" => Self::Download,
             "link" => Self::ExternalLink,
+            "doc" | "doc.fill" | "doc.text" => Self::File,
             "folder" | "folder.fill" => Self::Folder,
             "square.grid.2x2" | "terminal.grid" => Self::Grid,
             "keyboard" => Self::Keyboard,
@@ -419,6 +423,7 @@ fn embedded_svg(path: &str) -> Option<&'static [u8]> {
         "icons/cube.svg" => include_bytes!("../assets/icons/cube.svg"),
         "icons/download.svg" => include_bytes!("../assets/icons/download.svg"),
         "icons/external-link.svg" => include_bytes!("../assets/icons/external-link.svg"),
+        "icons/file.svg" => include_bytes!("../assets/icons/file.svg"),
         "icons/folder.svg" => include_bytes!("../assets/icons/folder.svg"),
         "icons/grid.svg" => include_bytes!("../assets/icons/grid.svg"),
         "icons/keyboard.svg" => include_bytes!("../assets/icons/keyboard.svg"),

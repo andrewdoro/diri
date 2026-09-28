@@ -357,6 +357,9 @@ struct ElementSharedState {
     selection: Mutex<TerminalSelection>,
     selection_shimmer: Mutex<SelectionShimmer>,
     find_highlights: Mutex<FindHighlights>,
+    /// Window-space rect of the grid cursor's cell from the latest live
+    /// prepaint, whether or not the caret itself is drawn.
+    input_cell: Mutex<Option<Bounds<Pixels>>>,
     modes: Mutex<TerminalModes>,
     scroll_router: Mutex<ScrollRouter>,
     history_lines: Mutex<HistoryLineCache>,
@@ -663,6 +666,7 @@ impl TerminalElement {
                 selection: Mutex::new(TerminalSelection::default()),
                 selection_shimmer: Mutex::new(SelectionShimmer::default()),
                 find_highlights: Mutex::new(FindHighlights::default()),
+                input_cell: Mutex::new(None),
                 modes: Mutex::new(TerminalModes::default()),
                 scroll_router: Mutex::new(ScrollRouter::default()),
                 history_lines: Mutex::new(HistoryLineCache::default()),
@@ -1244,6 +1248,16 @@ impl TerminalElement {
     #[must_use]
     pub fn current_find_match_bounds(&self) -> Option<Bounds<Pixels>> {
         mutex_lock(&self.shared.find_highlights).current_bounds
+    }
+
+    /// Window-space bounds of the cell under the grid cursor from this
+    /// element's latest prepaint. Unlike the painted caret this ignores cursor
+    /// visibility: TUIs such as Claude Code hide the caret but still park the
+    /// cursor on their input line, which is where an input popover belongs.
+    /// `None` while reading history, suspended, or before the first paint.
+    #[must_use]
+    pub fn input_cell_bounds(&self) -> Option<Bounds<Pixels>> {
+        *mutex_lock(&self.shared.input_cell)
     }
 
     /// Captures the small live grid and packages it with daemon history for a
@@ -1882,6 +1896,7 @@ impl Element for TerminalElement {
     ) -> Self::PrepaintState {
         if self.suspended {
             mutex_lock(&self.shared.find_highlights).current_bounds = None;
+            *mutex_lock(&self.shared.input_cell) = None;
             mutex_lock(&self.shared.row_cache).clear();
             mutex_lock(&self.shared.render_generations).clear();
             *mutex_lock(&self.shared.render_context) = None;
@@ -1910,6 +1925,7 @@ impl Element for TerminalElement {
 
         if grid_is_empty {
             mutex_lock(&self.shared.find_highlights).current_bounds = None;
+            *mutex_lock(&self.shared.input_cell) = None;
             return TerminalPrepaintState {
                 started_at: None,
                 background_quads: Vec::new(),
@@ -2246,6 +2262,19 @@ impl Element for TerminalElement {
         }
 
         drop(highlights);
+
+        *mutex_lock(&self.shared.input_cell) = (!viewport.is_reading()
+            && usize::from(cursor.row) < visible_rows
+            && usize::from(cursor.col) < visible_cols)
+            .then(|| {
+                Bounds::new(
+                    point(
+                        bounds.left() + metrics.x_for_col(cursor.col),
+                        bounds.top() + metrics.y_for_row(cursor.row),
+                    ),
+                    size(metrics.cell_width, metrics.line_height),
+                )
+            });
 
         let cursor = if cursor_should_render(!self.cursor_hidden, cursor.visible)
             && !viewport.is_reading()

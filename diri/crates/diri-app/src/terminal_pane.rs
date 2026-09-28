@@ -10,6 +10,7 @@ mod find_input;
 mod find_overlay;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod find_workflow_tests;
+mod path_picker;
 mod qol;
 mod reconnect;
 use qol::QolState;
@@ -641,6 +642,9 @@ pub struct TerminalPane {
     #[cfg(test)]
     pub(crate) render_count: usize,
     qol: QolState,
+    /// The open Insert Path picker, bound to the session it was opened on.
+    path_picker: Option<path_picker::PathPickerState>,
+    path_picker_generation: u64,
     /// Overlay scroller and rubber band over the grid's scrollback.
     scroller: diri_ui::ScrollerState,
     reconnect: reconnect::ReconnectUi,
@@ -926,6 +930,8 @@ impl TerminalPane {
             session_links: SessionLinks::new(cx),
             main_viewport: gpui::Size::default(),
             qol: QolState::default(),
+            path_picker: None,
+            path_picker_generation: 0,
             scroller: diri_ui::ScrollerState::new(),
             reconnect: Default::default(),
             pending_resizes: HashMap::new(),
@@ -2201,6 +2207,7 @@ impl TerminalPane {
         let Some(id) = self.selected_id() else {
             return;
         };
+        self.close_path_picker();
         let Some(resident) = self.residents.get_mut(&id) else {
             return;
         };
@@ -3009,6 +3016,10 @@ impl TerminalPane {
         if switcher_handled {
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+
+        if self.path_picker_key_down(event, window, cx) {
             return;
         }
 
@@ -4380,6 +4391,9 @@ impl Render for TerminalPane {
             if let Some(find) = self.render_find_bar(&session, colors, cx) {
                 terminal_surface = terminal_surface.child(find);
             }
+            if let Some(picker) = self.render_path_picker(&session, colors, cx) {
+                terminal_surface = terminal_surface.child(picker);
+            }
             pane = pane.child(terminal_surface);
             if let Some(summary) = self.render_session_links(&session, sidebar_colors, window, cx) {
                 pane = pane.child(summary);
@@ -4432,6 +4446,7 @@ impl Render for TerminalPane {
             .size_full()
             .text_color(colors.primary)
             .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::open_path_picker))
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::close_find))
@@ -5989,6 +6004,27 @@ mod tests {
                     } else {
                         None
                     };
+                    if scene.starts_with("insert-path") {
+                        // A shell prompt mid-command, or an agent's input line
+                        // pinned to the bottom of the screen.
+                        let bottom = scene == "insert-path-bottom";
+                        let lines: &[(u16, &str)] = if bottom {
+                            &[(1, "  Claude Code"), (2, "  ~/work/replay-web"), (25, "> what does ")]
+                        } else {
+                            &[(0, "replay-web  main"), (1, "> nvim ")]
+                        };
+                        grid.changed_rows.clear();
+                        for &(y, text) in lines {
+                            let mut cells = vec![GridCell::BLANK; 80];
+                            for (cell, ch) in cells.iter_mut().zip(text.chars()) {
+                                cell.scalar = ch as u32;
+                            }
+                            grid.changed_rows.push(ChangedRow::new(y, cells));
+                        }
+                        let (row, text) = lines[lines.len() - 1];
+                        grid.cursor_row = row;
+                        grid.cursor_col = text.chars().count() as u16;
+                    }
                     let resident = pane.residents.get_mut(&id).unwrap();
                     resident.element.apply_damage(grid);
                     if let Some((query, snapshot)) = find_fixture {
@@ -6046,6 +6082,36 @@ mod tests {
                         "controller-feedback" => pane.handle_pane_event(
                             PaneEvent::InputFeedback(id.clone(), "Terminal input queue is full. The latest input was not accepted.".into()), window, cx),
                         "copy" => pane.enter_copy_mode(window, cx),
+                        scene if scene.starts_with("insert-path") => {
+                            pane.open_path_picker(&crate::commands::InsertPath, window, cx);
+                            pane.path_picker_adopt_for_test(crate::path_picker::PathIndex::from_entries(
+                                std::path::Path::new("/work/replay-web"),
+                                &[
+                                    ("apps", true),
+                                    ("apps/license-lookup-app", true),
+                                    ("apps/license-lookup-app/README.md", false),
+                                    ("apps/license-lookup-app/playwright.config.ts", false),
+                                    ("apps/license-lookup-app/src", true),
+                                    ("apps/license-lookup-app/src/app.d.ts", false),
+                                    ("apps/license-lookup-app/src/providers/stripe.ts", false),
+                                    ("apps/license-lookup-app/src/providers/types.ts", false),
+                                    ("apps/license-lookup-app/src/types/License.ts", false),
+                                    ("apps/license-lookup-app/tests/test.ts", false),
+                                    ("design_assets", true),
+                                    ("dns", true),
+                                    ("docker-compose.yml", false),
+                                    ("Dockerfile", false),
+                                    ("eslint.config.mjs", false),
+                                    ("flake.lock", false),
+                                    ("flake.nix", false),
+                                    ("LICENSE", false),
+                                    ("node_modules", true),
+                                ],
+                            ));
+                            if let Ok(query) = std::env::var("DIRI_QOL_QUERY") {
+                                pane.path_picker_query_for_test(&query);
+                            }
+                        }
                         _ => (),
                     }
                     pane
@@ -6806,6 +6872,99 @@ mod tests {
                     "compatibility must not invent observed state"
                 );
             }
+        });
+    }
+
+    /// Insert Path owns the keyboard while open: the query never reaches the
+    /// PTY, and choosing a row types exactly one escaped path.
+    #[gpui::test]
+    fn insert_path_types_the_chosen_path_and_nothing_else(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let session = fixture_session();
+        let id = session.id.clone();
+        {
+            let mut store = runtime.store.write().unwrap();
+            store.upsert_session(session);
+            store.select(id.clone());
+        }
+        let (pane, cx) =
+            cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            let (tx, mut input) = mpsc::unbounded_channel();
+            let resident = pane.residents.get_mut(&id).unwrap();
+            resident.attachment.claim();
+            resident.attachment.input_observer = Some((id.clone(), tx));
+            resident.keyboard = None;
+
+            pane.open_path_picker(&crate::commands::InsertPath, window, cx);
+            assert!(!pane.residents[&id].element.text_input_enabled());
+            pane.path_picker_adopt_for_test(crate::path_picker::PathIndex::from_entries(
+                std::path::Path::new("/work/replay-web"),
+                &[
+                    ("apps", true),
+                    ("apps/My Notes.md", false),
+                    ("apps/src/License.ts", false),
+                ],
+            ));
+            for key in ["n", "o", "t", "e", "s", "down", "up"] {
+                let mut keystroke = Keystroke::parse(key).unwrap();
+                if key.len() == 1 {
+                    keystroke.key_char = Some(key.into());
+                }
+                pane.handle_key_down(
+                    &KeyDownEvent {
+                        keystroke,
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            }
+            assert!(
+                input.try_recv().is_err(),
+                "the query must not reach the PTY"
+            );
+            pane.handle_key_down(
+                &KeyDownEvent {
+                    keystroke: Keystroke::parse("enter").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                window,
+                cx,
+            );
+            assert_eq!(
+                input.try_recv().unwrap(),
+                (id.clone(), b"apps/My\\ Notes.md ".to_vec())
+            );
+            assert!(
+                input.try_recv().is_err(),
+                "Enter is consumed, never forwarded"
+            );
+            assert!(pane.path_picker.is_none());
+            assert!(pane.residents[&id].element.text_input_enabled());
+
+            // Escape closes without typing anything.
+            pane.open_path_picker(&crate::commands::InsertPath, window, cx);
+            pane.handle_key_down(
+                &KeyDownEvent {
+                    keystroke: Keystroke::parse("escape").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                window,
+                cx,
+            );
+            assert!(pane.path_picker.is_none());
+            assert!(input.try_recv().is_err());
         });
     }
 
