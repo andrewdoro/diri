@@ -505,6 +505,16 @@ pub trait Handler {
     /// A character to be displayed.
     fn input(&mut self, _c: char) {}
 
+    /// A run of printable ASCII (`0x20..=0x7e`) characters to be displayed.
+    ///
+    /// Must be equivalent to calling [`Handler::input`] for each character in
+    /// order, which the default implementation does.
+    fn input_ascii(&mut self, text: &str) {
+        for c in text.chars() {
+            self.input(c);
+        }
+    }
+
     /// Set cursor to position.
     fn goto(&mut self, _line: i32, _col: usize) {}
 
@@ -1293,6 +1303,14 @@ where
     fn print(&mut self, c: char) {
         self.handler.input(c);
         self.state.preceding_char = Some(c);
+    }
+
+    #[inline]
+    fn print_ascii(&mut self, text: &str) {
+        self.handler.input_ascii(text);
+        if let Some(c) = text.chars().next_back() {
+            self.state.preceding_char = Some(c);
+        }
     }
 
     #[inline]
@@ -2096,6 +2114,40 @@ mod tests {
                 reset_colors: Vec::new(),
             }
         }
+    }
+
+    /// Records `input` calls; ASCII runs arrive through the default
+    /// `input_ascii`, which must preserve per-character order.
+    #[derive(Default)]
+    struct InputRecorder {
+        inputs: String,
+        executed: Vec<u8>,
+    }
+
+    impl Handler for InputRecorder {
+        fn input(&mut self, c: char) {
+            self.inputs.push(c);
+        }
+
+        fn linefeed(&mut self) {
+            self.executed.push(b'\n');
+        }
+
+        fn carriage_return(&mut self) {
+            self.executed.push(b'\r');
+        }
+    }
+
+    #[test]
+    fn ascii_runs_print_every_character_in_order_and_feed_repeat() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = InputRecorder::default();
+        // Runs broken by controls, DEL, non-ASCII, an escape and a buffer end.
+        for chunk in ["ab\rc~ \x7fd\u{e9}f\ng\x1b[2bh", "ij", "\x1b[3b"] {
+            parser.advance(&mut handler, chunk.as_bytes());
+        }
+        assert_eq!(handler.inputs, "abc~ \u{7f}d\u{e9}fggghijjjj");
+        assert_eq!(handler.executed, b"\r\n");
     }
 
     #[test]

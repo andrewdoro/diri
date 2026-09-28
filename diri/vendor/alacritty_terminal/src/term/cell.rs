@@ -129,9 +129,9 @@ impl ResetDiscriminant<Color> for Cell {
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct CellExtra {
-    zerowidth: Vec<char>,
-    underline_color: Option<Color>,
-    hyperlink: Option<Hyperlink>,
+    pub(crate) zerowidth: Vec<char>,
+    pub(crate) underline_color: Option<Color>,
+    pub(crate) hyperlink: Option<Hyperlink>,
 }
 
 /// Content and attributes of a single cell in the terminal grid.

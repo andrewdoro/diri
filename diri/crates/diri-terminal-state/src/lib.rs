@@ -1481,52 +1481,52 @@ impl HeadlessScreen {
     // (cell mapping lives at module level; see `wire_cell`)
 
     fn fingerprint_row(&self, row: usize) -> (u64, usize) {
-        // FNV-1a is sufficient for change detection and much cheaper than
-        // constructing SipHash state for every damaged row. Grid publication
-        // still compares the actual cells, so this fingerprint never decides
-        // wire correctness. Style bits and both colors still belong in the
-        // digest: Cursor paints its composer caret as inverse video, and
+        // A fast multiply-fold hash is sufficient for change detection. Grid
+        // publication still compares the actual cells, so this fingerprint
+        // never decides wire correctness. It hashes the wire projection of
+        // each cell (glyph, zero-width marks, link, style bits and both
+        // colors): Cursor paints its composer caret as inverse video, and
         // Claude Code moves a menu highlight or a mouse selection by
         // recoloring cells, all without changing glyphs. Those frames must
-        // advance `content_seq` or the attach pump suppresses them.
-        let mut digest = 0xcbf2_9ce4_8422_2325u64;
-        let mut filled = 0;
-        let mut previous_link = None;
+        // advance `content_seq` or the attach pump suppresses them, while a
+        // change that is invisible on the wire must not.
+        //
+        // Four independent lanes keep the multiplies from forming one serial
+        // dependency chain across the row.
         let grid = self.term.grid();
-        let line = Line(row as i32);
-        let source = &grid[line];
-        for column in 0..self.geometry.cols {
-            let cell = &source[Column(column)];
-            let link = cell.hyperlink();
-            if link != previous_link {
-                for byte in link.as_ref().map_or(&b""[..], |link| link.uri().as_bytes()) {
-                    digest ^= u64::from(*byte);
-                    digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
-                }
-                digest ^= column as u64;
-                digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
-                previous_link = link;
-            }
-            if let Some(chars) = cell.zerowidth() {
-                for ch in chars {
-                    digest ^= u64::from(*ch);
-                    digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
-                }
-            }
-            let character = cell.c;
-            digest ^= u64::from(character);
-            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
-            digest ^= u64::from(wire_style(cell.flags).bits());
-            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
-            digest ^= u64::from(wire_color(cell.fg).packed());
-            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
-            digest ^= u64::from(wire_color(cell.bg).packed());
-            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
-            if character != ' ' && character != '\0' {
-                filled += 1;
-            }
+        let source = &grid[Line(row as i32)];
+        let cells = &source[..];
+        let cells = &cells[..self.geometry.cols.min(cells.len())];
+        let mut state = RowHashState::default();
+        let mut lanes = [
+            0xcbf2_9ce4_8422_2325u64,
+            0x8422_2325_cbf2_9ce4,
+            0x243f_6a88_85a3_08d3,
+            0x1319_8a2e_0370_7344,
+        ];
+        let mut chunks = cells.chunks_exact(4);
+        let mut column = 0;
+        for chunk in &mut chunks {
+            let words = [
+                state.word(column, &chunk[0]),
+                state.word(column + 1, &chunk[1]),
+                state.word(column + 2, &chunk[2]),
+                state.word(column + 3, &chunk[3]),
+            ];
+            lanes[0] = fold_mix(lanes[0], words[0]);
+            lanes[1] = fold_mix(lanes[1], words[1]);
+            lanes[2] = fold_mix(lanes[2], words[2]);
+            lanes[3] = fold_mix(lanes[3], words[3]);
+            column += 4;
         }
-        (digest, filled)
+        for (offset, cell) in chunks.remainder().iter().enumerate() {
+            lanes[offset] = fold_mix(lanes[offset], state.word(column + offset, cell));
+        }
+        let mut digest = fold_mix(state.marks, cells.len() as u64);
+        for lane in lanes {
+            digest = fold_mix(digest, lane);
+        }
+        (digest, state.filled)
     }
 
     fn rebuild_content_cache(&mut self) {
@@ -1550,7 +1550,7 @@ impl HeadlessScreen {
     /// concept of it and would silently drop the sequence.
     fn scan_progress(&mut self, bytes: &[u8]) {
         if self.progress_carry.is_empty() {
-            if !bytes.contains(&0x1b) {
+            if memchr::memchr(0x1b, bytes).is_none() {
                 return;
             }
             // Scan the chunk where it lies. Joining it to an empty carry would
@@ -1657,6 +1657,103 @@ fn wire_color(color: Color) -> TermColor {
     }
 }
 
+/// Folded 64×64→128-bit multiply: one step of a fast non-cryptographic hash.
+#[inline]
+fn fold_mix(state: u64, word: u64) -> u64 {
+    let product = u128::from(state ^ word) * u128::from(0x9e37_79b9_7f4a_7c15u64);
+    (product as u64) ^ (product >> 64) as u64
+}
+
+/// Per-row fingerprint state outside the four multiply lanes.
+struct RowHashState {
+    filled: usize,
+    /// Links and zero-width marks are rare; they fold into their own lane.
+    marks: u64,
+    previous_link: Option<alacritty_terminal::term::cell::Hyperlink>,
+    /// The wire style is derived only when the raw style changes, which
+    /// consecutive cells rarely do.
+    raw_style: u128,
+    style_hash: u64,
+}
+
+impl Default for RowHashState {
+    fn default() -> Self {
+        Self {
+            filled: 0,
+            marks: 0x0a40_9382_2299_f31d,
+            previous_link: None,
+            raw_style: u128::MAX,
+            style_hash: 0,
+        }
+    }
+}
+
+impl RowHashState {
+    #[inline(always)]
+    fn word(&mut self, column: usize, cell: &Cell) -> u64 {
+        if cell.extra.is_some() {
+            self.marks(column, cell);
+        } else if self.previous_link.is_some() {
+            self.marks = fold_mix(self.marks, column as u64 | 1 << 63);
+            self.previous_link = None;
+        }
+        let raw = raw_style_key(cell);
+        if raw != self.raw_style {
+            self.raw_style = raw;
+            self.style_hash = style_word(cell.flags, cell.fg, cell.bg);
+        }
+        let character = cell.c;
+        self.filled += usize::from(character != ' ' && character != '\0');
+        u64::from(character) ^ self.style_hash
+    }
+
+    #[inline(never)]
+    fn marks(&mut self, column: usize, cell: &Cell) {
+        let link = cell.hyperlink();
+        if link != self.previous_link {
+            let uri = link.as_ref().map_or(&b""[..], |link| link.uri().as_bytes());
+            for chunk in uri.chunks(8) {
+                let mut bytes = [0u8; 8];
+                bytes[..chunk.len()].copy_from_slice(chunk);
+                self.marks = fold_mix(self.marks, u64::from_le_bytes(bytes));
+            }
+            self.marks = fold_mix(self.marks, column as u64 | 1 << 63);
+            self.previous_link = link;
+        }
+        if let Some(chars) = cell.zerowidth() {
+            for ch in chars {
+                self.marks = fold_mix(self.marks, u64::from(*ch) | (column as u64) << 32);
+            }
+        }
+    }
+}
+
+/// Exact raw style identity (both colors and all flags), cheap to compare.
+#[inline]
+fn raw_style_key(cell: &Cell) -> u128 {
+    #[inline]
+    fn color(value: Color) -> u128 {
+        match value {
+            Color::Named(value) => value as u128,
+            Color::Spec(rgb) => {
+                1 << 24 | u128::from(rgb.r) << 16 | u128::from(rgb.g) << 8 | u128::from(rgb.b)
+            }
+            Color::Indexed(index) => 2 << 24 | u128::from(index),
+        }
+    }
+    color(cell.fg) | color(cell.bg) << 32 | u128::from(cell.flags.bits()) << 64
+}
+
+/// Hash of a cell's wire style bits and both wire colors.
+#[inline]
+fn style_word(flags: Flags, fg: Color, bg: Color) -> u64 {
+    let colors = u64::from(wire_color(fg).packed()) | u64::from(wire_color(bg).packed()) << 32;
+    fold_mix(
+        fold_mix(0x243f_6a88_85a3_08d3, colors),
+        u64::from(wire_style(flags).bits()),
+    )
+}
+
 fn wire_style(flags: Flags) -> TermStyle {
     let mut style = TermStyle::empty();
     if flags.contains(Flags::WRAPLINE) {
@@ -1745,12 +1842,10 @@ fn append_color(color: TermColor, foreground: bool, codes: &mut Vec<String>) {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
+    if needle.is_empty() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+    memchr::memmem::find(haystack, needle)
 }
 
 fn restore_semantic_flags(target: &mut Cell, source: GridCell) {

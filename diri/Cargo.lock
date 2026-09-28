@@ -157,7 +157,6 @@ version = "0.26.0"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
- "flate2",
  "home",
  "libc",
  "log",
@@ -169,7 +168,6 @@ dependencies = [
  "rustix 1.1.4",
  "rustix-openpty",
  "serde",
- "serde_json",
  "signal-hook",
  "unicode-width",
  "vte",
@@ -1685,6 +1683,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "diri-proto",
+ "memchr",
 ]
 
 [[package]]

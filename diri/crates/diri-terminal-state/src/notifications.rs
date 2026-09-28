@@ -35,10 +35,17 @@ impl NotificationParser {
 
     pub fn feed(&mut self, bytes: &[u8]) {
         // No copy or bytewise scan for the common plain-output case.
-        if self.state == 0 && !bytes.contains(&0x1b) {
-            return;
-        }
-        for &byte in bytes {
+        let mut index = 0;
+        while index < bytes.len() {
+            if self.state == 0 {
+                // Plain output between escapes cannot start an OSC.
+                let Some(offset) = memchr::memchr(0x1b, &bytes[index..]) else {
+                    return;
+                };
+                index += offset;
+            }
+            let byte = bytes[index];
+            index += 1;
             match self.state {
                 0 => {
                     if byte == 0x1b {

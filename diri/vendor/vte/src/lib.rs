@@ -769,13 +769,34 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// Handle ground dispatch of print/execute for all characters in a string.
     #[inline]
     fn ground_dispatch<P: Perform>(performer: &mut P, text: &str) {
-        for c in text.chars() {
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            // Printable ASCII runs are the bulk of terminal output; hand them
+            // over whole instead of one `print` call per character.
+            if is_printable_ascii(bytes[index]) {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && is_printable_ascii(bytes[index]) {
+                    index += 1;
+                }
+                performer.print_ascii(&text[start..index]);
+                continue;
+            }
+            let c = text[index..].chars().next().expect("index is on a char boundary");
+            index += c.len_utf8();
             match c {
                 '\x00'..='\x1f' | '\u{80}'..='\u{9f}' => performer.execute(c as u8),
                 _ => performer.print(c),
             }
         }
     }
+}
+
+/// Space through tilde: printed, one column wide, never a control.
+#[inline(always)]
+fn is_printable_ascii(byte: u8) -> bool {
+    (0x20..0x7f).contains(&byte)
 }
 
 #[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
@@ -810,6 +831,16 @@ enum State {
 pub trait Perform {
     /// Draw a character to the screen and update states.
     fn print(&mut self, _c: char) {}
+
+    /// Draw a run of printable ASCII (`0x20..=0x7e`) characters.
+    ///
+    /// This must be equivalent to calling [`Perform::print`] for every
+    /// character in order, which the default implementation does.
+    fn print_ascii(&mut self, text: &str) {
+        for c in text.chars() {
+            self.print(c);
+        }
+    }
 
     /// Execute a C0 or C1 control function.
     fn execute(&mut self, _byte: u8) {}
