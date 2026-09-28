@@ -332,20 +332,22 @@ impl SessionSurfaces {
             .resident_previews
             .get(&session.id)
             .or_else(|| self.screen_grids.get(&session.id));
-        let (cols, rows) = live
-            .map(|element| (element.grid_cols().max(1), element.grid_rows().max(1)))
-            .unwrap_or_else(|| self.fleet_grid());
+        // Every card has the shape of the pane you work in and one text size,
+        // whatever size each session's own terminal happens to be. A session
+        // wider or taller than that is cropped, keeping its bottom rows, where
+        // the prompt and the latest output are.
+        let (cols, rows) = self.fleet_grid();
         let (size, height) = miniature_geometry(window, font, pane, card_width, cols, rows);
         let pad =
             PANE_PAD * card_width / (f32::from(pane.cell_width) * f32::from(cols) + 2.0 * PANE_PAD);
+        let mini_metrics = CellMetrics::measure(window.text_system(), font, px(size));
         let mut mini = div()
             .relative()
             .flex_none()
             .w(px(card_width))
             .h(px(height))
             .overflow_hidden()
-            .bg(theme.background)
-            .p(px(pad));
+            .bg(theme.background);
         if live.is_none()
             && !self.screens.contains_key(&session.id)
             && !self.screen_requests.contains_key(&session.id)
@@ -372,12 +374,22 @@ impl SessionSurfaces {
             );
         }
         if let Some(element) = live {
+            let own_cols = element.grid_cols().max(1);
+            let own_rows = element.grid_rows().max(1);
             mini = mini.child(
-                element
-                    .clone()
-                    .font(font.clone())
-                    .font_size(px(size))
-                    .theme(theme),
+                div()
+                    .absolute()
+                    .left(px(pad))
+                    .bottom(px(pad))
+                    .w(mini_metrics.cell_width * f32::from(own_cols))
+                    .h(mini_metrics.line_height * f32::from(own_rows))
+                    .child(
+                        element
+                            .clone()
+                            .font(font.clone())
+                            .font_size(px(size))
+                            .theme(theme),
+                    ),
             );
         }
         if session.hibernation.is_some() {
