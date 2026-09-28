@@ -99,7 +99,7 @@ impl NativeNotifier {
                 )
             };
             center.setNotificationCategories(&NSSet::from_retained_slice(&[
-                category(SESSION_CATEGORY, &[open.clone()]),
+                category(SESSION_CATEGORY, std::slice::from_ref(&open)),
                 category(REPLY_CATEGORY, &[reply, open]),
             ]));
             NativeNotifierInner {
