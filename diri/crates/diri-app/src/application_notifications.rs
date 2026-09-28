@@ -40,7 +40,22 @@ pub(crate) fn install(
                 match copies.recv().await {
                     Ok(text) => {
                         cx.update(|cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
+                            let bytes = text.len();
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                            // The agent's copy (OSC 52) must land on the
+                            // pasteboard, or "copy does nothing" is all the
+                            // user sees.
+                            let verified = cx
+                                .read_from_clipboard()
+                                .and_then(|item| item.text())
+                                .is_some_and(|written| written.len() == bytes);
+                            if !verified {
+                                diri_telemetry::error_event!(
+                                    "clipboard.write_failed",
+                                    source = "osc52",
+                                    size = crate::telemetry::size_bucket(bytes)
+                                );
+                            }
                         });
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
