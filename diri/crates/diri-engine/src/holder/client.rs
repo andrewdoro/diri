@@ -131,22 +131,7 @@ impl HolderClient {
     /// the holder predates the output stream, and tailing the log is the only
     /// route.
     pub fn open_output_stream(&self) -> HolderResult<Option<HolderOutputStream>> {
-        let mut stream = socket::connect(&self.socket_path)?;
-        let mut request = HolderRequest::op(HolderOperation::OutputStream);
-        request.stream_version = Some(HOLDER_OUTPUT_STREAM_VERSION);
-        socket::write_json_line(&mut stream, &request)?;
-        let response: HolderResponse = socket::read_json_line(&mut stream)?;
-        if !response.ok || response.stream_version != Some(HOLDER_OUTPUT_STREAM_VERSION) {
-            return Ok(None);
-        }
-        let Some(start_offset) = response.start_offset else {
-            return Ok(None);
-        };
-        Ok(Some(HolderOutputStream {
-            stream: std::io::BufReader::with_capacity(OUTPUT_READ_BUFFER, stream),
-            start_offset,
-            timeout: None,
-        }))
+        HolderOutputStream::open(&self.socket_path)
     }
 
     pub fn is_alive(&self) -> bool {
@@ -198,6 +183,10 @@ impl HolderClient {
 /// Read buffer for one output subscription.
 const OUTPUT_READ_BUFFER: usize = 256 << 10;
 
+/// The longest subscription response accepted; a real one is under a hundred
+/// bytes.
+const RESPONSE_LINE_LIMIT: u64 = 64 << 10;
+
 /// A subscription to one holder's PTY output.
 pub struct HolderOutputStream {
     /// Buffered, because a frame costs two reads and frames are small: at PTY
@@ -210,6 +199,42 @@ pub struct HolderOutputStream {
 }
 
 impl HolderOutputStream {
+    fn open(path: &Path) -> HolderResult<Option<Self>> {
+        use std::io::BufRead;
+        let mut stream = socket::connect(path)?;
+        socket::set_buffer(&stream, libc::SO_RCVBUF, socket::OUTPUT_SOCKET_BUFFER);
+        let mut request = HolderRequest::op(HolderOperation::OutputStream);
+        request.stream_version = Some(HOLDER_OUTPUT_STREAM_VERSION);
+        socket::write_json_line(&mut stream, &request)?;
+        // The response is read through the same buffer the frames will be.
+        // The holder may send its first frame straight behind the response,
+        // and reading the line in unbuffered chunks consumed and discarded
+        // whatever of it arrived in the same read, leaving the next header
+        // to be parsed from the middle of a frame.
+        let mut stream = std::io::BufReader::with_capacity(OUTPUT_READ_BUFFER, stream);
+        let mut line = Vec::new();
+        (&mut stream)
+            .take(RESPONSE_LINE_LIMIT)
+            .read_until(b'\n', &mut line)
+            .map_err(|error| HolderError::io("read", error))?;
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        let response: HolderResponse = serde_json::from_slice(&line)
+            .map_err(|error| HolderError::InvalidRequest(format!("decode: {error}")))?;
+        if !response.ok || response.stream_version != Some(HOLDER_OUTPUT_STREAM_VERSION) {
+            return Ok(None);
+        }
+        let Some(start_offset) = response.start_offset else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            stream,
+            start_offset,
+            timeout: None,
+        }))
+    }
+
     fn set_timeout(&mut self, timeout: Option<Duration>) -> HolderResult<()> {
         if self.timeout == timeout {
             return Ok(());
@@ -262,6 +287,32 @@ impl HolderOutputStream {
         Ok(Some(offset))
     }
 
+    /// Decides what a failed read means once `consumed` bytes of a frame are
+    /// in. Returns true when no frame has begun and the wait simply ran out.
+    ///
+    /// The timeout applies only while waiting for a frame to begin. Once any
+    /// byte of one has arrived the rest is awaited without a deadline:
+    /// abandoning a frame halfway leaves those bytes consumed and the stream
+    /// desynchronized, and the next read would take whatever followed for a
+    /// header — a length that never arrives, and a read that blocks until the
+    /// holder exits.
+    fn frame_read_waits(&mut self, consumed: usize, error: &std::io::Error) -> HolderResult<bool> {
+        match error.kind() {
+            std::io::ErrorKind::Interrupted => Ok(false),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut if consumed == 0 => {
+                Ok(true)
+            }
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                self.set_timeout(None)?;
+                Ok(false)
+            }
+            _ => Err(HolderError::io(
+                "read output stream",
+                std::io::Error::new(error.kind(), error.to_string()),
+            )),
+        }
+    }
+
     /// Reads one frame onto the end of `run`, returning where it began.
     fn read_frame_into(
         &mut self,
@@ -272,15 +323,14 @@ impl HolderOutputStream {
         // the shortest expressible wait is what "poll" has to mean here.
         let timeout = timeout.max(Duration::from_nanos(1));
         let mut header = [0_u8; 12];
+        // The timeout matters only to a read that reaches the socket. Frames
+        // already buffered are taken without touching it: setting it is a
+        // syscall, and paying two per frame cost more than the frame did.
+        if self.stream.buffer().len() < header.len() {
+            self.set_timeout(Some(timeout))?;
+        }
         let mut filled = 0;
         while filled < header.len() {
-            // The timeout applies only while waiting for a frame to begin.
-            // Once any byte of one has arrived the rest is awaited without a
-            // deadline: abandoning a frame halfway leaves those bytes consumed
-            // and the stream desynchronized, and the next read would take
-            // whatever followed for a header — a length that never arrives,
-            // and a read that blocks until the holder exits.
-            self.set_timeout(if filled == 0 { Some(timeout) } else { None })?;
             match self.stream.read(&mut header[filled..]) {
                 Ok(0) => {
                     return Err(HolderError::io(
@@ -289,17 +339,11 @@ impl HolderOutputStream {
                     ));
                 }
                 Ok(read) => filled += read,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error)
-                    if filled == 0
-                        && matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) =>
-                {
-                    return Ok(None);
+                Err(error) => {
+                    if self.frame_read_waits(filled, &error)? {
+                        return Ok(None);
+                    }
                 }
-                Err(error) => return Err(HolderError::io("read output stream", error)),
             }
         }
         let offset = u64::from_be_bytes(header[..8].try_into().expect("eight-byte offset"));
@@ -309,14 +353,23 @@ impl HolderOutputStream {
                 "output frame is {length} bytes; maximum is {HOLDER_OUTPUT_MAX_FRAME}"
             )));
         }
-        // The rest of a frame that has started must arrive: a timeout here
-        // would strand half of it and desynchronize the stream.
-        self.set_timeout(None)?;
         let from = run.len();
         run.resize(from + length, 0);
-        self.stream
-            .read_exact(&mut run[from..])
-            .map_err(|error| HolderError::io("read output frame", error))?;
+        let mut received = 0;
+        while received < length {
+            match self.stream.read(&mut run[from + received..]) {
+                Ok(0) => {
+                    return Err(HolderError::io(
+                        "read output frame",
+                        std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+                    ));
+                }
+                Ok(read) => received += read,
+                Err(error) => {
+                    self.frame_read_waits(header.len() + received, &error)?;
+                }
+            }
+        }
         Ok(Some(offset))
     }
 }
@@ -408,22 +461,7 @@ impl HolderManagerClient {
     /// the holder predates the output stream, and tailing the log is the only
     /// route.
     pub fn open_output_stream(&self) -> HolderResult<Option<HolderOutputStream>> {
-        let mut stream = socket::connect(&self.socket_path)?;
-        let mut request = HolderRequest::op(HolderOperation::OutputStream);
-        request.stream_version = Some(HOLDER_OUTPUT_STREAM_VERSION);
-        socket::write_json_line(&mut stream, &request)?;
-        let response: HolderResponse = socket::read_json_line(&mut stream)?;
-        if !response.ok || response.stream_version != Some(HOLDER_OUTPUT_STREAM_VERSION) {
-            return Ok(None);
-        }
-        let Some(start_offset) = response.start_offset else {
-            return Ok(None);
-        };
-        Ok(Some(HolderOutputStream {
-            stream: std::io::BufReader::with_capacity(OUTPUT_READ_BUFFER, stream),
-            start_offset,
-            timeout: None,
-        }))
+        HolderOutputStream::open(&self.socket_path)
     }
 
     pub fn is_alive(&self) -> bool {
@@ -485,6 +523,58 @@ mod deadline_tests {
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         worker.join().unwrap();
     }
+    #[test]
+    fn a_frame_sent_right_behind_the_subscription_response_is_kept() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let path = temp.path().join("output.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&mut socket).read_line(&mut line).unwrap();
+            // A holder may have a frame queued the instant it subscribes, so
+            // the response and the first frame can arrive in one read.
+            let mut reply = serde_json::to_vec(&HolderResponse::output_stream(
+                HOLDER_OUTPUT_STREAM_VERSION,
+                40,
+            ))
+            .unwrap();
+            reply.push(b'\n');
+            reply.extend_from_slice(&40_u64.to_be_bytes());
+            reply.extend_from_slice(&5_u32.to_be_bytes());
+            reply.extend_from_slice(b"hello");
+            socket.write_all(&reply).unwrap();
+            socket
+        });
+        let mut stream = HolderClient::at(&path)
+            .open_output_stream()
+            .unwrap()
+            .expect("stream supported");
+        let _socket = worker.join().unwrap();
+        assert_eq!(stream.start_offset(), 40);
+        // And the socket is sized for a stream, not macOS's 8 KiB default.
+        let mut size: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&size) as libc::socklen_t;
+        // SAFETY: a live socket and a correctly sized out-parameter.
+        let result = unsafe {
+            use std::os::fd::AsRawFd;
+            libc::getsockopt(
+                stream.stream.get_ref().as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&mut size as *mut libc::c_int).cast(),
+                &mut length,
+            )
+        };
+        assert_eq!(result, 0);
+        assert!(size as usize >= socket::OUTPUT_SOCKET_BUFFER, "{size}");
+        let mut run = Vec::new();
+        let at = stream
+            .next_run_into(Duration::from_secs(1), 1 << 20, &mut run)
+            .unwrap();
+        assert_eq!((at, &run[..]), (Some(40), &b"hello"[..]));
+    }
+
     #[test]
     fn stat_reply_has_a_byte_bound() {
         let temp = tempfile::tempdir_in("/tmp").unwrap();

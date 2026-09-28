@@ -10,7 +10,7 @@
 use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -38,19 +38,12 @@ const MAX_SIGNAL: i32 = 32;
 #[cfg(not(target_os = "macos"))]
 const MAX_SIGNAL: i32 = 65;
 
-/// How many PTY chunks may be waiting to be written before the reader has to
-/// wait for the writer. At 64 KiB a chunk this absorbs a multi-megabyte stall
-/// without letting a wedged filesystem grow the queue without bound.
-const WRITE_QUEUE_DEPTH: usize = 256;
-
-/// How much queued output one disk write may carry. Larger writes cost the
-/// filesystem far less per byte than many small ones.
-const WRITE_BATCH_BYTES: usize = 1 << 20;
-
-/// How many chunks may be waiting for one output subscriber. This is what
+/// How many bytes may be waiting for one output subscriber. This is what
 /// bounds how far output can run ahead of the screen rendering it, so it is
-/// deliberately short: a megabyte of slack, not sixteen.
-const OUTPUT_QUEUE_DEPTH: usize = 16;
+/// deliberately short: a megabyte of slack, not sixteen. It is counted in
+/// bytes because a PTY read is a kilobyte: sixteen of those was all the slack
+/// a count of frames allowed.
+const OUTPUT_QUEUE_BYTES: usize = 1 << 20;
 
 /// How long the pump waits for a full subscriber queue before giving up on
 /// that subscriber. Long enough to ride out a scheduling hiccup, short enough
@@ -82,6 +75,11 @@ struct Shared {
     /// the holder's whole life; closing happens when `run` returns.
     pty: Mutex<Pty>,
     log: Mutex<OutputLog>,
+    /// The log's tail after its last completed append, so a stat need not
+    /// wait for the log lock. The writer holds that lock across a disk write,
+    /// and a stat queued behind it held the PTY lock meanwhile, which made
+    /// keystrokes wait on the filesystem.
+    log_tail: AtomicU64,
     /// Log tail at the moment this holder started: the boundary between prior
     /// incarnations' bytes and bytes attributable to THIS child.
     epoch_offset: u64,
@@ -224,6 +222,7 @@ impl HolderServer {
             guard: guard.clone(),
             pty: Mutex::new(pty),
             log: Mutex::new(log),
+            log_tail: AtomicU64::new(epoch_offset),
             epoch_offset,
             finished: AtomicBool::new(false),
             pump_wake,
@@ -298,8 +297,9 @@ impl HolderServer {
                             HOLDER_OUTPUT_STREAM_VERSION,
                             start_offset,
                         );
+                        socket::set_buffer(&client, libc::SO_SNDBUF, socket::OUTPUT_SOCKET_BUFFER);
                         if socket::write_json_line(&mut client, &response).is_ok() {
-                            let frames = super::fanout::FrameQueue::new(OUTPUT_QUEUE_DEPTH);
+                            let frames = super::fanout::FrameQueue::new(OUTPUT_QUEUE_BYTES);
                             fanout.subscribers.push(OutputSubscriber {
                                 frames: Arc::clone(&frames),
                             });
@@ -376,43 +376,36 @@ fn pump_pty(shared: &Arc<Shared>, reader: &mut crate::pty::PtyStream) {
     // tailing the spill file. Appending on this thread therefore made draining
     // the PTY wait on the filesystem — under a burst of output the pump sat in
     // `write` for most of its wall time while the child blocked on a full PTY
-    // buffer. Handing chunks to a writer decouples the two: the queue absorbs a
+    // buffer. Handing bytes to a writer decouples the two: the feed absorbs a
     // filesystem stall (a truncation rewrite, most of all) without ever
-    // stalling the reader.
+    // stalling the reader, and gathers kilobyte reads into large appends.
     //
-    // The channel is bounded, so a writer that genuinely cannot keep up applies
+    // The feed is bounded, so a writer that genuinely cannot keep up applies
     // backpressure rather than growing without limit. Ordering is preserved
     // because exactly one thread writes.
-    let (send, receive) = std::sync::mpsc::sync_channel::<Arc<[u8]>>(WRITE_QUEUE_DEPTH);
+    let feed = Arc::new(super::log_feed::LogFeed::new());
     let writer = {
         let shared = Arc::clone(shared);
+        let feed = Arc::clone(&feed);
         std::thread::Builder::new()
             .name(format!("holder-log-{}", shared.spec.session_id))
             .spawn(move || {
-                let mut batch: Vec<u8> = Vec::with_capacity(WRITE_BATCH_BYTES);
-                while let Ok(chunk) = receive.recv() {
-                    batch.clear();
-                    batch.extend_from_slice(&chunk);
-                    // Whatever else is already queued joins this write. One
-                    // large append costs far less than many small ones — a
-                    // syscall and a filesystem extent per chunk otherwise —
-                    // and nothing waits, so this adds no latency of its own.
-                    while batch.len() < WRITE_BATCH_BYTES {
-                        match receive.try_recv() {
-                            Ok(next) => batch.extend_from_slice(&next),
-                            Err(_) => break,
-                        }
-                    }
+                let mut batch: Vec<u8> = Vec::new();
+                while feed.take(&mut batch) {
                     // A failed disk write must not stop the session: the child
                     // is still running and its status still matters.
-                    let _ = shared.log.lock().expect("log").append(&batch);
+                    append_log(&shared, &batch);
+                    batch.clear();
+                    // A burst can leave a large buffer behind; an idle session
+                    // should not keep it.
+                    batch.shrink_to(super::log_feed::LOG_BATCH_BYTES);
                 }
             })
             .ok()
     };
     // Without a writer thread the append happens inline, which is slower but
     // always correct.
-    let mut queue = writer.is_some().then_some(send);
+    let mut queue = writer.is_some().then_some(feed);
 
     let mut buffer = [0u8; 64 << 10];
     loop {
@@ -459,17 +452,14 @@ fn pump_pty(shared: &Arc<Shared>, reader: &mut crate::pty::PtyStream) {
             // session should not wait for a disk write to see the bytes, and
             // this ordering is what decouples display latency from filesystem
             // throughput.
-            let chunk: Arc<[u8]> = Arc::from(&buffer[..filled]);
-            broadcast_output(shared, &chunk);
+            let chunk = &buffer[..filled];
+            broadcast_output(shared, chunk);
             // Bytes read are handed on even if `finished` was just set: the
             // exit watcher joins this thread before writing the marker, so
             // nothing can land beyond it — but a byte consumed from the kernel
             // and then dropped would be lost.
-            match queue.as_ref() {
-                Some(queue) if queue.send(Arc::clone(&chunk)).is_ok() => {}
-                _ => {
-                    let _ = shared.log.lock().expect("log").append(&chunk);
-                }
+            if !queue.as_ref().is_some_and(|queue| queue.push(chunk)) {
+                append_log(shared, chunk);
             }
         }
         if eof || shared.finished.load(Ordering::SeqCst) {
@@ -480,10 +470,19 @@ fn pump_pty(shared: &Arc<Shared>, reader: &mut crate::pty::PtyStream) {
     // Every queued byte must reach the log before this thread is joined: the
     // exit watcher writes the exit marker straight after the join, and a byte
     // still in flight would land after it.
-    drop(queue.take());
+    if let Some(queue) = queue.take() {
+        queue.close();
+    }
     if let Some(writer) = writer {
         let _ = writer.join();
     }
+}
+
+/// Appends to the log and publishes its new tail for [`current_stat`].
+fn append_log(shared: &Shared, bytes: &[u8]) {
+    let mut log = shared.log.lock().expect("log");
+    let _ = log.append(bytes);
+    shared.log_tail.store(log.tail_offset(), Ordering::Release);
 }
 
 /// Parks the pump until the PTY has something for it, or the exit path says
@@ -529,7 +528,7 @@ fn wait_for_output(pty_fd: i32, wake: &std::io::PipeReader) -> std::io::Result<b
 /// ahead of the screen that renders it — and giving up keeps a wedged or dead
 /// daemon from stalling the PTY. Anything a dropped subscriber misses is in the
 /// log, which is where it resumes.
-fn broadcast_output(shared: &Shared, frame: &Arc<[u8]>) {
+fn broadcast_output(shared: &Shared, frame: &[u8]) {
     let mut fanout = shared.output.lock().expect("output");
     let offset = fanout.next_offset;
     // Advanced whether or not anyone is listening: a subscriber that arrives
@@ -562,10 +561,8 @@ fn broadcast_output(shared: &Shared, frame: &Arc<[u8]>) {
 ///
 /// Returns false when the subscriber should be dropped: either it is gone, or
 /// it is far enough behind that continuing to wait would stall the PTY.
-fn offer_frame(subscriber: &OutputSubscriber, offset: u64, frame: &Arc<[u8]>) -> bool {
-    subscriber
-        .frames
-        .push((offset, Arc::clone(frame)), OUTPUT_SEND_PATIENCE)
+fn offer_frame(subscriber: &OutputSubscriber, offset: u64, frame: &[u8]) -> bool {
+    subscriber.frames.push(offset, frame, OUTPUT_SEND_PATIENCE)
 }
 
 /// Serves one subscriber until it disappears or the channel closes, then
@@ -741,9 +738,7 @@ fn watch_exit(
         loop {
             match drain.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(count) => {
-                    let _ = shared.log.lock().expect("log").append(&buffer[..count]);
-                }
+                Ok(count) => append_log(shared, &buffer[..count]),
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break, // WouldBlock: nothing buffered
             }
@@ -754,6 +749,7 @@ fn watch_exit(
         let mut log = shared.log.lock().expect("log");
         let _ = log.append(&HolderExitMarker::encode(&exit));
         let _ = log.flush();
+        shared.log_tail.store(log.tail_offset(), Ordering::Release);
     }
 
     // The marker goes to the log, not the stream — it is not PTY output — so a
@@ -989,6 +985,7 @@ fn current_stat(shared: &Shared) -> HolderStat {
 
 fn current_stat_without_identity(shared: &Shared) -> HolderStat {
     let finished = shared.finished.load(Ordering::SeqCst);
+    let log_offset = shared.log_tail.load(Ordering::Acquire);
     let pty = shared.pty.lock().expect("pty");
     // SAFETY: kill with signal 0 only checks existence.
     let child_alive = unsafe { libc::kill(shared.child_pid, 0) } == 0;
@@ -997,7 +994,7 @@ fn current_stat_without_identity(shared: &Shared) -> HolderStat {
         child_identity: None,
         child_pid: shared.child_pid,
         alive: !finished && child_alive,
-        log_offset: shared.log.lock().expect("log").tail_offset(),
+        log_offset,
         // Sample the live owner. A cloned writer dropped before `tcgetpgrp`
         // leaves a closed fd, so every job looks like the idle shell.
         foreground_pid: pty.foreground_pgid(),
@@ -1221,6 +1218,56 @@ mod tests {
         );
 
         // A pump parked without a deadline still has to see the child exit.
+        drop(shared);
+        client.kill_tree().expect("kill-tree");
+        wait_until("holder finished", || server.is_finished());
+        server.join().expect("join").expect("clean holder exit");
+    }
+
+    #[test]
+    fn a_log_write_in_progress_holds_up_neither_stat_nor_input() {
+        let root = tempfile::tempdir().unwrap();
+        let spec = HolderLaunchSpec {
+            session_id: "s_slow_disk".into(),
+            socket_path: root.path().join("h.sock").to_string_lossy().into_owned(),
+            pid_file_path: root.path().join("h.pid").to_string_lossy().into_owned(),
+            log_file_path: root
+                .path()
+                .join("s_slow_disk.bin")
+                .to_string_lossy()
+                .into_owned(),
+            argv: vec!["/bin/cat".into()],
+            cwd: "/tmp".into(),
+            environment: Default::default(),
+            cols: 80,
+            rows: 24,
+            disk_capacity: 4096,
+        };
+        let client = HolderClient::new(&spec.socket_path);
+        let server = std::thread::spawn(move || HolderServer::run(spec));
+        wait_until("holder ready", || client.is_alive());
+        let shared = running("s_slow_disk");
+
+        // The log writer holds this lock across its disk write. A stat used to
+        // wait for it while holding the PTY lock, so a slow filesystem stalled
+        // the Engine's fact sampling and every keystroke behind it.
+        let log = shared.log.lock().expect("log");
+        let (done, finished) = std::sync::mpsc::channel();
+        {
+            let client = client.clone();
+            std::thread::spawn(move || {
+                let stat = client.stat().map(|stat| stat.alive);
+                let input = client.write(b"typed while the disk is busy\n");
+                let _ = done.send((stat.ok(), input.is_ok()));
+            });
+        }
+        let outcome = finished.recv_timeout(Duration::from_secs(3));
+        drop(log);
+        assert_eq!(
+            outcome.expect("stat and input must not wait for the log"),
+            (Some(true), true)
+        );
+
         drop(shared);
         client.kill_tree().expect("kill-tree");
         wait_until("holder finished", || server.is_finished());
