@@ -19,6 +19,7 @@ mod system_notifications;
 #[cfg(feature = "screen-capture")]
 mod screen_capture;
 
+mod gpu_diag;
 mod metal_atlas;
 pub mod metal_renderer;
 
