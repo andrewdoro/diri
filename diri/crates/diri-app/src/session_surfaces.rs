@@ -69,6 +69,9 @@ pub struct SessionSurfaces {
     client: Arc<diri_client::DaemonClient>,
     tokio: Option<tokio::runtime::Handle>,
     screens: HashMap<SessionId, ScreenPreview>,
+    /// Colored screens of sessions that are not mounted, read once per open
+    /// so every calm-overview card is a real miniature, not a blank box.
+    screen_grids: HashMap<SessionId, TerminalElement>,
     screen_requests: HashMap<SessionId, ScreenRequest>,
     overview_was_visible: bool,
     overview_generation: usize,
@@ -185,11 +188,16 @@ impl SessionSurfaces {
             client: Arc::clone(runtime.client()),
             tokio,
             screens: HashMap::new(),
+            screen_grids: HashMap::new(),
             screen_requests: HashMap::new(),
             overview_was_visible: false,
             overview_generation: 0,
             overview_list_scroll: ScrollHandle::new(),
-            overview_variant: OverviewVariant::default(),
+            // Prototype switch while the design is chosen: DIRI_OVERVIEW_VARIANT
+            // = a (Safari) | b (gallery) | c (mini windows, default) | current.
+            overview_variant: OverviewVariant::from_env(
+                &std::env::var("DIRI_OVERVIEW_VARIANT").unwrap_or_else(|_| "c".into()),
+            ),
             _store_changes: store_changes,
         }
     }
@@ -286,6 +294,7 @@ impl Render for SessionSurfaces {
         if !overview_visible && self.overview_was_visible {
             self.screen_requests.clear();
             self.screens.clear();
+            self.screen_grids.clear();
         }
         if overview_visible && !self.overview_was_visible {
             self.overview_generation = self.overview_generation.wrapping_add(1);
@@ -1616,17 +1625,57 @@ impl SessionSurfaces {
         let client = Arc::clone(&self.client);
         let request_id = id.clone();
         let request = tokio.spawn(async move {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                client.read_screen(&request_id),
-            )
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                let screen = client.read_screen(&request_id).await;
+                // The visible grid with its colors: one probe for where the
+                // live grid starts, then the rows themselves.
+                let grid = async {
+                    let probe = client.read_scrollback_cells(&request_id, 0, 1).await.ok()?;
+                    let rows = (probe.total_rows - probe.live_start_row).clamp(1, 200);
+                    client
+                        .read_scrollback_cells(&request_id, probe.live_start_row, rows)
+                        .await
+                        .ok()
+                }
+                .await;
+                (screen, grid)
+            })
             .await
+            .map(|(screen, grid)| (screen.map(|screen| (screen, grid))))
         });
         let abort = request.abort_handle();
         let task_id = id.clone();
         let task = cx.spawn(async move |this, cx| {
+            let mut grid = None;
             let preview = match request.await {
-                Ok(Ok(Ok(screen))) => {
+                Ok(Ok(Ok((screen, cells)))) => {
+                    grid = cells.and_then(|cells| {
+                        let cols = u16::try_from(cells.cols).ok()?.max(1);
+                        let count = usize::try_from(cells.row_count).ok()?;
+                        let rows =
+                            diri_proto::grid::GridRowCodec::decode_rows(&cells.payload, count)
+                                .ok()?;
+                        let height = u16::try_from(rows.len()).ok()?.max(1);
+                        let element = TerminalElement::with_buffer(
+                            diri_term::buffer::GridBuffer::new(cols, height),
+                        );
+                        element.apply_damage(diri_proto::grid::GridUpdate {
+                            cols,
+                            rows: height,
+                            cursor_col: 0,
+                            cursor_row: 0,
+                            cursor_visible: false,
+                            is_full_snapshot: true,
+                            changed_rows: rows
+                                .into_iter()
+                                .enumerate()
+                                .map(|(row, cells)| {
+                                    diri_proto::grid::ChangedRow::new(row as u16, cells)
+                                })
+                                .collect(),
+                        });
+                        Some(element)
+                    });
                     let lines = screen_excerpt(&screen.text);
                     if lines.is_empty() {
                         ScreenPreview::Empty
@@ -1639,6 +1688,9 @@ impl SessionSurfaces {
             let _ = this.update(cx, |this, cx| {
                 this.screen_requests.remove(&task_id);
                 if this.store.read().unwrap().overview_state().is_visible() {
+                    if let Some(grid) = grid {
+                        this.screen_grids.insert(task_id.clone(), grid);
+                    }
                     this.screens.insert(task_id, preview);
                 }
                 cx.notify();

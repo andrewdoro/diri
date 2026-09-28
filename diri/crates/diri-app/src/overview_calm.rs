@@ -326,10 +326,13 @@ impl SessionSurfaces {
         font: &gpui::Font,
         theme: diri_term::theme::TermTheme,
         window: &Window,
+        cx: &Context<Self>,
     ) -> (AnyElement, f32) {
-        let (cols, rows) = self
+        let live = self
             .resident_previews
             .get(&session.id)
+            .or_else(|| self.screen_grids.get(&session.id));
+        let (cols, rows) = live
             .map(|element| (element.grid_cols().max(1), element.grid_rows().max(1)))
             .unwrap_or_else(|| self.fleet_grid());
         let (size, height) = miniature_geometry(window, font, pane, card_width, cols, rows);
@@ -343,7 +346,32 @@ impl SessionSurfaces {
             .overflow_hidden()
             .bg(theme.background)
             .p(px(pad));
-        if let Some(element) = self.resident_previews.get(&session.id) {
+        if live.is_none()
+            && !self.screens.contains_key(&session.id)
+            && !self.screen_requests.contains_key(&session.id)
+        {
+            // Only cards that are actually on screen ask for their screen;
+            // a completion repaints and lets the next ones in.
+            let weak = cx.entity().downgrade();
+            let id = session.id.clone();
+            mini = mini.child(
+                gpui::canvas(
+                    move |bounds, window, cx| {
+                        if bounds.intersects(&window.content_mask().bounds) {
+                            let id = id.clone();
+                            let weak = weak.clone();
+                            cx.defer(move |cx| {
+                                let _ = weak.update(cx, |this, cx| this.request_screen(id, cx));
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
+        }
+        if let Some(element) = live {
             mini = mini.child(
                 element
                     .clone()
@@ -378,7 +406,7 @@ impl SessionSurfaces {
         let focused = state.focused() == Some(&session.id);
         let id = session.id.clone();
         let glyph = self.status_glyph(session, 12.0, colors, window, cx);
-        let (mini, _) = self.calm_miniature(session, card_width, pane, font, theme, window);
+        let (mini, _) = self.calm_miniature(session, card_width, pane, font, theme, window, cx);
         let title = div()
             .min_w_0()
             .overflow_hidden()
