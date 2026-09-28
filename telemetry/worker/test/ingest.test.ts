@@ -32,7 +32,7 @@ describe("ingest", () => {
     expect(stored.split("\n")[2]).toBe(lines[1]);
 
     const installRow = await env.DB.prepare("SELECT * FROM installs WHERE install = ?1").bind(install).first();
-    expect(installRow).toMatchObject({ name: "julia", app_version: "0.9.0", os: "macos", arch: "aarch64" });
+    expect(installRow).toMatchObject({ name: "alex", app_version: "0.9.0", os: "macos", arch: "aarch64" });
 
     const batch = await env.DB.prepare("SELECT * FROM batches WHERE install = ?1").bind(install).first();
     expect(batch).toMatchObject({ t_min: T0, t_max: T0 + 30, procs: "app,engine,holder", lines: 4, bad_lines: 0 });
@@ -69,11 +69,11 @@ describe("ingest", () => {
     const install = newInstall();
     expect((await ingest(install, [rec(T0, "session.attach", "info", { session: "s_a" })])).status).toBe(202);
     const second = await ingest(install, [rec(T0 + 5000, "session.detach", "info", { session: "s_a" })], {
-      header: header(install, { app_version: "0.9.1", name: "julia k" }),
+      header: header(install, { app_version: "0.9.1", name: "alex k" }),
     });
     expect(second.status).toBe(202);
     const row = await env.DB.prepare("SELECT app_version, name FROM installs WHERE install = ?1").bind(install).first();
-    expect(row).toEqual({ app_version: "0.9.1", name: "julia k" });
+    expect(row).toEqual({ app_version: "0.9.1", name: "alex k" });
     const span = await env.DB.prepare("SELECT first_t, last_t FROM sessions WHERE install = ?1").bind(install).first();
     expect(span).toEqual({ first_t: T0, last_t: T0 + 5000 });
   });
@@ -107,7 +107,7 @@ describe("ingest", () => {
       ["not json", () => "{nope", 400],
       ["wrong version", (i) => header(i, { v: 2 }), 422],
       ["wrong type", (i) => header(i, { type: "record" }), 422],
-      ["install not a uuid", (i) => header(i, { install: "julia" }), 422],
+      ["install not a uuid", (i) => header(i, { install: "alex" }), 422],
       ["bad support id", (i) => header(i, { support_id: "X-1" }), 422],
       ["name too long", (i) => header(i, { name: "j".repeat(65) }), 422],
       ["control characters", (i) => header(i, { app_version: "0.9\u0000" }), 422],

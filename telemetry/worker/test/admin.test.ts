@@ -56,7 +56,7 @@ describe("admin queries", () => {
     expect(listed.incidents).toHaveLength(3);
     expect(listed.incidents[0].t).toBe(T0 + 2);
     expect(listed.incidents[1].fields.message).toBe("oob");
-    expect(listed.incidents[0]).toMatchObject({ name: "julia", support_id: supportId(a) });
+    expect(listed.incidents[0]).toMatchObject({ name: "alex", support_id: supportId(a) });
 
     const onlyPanics = await adminJson(`/v1/admin/incidents?install=${a}&kind=pan*&sev=incident`);
     expect(onlyPanics.incidents).toHaveLength(2);
@@ -78,7 +78,7 @@ describe("admin queries", () => {
     ]);
     const byConv = await adminJson(`/v1/admin/find?id=${CONV}`);
     const hit = byConv.matches.find((m: any) => m.install === install);
-    expect(hit).toMatchObject({ session: "s_find_me", conv: CONV, agent: "claude-code", name: "julia" });
+    expect(hit).toMatchObject({ session: "s_find_me", conv: CONV, agent: "claude-code", name: "alex" });
     const bySession = await adminJson("/v1/admin/find?id=s_find_me");
     expect(bySession.matches.filter((m: any) => m.install === install)).toHaveLength(2);
     const sessions = await adminJson(`/v1/admin/sessions?install=${install}`);
