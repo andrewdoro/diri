@@ -60,6 +60,101 @@ pub(super) fn session_tab_face(
         )
 }
 
+/// The selected tab's glass pill, drawn as one layer behind the strip's tabs
+/// so a selection change glides it from the old tab to the new one instead
+/// of the fill blinking off one tab and on at another.
+///
+/// Positions are in the strip's content space (tab `i` rests at
+/// `i * (TAB_WIDTH + TAB_GAP)`), so the pill scrolls with the tabs: when the
+/// new selection scrolls the strip, the pill rides the scroll with its old
+/// tab and then travels to the new one, never into a slot that is not there.
+#[derive(Default)]
+pub(super) struct TabPill {
+    selected: Option<SessionId>,
+    /// Where the pill rests, or is heading.
+    to: f32,
+    slide: Option<PillSlide>,
+}
+
+#[derive(Clone, Copy)]
+struct PillSlide {
+    from: f32,
+    start: Instant,
+}
+
+/// Where to draw the pill this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PillFrame {
+    pub(super) x: f32,
+    pub(super) animating: bool,
+}
+
+impl TabPill {
+    /// Forgets the resting place, so whatever the strip shows next is drawn
+    /// in place rather than slid to (first render, the strip reappearing).
+    pub(super) fn forget(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Settles the pill on `selected` at content x `to`. It glides only when
+    /// `may_slide` and the selection actually changed from a tab the strip
+    /// still shows; anything else (a reorder moving the selected tab, a
+    /// close, a project switch) puts it straight in place, because the tabs
+    /// themselves move without it in those cases. A change mid-glide starts
+    /// the next glide from where the pill is drawn now, so a held ⌘] chases
+    /// rather than queues. `visible` is the viewport's content range: a
+    /// start outside it is pulled to its edge, so a long jump spends the
+    /// curve's fast opening on screen instead of off it.
+    pub(super) fn update(
+        &mut self,
+        selected: Option<&SessionId>,
+        to: f32,
+        may_slide: bool,
+        visible: Option<(f32, f32)>,
+        now: Instant,
+    ) -> PillFrame {
+        let changed = self.selected.as_ref() != selected;
+        if changed && may_slide && self.selected.is_some() && selected.is_some() {
+            let current = self.sample(now).x;
+            let from = match visible {
+                Some((left, right)) if right > left => current.clamp(left - TAB_WIDTH, right),
+                _ => current,
+            };
+            self.slide = ((from - to).abs() >= 0.5).then_some(PillSlide { from, start: now });
+        } else if changed || !may_slide || (to - self.to).abs() >= 0.5 {
+            self.slide = None;
+        }
+        self.selected = selected.cloned();
+        self.to = to;
+        let frame = self.sample(now);
+        if !frame.animating {
+            self.slide = None;
+        }
+        frame
+    }
+
+    fn sample(&self, now: Instant) -> PillFrame {
+        let Some(slide) = self.slide else {
+            return PillFrame {
+                x: self.to,
+                animating: false,
+            };
+        };
+        let progress = now.saturating_duration_since(slide.start).as_secs_f32()
+            / Motion::ROW_SELECT_TIME.as_secs_f32();
+        if progress >= 1.0 {
+            return PillFrame {
+                x: self.to,
+                animating: false,
+            };
+        }
+        PillFrame {
+            x: slide.from + (self.to - slide.from) * Motion::SETTLE.settle(progress),
+            animating: true,
+        }
+    }
+}
+
 /// Focus bookkeeping for context menus opened from the horizontal strip.
 ///
 /// The sidebar's own menus live inside its render tree, which never paints
@@ -233,6 +328,7 @@ impl Sidebar {
             })?;
         self.ui.visible = visible;
         self.last_tab_selection = None;
+        self.tab_pill.forget();
         self.peek_open = false;
         self.peek_close = None;
         self.dismiss_hover_card(cx);
@@ -297,6 +393,71 @@ impl Sidebar {
             }
             self.last_tab_selection = selected.clone();
             self.last_tab_available_width = available_width;
+        }
+        let selected_index = tabs
+            .sessions
+            .iter()
+            .position(|session| Some(&session.id) == selected.as_ref());
+        // A tab that is lifted or stepping aside in a drag reorder carries
+        // its own fill and motion; the shared pill stands down until it rests.
+        let selected_moving = selected.as_ref().is_some_and(|id| {
+            self.lift_offset(&LiftKey::SessionTab(id.clone())).is_some()
+                || (!reduce_motion && self.tab_shift.deltas.contains_key(id))
+        });
+        let pill = match selected_index {
+            Some(index) if !selected_moving => {
+                let previous_shown = self
+                    .tab_pill
+                    .selected
+                    .as_ref()
+                    .is_some_and(|previous| tabs.sessions.iter().any(|s| &s.id == previous));
+                // The viewport's content range once the scroll above lands,
+                // estimated from the last layout (GPUI clamps the offset).
+                let viewport = f32::from(self.tab_scroll.bounds().size.width);
+                let visible = (viewport > 0.0).then(|| {
+                    let content = tab_count_width(tabs.sessions.len());
+                    let max = (content - viewport).max(0.0);
+                    let left = (-f32::from(self.tab_scroll.offset().x)).clamp(0.0, max);
+                    (left, left + viewport)
+                });
+                Some(self.tab_pill.update(
+                    selected.as_ref(),
+                    index as f32 * (TAB_WIDTH + TAB_GAP),
+                    !reduce_motion && previous_shown && self.lift.is_none(),
+                    visible,
+                    Instant::now(),
+                ))
+            }
+            _ => {
+                self.tab_pill.forget();
+                None
+            }
+        };
+        if let Some(frame) = pill {
+            let weak = self.weak_self.clone();
+            rows = rows.child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(frame.x))
+                    .w(px(TAB_WIDTH))
+                    .h(px(30.0))
+                    .rounded(px(SIDEBAR_ROW_RADIUS))
+                    .border_1()
+                    .border_color(colors.primary.alpha(0.0))
+                    .glass_pill(colors, true)
+                    // Frames only while the pill is travelling.
+                    .when(frame.animating, |pill| {
+                        pill.child(
+                            gpui::canvas(
+                                move |_, window, _| Self::refresh_on_next_frame(&weak, window),
+                                |_, _, _, _| (),
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
+                    }),
+            );
         }
         let held_hint = self.strip_held_hint;
         let tab_count = tabs.sessions.len();
@@ -377,7 +538,9 @@ impl Sidebar {
                 .cursor_pointer()
                 .border_1()
                 .border_color(colors.primary.alpha(0.0))
-                .glass_pill(colors, active)
+                // The shared pill layer draws the selection; a tab fills
+                // itself only while that layer stands down.
+                .glass_pill(colors, active && pill.is_none())
                 .hover(move |row| {
                     if active {
                         row
@@ -649,6 +812,9 @@ impl Sidebar {
         let colors = self.colors();
         self.end_lift_if_released(cx);
         if self.workspace_nav.active.is_some() {
+            // The tabs are not on screen, so the pill must not glide from a
+            // selection made while they were away.
+            self.tab_pill.forget();
             self.workspace_nav.available_width = available_width;
             return self.workspace_strip(colors, cx);
         }
@@ -759,6 +925,11 @@ impl Sidebar {
 
 /// Offsets that carry each tab from where it is drawn to its new slot.
 /// `pitch` is one slot: tab width plus gap.
+/// Laid-out width of `count` fixed-width tabs and the gaps between them.
+fn tab_count_width(count: usize) -> f32 {
+    (count as f32 * (TAB_WIDTH + TAB_GAP) - TAB_GAP).max(0.0)
+}
+
 fn tab_shift_deltas(
     before: &[SessionId],
     after: &[SessionId],
@@ -1069,5 +1240,138 @@ mod tests {
             );
             assert_eq!(sidebar.workspace_nav.active.as_ref(), Some(&workspace));
         });
+    }
+
+    fn tab(id: &str) -> SessionId {
+        SessionId(id.into())
+    }
+
+    const SLOT: f32 = TAB_WIDTH + TAB_GAP;
+
+    #[test]
+    fn the_pill_appears_in_place_on_first_render() {
+        let now = Instant::now();
+        let mut pill = TabPill::default();
+        let frame = pill.update(Some(&tab("a")), 2.0 * SLOT, true, None, now);
+        assert_eq!(
+            frame,
+            PillFrame {
+                x: 2.0 * SLOT,
+                animating: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_selection_change_glides_on_the_settle_curve_and_lands_exactly() {
+        let now = Instant::now();
+        let mut pill = TabPill::default();
+        pill.update(Some(&tab("a")), 0.0, true, None, now);
+        let start = pill.update(Some(&tab("b")), SLOT, true, None, now);
+        assert_eq!(
+            start,
+            PillFrame {
+                x: 0.0,
+                animating: true
+            }
+        );
+        let half = pill.update(
+            Some(&tab("b")),
+            SLOT,
+            true,
+            None,
+            now + Motion::ROW_SELECT_TIME / 2,
+        );
+        assert!(half.animating);
+        assert!(half.x > SLOT * 0.5 && half.x < SLOT, "{}", half.x);
+        let end = pill.update(
+            Some(&tab("b")),
+            SLOT,
+            true,
+            None,
+            now + Motion::ROW_SELECT_TIME,
+        );
+        assert_eq!(
+            end,
+            PillFrame {
+                x: SLOT,
+                animating: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_change_mid_glide_chases_from_where_the_pill_is_drawn() {
+        let now = Instant::now();
+        let mut pill = TabPill::default();
+        pill.update(Some(&tab("a")), 0.0, true, None, now);
+        pill.update(Some(&tab("b")), SLOT, true, None, now);
+        let later = now + Duration::from_millis(40);
+        let drawn = pill.sample(later).x;
+        let retarget = pill.update(Some(&tab("c")), 2.0 * SLOT, true, None, later);
+        assert_eq!(
+            retarget,
+            PillFrame {
+                x: drawn,
+                animating: true
+            }
+        );
+    }
+
+    #[test]
+    fn reorders_closes_and_reduced_motion_put_the_pill_in_place() {
+        let now = Instant::now();
+        let mut pill = TabPill::default();
+        pill.update(Some(&tab("a")), 0.0, true, None, now);
+        // The selected tab moved without the selection changing.
+        let reordered = pill.update(Some(&tab("a")), SLOT, true, None, now);
+        assert_eq!(
+            reordered,
+            PillFrame {
+                x: SLOT,
+                animating: false
+            }
+        );
+        // The caller withholds the glide (closed tab, reduce motion, drag).
+        let snapped = pill.update(Some(&tab("b")), 3.0 * SLOT, false, None, now);
+        assert_eq!(
+            snapped,
+            PillFrame {
+                x: 3.0 * SLOT,
+                animating: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_start_off_screen_is_pulled_to_the_viewport_edge() {
+        let now = Instant::now();
+        let mut pill = TabPill::default();
+        pill.update(Some(&tab("a")), 0.0, true, None, now);
+        let visible = (20.0 * SLOT, 24.0 * SLOT);
+        let frame = pill.update(Some(&tab("z")), 22.0 * SLOT, true, Some(visible), now);
+        assert_eq!(
+            frame,
+            PillFrame {
+                x: 20.0 * SLOT - TAB_WIDTH,
+                animating: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_forgotten_pill_does_not_glide() {
+        let now = Instant::now();
+        let mut pill = TabPill::default();
+        pill.update(Some(&tab("a")), 0.0, true, None, now);
+        pill.forget();
+        let frame = pill.update(Some(&tab("b")), SLOT, true, None, now);
+        assert_eq!(
+            frame,
+            PillFrame {
+                x: SLOT,
+                animating: false
+            }
+        );
     }
 }

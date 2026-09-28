@@ -581,6 +581,8 @@ pub struct Sidebar {
     tab_scroll: ScrollHandle,
     last_tab_selection: Option<SessionId>,
     last_tab_available_width: f32,
+    /// The selected tab's pill in the horizontal strip.
+    tab_pill: tabs::TabPill,
     filter_query: crate::query_editor::QueryEditor,
     filter_open: bool,
     filter_focus: FocusHandle,
@@ -780,6 +782,7 @@ impl Sidebar {
             tab_scroll: ScrollHandle::new(),
             last_tab_selection: None,
             last_tab_available_width: 0.0,
+            tab_pill: Default::default(),
             workspace_nav: workspaces::WorkspaceNavigation::new(cx, active_workspace),
             project_picker: project_picker::ProjectPicker::new(cx),
             strip_menu: tabs::StripMenu::new(cx),
