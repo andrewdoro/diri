@@ -27,7 +27,14 @@ use metal::{
 use objc::{self, msg_send, sel, sel_impl};
 use parking_lot::Mutex;
 
-use std::{cell::Cell, ffi::c_void, mem, ptr, sync::Arc};
+use crate::gpu_diag;
+use std::{
+    cell::Cell,
+    ffi::c_void,
+    mem, ptr,
+    sync::{Arc, atomic::Ordering::Relaxed},
+    time::{Duration, Instant},
+};
 
 // Exported to metal
 pub(crate) type PointF = gpui::Point<f32>;
@@ -57,16 +64,36 @@ pub(crate) unsafe fn new_renderer(
     MetalRenderer::new(context, transparent)
 }
 
+/// Frames start with a 2 MiB instance buffer; a scene that overflows it is
+/// re-encoded with a buffer twice as large.
+const DEFAULT_INSTANCE_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+/// Idle buffers kept for reuse. A window has at most two frames in flight
+/// (`MAXIMUM_DRAWABLE_COUNT`), so three covers a window plus a floating panel
+/// drawing at the same time. Before this cap every buffer that was ever in
+/// flight at once stayed pooled for the life of the process: the installed
+/// app held six 8 MiB buffers, five of them untouched and swapped out.
+const MAX_POOLED_INSTANCE_BUFFERS: usize = 3;
+/// How long a grown buffer size must go underused before it is halved. One
+/// dense frame (a full-screen overview of live terminals) used to pin its
+/// size forever; a window this long keeps an actively viewed dense surface
+/// from paying the grow-and-re-encode step again.
+const INSTANCE_BUFFER_SHRINK_WINDOW: Duration = Duration::from_secs(10);
+
 pub(crate) struct InstanceBufferPool {
     buffer_size: usize,
     buffers: Vec<metal::Buffer>,
+    /// Largest number of instance bytes one frame used in this window.
+    high_water: usize,
+    window_start: Option<Instant>,
 }
 
 impl Default for InstanceBufferPool {
     fn default() -> Self {
         Self {
-            buffer_size: 2 * 1024 * 1024,
+            buffer_size: DEFAULT_INSTANCE_BUFFER_SIZE,
             buffers: Vec::new(),
+            high_water: 0,
+            window_start: None,
         }
     }
 }
@@ -74,12 +101,66 @@ impl Default for InstanceBufferPool {
 pub(crate) struct InstanceBuffer {
     metal_buffer: metal::Buffer,
     size: usize,
+    /// Bytes written by the frame encoded into this buffer.
+    used: usize,
+}
+
+impl Drop for MetalRenderer {
+    fn drop(&mut self) {
+        gpu_diag::RENDERERS.fetch_sub(1, Relaxed);
+        gpu_diag::DRAWABLE_PIXELS.fetch_sub(self.diag_drawable_px, Relaxed);
+    }
+}
+
+impl Drop for InstanceBuffer {
+    fn drop(&mut self) {
+        gpu_diag::INSTANCE_BUFFERS_OUTSTANDING.fetch_sub(1, Relaxed);
+    }
 }
 
 impl InstanceBufferPool {
     pub(crate) fn reset(&mut self, buffer_size: usize) {
         self.buffer_size = buffer_size;
         self.buffers.clear();
+        self.note_pool();
+    }
+
+    fn note_pool(&self) {
+        gpu_diag::INSTANCE_BUFFERS_POOLED.store(self.buffers.len() as i64, Relaxed);
+        gpu_diag::INSTANCE_BUFFER_SIZE.store(self.buffer_size as i64, Relaxed);
+    }
+
+    /// Halves a grown buffer size once a whole window of frames fit in a
+    /// quarter of it, leaving at least twice the observed peak. Buffers of
+    /// the old size are dropped, now from the pool and in flight on release.
+    fn shrink_if_underused(&mut self, now: Instant) {
+        let start = *self.window_start.get_or_insert(now);
+        if now.duration_since(start) < INSTANCE_BUFFER_SHRINK_WINDOW {
+            return;
+        }
+        self.fit_to_high_water();
+        self.window_start = Some(now);
+    }
+
+    fn fit_to_high_water(&mut self) {
+        let mut size = self.buffer_size;
+        while size > DEFAULT_INSTANCE_BUFFER_SIZE && self.high_water.saturating_mul(4) <= size {
+            size /= 2;
+        }
+        if size != self.buffer_size {
+            self.reset(size);
+        }
+        self.high_water = 0;
+    }
+
+    /// A window that stops drawing (occluded, minimized) never acquires
+    /// again, so the windowed shrink would never run. Release the idle
+    /// buffers now and fit the size to what was drawn since the last window.
+    pub(crate) fn trim_idle(&mut self) {
+        self.fit_to_high_water();
+        self.buffers.clear();
+        self.window_start = None;
+        self.note_pool();
     }
 
     pub(crate) fn acquire(
@@ -87,6 +168,7 @@ impl InstanceBufferPool {
         device: &metal::Device,
         unified_memory: bool,
     ) -> InstanceBuffer {
+        self.shrink_if_underused(Instant::now());
         let buffer = self.buffers.pop().unwrap_or_else(|| {
             let options = if unified_memory {
                 MTLResourceOptions::StorageModeShared
@@ -99,16 +181,23 @@ impl InstanceBufferPool {
 
             device.new_buffer(self.buffer_size as u64, options)
         });
+        gpu_diag::INSTANCE_BUFFERS_OUTSTANDING.fetch_add(1, Relaxed);
+        self.note_pool();
+        gpu_diag::outstanding_changed();
         InstanceBuffer {
             metal_buffer: buffer,
             size: self.buffer_size,
+            used: 0,
         }
     }
 
     pub(crate) fn release(&mut self, buffer: InstanceBuffer) {
-        if buffer.size == self.buffer_size {
-            self.buffers.push(buffer.metal_buffer)
+        self.high_water = self.high_water.max(buffer.used);
+        gpu_diag::INSTANCE_BYTES_PEAK.fetch_max(buffer.used as i64, Relaxed);
+        if buffer.size == self.buffer_size && self.buffers.len() < MAX_POOLED_INSTANCE_BUFFERS {
+            self.buffers.push(buffer.metal_buffer.clone())
         }
+        self.note_pool();
     }
 }
 
@@ -136,6 +225,7 @@ pub(crate) struct MetalRenderer {
     core_video_texture_cache: core_video::metal_texture_cache::CVMetalTextureCache,
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
+    diag_drawable_px: i64,
     path_sample_count: u32,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
@@ -342,6 +432,8 @@ impl MetalRenderer {
         );
 
         let command_queue = device.new_command_queue();
+        gpu_diag::start(&device);
+        gpu_diag::RENDERERS.fetch_add(1, Relaxed);
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
         let core_video_texture_cache =
             CVMetalTextureCache::new(None, device.clone(), None).unwrap();
@@ -368,6 +460,7 @@ impl MetalRenderer {
             core_video_texture_cache,
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
+            diag_drawable_px: 0,
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "test-support"))]
             headless_render_target: None,
@@ -397,6 +490,9 @@ impl MetalRenderer {
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
+        let px = size.width.0 as i64 * size.height.0 as i64;
+        gpu_diag::DRAWABLE_PIXELS.fetch_add(px - self.diag_drawable_px, Relaxed);
+        self.diag_drawable_px = px;
         if let Some(layer) = &self.layer {
             let ns_size = NSSize {
                 width: size.width.0 as f64,
@@ -417,6 +513,8 @@ impl MetalRenderer {
     pub fn release_window_sized_textures(&mut self) {
         self.path_intermediate_texture = None;
         self.path_intermediate_msaa_texture = None;
+        self.instance_buffer_pool.lock().trim_idle();
+        self.note_path_textures();
     }
 
     fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
@@ -465,6 +563,15 @@ impl MetalRenderer {
         } else {
             self.path_intermediate_msaa_texture = None;
         }
+        self.note_path_textures();
+    }
+
+    fn note_path_textures(&self) {
+        let bytes = self
+            .path_intermediate_texture
+            .as_ref()
+            .map_or(0, |texture| texture.width() * texture.height() * 4);
+        gpu_diag::PATH_TEXTURE_BYTES.store(bytes as i64, Relaxed);
     }
 
     pub fn update_transparency(&mut self, transparent: bool) {
@@ -493,6 +600,9 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
+        gpu_diag::FRAMES.fetch_add(1, Relaxed);
+        gpu_diag::SPRITES_PEAK.fetch_max(scene.monochrome_sprites.len() as i64, Relaxed);
+        gpu_diag::QUADS_PEAK.fetch_max(scene.quads.len() as i64, Relaxed);
         let drawable = if let Some(drawable) = layer.next_drawable() {
             drawable
         } else {
@@ -535,7 +645,9 @@ impl MetalRenderer {
                     return;
                 }
                 Err(err) => {
-                    log::error!(
+                    // Expected when a scene outgrows a buffer size that was
+                    // shrunk after a quiet window; the frame is re-encoded.
+                    log::info!(
                         "failed to render: {}. retrying with larger instance buffer size",
                         err
                     );
@@ -986,6 +1098,7 @@ impl MetalRenderer {
         }
 
         command_encoder.end_encoding();
+        instance_buffer.used = instance_offset;
 
         if !self.is_unified_memory {
             // Sync the instance buffer to the GPU
@@ -1840,5 +1953,93 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+}
+
+#[cfg(test)]
+mod instance_buffer_pool_tests {
+    use super::*;
+
+    const MIB: usize = 1024 * 1024;
+
+    fn device() -> Option<metal::Device> {
+        metal::Device::system_default()
+    }
+
+    fn used(pool: &mut InstanceBufferPool, device: &metal::Device, bytes: usize) {
+        let mut buffer = pool.acquire(device, true);
+        buffer.used = bytes;
+        pool.release(buffer);
+    }
+
+    #[test]
+    fn concurrent_frames_leave_at_most_the_cap_pooled() {
+        let Some(device) = device() else { return };
+        let mut pool = InstanceBufferPool::default();
+        let in_flight: Vec<_> = (0..6).map(|_| pool.acquire(&device, true)).collect();
+        for buffer in in_flight {
+            pool.release(buffer);
+        }
+        assert_eq!(pool.buffers.len(), MAX_POOLED_INSTANCE_BUFFERS);
+    }
+
+    #[test]
+    fn a_grown_size_halves_after_an_underused_window() {
+        let Some(device) = device() else { return };
+        let mut pool = InstanceBufferPool::default();
+        pool.reset(8 * MIB);
+        let start = Instant::now();
+        pool.shrink_if_underused(start);
+        used(&mut pool, &device, 700 * 1024);
+        pool.shrink_if_underused(start + INSTANCE_BUFFER_SHRINK_WINDOW / 2);
+        assert_eq!(pool.buffer_size, 8 * MIB, "no shrink inside the window");
+        pool.shrink_if_underused(start + INSTANCE_BUFFER_SHRINK_WINDOW);
+        assert_eq!(pool.buffer_size, 2 * MIB, "0.7 MiB peak fits the default");
+        assert!(pool.buffers.is_empty(), "old-size buffers are dropped");
+    }
+
+    #[test]
+    fn a_size_in_use_keeps_twice_its_peak() {
+        let Some(device) = device() else { return };
+        let mut pool = InstanceBufferPool::default();
+        pool.reset(16 * MIB);
+        let start = Instant::now();
+        pool.shrink_if_underused(start);
+        used(&mut pool, &device, 3 * MIB);
+        pool.shrink_if_underused(start + INSTANCE_BUFFER_SHRINK_WINDOW);
+        assert_eq!(pool.buffer_size, 8 * MIB);
+
+        used(&mut pool, &device, 5 * MIB);
+        pool.shrink_if_underused(start + INSTANCE_BUFFER_SHRINK_WINDOW * 2);
+        assert_eq!(pool.buffer_size, 8 * MIB, "5 MiB frames still need 8 MiB");
+    }
+
+    #[test]
+    fn a_window_that_stops_drawing_releases_its_idle_buffers() {
+        let Some(device) = device() else { return };
+        let mut pool = InstanceBufferPool::default();
+        pool.reset(8 * MIB);
+        used(&mut pool, &device, 3 * MIB);
+        used(&mut pool, &device, 3 * MIB);
+        assert!(!pool.buffers.is_empty());
+        pool.trim_idle();
+        assert!(pool.buffers.is_empty());
+        assert_eq!(pool.buffer_size, 8 * MIB, "recent 3 MiB frames keep 8 MiB");
+        pool.trim_idle();
+        assert_eq!(
+            pool.buffer_size,
+            2 * MIB,
+            "nothing drawn since: default size"
+        );
+    }
+
+    #[test]
+    fn buffers_of_a_retired_size_are_not_pooled() {
+        let Some(device) = device() else { return };
+        let mut pool = InstanceBufferPool::default();
+        let old = pool.acquire(&device, true);
+        pool.reset(4 * MIB);
+        pool.release(old);
+        assert!(pool.buffers.is_empty());
     }
 }
