@@ -23,7 +23,10 @@ use crate::spool::{self, SpoolName};
 pub const DEFAULT_ENDPOINT: Option<&str> = None;
 /// Kept small so one batch fits the Worker's CPU budget on the free plan.
 pub const BATCH_RAW_BYTES: usize = 1024 * 1024;
-pub const ROUTINE_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// Routine uploads are hourly: each batch costs the Worker a request, an R2
+/// PUT and a handful of D1 row writes, so the interval sets how many installs
+/// the free tiers carry. Incidents still upload within a minute.
+pub const ROUTINE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub const POLL_INTERVAL: Duration = Duration::from_secs(60);
 const OFFSETS_FILE: &str = "offsets.json";
 /// An `.open` file untouched this long is treated as abandoned.
@@ -108,7 +111,7 @@ impl Uploader {
 
     /// Runs forever on a background thread: every minute it checks for an
     /// urgent marker (an incident was recorded), and otherwise uploads every
-    /// ten minutes.
+    /// hour.
     pub fn spawn(mut self) -> std::io::Result<std::thread::JoinHandle<()>> {
         std::thread::Builder::new()
             .name("diri-telemetry-upload".into())
