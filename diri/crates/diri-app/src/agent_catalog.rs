@@ -16,6 +16,16 @@ pub(crate) struct AgentOption {
     pub show_in_quick_create: bool,
     pub first_class: bool,
     pub setup_url: Option<String>,
+    pub install: Option<AgentInstall>,
+    pub sign_in_hint: Option<String>,
+}
+
+/// A vendor installer Diri may offer to run. The command only ever reaches a
+/// visible Terminal session, after the user picked a control that showed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentInstall {
+    pub command: String,
+    pub requirement: Option<String>,
 }
 
 /// Complete supported-Agent rows in the order supplied by Settings readiness.
@@ -42,29 +52,16 @@ pub(crate) fn settings_agent_items(mut items: Vec<AgentReadinessItem>) -> Vec<Ag
     items
 }
 
-/// Settings and the launcher must expose the shell whenever default resolution
-/// can choose it. Available catalog extensions are valid explicit defaults,
-/// but they do not replace the first-class-or-shell repair policy for a removed
-/// preference.
+/// Every installed Agent plus Terminal: a plain shell is always a valid
+/// Command-T default, and it is also where default resolution lands when no
+/// first-class Agent is installed. Terminal sorts last so the installed
+/// Agents keep the Engine/catalog order.
 pub(crate) fn default_agent_options(catalog: &AgentReadinessResult) -> Vec<AgentOption> {
     let mut options: Vec<_> = agent_options(catalog)
         .into_iter()
         .filter(|option| option.available)
         .collect();
-    if !options
-        .iter()
-        .any(|option| option.available && option.first_class)
-    {
-        options.push(AgentOption {
-            kind: AgentKind::SHELL,
-            display_name: "Terminal".to_owned(),
-            binary: "login shell".to_owned(),
-            available: true,
-            show_in_quick_create: true,
-            first_class: false,
-            setup_url: None,
-        });
-    }
+    options.push(terminal_option());
     options
 }
 
@@ -111,13 +108,17 @@ pub(crate) fn kind_spawnable(kind: &AgentKind, catalog: Option<&AgentReadinessRe
         .any(|option| option.available && option.kind == *kind)
 }
 
-/// Keep a saved default only while it is launchable. Removed/unknown ids fall
+/// Keep a saved default only while it is launchable. Terminal always is.
+/// Removed/unknown ids fall
 /// back to an installed first-class agent, and finally to a shell session so
 /// Command-T never becomes a dead shortcut.
 pub(crate) fn resolved_default_agent(
     saved: &AgentKind,
     catalog: &AgentReadinessResult,
 ) -> AgentKind {
+    if saved.is_terminal() {
+        return AgentKind::SHELL;
+    }
     let options = agent_options(catalog);
     if options
         .iter()
@@ -214,7 +215,7 @@ pub(crate) fn normal_web_url(url: &str) -> Option<String> {
     .then(|| url.to_owned())
 }
 
-fn option_from_readiness(item: &AgentReadinessItem) -> AgentOption {
+pub(crate) fn option_from_readiness(item: &AgentReadinessItem) -> AgentOption {
     let descriptor = item.descriptor.as_ref();
     let setup = descriptor.and_then(|descriptor| descriptor.setup.as_ref());
     let display_name = descriptor
@@ -232,7 +233,53 @@ fn option_from_readiness(item: &AgentReadinessItem) -> AgentOption {
         setup_url: setup
             .and_then(|setup| setup.url.as_deref())
             .and_then(normal_web_url),
+        install: setup.and_then(|setup| {
+            Some(AgentInstall {
+                command: typed_command(setup.install_command.as_deref()?)?,
+                requirement: setup
+                    .install_requirement
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|requirement| !requirement.is_empty())
+                    .map(str::to_owned),
+            })
+        }),
+        sign_in_hint: setup
+            .and_then(|setup| setup.sign_in_hint.as_deref())
+            .map(str::trim)
+            .filter(|hint| !hint.is_empty())
+            .map(str::to_owned),
     }
+}
+
+/// An install command is typed into a shell exactly as shown, so it must be
+/// one visible line: a control character could submit early or hide text from
+/// the control that displayed it.
+fn typed_command(command: &str) -> Option<String> {
+    let command = command.trim();
+    (!command.is_empty()
+        && command.chars().count() <= 200
+        && !command.chars().any(char::is_control))
+    .then(|| command.to_owned())
+}
+
+/// What a newcomer can set up on this target: first-class Agents that are not
+/// installed yet, in catalog order, at most `limit` of them. Agents Diri can
+/// install lead, so the shortest path to a first session is the first row.
+pub(crate) fn setup_candidates(catalog: &AgentReadinessResult, limit: usize) -> Vec<AgentOption> {
+    let mut candidates: Vec<_> = agent_options(catalog)
+        .into_iter()
+        .filter(|option| !option.available && option.first_class)
+        .filter(|option| option.install.is_some() || option.setup_url.is_some())
+        .collect();
+    candidates.sort_by_key(|option| {
+        option
+            .install
+            .as_ref()
+            .map_or(2, |install| u8::from(install.requirement.is_some()))
+    });
+    candidates.truncate(limit);
+    candidates
 }
 
 fn terminal_option() -> AgentOption {
@@ -244,6 +291,8 @@ fn terminal_option() -> AgentOption {
         show_in_quick_create: true,
         first_class: false,
         setup_url: None,
+        install: None,
+        sign_in_hint: None,
     }
 }
 
@@ -288,6 +337,7 @@ mod tests {
             url: Some("https://ampcode.com/manual".into()),
             install_hint: Some("Install Amp's CLI.".into()),
             sign_in_hint: Some("Sign in at ampcode.com, then run amp.".into()),
+            ..AgentSetup::default()
         });
         let options = agent_options(&AgentReadinessResult {
             agents: vec![unavailable],
@@ -332,6 +382,28 @@ mod tests {
             .expect("launcher/settings options represent the repaired default");
         assert_eq!(selected.display_name, "Terminal");
         assert!(selected.available);
+    }
+
+    #[test]
+    fn terminal_is_a_sticky_default_beside_installed_agents() {
+        let catalog = AgentReadinessResult {
+            agents: vec![item("codex", true, true)],
+            ..AgentReadinessResult::default()
+        };
+        let kinds: Vec<_> = default_agent_options(&catalog)
+            .into_iter()
+            .map(|option| option.kind)
+            .collect();
+        assert_eq!(kinds, vec![AgentKind::CODEX, AgentKind::SHELL]);
+        // Catalog repair must not rewrite a chosen Terminal to an Agent.
+        assert_eq!(
+            resolved_default_agent(&AgentKind::SHELL, &catalog),
+            AgentKind::SHELL
+        );
+        assert_eq!(
+            resolved_target_agent(&AgentKind::SHELL, Some(&catalog)),
+            AgentKind::SHELL
+        );
     }
 
     #[test]

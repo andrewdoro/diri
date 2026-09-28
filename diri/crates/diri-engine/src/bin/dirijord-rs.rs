@@ -152,10 +152,26 @@ fn main() {
     };
 
     let mut registry = Registry::new(Arc::clone(&engine), DirijorPaths::state_file(&home));
-    match registry.load() {
-        Ok(count) => eprintln!("dirijord-rs: loaded {count} session record(s)"),
-        Err(error) => eprintln!("dirijord-rs: state load: {error}"),
-    }
+    let state_loaded = match load_state(&mut registry) {
+        Ok(count) => {
+            eprintln!("dirijord-rs: loaded {count} session record(s)");
+            true
+        }
+        // Quarantined: the records are safe in the `.corrupt` copy, so serving
+        // from an empty table cannot overwrite them.
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            eprintln!("dirijord-rs: state load: {error}");
+            false
+        }
+        // The file is still there but unreadable (EACCES, EIO, EMFILE...).
+        // Serving would persist a table rebuilt from live holders alone over
+        // every exited, archived and remote record in it. Refuse to start; the
+        // app reconnects and relaunches once the cause clears.
+        Err(error) => {
+            eprintln!("dirijord-rs: state load: {error}; refusing to start over unread state");
+            std::process::exit(1);
+        }
+    };
     let adopted = registry.restore(&holder, &logs_dir);
     eprintln!(
         "dirijord-rs: adopted {} live holder session(s): {adopted:?}",
@@ -196,6 +212,43 @@ fn main() {
     // Only once the socket is accepting: remote adoption is SSH-bound and must
     // never be what a client waits behind.
     server.spawn_remote_restore();
+
+    // One-shot, off the accept path: reclaim per-session files no record,
+    // holder, or remote binding stands behind. Never repeated while idle.
+    {
+        let registry = Arc::clone(&registry);
+        let logs_dir = logs_dir.clone();
+        let holders_dir = app_support.join("holders");
+        let bindings_dir = DirijorPaths::socket(&home).parent().map_or_else(
+            || PathBuf::from("remote-bindings"),
+            |dir| dir.join("remote-bindings"),
+        );
+        let _ = std::thread::Builder::new()
+            .name("diri-orphan-sweep".into())
+            .spawn(move || {
+                let report = diri_engine::session_files::startup_sweep(
+                    &registry,
+                    state_loaded,
+                    &logs_dir,
+                    &holders_dir,
+                    &bindings_dir,
+                    &diri_engine::session_files::SweepOptions::default(),
+                );
+                match report {
+                    Some(report) => eprintln!(
+                        "dirijord-rs: orphan sweep removed {} file(s) ({} bytes) and {} recovery dir(s); kept {} referenced, {} recent; {} failed; {:?}",
+                        report.removed_files,
+                        report.removed_bytes,
+                        report.removed_recovery_dirs,
+                        report.kept_referenced,
+                        report.kept_recent,
+                        report.failed,
+                        report.elapsed,
+                    ),
+                    None => eprintln!("dirijord-rs: orphan sweep skipped (no loaded records)"),
+                }
+            });
+    }
 
     let _watcher = diri_engine::events::spawn_registry_watcher(
         Arc::clone(&registry),
@@ -250,6 +303,22 @@ fn main() {
                 eprintln!("dirijord-rs: accept: {error}; retrying in {delay:?}");
                 std::thread::sleep(delay);
             }
+        }
+    }
+}
+
+/// Loads the state file, retrying transient read failures briefly. A parse
+/// failure is final at once: `load` has already quarantined the file.
+fn load_state(registry: &mut Registry) -> std::io::Result<usize> {
+    let mut attempt = 0;
+    loop {
+        match registry.load() {
+            Err(error) if error.kind() != std::io::ErrorKind::InvalidData && attempt < 5 => {
+                attempt += 1;
+                eprintln!("dirijord-rs: state load: {error}; retrying");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            result => return result,
         }
     }
 }

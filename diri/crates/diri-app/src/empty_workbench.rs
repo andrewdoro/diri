@@ -1,138 +1,304 @@
-//! The resting workbench explains the next action without requiring a sidebar.
+//! The resting workbench: what Diri is, whether this machine can run an agent
+//! yet, and the one action that moves a newcomer forward.
+//!
+//! A first launch has no sessions and often no agent. Telling that person to
+//! "pick a coding agent installed on your computer" strands them, so the page
+//! reads detection facts and leads with whichever step is actually next:
+//! install an agent, or start a session.
+//!
+//! Starting is direct: the default agent opens in the home folder, the same
+//! launch as the New Agent shortcut, and a project folder is optional. The
+//! agent's own prompt is where the task gets typed, so nothing here composes
+//! or injects one.
+//!
+//! It is an empty state, not a landing page. It borrows the sidebar's empty
+//! state and the Settings controls: a tertiary symbol, row-sized type, and the
+//! same quiet bordered buttons, centered in the pane like any macOS
+//! "nothing selected" view.
 
-use diri_ui::{Palette, Radius, SemanticColors};
-use gpui::{FontWeight, IntoElement, Role, div, prelude::*, px};
+use std::rc::Rc;
 
-use crate::commands::{CommandId, FocusSidebar, OpenLauncher, command};
+use diri_proto::AgentKind;
+use diri_ui::{Radius, SemanticColors, Typo};
+use gpui::{AnyElement, Div, IntoElement, Role, SharedString, div, prelude::*, px};
+
+use crate::agent_setup::{ActionHandler, AgentSetupState, InstallHandler, quiet_link, setup_list};
+use crate::commands::{CommandId, NewDefaultSession, ShowAgentSettings, command};
 use crate::icons::sf_symbol;
 
-pub(crate) fn render(has_sessions: bool, colors: SemanticColors) -> impl IntoElement {
+pub(crate) struct EmptyWorkbench {
+    pub has_sessions: bool,
+    pub agents: AgentSetupState,
+    pub installing: Option<AgentKind>,
+    /// A detection scan is in flight, so "Check again" reads as busy.
+    pub scanning: bool,
+    /// herdr sessions this Mac could bring over, as "5 sessions from herdr".
+    pub herdr: Option<SharedString>,
+    pub importing_herdr: bool,
+}
+
+pub(crate) struct EmptyWorkbenchActions {
+    pub install: InstallHandler,
+    pub check_again: ActionHandler,
+    /// Pick a project folder, then open the default agent there.
+    pub start_in_folder: ActionHandler,
+    /// Confirm, then open every herdr pane as a session.
+    pub import_herdr: ActionHandler,
+}
+
+pub(crate) fn render(
+    state: EmptyWorkbench,
+    actions: EmptyWorkbenchActions,
+    colors: SemanticColors,
+) -> impl IntoElement {
+    let column = if state.has_sessions {
+        resting(&actions, colors)
+    } else {
+        welcome(&state, &actions, colors)
+    };
     div()
         .id("empty-workbench")
         .flex_1()
         .min_h(px(0.0))
         .overflow_y_scroll()
         .px(px(28.0))
-        .py(px(32.0))
+        .py(px(28.0))
         .flex()
         .flex_col()
-        .justify_center()
         .items_center()
+        // `justify_center` would clip the top of a column taller than the
+        // pane; spacers center it and still let it scroll from the top.
+        .child(div().flex_1())
+        .child(column)
+        .child(div().flex_1())
+}
+
+fn column() -> Div {
+    div()
+        .w_full()
+        .max_w(px(440.0))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .items_center()
+}
+
+/// Symbol, title, and a sentence or two: the same three parts as the
+/// sidebar's empty state, one step up in size because this is the main pane.
+fn heading(
+    symbol: &'static str,
+    title: &'static str,
+    body: impl Into<SharedString>,
+    colors: SemanticColors,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(12.0))
+        .child(sf_symbol(symbol, 28.0, colors.tertiary))
         .child(
             div()
-                .w_full()
-                .max_w(px(420.0))
                 .flex()
                 .flex_col()
-                .gap(px(24.0))
+                .items_center()
+                .gap(px(6.0))
                 .child(
                     div()
-                        .size(px(48.0))
-                        .flex_none()
-                        .rounded(px(Radius::PANEL))
-                        .bg(Palette::CLAY.alpha(0.12))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(sf_symbol("square.and.pencil", 23.0, Palette::CLAY)),
+                        .text_size(px(Typo::DISPLAY_TITLE.size))
+                        .font_weight(Typo::DISPLAY_TITLE.weight)
+                        .text_color(colors.primary)
+                        .child(title),
                 )
                 .child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .text_size(px(28.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(colors.primary)
-                                .child(if has_sessions { "Ready for your next task?" } else { "Your agents, one workspace." }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(14.0))
-                                .line_height(px(22.0))
-                                .text_color(colors.secondary)
-                                .child(if has_sessions {
-                                    "Pick up a session from the sidebar, or start something new."
-                                } else {
-                                    "Work with coding agents in your own projects. Give each task a session, and keep everything together in Diri."
-                                }),
-                        ),
-                )
-                .when(!has_sessions, |view| {
-                    view.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(14.0))
-                            .children([
-                                ("folder", "Choose a project folder"),
-                                ("terminal", "Pick a coding agent installed on your computer"),
-                                ("bubble.left", "Describe what you want to work on"),
-                            ].into_iter().map(|(icon, label)| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(12.0))
-                                    .child(sf_symbol(icon, 14.0, colors.secondary))
-                                    .child(div().text_size(px(13.0)).text_color(colors.secondary).child(label))
-                            })),
-                    )
-                })
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(14.0))
-                        .child(
-                            div()
-                                .id("empty-start-session")
-                                .debug_selector(|| "empty-start-session".into())
-                                .role(Role::Button)
-                                .aria_label("Start a session")
-                                .h(px(40.0))
-                                .px(px(16.0))
-                                .rounded(px(Radius::ROW))
-                                .bg(colors.primary)
-                                .text_color(colors.background)
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .flex()
-                                .items_center()
-                                .gap(px(10.0))
-                                .cursor_pointer()
-                                .hover(|button| button.opacity(0.88))
-                                .active(|button| button.opacity(0.74))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(OpenLauncher), cx);
-                                })
-                                .child("Start a session")
-                                .child(sf_symbol("chevron.right", 12.0, colors.background)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(colors.secondary)
-                                .child(command(CommandId::OpenLauncher).shortcut_label().unwrap_or_default()),
-                        ),
-                )
-                .when(has_sessions, |view| {
-                    view.child(
-                        div()
-                            .id("empty-browse-sessions")
-                            .role(Role::Button)
-                            .aria_label("Show sessions")
-                            .py(px(6.0))
-                            .text_size(px(13.0))
-                            .text_color(colors.secondary)
-                            .cursor_pointer()
-                            .hover(move |button| button.text_color(colors.primary))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(FocusSidebar), cx);
-                            })
-                            .child("Show sessions in the sidebar"),
-                    )
-                }),
+                        .max_w(px(440.0))
+                        .text_center()
+                        .text_size(px(Typo::ROW.size))
+                        .line_height(px(19.0))
+                        .text_color(colors.secondary)
+                        .child(body.into()),
+                ),
         )
+}
+
+fn welcome(state: &EmptyWorkbench, actions: &EmptyWorkbenchActions, colors: SemanticColors) -> Div {
+    // Not the sidebar's stack: on a first launch the two empty states sit
+    // side by side, and twin symbols read as a rendering mistake.
+    const SYMBOL: &str = "rectangle.split.2x1";
+    const TITLE: &str = "Run coding agents side by side";
+    let AgentSetupState::Missing(candidates) = &state.agents else {
+        return column()
+            .gap(px(18.0))
+            .child(heading(
+                SYMBOL,
+                TITLE,
+                "Each task gets its own session. Diri tells you when one needs you.",
+                colors,
+            ))
+            .child(start_controls("Start a session", actions, colors))
+            .when_some(herdr_link(state, actions, colors), |column, link| {
+                column.child(link)
+            });
+    };
+    let check_again = Rc::clone(&actions.check_again);
+    column()
+        .gap(px(18.0))
+        .child(heading(
+            SYMBOL,
+            TITLE,
+            "Install a coding agent to get started.",
+            colors,
+        ))
+        // The sentence above may run wide; the list stays the width of a
+        // Settings group so its Install buttons sit near their names.
+        .child(div().w_full().max_w(px(320.0)).child(setup_list(
+            "welcome",
+            candidates,
+            state.installing.as_ref(),
+            colors,
+            &actions.install,
+        )))
+        .child(
+            div()
+                .flex()
+                .justify_center()
+                .items_center()
+                .gap(px(16.0))
+                .child(quiet_link(
+                    "welcome-check-again",
+                    if state.scanning {
+                        "Checking…"
+                    } else {
+                        "Check again"
+                    },
+                    Some("arrow.counterclockwise"),
+                    colors,
+                    move |window, cx| check_again(window, cx),
+                ))
+                .child(quiet_link(
+                    "welcome-agent-settings",
+                    "More agents…",
+                    None,
+                    colors,
+                    |window, cx| window.dispatch_action(Box::new(ShowAgentSettings), cx),
+                )),
+        )
+}
+
+/// Someone arriving from herdr already has work in flight: one quiet line
+/// brings it over. It only appears once an agent is ready, because a
+/// resumed conversation needs its agent installed.
+fn herdr_link(
+    state: &EmptyWorkbench,
+    actions: &EmptyWorkbenchActions,
+    colors: SemanticColors,
+) -> Option<AnyElement> {
+    if state.importing_herdr {
+        return Some(quiet_link(
+            "empty-import-herdr",
+            "Importing from herdr…",
+            Some("arrow.down"),
+            colors,
+            |_, _| {},
+        ));
+    }
+    let headline = state.herdr.as_ref()?;
+    let import = Rc::clone(&actions.import_herdr);
+    Some(quiet_link(
+        "empty-import-herdr",
+        format!("Import {headline}…"),
+        Some("arrow.down"),
+        colors,
+        move |window, cx| import(window, cx),
+    ))
+}
+
+/// The app's standard bordered control, with the shortcut that does the same
+/// thing set inside it the way a menu item carries its key equivalent.
+fn start_button(label: &'static str, colors: SemanticColors) -> AnyElement {
+    div()
+        .id("empty-start-session")
+        .debug_selector(|| "empty-start-session".into())
+        .role(Role::Button)
+        .aria_label(label)
+        .h(px(28.0))
+        .px(px(11.0))
+        .rounded(px(Radius::BADGE))
+        .border_1()
+        .border_color(colors.primary.alpha(0.12))
+        .bg(colors.primary.alpha(0.06))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .text_size(px(12.0))
+        .font_weight(Typo::ROW_EMPHASIZED.weight)
+        .text_color(colors.primary)
+        .cursor_pointer()
+        .hover(move |button| button.bg(colors.primary.alpha(0.10)))
+        .active(move |button| button.bg(colors.primary.alpha(0.14)))
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(NewDefaultSession), cx))
+        .child(sf_symbol("plus", 11.0, colors.primary))
+        .child(label)
+        .when_some(
+            command(CommandId::NewDefaultSession).shortcut_label(),
+            |button, shortcut| {
+                button.child(
+                    div()
+                        .pl(px(3.0))
+                        .text_size(px(Typo::META.size))
+                        .text_color(colors.tertiary)
+                        .child(shortcut),
+                )
+            },
+        )
+        .into_any_element()
+}
+
+/// One press starts working: the default agent opens where the New Agent
+/// shortcut would put it. A project folder is an option, not a gate, because
+/// plenty of first tasks have no project yet.
+fn start_controls(
+    label: &'static str,
+    actions: &EmptyWorkbenchActions,
+    colors: SemanticColors,
+) -> Div {
+    let start_in_folder = Rc::clone(&actions.start_in_folder);
+    div()
+        .flex()
+        .flex_wrap()
+        .justify_center()
+        .items_center()
+        .gap_x(px(14.0))
+        .gap_y(px(8.0))
+        .child(start_button(label, colors))
+        .child(quiet_link(
+            "empty-start-in-folder",
+            "Choose a folder…",
+            Some("folder"),
+            colors,
+            move |window, cx| start_in_folder(window, cx),
+        ))
+}
+
+/// Sessions exist but none is open in this pane.
+fn resting(actions: &EmptyWorkbenchActions, colors: SemanticColors) -> Div {
+    column()
+        .gap(px(16.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(12.0))
+                .child(sf_symbol("square.stack.3d.up", 28.0, colors.tertiary))
+                .child(
+                    div()
+                        .text_size(px(Typo::DISPLAY_TITLE.size))
+                        .font_weight(Typo::DISPLAY_TITLE.weight)
+                        .text_color(colors.primary)
+                        .child("No session open"),
+                ),
+        )
+        .child(start_controls("New session", actions, colors))
 }

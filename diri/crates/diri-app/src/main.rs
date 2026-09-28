@@ -1,4 +1,5 @@
 mod agent_catalog;
+mod agent_setup;
 mod alerts;
 mod app_theme;
 mod application_notifications;
@@ -21,6 +22,11 @@ pub mod fuzzy;
 #[cfg(test)]
 mod gesture_delivery;
 mod git_review;
+#[cfg(test)]
+mod gpui_view_cache_tests;
+mod haptics;
+mod held_hints;
+mod herdr_import;
 pub mod history;
 mod icons;
 mod inspector;
@@ -40,6 +46,7 @@ mod palette_workspace;
 mod peek_settle;
 mod phone_access;
 mod platform;
+mod project_hue;
 pub mod query_editor;
 pub mod quick_open;
 pub mod quote;
@@ -62,6 +69,7 @@ mod tab_navigation;
 mod tab_peek;
 mod tab_preview;
 pub mod terminal_pane;
+mod tooltip_warmth;
 pub mod transcript;
 pub mod updates;
 pub mod usage;
@@ -404,6 +412,11 @@ fn main() {
         // keeps them inside the window for comparison or when a panel misbehaves.
         if std::env::var_os("DIRI_FLOATING_PANELS").is_none_or(|value| value != "0") {
             floating::enable(cx);
+        }
+        // Headless previews and screenshot fixtures want the theme they asked
+        // for on their first frame, so only the running application fades.
+        if !preview {
+            app_theme::live::enable();
         }
         // Confirmations are the system's alert sheets on macOS.
         #[cfg(target_os = "macos")]

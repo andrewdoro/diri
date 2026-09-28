@@ -44,22 +44,29 @@ pub(crate) fn activity_mark(
                 svg()
                     .path(FRAMES[frame % FRAMES.len()])
                     .size(px(14.0))
-                    .text_color(colors.secondary),
+                    .text_color(colors.primary),
             )
             .into_any_element(),
         StatusState::NeedsInput { destructive } => slot
             .child(Icon::new(
                 IconName::Warning,
                 14.0,
-                if destructive {
-                    Ink::DANGER
-                } else {
-                    Ink::ATTENTION
-                },
+                Ink::on_surface(
+                    if destructive {
+                        Ink::DANGER
+                    } else {
+                        Ink::ATTENTION
+                    },
+                    colors,
+                ),
             ))
             .into_any_element(),
         StatusState::DoneUnseen => slot
-            .child(Icon::new(IconName::Check, 14.0, Ink::FRESH))
+            .child(Icon::new(
+                IconName::Check,
+                14.0,
+                Ink::on_surface(Ink::FRESH, colors),
+            ))
             .into_any_element(),
         StatusState::Hibernated => slot
             .id("sleeping-status")
@@ -152,7 +159,12 @@ mod tests {
                 .load(path)
                 .expect("load activity frame")
                 .expect(path);
-            assert!(bytes.starts_with(b"<svg"), "{path}");
+            let svg = std::str::from_utf8(bytes.as_ref()).expect(path);
+            assert!(svg.starts_with("<svg"), "{path}");
+            assert!(
+                svg.contains("currentColor"),
+                "{path} must follow the theme color"
+            );
         }
     }
 

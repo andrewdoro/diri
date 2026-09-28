@@ -32,13 +32,64 @@ pub struct PersistedState {
     pub sessions: Vec<SessionRecord>,
 }
 
+/// What `load` reads: each session stays raw until it is decoded on its own,
+/// so one record this build cannot read never takes the rest down with it.
+#[derive(Deserialize)]
+struct LoadedState {
+    #[serde(default)]
+    projects: Vec<serde_json::Value>,
+    #[serde(default)]
+    sessions: Vec<serde_json::Value>,
+}
+
 impl PersistedState {
+    const VERSION: i64 = 1;
+
+    #[cfg(test)]
     fn current(sessions: Vec<SessionRecord>, projects: Vec<serde_json::Value>) -> Self {
         Self {
-            version: 1,
+            version: Self::VERSION,
             projects,
             sessions,
         }
+    }
+}
+
+/// The `sessions` section, folded with live state and sorted by id, streamed
+/// one record at a time instead of cloning the whole table first.
+struct PersistedRecords<'a>(&'a Registry);
+
+impl Serialize for PersistedRecords<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let registry = self.0;
+        let mut ids: Vec<&String> = registry.records.keys().collect();
+        ids.sort();
+        let mut sequence =
+            serializer.serialize_seq(Some(ids.len() + registry.unreadable_records.len()))?;
+        for id in ids {
+            let mut record = registry.records[id].clone();
+            registry.fold_live(&mut record);
+            sequence.serialize_element(&record)?;
+        }
+        for record in &registry.unreadable_records {
+            sequence.serialize_element(record)?;
+        }
+        sequence.end()
+    }
+}
+
+/// A Registry snapshot serialized under the Registry lock, committed later.
+pub(crate) struct PersistBatch {
+    file: JsonStateFile,
+    sequence: u64,
+    sections: Vec<(&'static str, Box<serde_json::value::RawValue>)>,
+}
+
+impl PersistBatch {
+    fn commit(self) -> std::io::Result<()> {
+        self.file
+            .commit_sections("registry", self.sequence, self.sections)
     }
 }
 
@@ -69,6 +120,14 @@ pub struct Registry {
     /// tab switch), and the flusher or the next persist call writes it out.
     dirty: bool,
     last_persist: Option<std::time::Instant>,
+    /// Orders prepared snapshots so one committed after releasing the
+    /// Registry lock can never replace a newer one on disk.
+    persist_sequence: u64,
+    /// Session records this build could not decode (typically written by a
+    /// newer one). They are kept verbatim and written back on every persist,
+    /// so a downgrade or an older build running side by side can never
+    /// delete them; the build that understands them picks them up again.
+    unreadable_records: Vec<serde_json::Value>,
     cursor_title_refresh_at: Option<std::time::Instant>,
     native_title_refresh_at: Option<std::time::Instant>,
 }
@@ -121,6 +180,10 @@ impl Drop for Registry {
 
 /// Flushes deferred persists on a short cadence. One per daemon, next to the
 /// events watcher.
+///
+/// The snapshot is serialized under the Registry lock, but the file write and
+/// its fsync happen after the lock is released, so control requests never
+/// queue behind a background flush's disk I/O.
 pub fn spawn_persist_flusher(
     registry: Arc<std::sync::Mutex<Registry>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
@@ -130,10 +193,19 @@ pub fn spawn_persist_flusher(
         .spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                 std::thread::sleep(PERSIST_DEBOUNCE);
-                let Ok(mut registry) = registry.lock() else {
-                    break;
+                let batch = {
+                    let Ok(mut registry) = registry.lock() else {
+                        break;
+                    };
+                    registry.take_dirty_batch()
                 };
-                let _ = registry.flush_dirty();
+                if let Some(batch) = batch
+                    && batch.commit().is_err()
+                    && let Ok(mut registry) = registry.lock()
+                {
+                    // Retry on the next tick with whatever is current then.
+                    registry.dirty = true;
+                }
             }
         })
         .expect("spawn persist flusher")
@@ -164,6 +236,8 @@ impl Registry {
             recovery_root,
             dirty: false,
             last_persist: None,
+            persist_sequence: 0,
+            unreadable_records: Vec::new(),
             cursor_title_refresh_at: None,
             native_title_refresh_at: None,
         }
@@ -184,8 +258,7 @@ impl Registry {
             Ok(Some(document)) => document,
             Ok(None) => return Ok(0),
             Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                let quarantine = self.state_file.path().with_extension("json.corrupt");
-                let _ = std::fs::rename(self.state_file.path(), &quarantine);
+                let quarantine = self.quarantine_state_file();
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
@@ -196,8 +269,22 @@ impl Registry {
             }
             Err(error) => return Err(error),
         };
-        match serde_json::from_value::<PersistedState>(serde_json::Value::Object(document)) {
+        match serde_json::from_value::<LoadedState>(serde_json::Value::Object(document)) {
             Ok(state) => {
+                let mut sessions = Vec::with_capacity(state.sessions.len());
+                self.unreadable_records.clear();
+                for raw in state.sessions {
+                    match serde_json::from_value::<SessionRecord>(raw.clone()) {
+                        Ok(record) => sessions.push(record),
+                        Err(error) => {
+                            let id = raw.get("id").and_then(|id| id.as_str()).unwrap_or("?");
+                            eprintln!(
+                                "diri-engine: keeping unreadable session record {id} verbatim: {error}"
+                            );
+                            self.unreadable_records.push(raw);
+                        }
+                    }
+                }
                 self.projects = state.projects;
                 let project_roots = self
                     .projects
@@ -209,9 +296,9 @@ impl Registry {
                         ))
                     })
                     .collect::<HashMap<_, _>>();
-                let mut locations = Vec::with_capacity(state.sessions.len());
+                let mut locations = Vec::with_capacity(sessions.len());
                 let mut repaired = Vec::new();
-                for mut record in state.sessions {
+                for mut record in sessions {
                     if let Some(home) = home
                         && repair_codex_conversation(&mut record, home)
                     {
@@ -243,8 +330,7 @@ impl Registry {
                 Ok(self.records.len())
             }
             Err(error) => {
-                let quarantine = self.state_file.path().with_extension("json.corrupt");
-                let _ = std::fs::rename(self.state_file.path(), &quarantine);
+                let quarantine = self.quarantine_state_file();
                 Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
@@ -254,6 +340,23 @@ impl Registry {
                 ))
             }
         }
+    }
+
+    /// Moves an unreadable state file aside without replacing an earlier
+    /// quarantine: each one may be the only copy of a whole fleet.
+    fn quarantine_state_file(&self) -> PathBuf {
+        let path = self.state_file.path();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis());
+        let mut quarantine = path.with_extension("json.corrupt");
+        let mut attempt = 0;
+        while quarantine.exists() {
+            attempt += 1;
+            quarantine = path.with_extension(format!("json.corrupt.{stamp}.{attempt}"));
+        }
+        let _ = std::fs::rename(path, &quarantine);
+        quarantine
     }
 
     /// Persists the current state — immediately when the last write is older
@@ -282,6 +385,14 @@ impl Registry {
         self.persist_now()
     }
 
+    /// Schedules a persist for the flusher without touching the disk on the
+    /// caller's thread. For state whose loss in a crash is harmless (which
+    /// tab was last looked at); anything a reply promises uses
+    /// [`persist_now`](Self::persist_now).
+    pub fn persist_deferred(&mut self) {
+        self.dirty = true;
+    }
+
     /// Writes out a deferred persist, if one is pending.
     pub fn flush_dirty(&mut self) -> std::io::Result<()> {
         if !self.dirty {
@@ -290,34 +401,44 @@ impl Registry {
         self.persist_now()
     }
 
-    /// Writes the current state atomically, unconditionally.
+    /// Writes the current state atomically and synchronously. Returns only
+    /// after the file is fsynced and renamed into place, or after confirming
+    /// the file already holds byte-identical sections.
     pub(crate) fn persist_now(&mut self) -> std::io::Result<()> {
-        let state = PersistedState::current(self.records_for_persistence(), self.projects.clone());
-        let known = serde_json::to_value(state)?;
-        let known = known
-            .as_object()
-            .expect("PersistedState serializes as an object");
-        self.state_file.update(|document| {
-            for key in ["version", "projects", "sessions"] {
-                document.insert(
-                    key.to_owned(),
-                    known.get(key).cloned().expect("known persistence key"),
-                );
-            }
-            Ok(())
-        })?;
+        self.prepare_persist()?.commit()?;
         self.dirty = false;
         self.last_persist = Some(std::time::Instant::now());
         Ok(())
     }
 
-    fn records_for_persistence(&self) -> Vec<SessionRecord> {
-        let mut records: Vec<SessionRecord> = self.records.values().cloned().collect();
-        for record in &mut records {
-            self.fold_live(record);
+    /// Serializes a pending persist and marks it taken, for a caller that
+    /// commits it after releasing the Registry lock.
+    fn take_dirty_batch(&mut self) -> Option<PersistBatch> {
+        if !self.dirty {
+            return None;
         }
-        records.sort_by(|a, b| a.id.0.cmp(&b.id.0));
-        records
+        let batch = self.prepare_persist().ok()?;
+        self.dirty = false;
+        self.last_persist = Some(std::time::Instant::now());
+        Some(batch)
+    }
+
+    /// Serializes the Registry's owned sections straight to JSON text: no
+    /// intermediate value tree and no copy of the whole record table.
+    fn prepare_persist(&mut self) -> std::io::Result<PersistBatch> {
+        let sessions = serde_json::value::to_raw_value(&PersistedRecords(self))?;
+        let projects = serde_json::value::to_raw_value(&self.projects)?;
+        let version = serde_json::value::to_raw_value(&PersistedState::VERSION)?;
+        self.persist_sequence += 1;
+        Ok(PersistBatch {
+            file: self.state_file.clone(),
+            sequence: self.persist_sequence,
+            sections: vec![
+                ("version", version),
+                ("projects", projects),
+                ("sessions", sessions),
+            ],
+        })
     }
 
     /// Adds (or replaces) a record without a live session — restores,
@@ -326,6 +447,36 @@ impl Registry {
     /// [`spawn`]: Registry::spawn
     pub fn insert_record(&mut self, record: SessionRecord) {
         self.records.insert(record.id.0.clone(), record);
+    }
+
+    /// Every session id something in this Registry still stands behind:
+    /// persisted records, live or launching sessions, and the in-memory
+    /// "reopen closed" stack. The startup orphan sweep keeps these ids' files.
+    pub fn referenced_session_ids(&self) -> std::collections::HashSet<String> {
+        self.records
+            .keys()
+            .chain(self.sessions.keys())
+            .chain(self.pending_launches.iter())
+            .cloned()
+            .chain(
+                self.recently_closed
+                    .iter()
+                    .map(|record| record.id.0.clone()),
+            )
+            // A record this build cannot read still owns its holder, logs and
+            // recovery capsule; sweeping them would lose it after all.
+            .chain(self.unreadable_records.iter().filter_map(|record| {
+                record
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_owned)
+            }))
+            .collect()
+    }
+
+    /// The `sessions/` directory holding each session's recovery files.
+    pub fn recovery_root(&self) -> &Path {
+        &self.recovery_root
     }
 
     /// Exact directory exported to this session's hook/notify process.
@@ -454,9 +605,15 @@ impl Registry {
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
-            let Some((capture, run)) = self.sessions.get(&id).and_then(|session| {
-                Some((session.take_completed_capture()?, session.holder_run()?))
-            }) else {
+            let Some(session) = self.sessions.get(&id) else {
+                continue;
+            };
+            // The capture is one-shot. A fast exit can land before the Holder
+            // reports its identity; taking the capture first drops it.
+            let Some(run) = session.holder_run() else {
+                continue;
+            };
+            let Some(capture) = session.take_completed_capture() else {
                 continue;
             };
             // Publish against the folded record so its status carries the
@@ -899,6 +1056,10 @@ impl Registry {
             .unwrap_or_default()
     }
 
+    pub fn take_clipboard(&self, id: &str) -> Option<String> {
+        self.sessions.get(id)?.take_clipboard()
+    }
+
     pub fn changed_since(
         &mut self,
         published: &mut HashMap<String, u64>,
@@ -1218,7 +1379,10 @@ impl Registry {
             return Err(error);
         }
         if plan.delete_output_log {
-            let _ = std::fs::remove_file(logs_dir.join(format!("{id}.bin")));
+            // The log, its screen checkpoint and the attention store all die
+            // with the record; leaving the sidecars is how closed sessions
+            // accumulated hundreds of MB.
+            let _ = crate::session_files::remove_log_files(logs_dir, id);
         }
         // The retained terminal belongs to this record; nothing else may
         // find it once the binding below is gone, so remove it too.
@@ -1242,9 +1406,20 @@ impl Registry {
     /// remote cwd can't be checked locally, so it always qualifies) and
     /// re-lists it. The caller drives the resume path from there.
     pub fn reopen_last_closed(&mut self) -> Option<SessionRecord> {
-        while let Some(record) = self.recently_closed.pop() {
+        while let Some(mut record) = self.recently_closed.pop() {
             if record.host.is_none() && !Path::new(&record.cwd).exists() {
                 continue; // the folder is gone; try the next candidate
+            }
+            // The stack holds the record as it was before the close, so it
+            // still claims its last live status. Nothing runs under it now;
+            // re-listing it live would leave clients attaching to no PTY.
+            if !matches!(record.status, SessionStatus::Exited(_)) {
+                record.status = SessionStatus::Exited(diri_proto::ExitInfo {
+                    reason: diri_proto::ExitReason::Exited,
+                    code: None,
+                    signal: None,
+                });
+                record.needs_input = None;
             }
             self.records.insert(record.id.0.clone(), record.clone());
             return Some(record);
@@ -1539,6 +1714,11 @@ impl Registry {
             record.listening_ports = Some(ports);
             ports_changed = true;
         }
+        // A session's own list restarts empty when the daemon does, so a
+        // sample adds to what the record already holds rather than replacing it.
+        let artifacts = artifacts.map(|artifacts| {
+            crate::artifacts::merge(record.artifacts.iter().flatten().cloned().chain(artifacts))
+        });
         if let Some(artifacts) = artifacts
             && record.artifacts.as_deref().unwrap_or_default() != artifacts
         {
@@ -1784,6 +1964,20 @@ impl Registry {
 
     pub fn state_file(&self) -> &Path {
         self.state_file.path()
+    }
+
+    /// The Registry's own state-file handle, so other owners of sections in
+    /// the same file share its validated image instead of re-parsing it.
+    pub(crate) fn state_file_handle(&self) -> JsonStateFile {
+        self.state_file.clone()
+    }
+
+    /// Session identity and owning project, without cloning or folding records.
+    pub(crate) fn session_projects(&self) -> HashMap<diri_proto::SessionId, diri_proto::ProjectId> {
+        self.records
+            .values()
+            .map(|record| (record.id.clone(), record.project_id.clone()))
+            .collect()
     }
 
     fn claimed_agent_ids(&self, except: Option<&str>) -> HashSet<String> {
@@ -2572,6 +2766,36 @@ mod tests {
     }
 
     #[test]
+    fn a_restarted_session_adds_links_instead_of_forgetting_old_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut registry = Registry::new(engine(), temp.path().join("state.json"));
+        registry.records.insert("s".into(), record("s"));
+        let link = |url: &str, at: f64| diri_proto::SessionArtifact {
+            kind: diri_proto::ArtifactKind::Link,
+            url: url.into(),
+            first_seen_at: DateMillis(at),
+        };
+        registry.apply_resource_sample("s", None, None, Some(vec![link("https://a.dev/x", 1.0)]));
+        // After a daemon restart the session's own list starts over.
+        let event = registry
+            .apply_resource_sample("s", None, None, Some(vec![link("https://b.dev/y", 2.0)]))
+            .expect("the new link is an update");
+        let urls: Vec<_> = event
+            .artifacts
+            .unwrap()
+            .into_iter()
+            .map(|artifact| artifact.url)
+            .collect();
+        assert_eq!(urls, ["https://a.dev/x", "https://b.dev/y"]);
+        assert!(
+            registry
+                .apply_resource_sample("s", None, None, Some(vec![link("https://a.dev/x", 3.0)]))
+                .is_none(),
+            "a link the record already holds changes nothing"
+        );
+    }
+
+    #[test]
     fn launch_reservation_rejects_overlapping_owners_and_wrong_record_state() {
         let temp = tempfile::tempdir().unwrap();
         let mut registry = Registry::new(engine(), temp.path().join("state.json"));
@@ -2603,6 +2827,96 @@ mod tests {
         let mut restarted = Registry::new(engine(), path);
         restarted.load().unwrap();
         assert_eq!(restarted.records()[0].remote_connection, None);
+    }
+
+    #[cfg(unix)]
+    fn file_identity(path: &Path) -> (u64, i64, i64) {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).unwrap();
+        (metadata.ino(), metadata.mtime(), metadata.mtime_nsec())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unchanged_persist_does_not_rewrite_the_state_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.json");
+        let mut registry = Registry::new(engine(), &path);
+        registry.insert_record(record("s_1"));
+        registry.persist_now().unwrap();
+        let written = file_identity(&path);
+
+        registry.persist_now().unwrap();
+        registry.persist_for_shutdown().unwrap();
+        assert_eq!(file_identity(&path), written);
+
+        registry.mark_seen("s_1").unwrap();
+        registry.persist_now().unwrap();
+        assert_ne!(file_identity(&path), written);
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(state["sessions"][0]["lastSeenAt"].is_number());
+    }
+
+    #[test]
+    fn registry_persist_keeps_sections_other_writers_own() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.json");
+        let mut registry = Registry::new(engine(), &path);
+        registry.insert_record(record("s_1"));
+        registry.persist_now().unwrap();
+
+        // A separate handle, as another process would have, writes its own
+        // section after the Registry cached the file.
+        let workspaces = crate::workspace::WorkspaceStore::new(&path);
+        let created = workspaces
+            .apply(
+                diri_proto::workspace::WorkspaceMutationParams {
+                    expected_revision: 0,
+                    mutation: diri_proto::workspace::WorkspaceMutation::CreateWorkspace {
+                        name: "kept".into(),
+                    },
+                },
+                &HashSet::new(),
+            )
+            .unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        document["future"] = serde_json::json!({"theme": "plum"});
+        std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        registry.mark_seen("s_1").unwrap();
+        registry.persist_now().unwrap();
+
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(state["sessions"][0]["lastSeenAt"].is_number());
+        assert_eq!(state["future"]["theme"], "plum");
+        assert_eq!(
+            crate::workspace::WorkspaceStore::new(&path)
+                .snapshot()
+                .unwrap(),
+            created
+        );
+    }
+
+    #[test]
+    fn a_background_flush_never_lands_an_older_snapshot_over_a_newer_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.json");
+        let mut registry = Registry::new(engine(), &path);
+        registry.insert_record(record("older"));
+        registry.persist_deferred();
+        // The flusher serializes under the lock, then commits after release...
+        let batch = registry.take_dirty_batch().expect("dirty batch");
+        // ...while a request thread persists newer state synchronously first.
+        registry.insert_record(record("newer"));
+        registry.persist_now().unwrap();
+        batch.commit().unwrap();
+
+        let mut reloaded = Registry::new(engine(), &path);
+        assert_eq!(reloaded.load().unwrap(), 2);
+        assert!(reloaded.record("newer").is_some());
     }
 
     #[test]
@@ -3030,6 +3344,72 @@ mod tests {
             temp.path().join("state.json.corrupt").exists(),
             "the unreadable file should still be recoverable by hand"
         );
+    }
+
+    #[test]
+    fn a_record_from_a_newer_build_never_takes_the_fleet_down() {
+        // 2026-09-15: an older daemon met one titleSource value it did not
+        // know and quarantined all 86 sessions. One unreadable record must
+        // cost nothing: the rest load, and it is written back untouched for
+        // the build that can read it.
+        let temp = tempfile::tempdir().expect("temp");
+        let state_file = temp.path().join("state.json");
+        let readable = serde_json::to_value(record("s_readable")).expect("encode");
+        let mut future = serde_json::to_value(record("s_future")).expect("encode");
+        future["titleSource"] = serde_json::json!("fromTheFuture");
+        future["newField"] = serde_json::json!({ "kept": true });
+        std::fs::write(
+            &state_file,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "projects": [],
+                "sessions": [readable, future.clone()],
+            }))
+            .expect("encode state"),
+        )
+        .expect("write");
+
+        let mut registry = Registry::new(engine(), &state_file);
+        assert_eq!(
+            registry.load().expect("one bad record is not a bad file"),
+            1
+        );
+        assert!(registry.record("s_readable").is_some());
+        assert!(!temp.path().join("state.json.corrupt").exists());
+        assert!(
+            registry.referenced_session_ids().contains("s_future"),
+            "the orphan sweep must not delete an unreadable session's files"
+        );
+
+        registry.insert_record(record("s_new"));
+        registry.persist_now().expect("persist");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).expect("read")).expect("json");
+        let sessions = written["sessions"].as_array().expect("sessions");
+        assert_eq!(sessions.len(), 3);
+        assert!(
+            sessions.contains(&future),
+            "the unreadable record must survive the write verbatim"
+        );
+    }
+
+    #[test]
+    fn quarantines_never_replace_an_earlier_one() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state_file = temp.path().join("state.json");
+        for body in [&b"{ first"[..], &b"{ second"[..]] {
+            std::fs::write(&state_file, body).expect("write");
+            let mut registry = Registry::new(engine(), &state_file);
+            registry.load().expect_err("corrupt state must be an error");
+        }
+        let mut kept: Vec<Vec<u8>> = std::fs::read_dir(temp.path())
+            .expect("dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt"))
+            .map(|entry| std::fs::read(entry.path()).expect("read"))
+            .collect();
+        kept.sort();
+        assert_eq!(kept, vec![b"{ first".to_vec(), b"{ second".to_vec()]);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Headless application state and the thin asynchronous daemon adapter.
 
+mod herdr;
 mod prefs;
 mod projection;
 mod residency;
@@ -25,8 +26,9 @@ use tokio::sync::{Notify, broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::notifications::{
-    SendTextCommand, StatusTransition, immediate_transitions_for_update, migration_transition,
-    prefs_sync_transition, reach_failure_transition,
+    SendTextCommand, StatusTransition, agent_installed_transition,
+    immediate_transitions_for_update, migration_transition, prefs_sync_transition,
+    reach_failure_transition,
 };
 use crate::switcher::{
     OverviewArrow, OverviewFilter, OverviewMode, OverviewOutcome, SessionOverviewState,
@@ -70,6 +72,11 @@ const UI_PUBLISH_INTERVAL: Duration = Duration::from_millis(50);
 // that, repeated Refresh clicks would queue daemon-side scans that each hold a
 // thread behind the same per-target single-flight lock.
 const MAX_AGENT_CATALOG_SCANS: u32 = 2;
+
+// A started install is watched for ten minutes: long enough for a slow
+// download, short enough that a closed installer tab stops costing scans.
+const AGENT_INSTALL_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+const AGENT_INSTALL_SCANS: u32 = 120;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StoreEventChange {
@@ -160,6 +167,18 @@ pub enum StoreEffect {
         title: String,
     },
     Spawn(SessionSpawnParams),
+    /// Read herdr's saved sessions off the main thread.
+    ScanHerdr {
+        tracked: HashSet<String>,
+        imported: HashSet<String>,
+    },
+    /// Open every planned herdr pane as a Diri session, in herdr's order.
+    ImportHerdr(Vec<herdr::ImportStep>),
+    /// Rescan this Mac until the Agent the user is installing appears.
+    WatchAgentInstall {
+        kind: AgentKind,
+        display_name: String,
+    },
     WorkspaceSpawn {
         id: u64,
         params: Option<SessionSpawnParams>,
@@ -362,6 +381,9 @@ pub struct SessionStore {
     auxiliary_slots: HashMap<(SessionId, usize), SessionId>,
     auxiliary_pending: HashSet<(SessionId, usize)>,
     projects: HashMap<ProjectId, Project>,
+    /// Projects in the order the Engine first saw them. Its list is
+    /// append-only, which makes this the one order here that never reshuffles.
+    project_seniority: Vec<ProjectId>,
     selected_session_id: Option<SessionId>,
     sidebar_selection: HashSet<SessionId>,
     pending_close: Option<PendingClose>,
@@ -419,6 +441,10 @@ pub struct SessionStore {
     /// spinner has to stay up until the last of them replies.
     agent_catalog_scans: HashMap<String, u32>,
     agent_catalog_errors: HashMap<String, String>,
+    /// The Agent whose installer the user started from Diri. While set, the
+    /// runtime rescans this Mac so setup surfaces flip to ready unprompted.
+    agent_install: Option<AgentKind>,
+    herdr: herdr::HerdrState,
     /// Attention states serving out their settle window, newest arming wins.
     /// Drained by the settle task in `StoreHandle`, which is what turns one of
     /// these into a chime and a banner — see `drain_settled_attention`.
@@ -426,6 +452,9 @@ pub struct SessionStore {
     /// Wakes the settle task when a window is armed early enough to beat the
     /// one it is currently sleeping on.
     attention_wake: Arc<Notify>,
+    /// Text terminal programs copied with OSC 52, for the application to put
+    /// on the system clipboard.
+    terminal_clipboard: broadcast::Sender<String>,
     effects: mpsc::UnboundedSender<StoreEffect>,
 }
 
@@ -473,6 +502,7 @@ impl SessionStore {
                 auxiliary_slots: HashMap::new(),
                 auxiliary_pending: HashSet::new(),
                 projects: HashMap::new(),
+                project_seniority: Vec::new(),
                 selected_session_id: selected_session_id.clone(),
                 sidebar_selection: HashSet::new(),
                 pending_close: None,
@@ -509,8 +539,11 @@ impl SessionStore {
                 agents: HashMap::new(),
                 agent_catalog_scans: HashMap::new(),
                 agent_catalog_errors: HashMap::new(),
+                agent_install: None,
+                herdr: herdr::HerdrState::default(),
                 notification_feed,
                 attention_wake: Arc::new(Notify::new()),
+                terminal_clipboard: broadcast::channel(4).0,
                 effects,
             },
             receiver,
@@ -519,6 +552,23 @@ impl SessionStore {
 
     pub fn notifications(&self) -> &crate::notification_feed::NotificationFeed {
         &self.notification_feed
+    }
+
+    pub fn terminal_clipboard_writes(&self) -> broadcast::Receiver<String> {
+        self.terminal_clipboard.subscribe()
+    }
+
+    /// Relays an OSC 52 copy while the user is in Diri. A write from a session
+    /// this store does not know, or one delayed past a gesture's plausible
+    /// reach (an event replayed after a reconnect), must not replace the
+    /// clipboard.
+    fn accept_terminal_clipboard(&self, event: diri_proto::SessionClipboardEvent) -> bool {
+        const MAX_AGE_MS: f64 = 5_000.0;
+        let known = self.sessions.get(&event.session_id).is_some_and(|session| {
+            !session.is_archived() && session.created_at == event.session_created_at
+        });
+        let fresh = (now_millis().0 - event.occurred_at.0).abs() <= MAX_AGE_MS;
+        known && fresh && self.app_is_active && self.terminal_clipboard.send(event.text).is_ok()
     }
 
     fn notification_change(&self, dismiss: Vec<String>) {
@@ -728,6 +778,40 @@ impl SessionStore {
         self.emit(StoreEffect::RefreshAgents { host, force });
     }
 
+    /// Runs an Agent's vendor installer where the user can watch it: a
+    /// Terminal session in the home folder with the command typed in. Only
+    /// this Mac is offered; a remote target keeps its setup guide.
+    pub(crate) fn install_agent(
+        &mut self,
+        option: &crate::agent_catalog::AgentOption,
+        window_target: Option<WindowSpawnTarget>,
+    ) -> bool {
+        let Some(install) = &option.install else {
+            return false;
+        };
+        self.spawn_kind(
+            AgentKind::SHELL,
+            SpawnOptions {
+                window_target,
+                cwd: Some(std::env::var("HOME").unwrap_or_else(|_| "/".to_owned())),
+                title: Some(format!("Install {}", option.display_name)),
+                initial_prompt: Some(install.command.clone()),
+                ..SpawnOptions::default()
+            },
+        );
+        self.agent_install = Some(option.kind.clone());
+        self.emit(StoreEffect::WatchAgentInstall {
+            kind: option.kind.clone(),
+            display_name: option.display_name.clone(),
+        });
+        true
+    }
+
+    /// The Agent being installed from Diri, until detection finds it.
+    pub fn installing_agent(&self) -> Option<&AgentKind> {
+        self.agent_install.as_ref()
+    }
+
     pub fn configure_agent(&mut self, params: diri_proto::AgentConfigureParams) {
         // Configuration is a user mutation, not a cache refresh: it must reach
         // the engine even while a scan for the same target is in flight, or a
@@ -919,6 +1003,10 @@ impl SessionStore {
         if let Some(id) = id {
             self.auxiliary_slots.insert((parent, slot), id);
         }
+    }
+
+    pub(crate) fn project_seniority(&self) -> &[ProjectId] {
+        &self.project_seniority
     }
 
     pub fn projects(&self) -> &HashMap<ProjectId, Project> {
@@ -1473,6 +1561,11 @@ impl SessionStore {
             .into_iter()
             .map(|session| (session.id.clone(), Arc::new(session)))
             .collect();
+        self.project_seniority = result
+            .projects
+            .iter()
+            .map(|project| project.id.clone())
+            .collect();
         self.projects = result
             .projects
             .into_iter()
@@ -1558,6 +1651,14 @@ impl SessionStore {
                 } else {
                     self.refresh_workspaces();
                 }
+            }
+            EventName::SESSION_CLIPBOARD => {
+                if let Ok(event) =
+                    serde_json::from_value::<diri_proto::SessionClipboardEvent>(event.params)
+                {
+                    self.accept_terminal_clipboard(event);
+                }
+                return StoreEventChange::None;
             }
             EventName::SESSION_NOTIFICATION => {
                 if let Ok(mut event) =
@@ -1662,6 +1763,9 @@ impl SessionStore {
                     if self.projects.get(&project.id) == Some(&project) {
                         return StoreEventChange::None;
                     }
+                    if !self.projects.contains_key(&project.id) {
+                        self.project_seniority.push(project.id.clone());
+                    }
                     self.projects.insert(project.id.clone(), project);
                     self.invalidate_projection();
                     self.sync_sidebar_order();
@@ -1701,6 +1805,12 @@ impl SessionStore {
                         && info.code == Some(0)
                         && !session.can_resume()
             )
+            // A conversation Diri cannot re-enter (an agent without resume, a
+            // pruned transcript, Stop on an agent that exits 0) still has its
+            // scrollback as the only in-app record; only a tab that never
+            // bound a conversation is disposable.
+            && session.agent_session_id.is_none()
+            && session.transcript_path.is_none()
             && previous
                 .as_deref()
                 .is_none_or(|record| !matches!(record.status, SessionStatus::Exited(_)));
@@ -2156,7 +2266,9 @@ impl SessionStore {
     }
 
     /// Every session that closing `ids` terminates: the rows themselves and
-    /// their auxiliary terminals, which never outlive their parent.
+    /// their auxiliary terminals, which never outlive their parent. A shell
+    /// already in `closing` was removed with its terminal tab; its record can
+    /// still be here until the engine drops it, and must not be counted again.
     pub(crate) fn closure_set(&self, ids: Vec<SessionId>) -> Vec<SessionId> {
         let mut ids = ids;
         let parents: HashSet<_> = ids.iter().cloned().collect();
@@ -2169,6 +2281,7 @@ impl SessionStore {
                     .as_ref()
                     .is_some_and(|parent| parents.contains(parent))
                     && is_auxiliary_terminal(session)
+                    && !self.closing.contains(&session.id)
             })
             .map(|session| session.id.clone())
             .collect();
@@ -2378,7 +2491,11 @@ impl SessionStore {
             options.host = self.default_spawn_host();
         }
         let target_host = options.host.clone();
-        if self.agent_catalog(target_host.as_deref()).is_none() {
+        // A Terminal default needs no readiness facts: a login shell is always
+        // launchable, so ⌘T must not wait on the Agent scan.
+        if !self.prefs.default_agent.is_terminal()
+            && self.agent_catalog(target_host.as_deref()).is_none()
+        {
             let target = target_host
                 .as_deref()
                 .map_or_else(|| "this Mac".to_owned(), |id| self.host_display_name(id));
@@ -3142,6 +3259,7 @@ impl StoreRuntime {
                                 let mut store =
                                     state_store.write().expect("session store lock poisoned");
                                 store.hydrate(list);
+                                store.request_herdr_scan();
                                 store.snapshot()
                             };
                             state_snapshots.send_replace(snapshot);
@@ -3591,6 +3709,74 @@ async fn run_effects(
                 });
                 Ok(())
             }
+            StoreEffect::ScanHerdr { tracked, imported } => {
+                tokio::spawn(herdr::scan(
+                    tracked,
+                    imported,
+                    Arc::clone(&store),
+                    change_tx.clone(),
+                ));
+                Ok(())
+            }
+            StoreEffect::ImportHerdr(steps) => {
+                tokio::spawn(herdr::import(
+                    steps,
+                    Arc::clone(&client),
+                    Arc::clone(&store),
+                    change_tx.clone(),
+                    status_tx.clone(),
+                ));
+                Ok(())
+            }
+            StoreEffect::WatchAgentInstall { kind, display_name } => {
+                let client = Arc::clone(&client);
+                let store = Arc::clone(&store);
+                let change_tx = change_tx.clone();
+                let status_tx = status_tx.clone();
+                tokio::spawn(async move {
+                    // Installers finish in seconds to a few minutes. Bounded,
+                    // so an abandoned install cannot leave a scan loop behind.
+                    for _ in 0..AGENT_INSTALL_SCANS {
+                        tokio::time::sleep(AGENT_INSTALL_SCAN_INTERVAL).await;
+                        let watching =
+                            |store: &SessionStore| store.agent_install.as_ref() == Some(&kind);
+                        if !watching(&store.read().expect("session store lock poisoned")) {
+                            return;
+                        }
+                        let Ok(catalog) = client
+                            .agent_readiness(diri_proto::AgentReadinessParams {
+                                host: None,
+                                force_refresh: true,
+                            })
+                            .await
+                        else {
+                            continue;
+                        };
+                        let installed = crate::agent_catalog::kind_spawnable(&kind, Some(&catalog));
+                        let mut locked = store.write().expect("session store lock poisoned");
+                        if !watching(&locked) {
+                            return;
+                        }
+                        locked.set_agent_catalog(catalog);
+                        if installed {
+                            locked.agent_install = None;
+                        }
+                        drop(locked);
+                        let _ = change_tx.send(());
+                        if installed {
+                            let _ = status_tx.send(agent_installed_transition(&display_name));
+                            return;
+                        }
+                    }
+                    let mut locked = store.write().expect("session store lock poisoned");
+                    if locked.agent_install.as_ref() == Some(&kind) {
+                        locked.agent_install = None;
+                        drop(locked);
+                        let _ = change_tx.send(());
+                    }
+                });
+                Ok(())
+            }
             StoreEffect::ConfigureAgent(params) => {
                 let client = Arc::clone(&client);
                 let store = Arc::clone(&store);
@@ -3711,7 +3897,11 @@ fn action_context(effect: &StoreEffect) -> Option<ActionContext> {
         // Catalog failures land in `agent_catalog_errors`, which the Agents
         // settings page and launch surfaces render in place — a toast on top
         // would double-report every unreachable host.
-        StoreEffect::RefreshAgents { .. } | StoreEffect::ConfigureAgent(_) => return None,
+        StoreEffect::RefreshAgents { .. }
+        | StoreEffect::ConfigureAgent(_)
+        | StoreEffect::WatchAgentInstall { .. } => return None,
+        // Import outcomes, failures included, arrive as one summary banner.
+        StoreEffect::ScanHerdr { .. } | StoreEffect::ImportHerdr(_) => return None,
     };
     Some(ActionContext { title, retry })
 }

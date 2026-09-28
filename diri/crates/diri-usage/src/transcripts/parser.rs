@@ -1,7 +1,8 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashSet},
     fs::File,
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::Path,
 };
 
@@ -22,12 +23,12 @@ pub(crate) fn parse_claude(
     seen_all: &mut HashSet<u64>,
     seen_by_hour: &mut BTreeMap<i64, Vec<u64>>,
 ) -> io::Result<u64> {
-    let Some((data, consumed)) = read_complete_lines(path, offset)? else {
-        return Ok(0);
-    };
-
-    for line in data.split(|byte| *byte == b'\n') {
-        if line.is_empty() || !contains_bytes(line, b"\"usage\"") {
+    let mut lines = CompleteLines::open(path, offset)?;
+    while let Some(line) = lines.next_line()? {
+        if line.is_empty()
+            || !contains_bytes(line, b"\"usage\"")
+            || !may_be_kind(line, "assistant", None)
+        {
             continue;
         }
         let Ok(object) = serde_json::from_slice::<Value>(line) else {
@@ -101,7 +102,7 @@ pub(crate) fn parse_claude(
         super::dashboard::record(details, model, hour, aggregate, match_claude(model), 0);
         hours.entry(hour).or_default().merge(aggregate);
     }
-    Ok(consumed)
+    Ok(lines.consumed())
 }
 
 /// Cumulative counters identify a re-emitted usage event without confusing it
@@ -122,17 +123,15 @@ pub(crate) fn parse_codex(
     model: &mut Option<String>,
     previous_total: &mut Option<CodexTotal>,
 ) -> io::Result<u64> {
-    let Some((data, consumed)) = read_complete_lines(path, offset)? else {
-        return Ok(0);
-    };
-
-    for line in data.split(|byte| *byte == b'\n') {
+    let mut lines = CompleteLines::open(path, offset)?;
+    while let Some(line) = lines.next_line()? {
         if line.is_empty() {
             continue;
         }
 
         if contains_bytes(line, b"\"turn_context\"") {
-            if let Ok(object) = serde_json::from_slice::<Value>(line)
+            if may_be_kind(line, "turn_context", None)
+                && let Ok(object) = serde_json::from_slice::<Value>(line)
                 && object.get("type").and_then(Value::as_str) == Some("turn_context")
                 && let Some(current) = object
                     .get("payload")
@@ -144,7 +143,9 @@ pub(crate) fn parse_codex(
             continue;
         }
 
-        if !contains_bytes(line, b"\"token_count\"") {
+        if !contains_bytes(line, b"\"token_count\"")
+            || !may_be_kind(line, "event_msg", Some("token_count"))
+        {
             continue;
         }
         let Ok(object) = serde_json::from_slice::<Value>(line) else {
@@ -226,20 +227,56 @@ pub(crate) fn parse_codex(
         );
         hours.entry(hour).or_default().merge(aggregate);
     }
-    Ok(consumed)
+    Ok(lines.consumed())
 }
 
-fn read_complete_lines(path: &Path, offset: u64) -> io::Result<Option<(Vec<u8>, u64)>> {
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(offset))?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
-    let Some(last_newline) = data.iter().rposition(|byte| *byte == b'\n') else {
-        return Ok(None);
-    };
-    data.truncate(last_newline + 1);
-    let consumed = u64::try_from(data.len()).expect("transcript tails fit in u64");
-    Ok(Some((data, consumed)))
+/// Streams the newline-terminated lines after `offset`, one at a time.
+///
+/// Transcripts reach hundreds of MiB (a long Codex rollout was 757 MB), and
+/// reading the whole tail at once made the app's footprint peak at several
+/// times that while `Vec` doubled. Only one line is buffered here. A trailing
+/// line without its newline is still being written: it is neither yielded
+/// nor counted, so the next scan resumes at its start.
+struct CompleteLines {
+    reader: BufReader<File>,
+    line: Vec<u8>,
+    consumed: u64,
+}
+
+impl CompleteLines {
+    fn open(path: &Path, offset: u64) -> io::Result<Self> {
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        Ok(Self {
+            reader: BufReader::with_capacity(64 * 1_024, file),
+            line: Vec::new(),
+            consumed: 0,
+        })
+    }
+
+    /// The next complete line without its newline, or `None` at the end of
+    /// the complete lines.
+    fn next_line(&mut self) -> io::Result<Option<&[u8]>> {
+        self.line.clear();
+        let read = match self.reader.read_until(b'\n', &mut self.line) {
+            Ok(read) => read,
+            // Lines already yielded have updated the caller's aggregates and
+            // dedup sets. Stop at that consistent point instead of failing
+            // the file; the next scan resumes after the last complete line.
+            Err(_) if self.consumed > 0 => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if read == 0 || self.line.last() != Some(&b'\n') {
+            return Ok(None);
+        }
+        self.consumed += read as u64;
+        Ok(Some(&self.line[..read - 1]))
+    }
+
+    /// Bytes of the complete lines yielded so far.
+    fn consumed(&self) -> u64 {
+        self.consumed
+    }
 }
 
 pub(crate) fn tail_hash(path: &Path, offset: u64) -> io::Result<u64> {
@@ -254,6 +291,38 @@ pub(crate) fn tail_hash(path: &Path, offset: u64) -> io::Result<u64> {
     let mut bytes = vec![0; usize::try_from(offset - start).expect("hash window fits usize")];
     file.read_exact(&mut bytes)?;
     Ok(fnv1a_bytes(&bytes))
+}
+
+/// The `type` tags that decide whether a line is a usage record.
+#[derive(serde::Deserialize)]
+struct LineKind<'a> {
+    #[serde(rename = "type", borrow, default)]
+    kind: Option<Cow<'a, str>>,
+    #[serde(borrow, default)]
+    payload: Option<PayloadKind<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct PayloadKind<'a> {
+    #[serde(rename = "type", borrow, default)]
+    kind: Option<Cow<'a, str>>,
+}
+
+/// False only when the line certainly is not a `kind` record (with payload
+/// type `payload`). Every other field is skipped without being built, so a
+/// multi-MiB line that merely mentions "token_count" (compacted history,
+/// tool output quoting a transcript) no longer materializes a `Value` tree
+/// several times its size. Anything unusual (a non-object payload, a
+/// non-string tag, duplicate keys) returns true and leaves the decision to
+/// the full parse, exactly as before.
+fn may_be_kind(line: &[u8], kind: &str, payload: Option<&str>) -> bool {
+    let Ok(tags) = serde_json::from_slice::<LineKind>(line) else {
+        return true;
+    };
+    tags.kind.as_deref() == Some(kind)
+        && payload.is_none_or(|payload| {
+            tags.payload.and_then(|tags| tags.kind).as_deref() == Some(payload)
+        })
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -277,4 +346,45 @@ fn fnv1a_bytes(value: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_be_kind;
+
+    #[test]
+    fn tag_probe_only_rules_out_lines_it_fully_understood() {
+        let event =
+            br#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{}}}"#;
+        assert!(may_be_kind(event, "event_msg", Some("token_count")));
+        let reordered = br#"{"payload":{"info":{},"type":"token_count"},"type":"event_msg"}"#;
+        assert!(may_be_kind(reordered, "event_msg", Some("token_count")));
+        let nested = br#"{"type":"compacted","payload":{"history":[{"type":"token_count"}]}}"#;
+        assert!(!may_be_kind(nested, "event_msg", Some("token_count")));
+        assert!(!may_be_kind(
+            br#"{"type":"user","message":{"usage":1}}"#,
+            "assistant",
+            None
+        ));
+        assert!(may_be_kind(
+            br#"{"type":"assistant","message":{}}"#,
+            "assistant",
+            None
+        ));
+        // Shapes the probe does not model fall through to the full parse.
+        assert!(may_be_kind(
+            br#"{"type":"event_msg","payload":"token_count"}"#,
+            "event_msg",
+            Some("token_count")
+        ));
+        assert!(may_be_kind(br#"{"type":7}"#, "assistant", None));
+        assert!(may_be_kind(
+            br#"{"type":"user","type":"assistant"}"#,
+            "assistant",
+            None
+        ));
+        assert!(may_be_kind(b"not json", "assistant", None));
+        // Escaped tags still compare by their decoded value.
+        assert!(may_be_kind(br#"{"type":"assistant"}"#, "assistant", None));
+    }
 }

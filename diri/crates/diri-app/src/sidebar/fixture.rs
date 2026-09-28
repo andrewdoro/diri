@@ -7,6 +7,8 @@ use diri_proto::{
 
 use crate::store::{InspectorTab, Prefs, SessionStore};
 
+mod projects;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PreviewScenario {
     #[default]
@@ -15,6 +17,8 @@ pub enum PreviewScenario {
     Empty,
     Artifacts,
     Fleet,
+    /// Several projects at once, for judging how they are told apart.
+    Projects,
 }
 
 impl PreviewScenario {
@@ -24,6 +28,7 @@ impl PreviewScenario {
             Some("empty") => Self::Empty,
             Some("artifacts") => Self::Artifacts,
             Some("fleet") => Self::Fleet,
+            Some("projects") => Self::Projects,
             _ => Self::Typical,
         }
     }
@@ -54,6 +59,9 @@ impl SidebarPreviewFixture {
         // A stable clock makes screenshot output deterministic while retaining
         // the exact relative intervals used by the Swift fixture.
         let now = 1_750_000_000_000.0;
+        if scenario == PreviewScenario::Projects {
+            return projects::make(now);
+        }
         let dirijor = project(
             "preview-dirijor",
             "/Users/preview/Projects/dirijor",
@@ -432,6 +440,63 @@ tokio::spawn(async move { clone_repository(request).await });
             store.select(id);
         }
         store
+    }
+}
+
+/// A fleet shaped like a busy installed app for render-cost benchmarks:
+/// `total` sessions spread over five projects, the first `working` of them
+/// working and the rest idle, with titles of varied length.
+#[cfg(all(test, target_os = "macos"))]
+impl SidebarPreviewFixture {
+    pub(crate) fn bench_fleet(total: usize, working: usize) -> Self {
+        let now = 1_750_000_000_000.0;
+        let projects: Vec<Project> = ["dirijor", "anara", "settings-kit", "infra", "notes"]
+            .iter()
+            .map(|name| {
+                project(
+                    &format!("bench-{name}"),
+                    &format!("/Users/preview/Projects/{name}"),
+                    name,
+                )
+            })
+            .collect();
+        let titles = [
+            "Polish the left sidebar hierarchy",
+            "Fix flaky reconnect test",
+            "Investigate why the terminal repaints after resize on external displays",
+            "Review PR",
+            "Port the usage store",
+            "Tune governor thresholds for quiescence",
+        ];
+        let kinds = [AgentKind::CODEX, AgentKind::CLAUDE_CODE, AgentKind::CURSOR];
+        let sessions: Vec<SessionRecord> = (0..total)
+            .map(|index| {
+                let status = if index < working {
+                    SessionStatus::Working
+                } else {
+                    SessionStatus::Idle
+                };
+                session(
+                    &format!("bench-{index}"),
+                    kinds[index % kinds.len()].clone(),
+                    &projects[index % projects.len()],
+                    &format!("{} #{index}", titles[index % titles.len()]),
+                    status,
+                    (index % 4 == 0).then_some("feature-branch"),
+                    now - minutes(index as f64 * 7.0),
+                )
+                .seen(now)
+                .into()
+            })
+            .collect();
+        Self {
+            selected_session_id: sessions.get(working).map(|session| session.id.clone()),
+            prefs: Prefs {
+                sidebar_session_order: sessions.iter().map(|session| session.id.clone()).collect(),
+                ..Prefs::default()
+            },
+            list: SessionListResult { sessions, projects },
+        }
     }
 }
 

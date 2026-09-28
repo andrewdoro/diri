@@ -6,10 +6,11 @@ use std::ops::{Index, IndexMut};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use super::Row;
 #[cfg(feature = "compact-history")]
 use super::compact::{CompactRows, RowCodec};
+use super::{GridCell, Row};
 use crate::index::Line;
+use crate::term::cell::ResetDiscriminant;
 
 /// Maximum number of buffered lines outside of the grid for performance optimization.
 const MAX_CACHE_SIZE: usize = 1_000;
@@ -287,6 +288,24 @@ impl<T> Storage<T> {
 
         let len = self.inner.len();
         self.zero = (self.zero as isize + count + len as isize) as usize % len;
+    }
+
+    /// `rotate(-count)` for a caller that resets every rotated row with
+    /// `template` before reading it. Compact history produces those rows in
+    /// their reset state directly instead of decoding recycled history.
+    #[inline]
+    pub fn rotate_reset<D>(&mut self, count: usize, template: &T)
+    where
+        T: ResetDiscriminant<D> + GridCell + Default,
+        D: PartialEq,
+    {
+        #[cfg(feature = "compact-history")]
+        if let Some(compact) = &mut self.compact {
+            compact.rotate_reset(count, template);
+            return;
+        }
+        let _ = template;
+        self.rotate(-(count as isize));
     }
 
     /// Rotate all existing lines down in history.

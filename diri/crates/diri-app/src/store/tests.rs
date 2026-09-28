@@ -16,7 +16,7 @@ use crate::notifications::NotificationSound;
 use super::{
     ClickModifiers, ClientStartup, EventEnvelope, InspectorTab, Prefs, SavedWindow, SessionStore,
     SidebarOrdering, SidebarProjection, StoreEffect, StoreEventChange, StoreRuntime,
-    TerminalResidency, WindowMode, WindowPlacement, event_publication_policy,
+    TerminalResidency, WindowMode, WindowPlacement, event_publication_policy, now_millis,
 };
 use crate::switcher::{OverviewFilter, OverviewLane, SwitcherKey};
 
@@ -1172,6 +1172,36 @@ fn closing_an_exited_parent_confirms_for_its_running_auxiliary_terminal() {
     );
 }
 
+/// Closing the inspector terminal tab removes that shell. The record stays
+/// until the engine drops it, so a later parent close must not count it.
+#[test]
+fn closed_terminal_tab_is_not_counted_when_closing_its_parent() {
+    let parent = session("parent", "p", 2.0);
+    let mut terminal = session("terminal", "p", 1.0);
+    terminal.kind = AgentKind::SHELL;
+    terminal.parent = Some(id("parent"));
+    let (mut store, mut effects) = hydrated(
+        vec![parent, terminal],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    store.remove_sessions(vec![id("terminal")]);
+    assert!(
+        store.sessions.contains_key(&id("terminal")),
+        "the engine has not dropped the shell record yet"
+    );
+    assert!(store.closing.contains(&id("terminal")));
+    drain(&mut effects);
+
+    store.request_close(vec![id("parent")]);
+    assert_eq!(
+        store.pending_close.as_ref().map(|pending| &pending.ids),
+        Some(&vec![id("parent")])
+    );
+}
+
 #[test]
 fn closing_an_exited_parent_with_an_exited_terminal_needs_no_confirmation() {
     let (mut store, mut effects) = hydrated(
@@ -1210,6 +1240,32 @@ fn a_real_process_exit_immediately_detaches_and_removes_the_agent() {
     assert!(emitted.contains(&StoreEffect::DetachAttachment(id("one"))));
     assert!(emitted.contains(&StoreEffect::Remove(id("one"))));
     assert!(store.ordered_sessions().is_empty());
+}
+
+/// Exiting 0 is not "nothing to lose" once a conversation exists: an agent
+/// Diri cannot resume (or one whose transcript is gone) keeps its row, since
+/// the scrollback is the last copy of that conversation in the app.
+#[test]
+fn a_clean_exit_with_a_conversation_keeps_its_row() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 1.0)],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    let mut exited = session("one", "p", 1.0);
+    exited.status = SessionStatus::Exited(ExitInfo {
+        reason: ExitReason::Exited,
+        code: Some(0),
+        signal: None,
+    });
+    exited.agent_session_id = Some("conversation".into());
+    exited.resumability = Resumability::NotResumable;
+    store.upsert_session(exited);
+
+    assert!(!drain(&mut effects).contains(&StoreEffect::Remove(id("one"))));
+    assert_eq!(store.ordered_sessions().len(), 1);
 }
 
 /// Closing the tab deletes the Engine record and the session's output log.
@@ -1620,6 +1676,65 @@ fn a_configure_issued_during_an_inflight_scan_still_reaches_the_engine() {
 }
 
 #[test]
+fn installing_an_agent_types_the_shown_command_into_a_home_terminal_and_watches_for_it() {
+    let (mut store, mut effects) = SessionStore::headless(Prefs::default());
+    let catalog = crate::agent_setup::bundled_catalog(&[]);
+    let claude = crate::agent_catalog::agent_options(&catalog)
+        .into_iter()
+        .find(|option| option.kind == AgentKind::CLAUDE_CODE)
+        .expect("bundled Claude Code");
+    let shown = claude.install.clone().expect("bundled installer").command;
+
+    assert!(store.install_agent(&claude, None));
+    let Ok(StoreEffect::Spawn(params)) = effects.try_recv() else {
+        panic!("install opens a session");
+    };
+    // A Terminal the user can watch, never an Agent launch, and exactly the
+    // text the Install control displayed.
+    assert_eq!(params.kind, AgentKind::SHELL);
+    assert_eq!(params.initial_prompt.as_deref(), Some(shown.as_str()));
+    assert_eq!(params.title.as_deref(), Some("Install Claude Code"));
+    assert_eq!(params.host, None, "installers only run on this Mac");
+    assert_eq!(params.new_worktree, None);
+    assert!(matches!(
+        effects.try_recv(),
+        Ok(StoreEffect::WatchAgentInstall { kind, .. }) if kind == AgentKind::CLAUDE_CODE
+    ));
+    assert_eq!(store.installing_agent(), Some(&AgentKind::CLAUDE_CODE));
+}
+
+#[test]
+fn a_first_session_needs_no_project_and_opens_the_default_agent_at_home() {
+    let (mut store, mut effects) = SessionStore::headless(Prefs::default());
+    store.set_agent_catalog(crate::agent_setup::bundled_catalog(&["claude-code"]));
+    assert!(store.sessions().is_empty() && store.projects().is_empty());
+
+    assert!(store.spawn_default(crate::store::SpawnOptions::default()));
+    let Ok(StoreEffect::Spawn(params)) = effects.try_recv() else {
+        panic!("the welcome's Start a session must launch without a folder step");
+    };
+    assert_eq!(params.kind, AgentKind::CLAUDE_CODE);
+    assert_eq!(params.cwd, std::env::var("HOME").expect("HOME"));
+    assert_eq!(
+        params.initial_prompt, None,
+        "the agent's own prompt takes the task"
+    );
+}
+
+#[test]
+fn an_agent_without_a_bundled_installer_is_never_run() {
+    let (mut store, mut effects) = SessionStore::headless(Prefs::default());
+    let catalog = crate::agent_setup::bundled_catalog(&[]);
+    let manual = crate::agent_catalog::agent_options(&catalog)
+        .into_iter()
+        .find(|option| option.install.is_none())
+        .expect("an agent with only a setup guide");
+    assert!(!store.install_agent(&manual, None));
+    assert!(effects.try_recv().is_err());
+    assert_eq!(store.installing_agent(), None);
+}
+
+#[test]
 fn a_failed_scan_is_retried_only_by_an_explicit_rescan() {
     let (mut store, mut effects) = SessionStore::headless(Prefs::default());
     store.request_agent_catalog(Some("forge".into()), false);
@@ -1748,6 +1863,18 @@ fn synthetic_events_upsert_project_and_remove_with_neighbor_focus() {
         store.sidebar_projection().projects[0].project.name,
         "Renamed"
     );
+    // A rename keeps the project's seniority; a new project joins the end.
+    let seniority = store.project_seniority().to_vec();
+    assert_eq!(seniority.iter().filter(|known| known.0 == "p").count(), 1);
+    store.handle_event(EventEnvelope {
+        name: diri_proto::EventName::PROJECT_UPDATED.to_owned(),
+        seq: 2,
+        params: serde_json::to_value(project("newest", "Newest")).unwrap(),
+    });
+    assert_eq!(
+        store.project_seniority(),
+        [seniority, vec![pid("newest")]].concat()
+    );
 
     store.handle_event(EventEnvelope {
         name: diri_proto::EventName::SESSION_REMOVED.to_owned(),
@@ -1756,6 +1883,144 @@ fn synthetic_events_upsert_project_and_remove_with_neighbor_focus() {
     });
     assert_eq!(store.selected_session_id, Some(id("two")));
     assert!(!store.sessions.contains_key(&id("one")));
+}
+
+/// A cwd the app has not hydrated still has to land in the sidebar order.
+/// The folder draws from the session either way; drag only sees ids that
+/// `reconcile_sidebar_order` copied out of the project map.
+#[cfg(unix)]
+#[test]
+fn spawned_project_is_published_into_sidebar_order() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::sync::Mutex;
+
+    use diri_proto::{ControlMessage, EventName, Project};
+
+    let root = tempdir().unwrap();
+    let cwd = root.path().join("fresh");
+    std::fs::create_dir(&cwd).unwrap();
+    let cwd = cwd.to_string_lossy().into_owned();
+    let (manifests, _) =
+        diri_engine::ManifestEngine::load_dir(&diri_engine::detect::bundled_manifest_dir())
+            .unwrap();
+    let registry = Arc::new(Mutex::new(diri_engine::Registry::new(
+        Arc::new(manifests),
+        root.path().join("state.json"),
+    )));
+    let server = Arc::new(diri_engine::ControlServer::new(
+        Arc::clone(&registry),
+        root.path().join("daemon.sock"),
+    ));
+    let bus = server.events().subscribe(
+        None,
+        diri_engine::events::Filter::new(
+            None,
+            Some(vec![
+                EventName::PROJECT_UPDATED.into(),
+                EventName::SESSION_UPDATED.into(),
+            ]),
+        ),
+    );
+    let listener = server.bind().unwrap();
+    let serving = {
+        let server = Arc::clone(&server);
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = server.serve(stream);
+            }
+        })
+    };
+    let client = UnixStream::connect(server.socket_path()).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut writer = client.try_clone().unwrap();
+    let mut reader = BufReader::new(client);
+    {
+        let mut call = |request_id: u64, method: &str, params: serde_json::Value| {
+            let message = ControlMessage::Request {
+                id: request_id,
+                method: method.to_owned(),
+                params: Some(params),
+            };
+            let mut bytes = serde_json::to_vec(&message).unwrap();
+            bytes.push(b'\n');
+            writer.write_all(&bytes).unwrap();
+            writer.flush().unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            match serde_json::from_str::<ControlMessage>(&line).unwrap() {
+                ControlMessage::Response {
+                    result: Ok(value), ..
+                } => value,
+                other => panic!("expected success, got {other:?}"),
+            }
+        };
+        let spawn_params = serde_json::json!({
+            "kind": { "shell": {} },
+            "cwd": cwd,
+            "argv": ["/bin/sh", "-c", "sleep 30"],
+        });
+
+        let first = call(1, "session.spawn", spawn_params.clone());
+        let session_id = first["id"].as_str().unwrap().to_owned();
+        let published = drain_ready(&bus);
+        let project_events: Vec<_> = published
+            .iter()
+            .filter(|event| event.name == EventName::PROJECT_UPDATED)
+            .collect();
+        assert_eq!(project_events.len(), 1, "a new cwd publishes one project");
+        assert!(project_events[0].params().get("pinnedOrder").is_none());
+        let inserted: Project = serde_json::from_value(project_events[0].params()).unwrap();
+        assert_eq!(inserted.root, cwd);
+
+        let (mut store, _) = hydrated(
+            vec![session("kept", "kept", 1.0)],
+            vec![project("kept", "Kept")],
+            Prefs::default(),
+        );
+        for event in &published {
+            store.handle_event(EventEnvelope {
+                name: event.name.clone(),
+                seq: event.seq,
+                params: event.params(),
+            });
+        }
+        let order = store.sidebar_project_order();
+        assert!(
+            order.contains(&pid("kept")) && order.contains(&inserted.id),
+            "reorder needs both project ids in the sidebar order: {order:?}"
+        );
+        assert_eq!(
+            store
+                .sessions
+                .get(&id(&session_id))
+                .map(|session| session.project_id.clone()),
+            Some(inserted.id)
+        );
+
+        let _second = call(2, "session.spawn", spawn_params);
+        let again = drain_ready(&bus);
+        assert!(
+            again
+                .iter()
+                .all(|event| event.name != EventName::PROJECT_UPDATED),
+            "an existing project is not published again: {again:?}"
+        );
+    }
+    let _ = writer.shutdown(std::net::Shutdown::Write);
+    drop(reader);
+    serving.join().unwrap();
+}
+
+#[cfg(unix)]
+fn drain_ready(events: &diri_engine::events::EventStream) -> Vec<diri_engine::events::Event> {
+    let mut found = Vec::new();
+    while let Some(event) = events.recv(Duration::ZERO) {
+        found.push(event);
+    }
+    found
 }
 
 #[test]
@@ -2657,6 +2922,49 @@ fn custom_notification(session: &SessionRecord, event_id: &str) -> EventEnvelope
     }
 }
 
+fn terminal_copy(session: &SessionRecord, occurred_at: DateMillis) -> EventEnvelope {
+    EventEnvelope {
+        name: diri_proto::EventName::SESSION_CLIPBOARD.into(),
+        params: serde_json::to_value(diri_proto::SessionClipboardEvent {
+            session_id: session.id.clone(),
+            session_created_at: session.created_at,
+            occurred_at,
+            text: "copied in codex".into(),
+        })
+        .unwrap(),
+        seq: 1,
+    }
+}
+
+#[test]
+fn terminal_copies_reach_the_clipboard_only_while_fresh_active_and_known() {
+    let record = session("codex", "p", 1.0);
+    let (mut store, _effects) = hydrated(
+        vec![record.clone()],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    let mut copies = store.terminal_clipboard_writes();
+
+    assert!(!store.handle_event(terminal_copy(&record, now_millis())));
+    assert_eq!(copies.try_recv().unwrap(), "copied in codex");
+
+    // A replay after a reconnect is long past the gesture that caused it.
+    store.handle_event(terminal_copy(
+        &record,
+        DateMillis(now_millis().0 - 60_000.0),
+    ));
+    let mut stranger = record.clone();
+    stranger.id = id("unknown");
+    store.handle_event(terminal_copy(&stranger, now_millis()));
+    let mut reincarnated = record.clone();
+    reincarnated.created_at = DateMillis(record.created_at.0 + 1.0);
+    store.handle_event(terminal_copy(&reincarnated, now_millis()));
+    store.set_active(false);
+    store.handle_event(terminal_copy(&record, now_millis()));
+    assert!(copies.try_recv().is_err());
+}
+
 #[test]
 fn terminal_notifications_are_unread_events_not_execution_states() {
     let record = session("hidden", "p", 1.0);
@@ -2906,4 +3214,171 @@ fn notification_pipeline_redraws_interrupt_once() {
         "one pending request must produce one native interruption across title redraws"
     );
     assert_eq!(store.notifications().entries().len(), 1);
+}
+
+#[test]
+fn importing_herdr_resumes_conversations_and_spawns_the_rest_in_herdr_order() {
+    let (mut store, mut effects) = SessionStore::headless(Prefs::default());
+    assert!(
+        !store.import_herdr(),
+        "nothing to import before a scan answers"
+    );
+    let plan = crate::herdr_import::preview_plan();
+    store.set_herdr_plan(Some(plan.clone()));
+
+    assert!(store.import_herdr());
+    assert!(!store.import_herdr(), "one import at a time");
+    let Ok(StoreEffect::ImportHerdr(steps)) = effects.try_recv() else {
+        panic!("import emits one ordered effect");
+    };
+    assert_eq!(steps.len(), plan.items.len());
+    let calls = steps
+        .iter()
+        .map(|step| match &step.call {
+            super::herdr::ImportCall::Resume(entry) => format!("resume {}", entry.kind.id()),
+            super::herdr::ImportCall::Spawn(params) => {
+                assert_eq!(params.host, None, "herdr panes are local");
+                assert_eq!(params.initial_prompt, None, "nothing is typed");
+                format!("spawn {} {}", params.kind.id(), params.cwd)
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        [
+            "resume claude-code",
+            "resume codex",
+            "spawn shell /Users/you/checkout",
+            "resume claude-code",
+            "spawn opencode /Users/you/api",
+            "spawn shell /Users/you/api",
+        ]
+    );
+    assert!(
+        steps[0]
+            .remember
+            .contains(&crate::herdr_import::conversation_key("a"))
+    );
+}
+
+/// The runner against a fake Engine: conversations go through the resume
+/// RPC, the rest through spawn, in order; a pane that fails is reported and
+/// stays importable while the others are remembered.
+#[tokio::test]
+async fn herdr_import_runner_remembers_only_what_opened_and_reports_failures() {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::os::unix::net::UnixListener;
+
+    use diri_proto::{ControlMessage, HelloResult, Method, RUST_ENGINE_KIND, WIRE_VERSION};
+
+    let temp = tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut calls = Vec::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            let Ok(ControlMessage::Request { id, method, params }) =
+                serde_json::from_str::<ControlMessage>(&line)
+            else {
+                continue;
+            };
+            let result = if method == Method::HELLO {
+                Ok(serde_json::to_value(HelloResult {
+                    proto: WIRE_VERSION,
+                    build: "test-engine".to_owned(),
+                    pid: std::process::id() as i32,
+                    engine_instance_id: None,
+                    engine_kind: Some(RUST_ENGINE_KIND.to_owned()),
+                    executable_hash: None,
+                })
+                .unwrap())
+            } else {
+                let params = params.unwrap_or_default();
+                let kind = params
+                    .pointer("/entry/kind")
+                    .or_else(|| params.get("kind"))
+                    .and_then(|kind| serde_json::from_value::<AgentKind>(kind.clone()).ok())
+                    .map(|kind| kind.id().to_owned())
+                    .unwrap_or_default();
+                calls.push(format!("{method} {kind}"));
+                if kind == "opencode" {
+                    Err(diri_proto::ControlError::not_found(
+                        "no manifest for agent opencode",
+                    ))
+                } else {
+                    Ok(
+                        serde_json::to_value(session(&format!("s{}", calls.len()), "p", 1.0))
+                            .unwrap(),
+                    )
+                }
+            };
+            let mut bytes = serde_json::to_vec(&ControlMessage::Response { id, result }).unwrap();
+            bytes.push(b'\n');
+            writer.write_all(&bytes).unwrap();
+            writer.flush().unwrap();
+            if calls.len() == 6 {
+                break;
+            }
+        }
+        calls
+    });
+
+    let client = Arc::new(DaemonClient::with_socket_path(socket));
+    client.connect();
+    client
+        .wait_until_connected(Duration::from_secs(2))
+        .await
+        .unwrap();
+    let (mut store, mut effects) = SessionStore::headless(Prefs::default());
+    store.set_herdr_plan(Some(crate::herdr_import::preview_plan()));
+    assert!(store.import_herdr());
+    let Ok(StoreEffect::ImportHerdr(steps)) = effects.try_recv() else {
+        panic!("import effect");
+    };
+    let store = Arc::new(std::sync::RwLock::new(store));
+    let (change_tx, _) = tokio::sync::broadcast::channel(8);
+    let (status_tx, mut status_rx) = tokio::sync::broadcast::channel(8);
+
+    super::herdr::import(steps, client, Arc::clone(&store), change_tx, status_tx).await;
+
+    assert_eq!(
+        server.join().unwrap(),
+        [
+            "session.resume_from_history claude-code",
+            "session.resume_from_history codex",
+            "session.spawn shell",
+            "session.resume_from_history claude-code",
+            "session.spawn opencode",
+            "session.spawn shell",
+        ]
+    );
+    let locked = store.read().unwrap();
+    assert!(!locked.herdr().importing);
+    let remembered = &locked.preferences().herdr_imported;
+    assert!(remembered.contains(&crate::herdr_import::conversation_key("a")));
+    assert!(remembered.contains("default/w2/6//Users/you/api"));
+    assert_eq!(
+        remembered.len(),
+        8,
+        "3 conversations x 2 keys + 2 terminals; the failed agent is not remembered"
+    );
+    drop(locked);
+    let banner = status_rx
+        .try_recv()
+        .expect("summary banner")
+        .in_app_banner
+        .expect("in-app banner");
+    assert_eq!(banner.title, "Moved 5 of 6 sessions from herdr");
+    assert!(
+        banner.body.contains("no manifest for agent opencode"),
+        "{}",
+        banner.body
+    );
 }

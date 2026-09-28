@@ -159,6 +159,7 @@ impl MetalAtlasState {
             metal::MTLStorageMode::Managed
         });
         let metal_texture = self.device.new_texture(&texture_descriptor);
+        crate::gpu_diag::atlas_texture(kind, size_bytes(size, kind), 1);
 
         let texture_list = match kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
@@ -205,6 +206,25 @@ struct MetalAtlasTexture {
     allocator: BucketedAtlasAllocator,
     metal_texture: AssertSend<metal::Texture>,
     live_atlas_keys: u32,
+}
+
+fn size_bytes(size: Size<DevicePixels>, kind: AtlasTextureKind) -> i64 {
+    let bpp = if kind == AtlasTextureKind::Polychrome {
+        4
+    } else {
+        1
+    };
+    size.width.0 as i64 * size.height.0 as i64 * bpp
+}
+
+impl Drop for MetalAtlasTexture {
+    fn drop(&mut self) {
+        let size = Size {
+            width: DevicePixels(self.metal_texture.width() as i32),
+            height: DevicePixels(self.metal_texture.height() as i32),
+        };
+        crate::gpu_diag::atlas_texture(self.id.kind, size_bytes(size, self.id.kind), -1);
+    }
 }
 
 impl MetalAtlasTexture {

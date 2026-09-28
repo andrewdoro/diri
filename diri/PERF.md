@@ -1,5 +1,547 @@
 # diri performance record
 
+## Sidebar rows re-render only when they change (2026-09-28)
+
+**Where the time went.** A live sample of the installed app showed the main
+thread about 20% busy with 51 sessions, about four of them working. Roughly
+45% of that was `Sidebar` render, layout, prepaint, and paint. The sidebar is
+cached in RootView, but every 125 ms activity-mark tick notified it, and each
+re-render rebuilt all 51 rows.
+
+**Why a row cache needed GPUI changes.** Upstream GPUI (zed `dc2a339`, #21165)
+re-renders every cached view nested inside a cached view that missed its
+cache. It records cache ranges as absolute frame indices, which go stale
+while an ancestor is reused wholesale.
+
+**What changed.**
+
+- GPUI is now vendored in `vendor/gpui`, with the patch described in
+  `vendor/gpui/DIRI_PATCHES.md`. Cached views record ranges relative to their
+  nearest cached ancestor, so non-dirty nested views are reused. Opacity is
+  part of the cache key.
+- Each session row is a cached view that renders from a props snapshot. The
+  activity tick notifies only the working rows.
+- A store publication re-renders only rows whose props changed.
+
+Store churn was never the driver. The app already drops byte-identical
+`session.updated` events without publishing, and resource samples arrive
+every 30 s.
+
+**How it was measured.** `sidebar_fleet_render_cost` mounts the real RootView
+under headless Metal with five projects and four working sessions. It stands
+in cached blank rasters for brand marks, which production draws as CoreGraphics
+images on the main thread. One step is one notify plus the frame it causes.
+The numbers are release-build medians of 1,000 steps. Before and after ran as
+alternating binaries three times each, with load average ~15–20 from other
+agents:
+
+| 51 sessions | Rows built, before → after | Step median, before → after |
+| --- | ---: | ---: |
+| Activity tick | 51 → 4 | 1.53–1.61 → 1.05–1.06 ms |
+| Store publication (nothing changed) | 51 → 0 | 1.53–1.56 → 0.99–1.01 ms |
+| Root-only frame (sidebar reused) | 0 → 0 | 0.39–0.40 → 0.41–0.42 ms |
+
+Subtracting the root-only frame, a tick's sidebar share falls from about
+1.15 ms to 0.65 ms. Per-row growth falls from about 20 µs to about 6 µs:
+single runs at 5/25/51/100 sessions measured a tick at 0.72/1.09/1.75/2.70 ms
+before and 0.74/0.93/1.14/1.33 ms after. What remains per row is computing and
+comparing props, the list wrapper, and replaying cached ranges.
+
+A root-only frame costs about 0.03 ms more (+8%). Each row adds a view and a
+wrapper node that a reused sidebar replays.
+
+**Visual checks.** Pixels are identical to `main`:
+
+- 20 headless sidebar fixtures, light and dark: typical, fleet, stress,
+  projects, hover, recency, filter, session menu, hover card, lineage.
+- The bench's final frame, after roughly 3,000 steps.
+
+`reused_sidebar_rows_paint_like_a_full_render` checks the reuse path. After 11
+ticks interleaved with no-op publications and root frames, it compares against
+a `window.refresh()` rebuild and requires zero differing pixels. It fails if a
+working mark stops advancing.
+
+**Not claimed:**
+
+- any installed-app CPU change;
+- GPU or present cost;
+- the horizontal strip. It is rendered inline by RootView and still rebuilds
+  every tab.
+## Terminal feed path, 4.1–4.7× faster per core (2026-09-28)
+
+Every local session's Engine and every remote session's Helper parse all PTY
+output through `HeadlessScreen::feed`: VTE, the alacritty grid, compact
+scrollback and per-row change fingerprints. At `main`, a 64 MiB colored build
+log parsed at about 25 MB/s on one core. A stack sample showed the escape parser
+itself was a minor cost. Most time went to scrollback: each 32-row history block
+was serialized as JSON and DEFLATE-compressed. Once history was full, the oldest
+block was also decoded again to recycle its rows.
+
+Changes, with no protocol, checkpoint or wire change:
+
+- History blocks use a binary row encoding (style table, text, style runs,
+  implied default suffix) and a small in-tree LZ77 block codec instead of
+  `serde_json` + `flate2`. No dependency is added.
+- With full history, recycled rows are built in their reset state directly
+  from the encoded row. Evicting history never decodes a block.
+- VTE hands printable ASCII runs to the terminal, which writes a row segment at
+  a time. The result is identical to per-character input (wide cells, wrap,
+  insert mode, charsets, prompt marks and links fall back or match).
+- Row fingerprints hash the same wire projection in four multiply lanes. They
+  derive the wire style only when a cell's raw style changes.
+- Notification and progress scans use `memchr`, which VTE already links.
+  Visible-row indexing has an inlined fast path.
+
+Details and tests are in `vendor/alacritty_terminal/DIRI-PATCH.md` and
+`vendor/vte/DIRI-PATCH.md`.
+
+### Measurements
+
+Apple M4 Max (Mac16,5), macOS 27.0, Rust 1.97.1 release builds. The base is
+`daa570e` with the same `feedbench` source. The machine was shared with other
+work (load average 7–25), so `feedbench` now also reports process CPU time.
+The table gives CPU-time medians of three alternating base/branch runs at
+160×50 (MB = MiB).
+
+| Payload, read size | Base | Branch | Speedup |
+| --- | ---: | ---: | ---: |
+| Colored build log (64 MiB), 4 KiB | 21.7 MB/s | 88.8 MB/s | 4.1× |
+| same, 16 KiB | 24.7 MB/s | 110.6 MB/s | 4.5× |
+| same, 64 KiB | 26.0 MB/s | 117.5 MB/s | 4.5× |
+| same, one call | 26.9 MB/s | 120.1 MB/s | 4.5× |
+| same, Engine config (notifications), 4 KiB | 21.5 MB/s | 87.5 MB/s | 4.1× |
+| same, Engine config, 64 KiB | 25.9 MB/s | 115.3 MB/s | 4.5× |
+| `git log -p --color` (32 MiB), 4 KiB | 13.5 MB/s | 58.4 MB/s | 4.3× |
+| same, 64 KiB | 15.1 MB/s | 70.8 MB/s | 4.7× |
+
+At 4 KiB reads, row fingerprints of the fully damaged screen are now the
+largest single cost. The remaining time is split between the parser and
+history encoding.
+
+`terminal_throughput` (160×50 per-operation, base → branch): typing
+1,773 → 1,023 ns, scrolling 63,335 → 36,330 ns, cursor-only 1,313 → 784 ns.
+`terminal_parity`, 10,000 lines per 80×24 core: feed time p50 87.4 → 34.5 ms
+per core. Retained heap is 246,403 → 259,699 bytes and peak heap is
+635,191 → 324,211 bytes; the base's peak included JSON/DEFLATE buffers.
+
+`terminal_fleet` gates pass (base → branch): fresh 2.02 → 2.02 MiB, full
+history 6.25 → 6.09 MiB, widened 16.37 → 16.21 MiB, after churn
+11.62 → 11.46 MiB, zero warmed cursor allocations and zero leaked bytes.
+Compressed history stored 10,000 rows of 160 columns in 54.5 bytes/row
+(base 53.0) for `git log -p` and 41.8 bytes/row (base 35.4) for the synthetic
+log. The 4 MiB history budget and its accounting are unchanged, except that a
+partially recycled oldest block counts compressed bytes plus one index instead
+of fully decoded rows. **Output limited by the byte budget, not the
+10,000-row limit, can retain fewer rows than before.**
+
+`fleetbench` (20 sessions × 16 MiB, three alternating runs) kept aggregate
+throughput at 91–98 MB/s (base) versus 95–105 MB/s (branch). That fixture is
+bound by the PTY, Holder and log path, not parsing. For the same 320 MiB, the
+benchmark process's CPU time fell from 17.8–18.2 to 9.0–9.4 seconds
+(user + sys). System time rose from about 1.1 to 2.4 seconds; that was not
+investigated. No desktop was attached.
+
+### Equivalence
+
+- `crates/diri-terminal-state/tests/transcript_digest.rs` (opt-in) drives
+  60,000 steps through random read splits: styles, wide/combining text, links,
+  prompts, scroll regions, erase, insert mode, charsets, alternate screen,
+  synchronized output, resizes and full 10,000-row history. It hashes every
+  diff, snapshot, history, scrollback, `content_seq`, `filled_cells`, cursor,
+  title and progress. Both revisions print identical digests at every
+  checkpoint. Deliberately broken fingerprints and recycled rows change the
+  digest.
+- Randomized vendored-crate tests compare `input_ascii` with per-character
+  `input` and full-history recycling with dense storage. Other tests check
+  recycled rows against decode-then-`Row::reset` and codec/LZ round trips.
+  Each test was confirmed to fail on an injected bug.
+- While testing, dense and compact storage were found to diverge after
+  resizing a *full* history. The base revision diverges the same way. This
+  change does not address it.
+
+Not claimed: GUI rendering, input-to-photon latency, SSH or WAN behavior, or a
+whole-application CPU reduction of any particular size.
+
+```sh
+cargo build --release -p diri-engine --example feedbench
+target/release/examples/feedbench <payload> 160 50
+cargo bench -p diri-terminal-state --bench terminal_throughput
+cargo bench -p diri-terminal-state --bench terminal_fleet
+cargo bench -p diri-terminal-state --bench terminal_parity
+cargo test --release -p diri-terminal-state --test transcript_digest -- --ignored --nocapture
+```
+
+The 64 MiB log has lines like
+`ESC[3Nm[0000000123] building crate_N v0.N.0ESC[0m  Compiling module xxxx…\r\n`.
+The Remote Helper Build ID changes because it hashes vendored parser sources.
+Live Helpers keep their binaries.
+## Desktop memory attribution (2026-09-28)
+
+The installed 0.8.7 app (30 sessions, one window, 1.5 days up) measured a
+516 MB physical footprint, 942 MB peak. `footprint`/`vmmap` (read-only, the
+installed app was not restarted) split it as: owned unmapped (graphics)
+207 MB, Malloc Small 115 MB, IOSurface 83 MB, IOAccelerator (graphics) 60 MB,
+Malloc Large 25 MB. A new retained switch, `DIRI_GPU_DIAG=1`, prints the
+renderer's Metal allocation, instance-buffer pool, atlas pages, path targets,
+drawable pixels and frames every five seconds to stderr; its counters are
+relaxed atomics and no thread starts when it is off.
+
+What each part is:
+
+- **~194 MB owned unmapped (graphics) is the Metal driver, not diri.** A
+  standalone 45-line Swift Metal app on the same machine (macOS 27, M4 Max)
+  carries 193–202 MB whenever it has submitted a command buffer in the last
+  ~2 s: at 60, 8, 2 and 0.5 fps, with a 64×64 drawable, rendering offscreen
+  without presenting, and with `maxCommandBufferCount` 1. Two seconds after
+  the last submission the same memory is reported reclaimable. The only lever
+  is not submitting frames while nothing changes; in the dev app an idle
+  window drew 0–2 frames per 5 s and the pool became reclaimable. The
+  sidebar's 8 Hz Working tick is handled separately.
+- **IOSurface is the two window drawables** (2 × 41.7 MB at 4112×2580).
+  `MAXIMUM_DRAWABLE_COUNT` is already 2. Inherent to the window size.
+- **IOAccelerator held six 8 MiB instance buffers, five swapped out.** The
+  shared instance-buffer pool kept every buffer that had ever been in flight
+  at once, and its size only doubled. Fixed below.
+- **Heap.** A MallocStackLogging (lite) attribution of a dev app after a
+  30-session scenario found 44 MB live: GPUI scene vectors 12 MB, the usage
+  ledger 8.5 MB, text shaping 2.3 MB, then small items. The installed app's
+  scene vectors are 36 MB (two scenes at 65,536 sprites); that is the known
+  `Scene::clear` high-water in upstream GPUI (not vendored) and is not
+  changed here. `malloc_zone_pressure_relief` released 0 bytes, so no
+  allocator trimming was added. Atlas pages (one 1 MiB monochrome page) and
+  path targets (lazy, 0 in the scenario) were not factors, and the renderer
+  count returned to one after floating panels closed (no #425 regression).
+- **The 942 MB peak is the usage scan.** Each transcript tail was read into
+  one `Vec`; this machine has a 757 MB Codex rollout and lines up to 24 MB.
+
+Changes:
+
+- The instance-buffer pool keeps at most three idle buffers, halves a grown
+  size after 10 s in which every frame fit in a quarter of it (leaving 2×
+  headroom), and drops idle buffers and refits the size when a window stops
+  drawing (occlusion). Growth is unchanged: an overflowing scene is
+  re-encoded once with a doubled buffer.
+- Transcripts are streamed one complete line at a time. A partial trailing
+  line is neither consumed nor counted, as before. A read error after some
+  lines stops at the last complete line instead of discarding the file's
+  progress. A borrowed probe of the `type`/`payload.type` tags skips lines
+  that only mention a usage tag (compacted history) without building a
+  `serde_json::Value` of the whole line; anything the probe does not model
+  falls through to the unchanged full parse.
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Cold usage scan of this machine, 12.1 GB / 2,529 transcripts, peak RSS | 996–1,196 MiB | 209–222 MiB |
+| Same scan, wall time | 15.8–15.9 s | 12.4–12.6 s |
+| Dev app cold start + 30-session scripted scenario, peak footprint (one run each) | 1.5 GB | 643 MB |
+| Instance-pool probe after dense frames in four windows, IOAccelerator (graphics) | 26 MB (3 × 8 MiB kept) | 1.8 MB (none kept) |
+
+The scan comparison ran the old and new parser on the same APFS clone of
+`~/.claude/projects` and `~/.codex/sessions`; the written ledgers were
+byte-identical and the snapshots differed only in clock-derived fields. The
+dev-app scenario (fresh support dir, 26 idle sessions with 3,000 lines of
+history, 4 streaming, 60 session switches, palette/quick-open/history
+toggles, overview/peek, zoom) used a local, uncommitted harness; with a warm
+usage ledger its idle footprint was 186–203 MB on both builds, so no
+steady-state change is claimed for that scenario. The installed app's
+instance-buffer saving (up to five idle 8 MiB buffers) is inferred from its
+`vmmap`, not re-measured on a new install. No change reduces the driver pool
+or drawables.
+## Hibernated agents outliving their sessions (2026-09-28)
+
+A `ps` of the author's Mac found 33 stopped processes parented to launchd,
+6–13 days old, holding about 153 MB resident: 7 Codex node wrappers
+(`node …/bin/codex -c notify=[…dirijor notify] …`), 13 Claude Code
+processes, and 13 Chrome DevTools MCP telemetry watchdogs. Each wrapper and
+Claude process sat in state `T` in the process group of a leader that no
+longer existed (`fish -i -l -c codex …`), with its own children as unreaped
+zombies and fds 0–2 on a revoked terminal. Each watchdog was stopped in a
+session of its own. Nothing continues them, so they last until reboot.
+
+The shape is a hibernated (SIGSTOPped) tree whose leader died. On macOS a
+stopped process with default disposition dies at once from the hangup that
+follows, even while stopped, which is why the native Codex binary and the MCP
+servers are zombies. A stopped process that handles SIGHUP — Codex's node
+wrapper forwards it to its child, Claude Code handles it — keeps it pending
+forever. Two paths lead there: the leader dies while its holder lives (the
+holder reaped it and left the rest), or the holder manager process dies (a
+crash, `kill -9`, reinstall), which hangs every PTY up at once. The
+manager for the installed app was replaced on 2026-09-23, after every
+installed-app orphan was created; the dev-build orphans belong to dev
+managers that no longer exist.
+
+Fix, in the local Holder only:
+
+- The exit watcher waits for the leader's exit without reaping it (a kqueue
+  `NOTE_EXIT`/pidfd readiness fd; macOS `waitid(WNOWAIT)` also returns for a
+  stop, so it would read a hibernation as an exit), then SIGKILLs the
+  leader's process group, everything still descended from its members, and
+  every identity the holder's last SIGSTOP froze, re-verifying each pid's
+  start time. The zombie leader pins the group id until then.
+- A single `diri-holder --group-guard` per manager (about 1.3 MB phys
+  footprint, measured with `footprint`) reads `+pgid`/`-pgid` and
+  `s`/`c` frozen-identity lines from a pipe only the manager holds, and on
+  EOF kills what is still registered. It wakes only when a session starts,
+  ends, hibernates or wakes.
+
+Before/after, from deterministic fixtures of the Codex shape (`sh -c` leader
+forking a wrapper that traps TERM/HUP and waits on a `sleep` child, plus a
+`setsid` helper):
+
+| Scenario | Survivors before | After |
+| --- | --- | --- |
+| hibernated, leader SIGKILLed, holder alive | wrapper (`T`), setsid helper (`Ts`) | none |
+| running, leader exits, group member ignores HUP/TERM | that member | none |
+| hibernated, manager SIGKILLed | wrapper (`T`), setsid helper (`Ts`) | none |
+
+The before columns were produced by disabling the sweep and the guard in the
+same tests. Reproduce from `diri/`:
+
+```sh
+cargo test -p diri-engine --lib holder::server::tests::a_leader
+cargo test -p diri-engine --lib holder::guard
+cargo test -p diri-engine --test holder a_dead_manager_leaves_no_hibernated_agent_behind
+```
+
+Not claimed: this does not clean up processes that are already orphaned, and
+it does not cover a tree whose manager died before this build was running.
+It does not change explicit kill/close (`kill_tree` already escalated to
+SIGKILL) or the remote Helper, whose per-session guard already kills the
+Agent group before the leader is reaped. A group member that ignores the
+hangup no longer outlives a leader that exits normally; that matches the
+remote Helper. Out-of-group descendants of a leader that exits normally
+while running are still left to their own lifecycle.
+## Per-session files no longer leak; startup orphan sweep (2026-09-28)
+
+An installed Engine's `logs/` held 949 MB in 1,440 files while `state.json`
+held 30 session records. Only 90 files (256 MB) belonged to a record. The rest
+were 1,013 `s_<id>.screen.plist` checkpoints, 257 `s_<id>.attention.sqlite`
+stores, and 78 `s_<id>.bin` output logs up to 49 days old.
+
+Cause: `Registry::remove`, the only path that drops a record, unlinked
+`<id>.bin` and nothing else. The screen checkpoint and the attention store of
+every closed tab stayed forever, and nothing collected files orphaned by
+crashes, state loss, or older builds. Removal now calls one helper,
+`session_files::remove_log_files`, over one suffix list (`.bin`,
+`.screen.plist[.tmp]`, `.attention.sqlite[-journal|-wal|-shm]`). Recovery
+directories were already cleaned by `remove_owned_files`.
+
+The daemon also runs one bounded sweep per start, on its own thread after the
+socket is bound. It never repeats and never runs while idle. It keeps every id
+referenced by a loaded record, a live or launching session, the in-memory
+reopen-closed stack, a holder socket or pid file, or a remote binding file
+name. It only considers regular files named exactly `s_<12 lowercase hex>`
+plus a known suffix, never follows symlinks, and skips anything modified in
+the last 15 minutes. In `sessions/` it removes only the Engine-owned recovery
+files. The sweep is skipped when the state file failed to load or holds no
+records.
+
+Measured with `examples/logsweep.rs` (release, Apple silicon, APFS):
+
+| | files | bytes |
+|---|---:|---:|
+| installed `logs/` before | 1,438 | 974 MB |
+| dry run: would remove | 1,324 (+19 recovery dirs) | 701.7 MB |
+| kept (referenced / recent / foreign) | 138 / 4 / 2 | ~272 MB |
+
+Sweeping a replica with the same names, sizes, and mtimes (content not
+copied) took 48–68 ms when the files were sparse and 237–294 ms when they were
+dense (`LOGSWEEP_DENSE=1`). Both runs were off the accept path.
+
+Not claimed: the dry run is a snapshot of one machine at one moment. The
+dense replica approximates, but is not, the user's real extents. Bytes are
+logical sizes. The workspace layout still names 191 dead session ids. Those
+tabs have no record and are not treated as references, and that leak is not
+fixed here.
+## Settled pull requests (2026-09-28)
+
+The Engine's PR monitor refetches every pull request linked from an attached
+session once a minute while the App is in front, one `gh pr view` process
+(about 60 ms CPU, 1 s wall, one GitHub GraphQL call) per PR. On the installed
+App a session that had shipped 26 PRs kept that up for all of them: 51 `gh`
+processes in 90 s, nearly all for merged PRs whose state can no longer change.
+
+A PR whose cached state is `MERGED` or `CLOSED` now refreshes on the 30-minute
+background ceiling whatever its session's visibility. Selecting the session
+still forces an immediate refetch, exactly as before, and open PRs keep the
+60 s foreground cadence. For the observed session that is 26 `gh` calls a
+minute becoming fewer than one. `a_merged_or_closed_pr_on_screen_is_not_polled_every_minute`
+pins the cadences; it measures scheduling, not GitHub latency.
+## Idle attach pumps (2026-09-28)
+
+Every attached session has one Engine pump thread. Idle, it woke once a
+second, took the Registry lock and looked its Session up again. That tick was
+the only way it learned that a restart had replaced the Session, or that its
+last sink had gone. A 5 s `sample` of the installed Engine found 13 such
+threads, so an idle Engine woke 13 times a second for them, growing with every
+open tab.
+
+A pump now sleeps on its grid wake source alone. Output wakes it as before.
+Dropping a Session notifies its wake source, so a pump whose Session was
+replaced re-seeds immediately instead of within a second. A departing sink
+wakes the pump so it can see whether it was the last one. A 30 s ceiling
+remains as a safety net. While the Session is absent mid-restart, nothing else
+will wake the pump, so that state keeps the 1 s retry.
+
+`an_idle_pump_stops_as_soon_as_its_last_sink_leaves` requires the pump to exit
+within 300 ms of an idle client leaving; with the departure wake removed it
+fails. Idle wakeups fall from one per second per attached session to one per
+30 s. No throughput, latency or protocol change is claimed or intended.
+## Engine state persistence against a 1.5 MB state.json (2026-09-28)
+
+A live sample of the installed Engine (51 sessions, `state.json` 1.5 MB, almost
+all of it `sessions` pull-request bodies and discussion) spent ~115 ms per 5 s
+in `Registry::persist_now`, plus ~30 ms in `workspace.mutate` and ~11 ms in
+`WorkspaceStore::snapshot`. Every persist re-read and parsed the whole file
+into a `serde_json::Value`, cloned the record table and the value tree,
+re-serialized everything and fsynced, even when nothing had changed.
+`session.mark_seen` and every attach did this on the control connection thread.
+
+`JsonStateFile` still does locked read-modify-write with atomic rename, because
+the Registry (`version`/`projects`/`sessions`), the workspace store
+(`workspaceState`) and any other compatible process share one file and must
+not clobber each other's keys. What changed:
+
+- The document is kept as top-level sections of raw JSON text. Sections a
+  writer does not own are carried byte for byte, never parsed into a tree.
+- The last image read or written is cached with an open handle to its file.
+  Under the lock, an update `stat`s the path; while device, inode, length and
+  mtime still match, the image is the file and nothing is re-read. Any other
+  writer's rename (or in-place write) misses and reloads as before. Holding
+  the handle keeps the inode allocated, so its number cannot be recycled. The
+  Registry and workspace store share one handle.
+- A persist whose sections are byte-identical does not write or fsync.
+- The Registry serializes records straight to text, one folded record at a
+  time, instead of `Vec<SessionRecord>` → `Value` → clone → bytes.
+- The flusher serializes under the Registry lock and writes after releasing
+  it. Per-owner sequence numbers stop an older snapshot from landing over a
+  newer synchronous one.
+- `session.mark_seen` and the attach path mark the Registry dirty instead of
+  persisting on the request thread; the flusher writes within 500 ms.
+  `publish_updated` folds one record instead of cloning the whole table, and
+  `workspace.mutate` reads session ids without cloning records.
+
+Durability is unchanged. `persist_now`, `persist_for_shutdown` and lifecycle
+persists still fsync the file before returning, and workspace mutations still
+fsync the directory entry too, including when the bytes are unchanged.
+`mark_seen` was already debounced, so it was never durable before reply. The
+on-disk format is the same JSON object with the same keys; key order is still
+sorted at the top level, and record fields now follow struct order.
+
+`statebench` (release, macOS 27, APFS, Apple silicon) builds a 1,528 KB fixture:
+50 sessions, 5 of them with 26 PRs each (2 KB body, six ~1.2 KB discussion
+items, 8 checks); 20 projects; a 63 KB `workspaceState` made through real
+mutations. Wall time includes F_FULLFSYNC. CPU is process user+system per
+operation. Medians of two runs each:
+
+| operation (n)               | before wall | after wall | before CPU | after CPU |
+|-----------------------------|------------:|-----------:|-----------:|----------:|
+| persist, unchanged (40)     | 16.2 ms     | 1.0 ms     | 7.4–8.6 ms | 1.0 ms    |
+| persist, one field (40)     | 13.0–16.2 ms| 8.1 ms     | 6.4–7.9 ms | 1.6 ms    |
+| `session.mark_seen` RPC (20)| 19.7–21.5 ms| 5.2–6.6 ms | 7.2–8.2 ms | 0.44 ms   |
+| `workspace.mutate` RPC (40) | 17.0–19.6 ms| 10.9–11.9 ms| 5.8–7.7 ms| 1.3–1.4 ms|
+| `workspace.snapshot` RPC (40)| 2.8–5.0 ms | 0.55 ms    | 2.9–4.4 ms | 0.60 ms   |
+
+What remains in a changed persist is the fsync. In `workspace.mutate` it is
+the file fsync plus the directory fsync. The remaining `mark_seen` wall time,
+with no disk I/O, is inside `EventBus::publish_encoded`. That path is being
+changed in the separate event-bus work and was not touched here.
+
+Not claimed: this does not measure the installed app's end-to-end CPU, and
+it does not measure real disks other than the local APFS volume. The
+"unchanged" row is a best case: a real change still pays serialization of
+all sessions (~1 ms here). Per-record serialization caching was not added.
+
+Reproduce from `diri/`:
+
+```sh
+cargo test --release -p diri-app --bin diri sidebar_fleet_render_cost -- --ignored --nocapture
+cargo test -p diri-app --bin diri reused_sidebar_rows_paint_like_a_full_render -- --ignored
+cargo test -p diri-app --bin diri gpui_view_cache
+```
+
+`DIRI_BENCH_SESSIONS` and `DIRI_BENCH_ITERATIONS` scale the bench.
+cargo test -p gpui_macos --lib instance_buffer_pool
+cargo test -p diri-usage --test scan_peak_memory
+cargo run --release -p diri-usage --example usage_scan_bench
+```
+
+`usage_scan_bench` reads the transcripts read-only into a private temporary
+ledger; point `HOME` at an APFS clone to compare builds on identical bytes.
+The pool row came from a local, uncommitted GPUI probe (60,000 2 px glyphs
+in a main window and three popups, then 25 s of near-empty frames, `vmmap`
+of IOAccelerator regions). It opens real windows, so it was not added to
+the repository; the unit tests pin the pool policy instead.
+cargo test -p diri-engine --test session_files
+cargo run --release -p diri-engine --example logsweep -- dry-run \
+    "$HOME/Library/Application Support/Dirijor"
+LOGSWEEP_DENSE=1 cargo run --release -p diri-engine --example logsweep -- \
+    simulate "$HOME/Library/Application Support/Dirijor" /tmp/sweep-replica
+```
+
+`removing_a_held_session_deletes_every_sidecar` fails on the old removal path
+(`.screen.plist` and `.attention.sqlite` are left).
+
+cargo run --release -p diri-engine --example statebench -- 40
+cargo test -p diri-engine --lib -- state_file unchanged_persist sections_other_writers older_snapshot mark_seen_replies
+## Engine event delivery (2026-09-28)
+
+A 20-second capture of `dirijor events subscribe` on the installed app (51
+sessions, four agents working) carried 119 events and 10 MB of JSON. 83 of the
+98 `session.updated` events were byte-identical to the previous one for the
+same session: the status watcher, resource sweep, PR monitor and control
+mutations each publish a whole record, and most restate it unchanged. Records
+are large because tracked pull requests carry body, checks and discussion; one
+session with 26 PRs encodes to 272 KB and was republished 27 times.
+
+The App already discarded identical records, but only after decoding them.
+Each publication also cost the Engine a `Value` build, a clone, a re-decode
+into `SessionRecord` for the activity log, one encode for the replay ring, and,
+per subscriber, a deep clone plus a full re-encode, which
+`ControlMessage::serialize` itself preceded by another deep clone.
+
+Changes:
+
+- The bus drops a `session.updated` whose encoded bytes equal the last one
+  published for that session. The comparison is exact (bytes, not a hash); the
+  entry is forgotten on `session.removed`; no other event kind is affected.
+  A suppressed restatement takes no sequence number and no activity append.
+- Params are encoded once, at publish, straight from the typed payload. The
+  ring, every subscriber queue and the control writer share those bytes; the
+  writer splices them into the frame (byte-identical to the old line, pinned
+  by a test).
+- `ControlMessage` serializes field by field, without the intermediate object;
+  this applies to every response too, including `session.list`.
+- Eleven single-session lookups (`publish_updated`, `events.wait`, spawn,
+  resume, …) use `Registry::record(id)` instead of cloning, folding and
+  sorting every record to find one.
+
+`eventbench` replays that capture's publication mix with synthetic text of the
+same sizes through the production `ControlServer` over a socket pair, and the
+client decodes each frame as the App does. Release build, 20 rounds (each round
+= 20 s of live traffic), three runs each, Apple Silicon:
+
+| Per 20 s of live traffic | Before | After |
+| --- | ---: | ---: |
+| Engine CPU | 24.7–26.6 ms | 3.5–3.8 ms |
+| Client decode CPU | 14.8–17.2 ms | 1.2–1.4 ms |
+| Bytes delivered | 3.9–4.3 MB | 0.36 MB |
+
+With `distinct` (every publication a real change, so nothing is suppressed)
+Engine CPU per 20 s fell from 23.2–23.9 ms to 10.3–10.5 ms and client decode is
+unchanged in kind. The bench publishes flat out, far burstier than live
+traffic: both builds sometimes exceeded the 16 MiB subscriber bound and
+delivered an `events.dropped` marker (which makes the App resynchronize), so
+frame counts in those runs differ. At the recorded rate (~0.5 MB/s) neither is
+near the bound. This measures the event path only; the App's own rendering of a
+real change and state persistence are not covered here.
+
+```sh
+cargo build --release -p diri-engine --example eventbench
+target/release/examples/eventbench 20
+target/release/examples/eventbench 20 distinct
+```
+
 ## Workspace terminal redraw isolation (2026-09-16)
 
 A live sample of installed Diri 0.7.4 reproduced 23–31% app CPU, with
@@ -529,9 +1071,21 @@ not recreate the retired burst (204.8 MB). This isolated continuous decorative
 frames as the condition preventing Metal from retiring resize-era resources.
 
 That historical fix paused decorative repainting after geometry settled. The
-current implementation goes further: status glyphs and the terminal cursor are
-static, so they never create autonomous frame tasks. Real status changes and
-terminal grid damage still repaint immediately. The window and root surface
+current implementation goes further: status glyphs are static, so they never
+create autonomous frame tasks. Real status changes and terminal grid damage
+still repaint immediately.
+
+The terminal cursor is the one bounded exception (`diri-term/src/cursor_motion.rs`).
+It is solid while in use, and only a focused, visible cursor that has been idle
+for 500 ms blinks: ten eased 1.2 s cycles, then it rests solid and schedules
+nothing, so a terminal left alone still paints zero frames. Fades repaint in
+33 ms steps from a one-shot wake instead of the display link: 12 frames per
+cycle, 121 frames in total over the 12 s after the last activity (measured
+headlessly against the element's `RendererStats`; the static cursor painted 1).
+A glide is 80 ms of display-rate frames after a keystroke that was going to
+repaint the row anyway. Neither invalidates the row cache: the cursor is
+sampled after rows are prepared and painted last. Under Reduce Motion the
+cursor is the static block it was before. The window and root surface
 are opaque, avoiding a persistent WindowServer backdrop/blur composition pass.
 
 ### CPU allocation retention

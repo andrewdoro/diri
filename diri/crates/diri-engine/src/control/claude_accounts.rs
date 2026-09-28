@@ -510,25 +510,6 @@ impl ControlServer {
 
     /// Whether the conversation has a transcript Claude can resume; a tab
     /// that never sent a message must relaunch fresh, keeping its id.
-    fn claude_transcript_exists(
-        record: &diri_proto::SessionRecord,
-        home: &Path,
-        conversation: &str,
-    ) -> bool {
-        let nonempty = |path: &Path| fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0);
-        if let Some(path) = &record.transcript_path
-            && nonempty(Path::new(path))
-        {
-            return true;
-        }
-        nonempty(
-            &home
-                .join("projects")
-                .join(crate::inject::claude_project_slug(&record.cwd))
-                .join(format!("{conversation}.jsonl")),
-        )
-    }
-
     pub(super) fn switch_claude(
         &self,
         profile: AgentAccountProfile,
@@ -586,13 +567,20 @@ impl ControlServer {
             let registry = self.registry.lock().map_err(poisoned)?;
             let running = registry.get(&record.id.0).is_some()
                 && !matches!(record.status, diri_proto::SessionStatus::Exited(_));
-            let mut spec = if Self::claude_transcript_exists(&record, &home, &conversation) {
+            // Resume the id whose transcript exists, never the verified
+            // path's existence paired with a newer, unwritten id.
+            let written = crate::history::claude_resumable_conversation(
+                &[home.join("projects")],
+                Some(&conversation),
+                record.transcript_path.as_deref(),
+            );
+            let mut spec = if let Some(written) = written {
                 self.resume_spec(
                     &registry,
                     &record.id.0,
                     AgentKind::CLAUDE_CODE_ID,
                     &record.cwd,
-                    Some(&conversation),
+                    Some(&written),
                 )?
             } else {
                 self.fresh_spec(

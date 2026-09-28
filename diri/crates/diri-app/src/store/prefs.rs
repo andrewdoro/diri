@@ -170,6 +170,14 @@ where
     })
 }
 
+fn sidebar_lineage_highlights_default() -> bool {
+    true
+}
+
+const fn window_transparency_default() -> f32 {
+    1.0
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Prefs {
@@ -210,12 +218,19 @@ pub struct Prefs {
     pub follow_system_theme: bool,
     pub terminal_font_size: f32,
     pub terminal_copy_on_select: bool,
+    /// Open a terminal URL on a plain click. When off, links still open with
+    /// Command- or Control-click.
+    pub terminal_open_links_on_click: bool,
     pub terminal_hide_pointer: bool,
     pub terminal_paste_protection: bool,
     /// Whether the window blurs the desktop behind it. Field-level default so
     /// files written before it existed pick up glass.
     #[serde(default)]
     pub window_material: WindowMaterial,
+    /// How much desktop the glass lets through, as a multiple of the shipped
+    /// tint (1.0). Missing files keep the shipped look.
+    #[serde(default = "window_transparency_default")]
+    pub window_transparency: f32,
     /// Last size, position, and presentation mode of the key window.
     pub window_placement: Option<WindowPlacement>,
     /// The other windows open at the last quit, in no particular order. They
@@ -226,6 +241,10 @@ pub struct Prefs {
     pub sidebar_visible: bool,
     pub sidebar_width: f32,
     pub sidebar_grouping: SidebarGrouping,
+    /// Mark a session's parent and children while the pointer or keyboard
+    /// cursor rests on it. Missing files pick this up as on.
+    #[serde(default = "sidebar_lineage_highlights_default")]
+    pub sidebar_lineage_highlights: bool,
     pub tab_orientation: TabOrientation,
     /// Visibility of the top tab strip, independent of the vertical sidebar.
     pub horizontal_tabs_visible: bool,
@@ -267,6 +286,9 @@ pub struct Prefs {
     pub shortcut_overrides: BTreeMap<String, Option<String>>,
     /// Session that should regain focus after the daemon's initial hydrate.
     pub last_selected_session: Option<SessionId>,
+    /// herdr panes and conversations already brought over, so importing
+    /// again only offers what is new. See `crate::herdr_import`.
+    pub herdr_imported: std::collections::BTreeSet<String>,
 }
 
 impl Default for Prefs {
@@ -288,14 +310,17 @@ impl Default for Prefs {
             follow_system_theme: false,
             terminal_font_size: 13.0,
             terminal_copy_on_select: false,
+            terminal_open_links_on_click: true,
             terminal_hide_pointer: true,
             terminal_paste_protection: false,
             window_material: WindowMaterial::Glass,
+            window_transparency: window_transparency_default(),
             window_placement: None,
             additional_windows: Vec::new(),
             sidebar_visible: false,
             sidebar_width: 248.0,
             sidebar_grouping: SidebarGrouping::Project,
+            sidebar_lineage_highlights: true,
             tab_orientation: TabOrientation::Vertical,
             horizontal_tabs_visible: true,
             active_workspace: None,
@@ -317,6 +342,7 @@ impl Default for Prefs {
             launch_recipes: LaunchRecipeBook::default(),
             shortcut_overrides: BTreeMap::new(),
             last_selected_session: None,
+            herdr_imported: Default::default(),
         }
     }
 }
@@ -410,6 +436,12 @@ impl Prefs {
     }
 
     pub fn normalize(&mut self) {
+        self.window_transparency = if self.window_transparency.is_finite() {
+            self.window_transparency
+                .clamp(0.0, diri_ui::SemanticColors::MAX_TRANSPARENCY)
+        } else {
+            window_transparency_default()
+        };
         if !self.terminal_font_size.is_finite() {
             self.terminal_font_size = 13.0;
         }
@@ -533,6 +565,7 @@ mod tests {
     fn fresh_preferences_close_panels_but_saved_choices_survive() {
         let fresh: Prefs = serde_json::from_str("{}").expect("missing preferences use defaults");
         assert!(!fresh.sidebar_visible);
+        assert!(fresh.sidebar_lineage_highlights);
         assert!(!fresh.inspector_open);
         assert_eq!(fresh.sidebar_grouping, SidebarGrouping::Project);
         assert_eq!(fresh.sidebar_ordering, SidebarOrdering::Custom);

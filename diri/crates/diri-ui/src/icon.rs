@@ -50,8 +50,10 @@ pub enum IconName {
     Activity,
     Archive,
     ArrowDown,
-    Pin,
     ArrowUp,
+    ArrowTurnUpLeft,
+    ArrowTurnDownRight,
+    Pin,
     Bell,
     Branch,
     ChartBar,
@@ -112,12 +114,14 @@ pub enum IconName {
 }
 
 impl IconName {
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 65] = [
         Self::Account,
         Self::Activity,
         Self::Archive,
         Self::ArrowDown,
         Self::ArrowUp,
+        Self::ArrowTurnUpLeft,
+        Self::ArrowTurnDownRight,
         Self::Pin,
         Self::Bell,
         Self::Branch,
@@ -186,6 +190,8 @@ impl IconName {
             Self::Pin => "icons/pin.svg",
             Self::ArrowDown => "icons/arrow-down.svg",
             Self::ArrowUp => "icons/arrow-up.svg",
+            Self::ArrowTurnUpLeft => "icons/arrow-turn-up-left.svg",
+            Self::ArrowTurnDownRight => "icons/arrow-turn-down-right.svg",
             Self::Bell => "icons/bell.svg",
             Self::Branch => "icons/branch.svg",
             Self::ChartBar => "icons/chart-bar.svg",
@@ -254,6 +260,8 @@ impl IconName {
             "archivebox" | "archivebox.fill" => Self::Archive,
             "pin" | "pin.fill" => Self::Pin,
             "arrow.down" => Self::ArrowDown,
+            "arrow.turn.down.right" => Self::ArrowTurnDownRight,
+            "arrow.turn.up.left" => Self::ArrowTurnUpLeft,
             "arrow.up.arrow.down" => Self::ResizeHorizontal,
             "arrow.up" => Self::ArrowUp,
             "bell" | "bell.fill" => Self::Bell,
@@ -388,6 +396,10 @@ fn embedded_svg(path: &str) -> Option<&'static [u8]> {
         "icons/pin.svg" => include_bytes!("../assets/icons/pin.svg"),
         "icons/arrow-down.svg" => include_bytes!("../assets/icons/arrow-down.svg"),
         "icons/arrow-up.svg" => include_bytes!("../assets/icons/arrow-up.svg"),
+        "icons/arrow-turn-down-right.svg" => {
+            include_bytes!("../assets/icons/arrow-turn-down-right.svg")
+        }
+        "icons/arrow-turn-up-left.svg" => include_bytes!("../assets/icons/arrow-turn-up-left.svg"),
         "icons/bell.svg" => include_bytes!("../assets/icons/bell.svg"),
         "icons/branch.svg" => include_bytes!("../assets/icons/branch.svg"),
         "icons/chart-bar.svg" => include_bytes!("../assets/icons/chart-bar.svg"),
@@ -504,6 +516,8 @@ mod tests {
             "arrow.branch",
             "arrow.clockwise.circle",
             "arrow.down",
+            "arrow.turn.down.right",
+            "arrow.turn.up.left",
             "arrow.down.circle",
             "arrow.left.and.right",
             "arrow.left.arrow.right",

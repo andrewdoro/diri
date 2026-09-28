@@ -55,7 +55,13 @@ struct ControlState {
     writer: Option<SessionAttachmentHandle>,
     last_resize: Option<(u16, u16)>,
     pending_resize: Option<(u16, u16)>,
+    /// The size most recently asked of the PTY by any view. Unlike
+    /// `last_resize` it survives a lease change, so a view that regains the
+    /// lease can tell whether another view left the PTY at a different size.
+    requested_size: Option<(u16, u16)>,
     resize_wake: Arc<Notify>,
+    #[cfg(test)]
+    resize_sends: u64,
 }
 
 /// Accepted means queued locally. There is no PTY delivery acknowledgement.
@@ -117,9 +123,24 @@ impl AttachmentControl {
         let _ = self.submit_at(AttachmentCommand::Resize(size.0, size.1), Some(revision));
     }
 
+    /// True when no view has sized this PTY yet, or the last size any view
+    /// asked for is `size`.
+    pub(super) fn pty_may_be(&self, size: (u16, u16)) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .requested_size
+            .is_none_or(|requested| requested == size)
+    }
+
     pub(super) fn needs_resize(&self, size: (u16, u16)) -> bool {
         let state = self.state.lock().unwrap();
         state.pending_resize.or(state.last_resize) != Some(size)
+    }
+
+    #[cfg(test)]
+    pub(super) fn resize_sends_for_test(&self) -> u64 {
+        self.state.lock().unwrap().resize_sends
     }
 
     pub(super) fn is_controller(&self) -> bool {
@@ -143,6 +164,7 @@ impl AttachmentControl {
         }
         if let AttachmentCommand::Resize(cols, rows) = command {
             let size = (cols, rows);
+            state.requested_size = Some(size);
             let result = match &state.writer {
                 Some(writer) => writer.resize(cols, rows),
                 None => Ok(()), // Desired geometry survives connection setup.
@@ -151,6 +173,10 @@ impl AttachmentControl {
                 Ok(()) => {
                     state.last_resize = Some(size);
                     state.pending_resize = None;
+                    #[cfg(test)]
+                    {
+                        state.resize_sends = state.resize_sends.saturating_add(1);
+                    }
                 }
                 Err(_) => {
                     state.pending_resize = Some(size);
@@ -271,7 +297,10 @@ impl ControllerLease {
                 writer: None,
                 last_resize: None,
                 pending_resize: None,
+                requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                #[cfg(test)]
+                resize_sends: 0,
             }));
             let session = Rc::new(RefCell::new(SessionController {
                 id: id.clone(),
@@ -375,6 +404,11 @@ impl ControllerLease {
         if let Some(view) = self.session.borrow_mut().views.get_mut(&self.view) {
             view.damage = Some(element.damage_observer());
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn reflow_held_for_test(&self) -> bool {
+        self.session.borrow().hold.is_some()
     }
 
     pub(super) fn hold_reflow(&self, cx: &mut App) {
@@ -490,7 +524,8 @@ impl SessionController {
         }
     }
 
-    fn apply(&mut self, update: GridUpdate) {
+    fn apply(&mut self, mut update: GridUpdate) {
+        self.buffer.write().unwrap().promote_fake_caret(&mut update);
         for view in self.views.values() {
             if let Some(damage) = &view.damage {
                 damage.prepare(&update);
@@ -760,7 +795,10 @@ mod tests {
                 writer: None,
                 last_resize: None,
                 pending_resize: None,
+                requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                #[cfg(test)]
+                resize_sends: 0,
             }))
         };
         let (prior_done, prior) = watch::channel(false);
@@ -818,7 +856,10 @@ mod tests {
                 writer: None,
                 last_resize: None,
                 pending_resize: None,
+                requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                #[cfg(test)]
+                resize_sends: 0,
             })),
             view: 1,
             events,

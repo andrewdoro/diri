@@ -140,6 +140,15 @@ pub struct SemanticColors {
     sidebar_surface: Rgba,
     floating_surface: Rgba,
     material: Material,
+    /// Scales how much desktop the glass tints let through: 1 is the shipped
+    /// density, 0 paints every glass surface solid, and values above 1 thin
+    /// the tints toward clear. Ignored by opaque windows.
+    transparency: f32,
+    /// How far the palette is from dark (0) to light (1). Every real theme
+    /// sits at an end. A fade between a dark and a light theme passes through
+    /// the middle, and the values that differ by appearance travel with it
+    /// instead of switching sides on one frame.
+    lightness: f32,
 }
 
 impl SemanticColors {
@@ -154,6 +163,8 @@ impl SemanticColors {
             sidebar_surface: rgba_f32(0.949, 0.953, 0.941, 0.89),
             floating_surface: rgba_f32(0.949, 0.953, 0.941, 1.0),
             material: Material::Opaque,
+            transparency: 1.0,
+            lightness: 1.0,
         }
     }
 
@@ -168,6 +179,8 @@ impl SemanticColors {
             sidebar_surface: rgba_f32(0.141, 0.161, 0.196, 0.89),
             floating_surface: rgba_f32(0.141, 0.161, 0.196, 1.0),
             material: Material::Opaque,
+            transparency: 1.0,
+            lightness: 0.0,
         }
     }
 
@@ -220,7 +233,42 @@ impl SemanticColors {
             sidebar_surface,
             floating_surface,
             material: Material::Opaque,
+            transparency: 1.0,
+            lightness: match appearance {
+                Appearance::Dark => 0.0,
+                Appearance::Light => 1.0,
+            },
         }
+    }
+
+    /// Places the palette between dark and light while a theme fade crosses
+    /// from one to the other. `appearance` follows the nearer end.
+    pub const fn with_lightness(mut self, lightness: f32) -> Self {
+        self.lightness = lightness.clamp(0.0, 1.0);
+        self.appearance = if self.lightness < 0.5 {
+            Appearance::Dark
+        } else {
+            Appearance::Light
+        };
+        self
+    }
+
+    /// `dark` or `light` exactly at the ends, so a settled theme paints the
+    /// authored constant; in proportion in between.
+    const fn between(self, dark: Rgba, light: Rgba) -> Rgba {
+        let t = self.lightness;
+        if t <= 0.0 {
+            return dark;
+        }
+        if t >= 1.0 {
+            return light;
+        }
+        rgba_f32(
+            dark.r + (light.r - dark.r) * t,
+            dark.g + (light.g - dark.g) * t,
+            dark.b + (light.b - dark.b) * t,
+            dark.a + (light.a - dark.a) * t,
+        )
     }
 
     /// Chooses how translucent every surface paints. Glass only changes the
@@ -234,11 +282,34 @@ impl SemanticColors {
         self.material
     }
 
+    /// Scales the desktop show-through of every glass tint, keeping each
+    /// surface's density relative to the others. See [`Self::transparency`].
+    pub const fn with_transparency(mut self, transparency: f32) -> Self {
+        self.transparency = transparency.clamp(0.0, Self::MAX_TRANSPARENCY);
+        self
+    }
+
+    pub const fn transparency(self) -> f32 {
+        self.transparency
+    }
+
+    /// Past this the sidebar tint is nearly gone and labels sit on raw
+    /// wallpaper.
+    pub const MAX_TRANSPARENCY: f32 = 1.5;
+
     fn glass_alpha(self, dark: f32, light: f32) -> f32 {
-        match self.appearance {
-            Appearance::Dark => dark,
-            Appearance::Light => light,
+        let shipped = self
+            .between(
+                rgba_f32(0.0, 0.0, 0.0, dark),
+                rgba_f32(0.0, 0.0, 0.0, light),
+            )
+            .a;
+        // Return the authored constant untouched at the default so the
+        // shipped look is bit-for-bit what it was before the slider.
+        if self.transparency == 1.0 {
+            return shipped;
         }
+        (1.0 - (1.0 - shipped) * self.transparency).clamp(0.0, 1.0)
     }
 
     /// The window's own fill: the base every panel composes over. Under glass
@@ -302,10 +373,9 @@ impl SemanticColors {
     pub const fn floating_stroke(self) -> Rgba {
         match self.material {
             Material::Glass => Glass::stroke(self),
-            Material::Opaque => match self.appearance {
-                Appearance::Dark => rgba_f32(1.0, 1.0, 1.0, 0.08),
-                Appearance::Light => rgba_f32(0.0, 0.0, 0.0, 0.10),
-            },
+            Material::Opaque => {
+                self.between(rgba_f32(1.0, 1.0, 1.0, 0.08), rgba_f32(0.0, 0.0, 0.0, 0.10))
+            }
         }
     }
 
@@ -313,10 +383,10 @@ impl SemanticColors {
     /// It follows the active theme's foreground hue and stays quieter than a
     /// floating menu outline because the panel already has tonal separation.
     pub const fn sidebar_stroke(self) -> Rgba {
-        match self.appearance {
-            Appearance::Dark => rgba_f32(self.primary.r, self.primary.g, self.primary.b, 0.075),
-            Appearance::Light => rgba_f32(self.primary.r, self.primary.g, self.primary.b, 0.095),
-        }
+        self.between(
+            rgba_f32(self.primary.r, self.primary.g, self.primary.b, 0.075),
+            rgba_f32(self.primary.r, self.primary.g, self.primary.b, 0.095),
+        )
     }
 
     /// Denser material for transient UI layered over live content.
@@ -337,10 +407,8 @@ impl SemanticColors {
         match self.material {
             Material::Opaque => self.floating_surface,
             Material::Glass => {
-                let lift = match self.appearance {
-                    Appearance::Dark => rgba_f32(1.0, 1.0, 1.0, 0.05),
-                    Appearance::Light => rgba_f32(1.0, 1.0, 1.0, 0.30),
-                };
+                let lift =
+                    self.between(rgba_f32(1.0, 1.0, 1.0, 0.05), rgba_f32(1.0, 1.0, 1.0, 0.30));
                 composite(lift, self.floating_surface).alpha(0.97)
             }
         }
@@ -379,6 +447,23 @@ impl Ink {
             crate::AgentKind::Gemini => Palette::GEMINI_BLUE,
             crate::AgentKind::Shell | crate::AgentKind::Generic => Self::GENERIC_WORKING,
         }
+    }
+
+    /// A status hue that stays readable on the current surface. Light themes
+    /// pull the bright ink toward the foreground, the same way an agent logo
+    /// uses the theme's own text color. Dark themes keep the authored hue.
+    pub fn on_surface(hue: Rgba, colors: SemanticColors) -> Rgba {
+        if colors.appearance == Appearance::Dark {
+            return hue;
+        }
+        const TOWARD_FOREGROUND: f32 = 0.5;
+        let keep = 1.0 - TOWARD_FOREGROUND;
+        rgba_f32(
+            hue.r * keep + colors.primary.r * TOWARD_FOREGROUND,
+            hue.g * keep + colors.primary.g * TOWARD_FOREGROUND,
+            hue.b * keep + colors.primary.b * TOWARD_FOREGROUND,
+            hue.a,
+        )
     }
 
     pub const fn overprint(kind: crate::AgentKind) -> Rgba {
@@ -429,17 +514,11 @@ pub struct Glass;
 
 impl Glass {
     pub fn fill(colors: SemanticColors) -> Rgba {
-        match colors.appearance {
-            Appearance::Dark => rgba_f32(1.0, 1.0, 1.0, 0.18),
-            Appearance::Light => rgba_f32(1.0, 1.0, 1.0, 0.72),
-        }
+        colors.between(rgba_f32(1.0, 1.0, 1.0, 0.18), rgba_f32(1.0, 1.0, 1.0, 0.72))
     }
 
     pub const fn stroke(colors: SemanticColors) -> Rgba {
-        match colors.appearance {
-            Appearance::Dark => rgba_f32(1.0, 1.0, 1.0, 0.12),
-            Appearance::Light => rgba_f32(0.0, 0.0, 0.0, 0.12),
-        }
+        colors.between(rgba_f32(1.0, 1.0, 1.0, 0.12), rgba_f32(0.0, 0.0, 0.0, 0.12))
     }
 
     /// Fill for a menu that is its own blurred window: the sidebar's settled
@@ -453,10 +532,7 @@ impl Glass {
     /// surface (menus, palettes, popovers). Pills sit flush on their panel
     /// and do not carry it; a lifted panel does.
     pub const fn rim(colors: SemanticColors) -> Rgba {
-        match colors.appearance {
-            Appearance::Dark => rgba_f32(1.0, 1.0, 1.0, 0.10),
-            Appearance::Light => rgba_f32(1.0, 1.0, 1.0, 0.65),
-        }
+        colors.between(rgba_f32(1.0, 1.0, 1.0, 0.10), rgba_f32(1.0, 1.0, 1.0, 0.65))
     }
 
     /// No shadows: on a blurred backdrop they read as smudges. Kept as the
@@ -539,6 +615,8 @@ impl Motion {
     pub const FOOTER_PIN: Spring = Spring::new(0.32, 0.82);
     pub const ROW_SELECT: f32 = 0.16;
     pub const OVERLAY_FADE: f32 = 0.12;
+    /// The way out of an overlay fade: shorter, because the hand has moved on.
+    pub const OVERLAY_FADE_OUT: f32 = 0.08;
     /// Sidebar and inspector open/close. Longer than the fades above because
     /// the seam moves a whole panel width and pushes the workbench with it.
     pub const SEAM_SLIDE_MS: u64 = 260;
@@ -572,6 +650,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn appearance_constants_are_exact_at_the_ends_and_travel_in_between() {
+        let dark = SemanticColors::dark();
+        let light = SemanticColors::light();
+        assert_eq!(dark.with_lightness(0.0), dark);
+        assert_eq!(Glass::fill(dark).a, 0.18);
+        assert_eq!(Glass::fill(light).a, 0.72);
+        assert_eq!(Glass::fill(dark.with_lightness(1.0)).a, 0.72);
+
+        let dusk = dark.with_lightness(0.25);
+        assert_eq!(dusk.appearance, Appearance::Dark);
+        assert!(Glass::fill(dusk).a > 0.18 && Glass::fill(dusk).a < 0.45);
+        assert_eq!(dark.with_lightness(0.75).appearance, Appearance::Light);
+        let stroke = dark.with_lightness(0.5).floating_stroke();
+        assert!((stroke.r - 0.5).abs() < 0.001 && (stroke.a - 0.09).abs() < 0.001);
+    }
+
+    #[test]
+    fn status_ink_darkens_on_light_surfaces_and_stays_bright_on_dark() {
+        let light = Ink::on_surface(Ink::FRESH, SemanticColors::light());
+        let dark = Ink::on_surface(Ink::FRESH, SemanticColors::dark());
+        assert!(light.g < Ink::FRESH.g && light.r <= Ink::FRESH.r);
+        assert_eq!(dark, Ink::FRESH);
+        let attention = Ink::on_surface(Ink::ATTENTION, SemanticColors::light());
+        assert!(attention.r < Ink::ATTENTION.r && attention.g < Ink::ATTENTION.g);
+    }
+
+    #[test]
     fn semantic_opacities_match_swift_conventions() {
         let colors = SemanticColors::dark();
         assert_eq!(colors.text(TextTone::Selected).a, 1.0);
@@ -598,6 +703,28 @@ mod tests {
             assert!(colors.floating_surface().a > colors.sidebar_surface().a);
             assert_eq!(colors.floating_surface().a, 1.0);
             assert_eq!(colors.floating_fill(), colors.floating_surface());
+        }
+    }
+
+    #[test]
+    fn transparency_scales_glass_tints_and_keeps_the_default_exact() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let glass = SemanticColors::new(appearance).with_material(Material::Glass);
+            assert_eq!(glass.with_transparency(1.0), glass);
+
+            let solid = glass.with_transparency(0.0);
+            assert_eq!(solid.window_fill().a, 1.0);
+            assert_eq!(solid.sidebar_surface().a, 1.0);
+            assert_eq!(solid.work_surface().a, 1.0);
+
+            let clear = glass.with_transparency(SemanticColors::MAX_TRANSPARENCY);
+            assert!(clear.window_fill().a < glass.window_fill().a);
+            assert!(clear.sidebar_surface().a < glass.sidebar_surface().a);
+            assert!(clear.work_surface().a > clear.window_fill().a);
+            assert_eq!(clear.floating_fill(), glass.floating_fill());
+
+            let opaque = SemanticColors::new(appearance).with_transparency(0.4);
+            assert_eq!(opaque.window_fill(), opaque.background);
         }
     }
 

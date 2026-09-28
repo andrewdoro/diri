@@ -607,3 +607,79 @@ fn events_flow_to_a_subscribed_connection() {
     let _ = actor.shutdown(std::net::Shutdown::Both);
     watcher.join().expect("watcher");
 }
+
+/// A program that copies with OSC 52 (Codex over SSH, Vim, tmux) reaches the
+/// app as one decoded `session.clipboard` event, not as terminal noise.
+#[test]
+fn an_osc52_copy_in_a_live_session_is_published_as_a_clipboard_event() {
+    let temp = tempfile::tempdir().expect("temp");
+    let registry = Arc::new(Mutex::new(Registry::new(
+        engine(),
+        temp.path().join("state.json"),
+    )));
+    let server = Arc::new(ControlServer::new(
+        Arc::clone(&registry),
+        temp.path().join("daemon.sock"),
+    ));
+    let listener = server.bind().expect("bind");
+    {
+        let server = Arc::clone(&server);
+        std::thread::spawn(move || {
+            while let Ok((stream, _)) = listener.accept() {
+                let server = Arc::clone(&server);
+                std::thread::spawn(move || {
+                    let _ = server.serve(stream);
+                });
+            }
+        });
+    }
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = diri_engine::events::spawn_registry_watcher(
+        Arc::clone(&registry),
+        server.events(),
+        Arc::clone(&stop),
+    );
+
+    let mut stream = UnixStream::connect(server.socket_path()).expect("connect");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("timeout");
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    let mut send = |message: &ControlMessage| {
+        let mut bytes = serde_json::to_vec(message).expect("encode");
+        bytes.push(b'\n');
+        stream.write_all(&bytes).expect("write");
+    };
+    send(&ControlMessage::Request {
+        id: 1,
+        method: "events.subscribe".into(),
+        params: Some(json!({ "kinds": ["session.clipboard"] })),
+    });
+    send(&ControlMessage::Request {
+        id: 2,
+        method: "session.spawn".into(),
+        params: Some(json!({
+            "kind": { "shell": {} },
+            "cwd": "/tmp",
+            // "copied from codex", as Codex writes it: `c` target, BEL end.
+            "argv": ["/bin/sh", "-c", "printf '\\033]52;c;Y29waWVkIGZyb20gY29kZXg=\\007'; sleep 5"],
+        })),
+    });
+
+    let mut copied = None;
+    for _ in 0..20 {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read");
+        if let ControlMessage::Event { name, params, .. } =
+            serde_json::from_str(&line).expect("decode")
+        {
+            assert_eq!(name, "session.clipboard");
+            copied = params["text"].as_str().map(str::to_owned);
+            break;
+        }
+    }
+    assert_eq!(copied.as_deref(), Some("copied from codex"));
+
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    watcher.join().expect("watcher");
+}

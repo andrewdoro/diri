@@ -1,7 +1,7 @@
 # Diri VTE patch
 
 Source: crates.io `vte` 0.15.0, copied from the Cargo registry. Original
-Apache-2.0/MIT licenses and upstream tests are retained. There are two
+Apache-2.0/MIT licenses and upstream tests are retained. There are three
 production changes. The first is `SyncState::default`: its byte buffer starts empty instead of reserving
 the 2 MiB synchronization limit for every terminal, including idle shells.
 
@@ -45,3 +45,17 @@ cargo test -p vte
 cargo test -p diri-terminal-state
 cargo bench -p diri-terminal-state --bench terminal_fleet --bench terminal_throughput
 ```
+
+## Printable ASCII runs
+
+Ground-state text is still validated and dispatched in order, but a run of
+printable ASCII (`0x20..=0x7e`) now reaches the performer as one
+`Perform::print_ascii(&str)` call instead of one `print` per character. The
+ANSI performer forwards it as `Handler::input_ascii` and records the run's
+last character for REP. Both trait methods default to the per-character loop,
+so other performers and handlers are unchanged. Controls, DEL, C1 and every
+non-ASCII character still take `execute`/`print` individually.
+
+This lets the terminal write a row segment at a time (see the alacritty patch
+notes). Test: `ascii_runs_print_every_character_in_order_and_feed_repeat`.
+

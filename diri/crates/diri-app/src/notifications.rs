@@ -108,6 +108,35 @@ fn plain_banner(prefix: &str, title: String, body: String) -> StatusTransition {
     }
 }
 
+/// Detection found an Agent the user asked Diri to install.
+pub fn agent_installed_transition(display_name: &str) -> StatusTransition {
+    plain_banner(
+        "agent-install",
+        format!("{display_name} is ready"),
+        "Start a session to give it a task. It asks you to sign in the first time.".to_owned(),
+    )
+}
+
+/// The one summary a herdr import posts: how many panes arrived, and the
+/// first reason any did not.
+pub fn herdr_import_transition(
+    opened: usize,
+    total: usize,
+    first_failure: Option<&str>,
+) -> StatusTransition {
+    let sessions = |count: usize| if count == 1 { "session" } else { "sessions" };
+    let title = if opened == total {
+        format!("Moved {opened} {} from herdr", sessions(opened))
+    } else {
+        format!("Moved {opened} of {total} {} from herdr", sessions(total))
+    };
+    let body = match first_failure {
+        Some(reason) => format!("Some panes did not open: {reason}"),
+        None => "They are in the sidebar under their projects.".to_owned(),
+    };
+    foreground_banner(title, body)
+}
+
 fn foreground_banner(title: String, body: String) -> StatusTransition {
     StatusTransition {
         dismiss: Vec::new(),

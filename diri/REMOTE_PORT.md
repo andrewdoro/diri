@@ -843,6 +843,19 @@ the existing annotations and the same `unicode-width` 0.2.2 width rules as the
 shared parser; making that existing transitive dependency direct in `diri-term`
 avoids a separate, inconsistent width table.
 
+Find over a remote session's history (September 2026) uses the same rule. The
+local Engine answers `session.capture_find` for a remote session by reading the
+newest rows the capture budget allows through the existing on-demand
+`ScrollbackRequest`, at most 1024 rows per request, and assembling one
+contiguous tail that ends at the visible grid. Absolute rows never renumber, so
+output arriving between reads only adds rows that a further read picks up; a
+bounded number of reads keeps a fast-printing terminal from being chased, and a
+resize or reset between reads fails the capture. There is no Helper protocol,
+capability, controller, snapshot, or history-budget change, and nothing new is
+retained on the remote host. A Helper that cannot serve the rows makes the
+capture fail, and the client falls back to searching the mirrored screen, which
+is what every remote session did before.
+
 The shared terminal parser additionally retains OSC 8 targets, soft-wrap facts,
 wide-cell continuation facts, combining characters, and OSC 133 A prompt-start
 marks. These are terminal screen facts; the Holder does not infer commands,
@@ -1545,6 +1558,15 @@ run hooks, or interpret actions. No Helper protocol or capability changes are
 required. Replayed output must not redeliver notifications. Alerts produced
 while the Engine is disconnected are not recovered from replay; reliable
 offline notification delivery remains an independent enhancement.
+
+The same scanner relays OSC 52 clipboard writes as a local `session.clipboard`
+event, which the app writes to the system clipboard. This is how a program on a
+remote host copies (Codex, for one, switches to OSC 52 when it detects SSH, and
+selects with the mouse in its alternate screen, so a local drag never happens).
+Only writes are relayed: clipboard reads and clears are ignored, one write is
+bounded to 1 MiB of base64, replayed output never rewrites the clipboard, and
+the app drops a write that arrives more than a few seconds late. The Holder is
+unchanged; no Helper protocol or capability changes are required.
 
 The local Rust Engine persists causal attention identities and native-source
 receipts in a per-session SQLite journal. Adoption retains the journal namespace;

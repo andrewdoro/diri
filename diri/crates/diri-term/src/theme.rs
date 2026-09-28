@@ -73,6 +73,10 @@ pub struct TermTheme {
     pub find_match: Rgba,
     pub find_match_current: Rgba,
     pub ansi: [Rgba; 16],
+    /// Zero for a theme as authored. [`TermTheme::mix`] stamps the palette it
+    /// produced here, so a per-cell cache can tell two frames of a fade apart
+    /// without hashing sixteen colors for every cell.
+    pub(crate) blend: u64,
 }
 
 impl TermTheme {
@@ -108,6 +112,7 @@ impl TermTheme {
             hex(0x29b8db),
             hex(0xffffff),
         ],
+        blend: 0,
     };
 
     pub const SOLARIZED_DARK: Self = dark_theme(
@@ -215,6 +220,7 @@ impl TermTheme {
             hex(0x99ffe4),
             hex(0xffffff),
         ],
+        blend: 0,
     };
 
     pub const NORD: Self = dark_theme(
@@ -370,6 +376,15 @@ impl TermTheme {
     /// Bold selects a bold face; it intentionally does not brighten ANSI 0–7.
     #[must_use]
     pub fn resolve_cell(&self, cell: GridCell) -> ResolvedCellStyle {
+        self.resolve_cell_under(cell, None)
+    }
+
+    /// [`Self::resolve_cell`] for a cell painted under a selection or find
+    /// `tint`. The tint sits between the cell's background and its glyph, so
+    /// the foreground is held readable against the two combined. The reported
+    /// background stays the cell's own.
+    #[must_use]
+    pub fn resolve_cell_under(&self, cell: GridCell, tint: Option<Rgba>) -> ResolvedCellStyle {
         let inverse = cell.style.contains(TermStyle::INVERSE);
         let mut foreground = if inverse {
             self.resolve_color(cell.bg, true)
@@ -384,11 +399,14 @@ impl TermTheme {
         let visible = !cell.style.contains(TermStyle::INVISIBLE);
         // Programs pick colors for dark terminals; see `contrast` for which
         // pairs a light theme answers for and how they are corrected.
-        // SGR faint is an opaque color of its own in every theme, solved and
-        // cached along the same path.
+        // SGR faint is an opaque color of its own in every theme, and a glyph
+        // under a selection or find tint answers to that tint in every theme;
+        // all three are solved and cached along the same path.
         let own = self.appearance == ThemeAppearance::Light && contrast::applies(cell);
-        if own || (visible && cell.style.contains(TermStyle::DIM)) {
-            foreground = contrast::painted_foreground(self, cell, foreground, background, own);
+        let tint = tint.filter(|_| contrast::tint_applies(cell));
+        if own || tint.is_some() || (visible && cell.style.contains(TermStyle::DIM)) {
+            foreground =
+                contrast::painted_foreground(self, cell, foreground, background, own, tint);
         }
         if !visible {
             foreground = foreground.alpha(0.0);
@@ -403,6 +421,17 @@ impl TermTheme {
             strikethrough: visible && cell.style.contains(TermStyle::CROSSED_OUT),
             visible,
         }
+    }
+
+    /// Cursor fill and cursor glyph color for a cursor on `cell`, which may
+    /// itself sit under a selection or find `tint`.
+    #[must_use]
+    pub fn cursor_colors(&self, cell: GridCell, tint: Option<Rgba>) -> (Rgba, Rgba) {
+        let mut background = self.resolve_cell(cell).background;
+        if let Some(tint) = tint {
+            background = contrast::over(tint, background);
+        }
+        contrast::cursor_colors(self, background)
     }
 
     #[must_use]
@@ -520,6 +549,7 @@ const fn palette_theme(
             hex(ansi_values[14]),
             hex(ansi_values[15]),
         ],
+        blend: 0,
     }
 }
 

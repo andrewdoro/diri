@@ -88,6 +88,11 @@ pub struct SidebarUiState {
     pub visible: bool,
     pub width: f32,
     pub hovered_project: Option<ProjectId>,
+    /// Header press that started while this project's hover controls were up.
+    /// A move during that press clears hover, which unmounts the controls
+    /// before mouse-up; the release still belongs to whichever control it
+    /// lands on.
+    pub project_hover_press: Option<ProjectId>,
     pub hovered_session: Option<SessionId>,
     pub hovered_control: Option<&'static str>,
     pub popover: Option<Popover>,
@@ -128,6 +133,7 @@ impl SidebarUiState {
             visible: true,
             width: width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
             hovered_project: None,
+            project_hover_press: None,
             hovered_session: None,
             hovered_control: None,
             popover: None,

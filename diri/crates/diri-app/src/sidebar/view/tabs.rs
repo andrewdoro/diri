@@ -1,9 +1,13 @@
 use super::*;
 use crate::store::TabOrientation;
 use crate::tab_navigation::{TAB_STRIP_HEIGHT, selected_project_tabs};
+use diri_ui::title_fade;
 
 const TAB_WIDTH: f32 = 164.0;
 const TAB_GAP: f32 = 4.0;
+/// What a tab leaves its title: the width less the border, padding, mark
+/// slot, close button and the two gaps between them.
+const TAB_TITLE_WIDTH: f32 = TAB_WIDTH - 2.0 - 20.0 - 18.0 - 7.0 - 18.0 - 7.0;
 
 /// A session tab picked up in the horizontal strip. It carries no ghost:
 /// the tab itself is lifted by the strip, locked to the strip's axis.
@@ -22,7 +26,7 @@ impl Render for DraggedTab {
 /// does; both sit in one fixed slot so the title never shifts between them.
 pub(super) fn session_tab_face(
     mark: AnyElement,
-    title: SharedString,
+    title: impl IntoElement,
     active: bool,
     colors: SemanticColors,
 ) -> gpui::Div {
@@ -46,7 +50,6 @@ pub(super) fn session_tab_face(
                 .flex_1()
                 .min_w(px(0.0))
                 .overflow_hidden()
-                .text_ellipsis()
                 .text_size(px(Typo::ROW.size))
                 .text_color(if active {
                     colors.primary
@@ -295,9 +298,17 @@ impl Sidebar {
             self.last_tab_selection = selected.clone();
             self.last_tab_available_width = available_width;
         }
-        for (session, state) in tabs.sessions.into_iter().zip(marks) {
+        let held_hint = self.strip_held_hint;
+        let tab_count = tabs.sessions.len();
+        for (index, (session, state)) in tabs.sessions.into_iter().zip(marks).enumerate() {
             let id = session.id.clone();
             let active = selected.as_ref() == Some(&id);
+            // The same rule the sidebar rows follow: ⌘1–⌘8, then ⌘9 = last.
+            let rank = if index < 8 {
+                Some(index + 1)
+            } else {
+                (index + 1 == tab_count).then_some(9)
+            };
             let title = display_title(&session);
             self.working_row_rendered |= state == StatusState::Working;
             let mark = match state {
@@ -323,6 +334,14 @@ impl Sidebar {
                     .child(activity_mark(state, self.activity_frame, colors))
                     .into_any_element(),
             };
+            let mark = crate::held_hints::in_leading_slot(
+                mark,
+                16.0,
+                format!("held-hint:tab:{}", id.0),
+                rank.and_then(crate::held_hints::session_label),
+                held_hint,
+                colors,
+            );
             let debug_id = id.0.clone();
             let close_id = id.clone();
             let probe_key = SharedString::from(format!("tab:{}", id.0));
@@ -338,7 +357,13 @@ impl Sidebar {
             if shift.is_none() {
                 self.tab_shift.applied.borrow_mut().remove(&id);
             }
-            let tab = session_tab_face(mark, title.clone().into(), active, colors)
+            // At rest the title fades out where it overflows; while it settles
+            // the crossfading label owns the box.
+            let face = match self.settling_title(&id, TAB_TITLE_WIDTH) {
+                Some(settling) => settling.into_any_element(),
+                None => title_fade(title.clone()).into_any_element(),
+            };
+            let tab = session_tab_face(mark, face, active, colors)
                 .id(SharedString::from(format!("horizontal-tab-{}", id.0)))
                 .debug_selector(move || format!("horizontal-tab-{}", debug_id))
                 .role(Role::Tab)
@@ -391,6 +416,8 @@ impl Sidebar {
                                 if this.pointer_crossed_tab(&dragged.0, &id)
                                     && this.reorder_tab(&dragged.0, &id, cx.reduce_motion())
                                 {
+                                    // The held tab traded places with this one.
+                                    haptics::perform(Haptic::Snap, haptics::key("tab-slot", &id));
                                     cx.notify();
                                 }
                             });
@@ -398,7 +425,7 @@ impl Sidebar {
                         }
                     })
                 })
-                .child(
+                .child(crate::held_hints::below(
                     div()
                         .id(SharedString::from(format!(
                             "close-horizontal-tab-{}",
@@ -418,8 +445,16 @@ impl Sidebar {
                             this.close_sessions(vec![close_id.clone()], cx);
                             cx.stop_propagation();
                             cx.notify();
-                        })),
-                )
+                        }))
+                        .into_any_element(),
+                    "close-tab",
+                    // ⌘W closes the selected session, so only its ✕ says so.
+                    active
+                        .then(|| crate::held_hints::label(crate::commands::CommandId::CloseSession))
+                        .flatten(),
+                    held_hint,
+                    colors,
+                ))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(
                     MouseButton::Right,
@@ -595,11 +630,16 @@ impl Sidebar {
         // working marks' 8 Hz tick alive only while one is on screen.
         self.reconcile_workspace_navigation(cx);
         self.working_row_rendered = false;
+        // The strip stands in for the panel; its marks advance through a
+        // sidebar notify, not through session rows.
+        self.rows_mounted = false;
+        self.observe_titles(cx);
         if cx.reduce_motion() {
             self.activity_frame = 0;
         }
         let strip = self.horizontal_strip(available_width, trailing, cx);
         self.schedule_activity_tick(cx);
+        self.schedule_title_tick(cx);
         strip
     }
 
@@ -616,6 +656,7 @@ impl Sidebar {
             return self.workspace_strip(colors, cx);
         }
         let rows = self.render_project_tab_rows(available_width, cx);
+        let held_hint = self.strip_held_hint;
         div()
             .id("horizontal-tabs")
             .debug_selector(|| "horizontal-tabs".into())
@@ -655,7 +696,7 @@ impl Sidebar {
             .text_color(colors.primary)
             .child(self.project_control(colors, cx))
             .child(rows)
-            .child(
+            .child(crate::held_hints::below(
                 div()
                     .id("horizontal-peek-tabs")
                     .debug_selector(|| "horizontal-peek-tabs".into())
@@ -673,9 +714,14 @@ impl Sidebar {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(crate::commands::ToggleTabPeek), cx)
-                    }),
-            )
-            .child(
+                    })
+                    .into_any_element(),
+                "peek-tabs",
+                crate::held_hints::label(crate::commands::CommandId::ToggleTabPeek),
+                held_hint,
+                colors,
+            ))
+            .child(crate::held_hints::below(
                 div()
                     .id("horizontal-new-tab")
                     .debug_selector(|| "horizontal-new-tab".into())
@@ -693,8 +739,13 @@ impl Sidebar {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(crate::commands::NewDefaultSession), cx)
-                    }),
-            )
+                    })
+                    .into_any_element(),
+                "new-tab",
+                crate::held_hints::label(crate::commands::CommandId::NewDefaultSession),
+                held_hint,
+                colors,
+            ))
             .when_some(trailing, |strip, trailing| {
                 strip.child(
                     div()
@@ -737,7 +788,7 @@ mod tests {
     use diri_proto::workspace::{
         LayoutNode, PaneId, TabId, WorkspaceId, WorkspaceRecord, WorkspaceSnapshot, WorkspaceTab,
     };
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
     /// Only the strip paints, exactly as the app does while horizontal tabs
     /// hide the sidebar panel.
@@ -770,6 +821,75 @@ mod tests {
             StripOnly { sidebar }
         });
         (view.read_with(cx, |view, _| view.sidebar.clone()), cx)
+    }
+
+    #[gpui::test]
+    fn a_tab_trading_places_ticks_once_per_slot(cx: &mut TestAppContext) {
+        let (sidebar, cx) = strip_harness(cx, true);
+        let order = sidebar.update(cx, |sidebar, _| sidebar.visible_tab_order());
+        let bounds = |cx: &mut VisualTestContext, id: &SessionId| {
+            cx.debug_bounds(Box::leak(
+                format!("horizontal-tab-{}", id.0).into_boxed_str(),
+            ))
+            .expect("tab")
+        };
+        // Only siblings on the same side of the pin boundary trade places.
+        let (moved, target) = order
+            .iter()
+            .enumerate()
+            .flat_map(|(index, moved)| {
+                order[index + 1..]
+                    .iter()
+                    .map(move |target| (moved.clone(), target.clone()))
+            })
+            .find(|(moved, target)| {
+                sidebar.update(cx, |sidebar, _| {
+                    let before = sidebar.visible_tab_order();
+                    let traded = sidebar.reorder_tab(moved, target, true);
+                    if traded {
+                        assert!(sidebar.reorder_tab(moved, target, true));
+                        assert_eq!(sidebar.visible_tab_order(), before);
+                    }
+                    traded
+                })
+            })
+            .expect("the preview strip has two tabs that can trade places");
+        cx.run_until_parked();
+        let from = bounds(cx, &moved);
+        let over = bounds(cx, &target);
+        let _ = haptics::testing::take();
+
+        cx.simulate_mouse_down(from.center(), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            from.center() + point(px(6.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        // Over the neighbour but short of its midline: hover, not a slot.
+        cx.simulate_mouse_move(
+            point(over.left() + px(4.0), over.center().y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        assert_eq!(haptics::testing::take(), []);
+
+        let past_midline = point(over.center().x + px(4.0), over.center().y);
+        cx.simulate_mouse_move(past_midline, MouseButton::Left, Modifiers::default());
+        assert_eq!(
+            haptics::testing::take(),
+            [(Haptic::Snap, haptics::key("tab-slot", &target))]
+        );
+        cx.simulate_mouse_move(
+            past_midline + point(px(1.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(past_midline, MouseButton::Left, Modifiers::default());
+        assert_eq!(
+            haptics::testing::take(),
+            [],
+            "holding the new slot and letting go add nothing"
+        );
     }
 
     #[gpui::test]

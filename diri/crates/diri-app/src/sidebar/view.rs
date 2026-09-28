@@ -1,8 +1,17 @@
 mod accounts;
+mod arrivals;
 mod filter;
+#[cfg(test)]
+mod hue_tests;
+mod lineage;
 mod project_picker;
+mod rows;
 mod tabs;
+mod titles;
 mod workspaces;
+
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use titles::testing as title_clock_for_test;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -32,6 +41,7 @@ use tokio::sync::mpsc;
 use crate::commands::{CommandId, OpenSettings, ToggleHistory};
 use crate::delegation::{HandoffProposal, handoff_proposal, sibling_proposal, validate_handoff};
 use crate::external_drop::{ExternalDropPlan, ExternalDropTarget, plan_external_drop};
+use crate::haptics::{self, Haptic};
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::query_label;
 use crate::query_editor::{self, ClipboardEdit, Edit};
@@ -48,11 +58,13 @@ use crate::usage::{UsageFormat, UsageSnapshot};
 use crate::session_presentation::{activity_mark, is_loading, status_state, ui_agent_kind};
 
 use super::disclosure::{Disclosure, Frame as DisclosureFrame};
+use super::title_settle::{SettlingLabel, TitleSettles};
 
 use super::{
     CursorMove, DragItem, DropZone, Popover, PreviewScenario, SidebarPreviewFixture,
     SidebarUiState, drop_zone, move_before, move_past, move_to_end,
 };
+use lineage::{LineageRole, LineageSession, lineage_anchor, lineage_marks};
 
 /// Height of each insertion band at the top and bottom of a session row. A
 /// quarter of the row on each side leaves half the row as the drop-onto core.
@@ -78,6 +90,37 @@ const SECTION_GAP: f32 = 8.0;
 /// agent mark, and the ✕ that stands on that column when a session or
 /// project row is hovered. One width keeps them on a single vertical line.
 const SIDEBAR_TRAILING_SLOT: f32 = 16.0;
+
+/// Which hover control a point in a project header lands on.
+/// The strip sits `Space::ROW_H` in from the header's right edge.
+enum ProjectHoverAction {
+    Menu,
+    Add,
+    Close,
+}
+
+fn project_hover_action(
+    header: Bounds<Pixels>,
+    position: Point<Pixels>,
+) -> Option<ProjectHoverAction> {
+    if !header.contains(&position) {
+        return None;
+    }
+    let strip_width = px(SIDEBAR_ACTION_SLOT * 2.0 + SIDEBAR_TRAILING_SLOT);
+    let strip_right = header.right() - px(Space::ROW_H);
+    let strip_left = strip_right - strip_width;
+    if position.x < strip_left || position.x >= strip_right {
+        return None;
+    }
+    let into = position.x - strip_left;
+    if into < px(SIDEBAR_ACTION_SLOT) {
+        Some(ProjectHoverAction::Menu)
+    } else if into < px(SIDEBAR_ACTION_SLOT * 2.0) {
+        Some(ProjectHoverAction::Add)
+    } else {
+        Some(ProjectHoverAction::Close)
+    }
+}
 
 /// How far a swapped-in body travels before it settles, and how long the
 /// whole swap takes. The travel is deliberately short: the sidebar itself
@@ -546,6 +589,9 @@ pub struct Sidebar {
     /// Window-space row bounds from the latest prepaint. Keyboard navigation
     /// uses these to reveal only rows that actually crossed the viewport edge.
     row_bounds: Rc<RefCell<HashMap<SessionId, Bounds<Pixels>>>>,
+    /// The gap the insertion marker was last drawn in during a session drag.
+    insertion_haptic: RefCell<haptics::Crossing>,
+    insertion_line: Cell<Option<f32>>,
     /// Window-space bounds of rows that are not sessions (project headers)
     /// from the latest prepaint, so they can take part in the edge fade.
     fade_bounds: Rc<RefCell<HashMap<SharedString, Bounds<Pixels>>>>,
@@ -576,9 +622,30 @@ pub struct Sidebar {
     /// panel paints it elsewhere.
     main_viewport: Size<Pixels>,
     working_row_rendered: bool,
+    /// Cached views of the session rows, by session (see `rows.rs`).
+    session_row_views: HashMap<SessionId, Entity<rows::SessionRowView>>,
+    /// Rows whose activity mark animates, from the latest render.
+    animated_rows: Vec<WeakEntity<rows::SessionRowView>>,
+    /// Session rows were mounted by the latest sidebar render.
+    rows_mounted: bool,
+    /// Every row renders on the next sidebar render.
+    rows_stale: bool,
+    /// The pending notify cannot change rows beyond their props.
+    notify_keeps_rows: bool,
+    /// This render's held-⌘ hint opacity, handed to rows through their props.
+    row_held_hint: f32,
+    /// Sessions whose rows this render mounted.
+    mounted_row_ids: HashSet<SessionId>,
+    _self_observer: Option<gpui::Subscription>,
+    /// Project hues for the list being rendered.
+    hues: crate::project_hue::ProjectHues,
     /// Rebuilt once per projection render. Looking up ⌘1…⌘9 inside every row
     /// previously re-locked the store and scanned the full session list N times.
     shortcut_ranks: HashMap<SessionId, usize>,
+    /// Direct parent (turn up-left) and children (turn down-right) of the hovered
+    /// session, or of the keyboard cursor while the sidebar is focused and
+    /// nothing is hovered.
+    lineage_roles: HashMap<SessionId, LineageRole>,
     focus_handle: FocusHandle,
     hover_task: Option<Task<()>>,
     hover_keystrokes: Option<gpui::Subscription>,
@@ -589,6 +656,9 @@ pub struct Sidebar {
     update: UpdateState,
     /// When visibility last flipped, so a held ⌘B cannot outrun the slide.
     last_toggle: Option<Instant>,
+    /// Hold-⌘ hint opacity for the horizontal strip, which `RootView`
+    /// renders inline and so samples for it.
+    pub(crate) strip_held_hint: f32,
     preview: bool,
     /// Which face the New Agent menu shows. The remote directory listing
     /// itself lives in the Store so the daemon adapter can complete it
@@ -613,6 +683,16 @@ pub struct Sidebar {
     recency_disclosure: Option<Disclosure>,
     disclosure_animating: bool,
     disclosure_tick: Option<Task<()>>,
+    /// Titles an agent changed crossfade instead of snapping. Shared by the
+    /// rows and the horizontal strip, which show the same sessions.
+    title_settles: TitleSettles,
+    title_clock: fn() -> Instant,
+    /// The instant every title in this pass is sampled at.
+    title_now: Instant,
+    title_tick: Option<Task<()>>,
+    /// Sessions that arrive grow into the list and ones that leave collapse
+    /// out of it, sampled on the title clock.
+    row_motion: super::row_motion::RowMotion<SessionId, crate::store::SidebarRow>,
 }
 
 /// The sidebar state that asked for a native folder pick, captured when the
@@ -647,6 +727,8 @@ impl Sidebar {
         scenario: PreviewScenario,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.observe_global::<crate::held_hints::HeldHintsState>(|_, cx| cx.notify())
+            .detach();
         let (store, preview_effects) = if preview {
             let fixture = SidebarPreviewFixture::make(scenario);
             let (mut store, effects) = SessionStore::headless(fixture.prefs);
@@ -682,13 +764,7 @@ impl Sidebar {
                 loop {
                     match changes.recv().await {
                         Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            if this
-                                .update(cx, |this, cx| {
-                                    this.store.write().expect("store").reconcile();
-                                    cx.notify();
-                                })
-                                .is_err()
-                            {
+                            if this.update(cx, |this, cx| this.store_changed(cx)).is_err() {
                                 return;
                             }
                         }
@@ -722,6 +798,8 @@ impl Sidebar {
             filter_focus: cx.focus_handle(),
             filter_generation: 0,
             row_bounds: Rc::new(RefCell::new(HashMap::new())),
+            insertion_haptic: RefCell::new(haptics::Crossing::default()),
+            insertion_line: Cell::new(None),
             fade_bounds: Rc::new(RefCell::new(HashMap::new())),
             section_bounds: Rc::new(RefCell::new(HashMap::new())),
             section_shift: Shift::default(),
@@ -738,7 +816,18 @@ impl Sidebar {
             activity_activation: None,
             main_viewport: Size::default(),
             working_row_rendered: false,
+            session_row_views: HashMap::new(),
+            animated_rows: Vec::new(),
+            rows_mounted: false,
+            rows_stale: true,
+            notify_keeps_rows: false,
+            row_held_hint: 0.0,
+            mounted_row_ids: HashSet::new(),
+            _self_observer: None,
+            hues: Default::default(),
             shortcut_ranks: HashMap::new(),
+            strip_held_hint: 0.0,
+            lineage_roles: HashMap::new(),
             focus_handle: cx.focus_handle(),
             hover_task: None,
             hover_keystrokes: None,
@@ -759,8 +848,14 @@ impl Sidebar {
             recency_disclosure: None,
             disclosure_animating: false,
             disclosure_tick: None,
+            title_settles: TitleSettles::default(),
+            title_clock: Instant::now,
+            title_now: Instant::now(),
+            title_tick: None,
+            row_motion: Default::default(),
         };
         sidebar.ui.preview_account = preview;
+        sidebar._self_observer = Some(cx.observe_self(|sidebar, _| sidebar.note_self_notified()));
         // Opens a popover at launch: headless screenshots verify its layout,
         // and a dev build shows its blurred panel without anyone clicking.
         match std::env::var("DIRIJOR_SIDEBAR_POPOVER").as_deref() {
@@ -1070,6 +1165,9 @@ impl Sidebar {
             // A popover anchored to a session row has nothing to point at once
             // the rows are gone.
             self.ui.popover = None;
+            // Rows unmount with the session list, so a leave event never
+            // arrives if the pointer moves while settings is open.
+            self.ui.hovered_session = None;
             self.dismiss_hover_card(cx);
         }
         self.settings_nav = nav;
@@ -1260,7 +1358,7 @@ impl Sidebar {
 
     fn colors(&self) -> SemanticColors {
         let store = self.store.read().expect("session store lock poisoned");
-        crate::app_theme::sidebar_colors_for(store.preferences())
+        crate::app_theme::sidebar_colors_in(&store)
     }
 
     fn begin_rename(
@@ -1718,7 +1816,12 @@ impl Sidebar {
         .size_full()
     }
 
-    fn new_agent_row(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+    fn new_agent_row(
+        &self,
+        held_hint: f32,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let hovering = self.ui.hovered_control == Some("new-agent");
         let (agent_kind, host_label) = {
             let store = self.store.read().expect("session store lock poisoned");
@@ -1799,12 +1902,27 @@ impl Sidebar {
                                 .child(host),
                         )
                     })
-                    .child(AgentLogo::new(agent_kind, 16.0, colors).badged(false)),
+                    .child(crate::held_hints::in_slot(
+                        AgentLogo::new(agent_kind, 16.0, colors)
+                            .badged(false)
+                            .inset(0.08)
+                            .into_any_element(),
+                        16.0,
+                        "held-hint:new-agent".to_owned(),
+                        crate::held_hints::label(CommandId::NewDefaultSession),
+                        held_hint,
+                        colors,
+                    )),
             )
             .into_any_element()
     }
 
-    fn top_bar(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+    fn top_bar(
+        &self,
+        held_hint: f32,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let in_settings = self.settings_nav.is_some();
         let primary_control = if in_settings { "settings" } else { "search" };
         let primary_hover = self.ui.hovered_control == Some(primary_control);
@@ -1830,20 +1948,26 @@ impl Sidebar {
                 }),
             )
         } else {
-            icon_button(
+            crate::held_hints::below(
+                icon_button(
+                    "sidebar-search",
+                    "Search sessions",
+                    "magnifyingglass",
+                    primary_hover,
+                    colors,
+                    cx.listener(|this, _, window, cx| {
+                        this.ui.popover = None;
+                        window.dispatch_action(Box::new(ToggleHistory), cx);
+                    }),
+                    cx.listener(|this, hovered: &bool, _, cx| {
+                        this.ui.hovered_control = hovered.then_some("search");
+                        cx.notify();
+                    }),
+                ),
                 "sidebar-search",
-                "Search sessions",
-                "magnifyingglass",
-                primary_hover,
+                crate::held_hints::label(CommandId::ToggleHistory),
+                held_hint,
                 colors,
-                cx.listener(|this, _, window, cx| {
-                    this.ui.popover = None;
-                    window.dispatch_action(Box::new(ToggleHistory), cx);
-                }),
-                cx.listener(|this, hovered: &bool, _, cx| {
-                    this.ui.hovered_control = hovered.then_some("search");
-                    cx.notify();
-                }),
             )
         };
         div()
@@ -1877,21 +2001,27 @@ impl Sidebar {
                 ))
             })
             .child(primary_button)
-            .child(icon_button(
+            .child(crate::held_hints::below(
+                icon_button(
+                    "sidebar-toggle",
+                    if self.peek_open {
+                        "Pin sidebar open"
+                    } else {
+                        "Hide sidebar"
+                    },
+                    "sidebar.left",
+                    toggle_hover,
+                    colors,
+                    cx.listener(|this, _, _, cx| this.toggle(cx)),
+                    cx.listener(|this, hovered: &bool, _, cx| {
+                        this.ui.hovered_control = hovered.then_some("sidebar-toggle");
+                        cx.notify();
+                    }),
+                ),
                 "sidebar-toggle",
-                if self.peek_open {
-                    "Pin sidebar open"
-                } else {
-                    "Hide sidebar"
-                },
-                "sidebar.left",
-                toggle_hover,
+                crate::held_hints::label(CommandId::ToggleSidebar),
+                held_hint,
                 colors,
-                cx.listener(|this, _, _, cx| this.toggle(cx)),
-                cx.listener(|this, hovered: &bool, _, cx| {
-                    this.ui.hovered_control = hovered.then_some("sidebar-toggle");
-                    cx.notify();
-                }),
             ))
             .into_any_element()
     }
@@ -2141,6 +2271,7 @@ impl Sidebar {
         let plan = plan_external_drop(paths.paths(), target);
         self.external_drop_feedback = plan.feedback();
         if plan.action.is_some() {
+            haptics::perform(Haptic::Accepted, haptics::key("sidebar-drop", ()));
             cx.emit(SidebarEvent::ExternalDrop(plan));
         }
         cx.notify();
@@ -2278,15 +2409,17 @@ impl Sidebar {
             .into_any_element()
     }
 
+    /// A sidebar with nothing in it says so and nothing more, the way Finder
+    /// and Mail do. The main pane beside it carries the explanation and the
+    /// button; an icon, a slogan and a stray shortcut here only competed with
+    /// it. The whole area still accepts a dropped folder.
     fn empty_state(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("sidebar-empty-state")
             .flex_1()
             .flex()
-            .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(12.0))
             .rounded(px(Radius::PANEL))
             .drag_over::<ExternalPaths>(move |element, paths, _, _| {
                 if Self::can_accept_external_drop(paths, ExternalDropTarget::EmptySpace) {
@@ -2302,49 +2435,11 @@ impl Sidebar {
                 cx.stop_propagation();
                 this.external_drop(paths, ExternalDropTarget::EmptySpace, cx);
             }))
-            .child(sf_symbol("square.stack.3d.up", 28.0, colors.tertiary))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(3.0))
-                    .child(
-                        div()
-                            .text_size(px(Typo::ROW_EMPHASIZED.size))
-                            .font_weight(Typo::ROW_EMPHASIZED.weight)
-                            .text_color(colors.secondary)
-                            .child("Your sessions live here"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(Typo::META.size))
-                            .text_color(colors.tertiary)
-                            .child(
-                                crate::commands::command(CommandId::OpenLauncher)
-                                    .shortcut_label()
-                                    .unwrap_or_default(),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .id("empty-new-agent")
-                    .px(px(10.0))
-                    .h(px(SIDEBAR_NAV_ROW_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .rounded(px(SIDEBAR_ROW_RADIUS))
                     .text_size(px(Typo::ROW.size))
-                    .text_color(colors.secondary)
-                    .cursor_pointer()
-                    .hover(move |element| element.bg(colors.primary.alpha(0.06)))
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(crate::commands::OpenLauncher), cx);
-                    })
-                    .gap(px(7.0))
-                    .child(sf_symbol("square.and.pencil", 13.0, colors.secondary))
-                    .child("Start a session"),
+                    .text_color(colors.tertiary)
+                    .child("No Sessions"),
             )
             .into_any_element()
     }
@@ -2428,9 +2523,61 @@ impl Sidebar {
                     cx.notify();
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener({
+                    let id = id.clone();
+                    move |this, _, _, _| {
+                        this.ui.project_hover_press =
+                            (this.ui.hovered_project.as_ref() == Some(&id)).then(|| id.clone());
+                    }
+                }),
+            )
             .on_click(cx.listener({
                 let id = id.clone();
-                move |this, _, _, cx| {
+                let project = project_for_click.clone();
+                let project_root = project_root.clone();
+                let project_host = project_host.clone();
+                move |this, event: &gpui::ClickEvent, _, cx| {
+                    let armed = this
+                        .ui
+                        .project_hover_press
+                        .take()
+                        .filter(|pressed| pressed == &id);
+                    let header = this
+                        .fade_bounds
+                        .borrow()
+                        .get(&SharedString::from(format!("project:{}", id.0)))
+                        .copied();
+                    if armed.is_some()
+                        && let Some(header) = header
+                        && let Some(action) = project_hover_action(header, event.position())
+                    {
+                        match action {
+                            ProjectHoverAction::Menu => {
+                                this.ui.popover = Some(Popover::ProjectActions {
+                                    id: project.id.clone(),
+                                    position: Some(point(
+                                        px(12.0),
+                                        event.position().y + px(SIDEBAR_NAV_ROW_HEIGHT / 2.0 + 3.0),
+                                    )),
+                                });
+                            }
+                            ProjectHoverAction::Add => {
+                                this.open_new_agent_popover_below(
+                                    Some(project_root.clone()),
+                                    project_host.clone(),
+                                    event.position(),
+                                    cx,
+                                );
+                            }
+                            ProjectHoverAction::Close => {
+                                this.close_project_sessions(&id, cx);
+                            }
+                        }
+                        cx.notify();
+                        return;
+                    }
                     this.commit_rename();
                     let _ = this
                         .store
@@ -2501,6 +2648,10 @@ impl Sidebar {
                             let target = format!("project:{}", id.0);
                             let moved_now = this.pointer_crossed_header(moved, &id, window)
                                 && this.reorder_project(moved, &id, cx.reduce_motion());
+                            if moved_now {
+                                // The held project traded places with this one.
+                                haptics::perform(Haptic::Snap, haptics::key("project-slot", &id));
+                            }
                             if moved_now || this.ui.drag_target.as_deref() != Some(&target) {
                                 this.ui.drag_target = Some(target);
                                 cx.notify();
@@ -2564,7 +2715,12 @@ impl Sidebar {
                         let id = id.clone();
                         move || format!("PROJECT_DISCLOSURE_{}", id.0)
                     })
-                    .child(project_disclosure(collapsed, colors)),
+                    .child(disclosure_tile(
+                        collapsed,
+                        // The header is where a project's hue is learned.
+                        self.hues.color(&id, colors).unwrap_or(colors.secondary),
+                        colors,
+                    )),
             )
             .child(
                 div()
@@ -2597,6 +2753,13 @@ impl Sidebar {
                         .h(px(SIDEBAR_NAV_ROW_HEIGHT))
                         .flex()
                         .items_center()
+                        // The header drags, and GPUI treats a pressed header as
+                        // unhovered, which unmounts this strip before mouse-up.
+                        // Stopping the press here keeps plus, ellipsis, and
+                        // close as clicks on themselves.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
                         .child(
                             div()
                                 .id(format!("project-menu:{}", id.0))
@@ -2715,7 +2878,7 @@ impl Sidebar {
         // Keep the last visible rows only for the close animation. The Store
         // remains authoritative for keyboard navigation and selection.
         let now = Instant::now();
-        let (motion, retained) = self
+        let (_, retained) = self
             .project_disclosures
             .entry(id.clone())
             .or_insert_with(|| {
@@ -2734,23 +2897,35 @@ impl Sidebar {
             // A session removed while closing must not survive in the visual tail.
             retained.retain(|row| group.active.iter().any(|session| session.id == *row.id()));
         }
+        let rows = retained.clone();
+        // Arrivals and departures, while the folder is open; a folding
+        // project already moves by its own disclosure.
+        let slots = if collapsed {
+            None
+        } else {
+            self.arrange_rows(&id.0, &rows)
+        };
+        let count = slots.as_ref().map_or(rows.len(), Vec::len);
+        let (motion, retained) = self
+            .project_disclosures
+            .get_mut(&id)
+            .expect("inserted above");
         let frame = motion.update(
             !collapsed,
-            retained.len() + usize::from(!group.archived.is_empty()),
+            count + usize::from(!group.archived.is_empty()),
             now,
             cx.reduce_motion(),
         );
         self.disclosure_animating |= frame.animating;
-        let rows = retained.clone();
         if collapsed && !frame.animating {
             retained.clear();
         }
         if frame.reveal > 0.0 {
             let mut children = Vec::new();
-            for row in &rows {
-                let shortcut = self.shortcut_for(row.id());
+            for (row, presence, ghost) in super::row_motion::paint_order(&rows, &slots) {
+                let shortcut = (!ghost).then(|| self.shortcut_for(row.id())).flatten();
                 let id = row.id().clone();
-                let drop = if collapsed {
+                let drop = if collapsed || ghost {
                     None
                 } else {
                     self.row_drop_feedback(row, window, cx)
@@ -2759,25 +2934,34 @@ impl Sidebar {
                     Some(RowDrop::Insert(zone)) => Some((zone, row.depth)),
                     _ => None,
                 };
-                let rendered = self.session_row(
+                let working = self.working_row_rendered;
+                let rendered = self.mount_session_row(
                     row,
                     shortcut,
                     drop,
                     group.host.is_some(),
                     colors,
+                    presence != super::row_motion::Presence::FULL || ghost,
                     window,
                     cx,
                 );
-                let rendered = if collapsed {
+                // A leaving row does not keep the activity tick alive.
+                self.working_row_rendered &= !ghost || working;
+                let rendered = Self::row_slot(rendered, presence, ghost);
+                let rendered = if collapsed || ghost {
                     rendered
                 } else {
                     self.track_row_bounds(id, rendered, marker)
                 };
-                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT));
+                children.push((
+                    rendered,
+                    SIDEBAR_NAV_ROW_HEIGHT * presence.height,
+                    presence.height,
+                ));
             }
             if !group.archived.is_empty() {
                 let (bucket, height) = self.archived_bucket(group, !collapsed, colors, window, cx);
-                children.push((bucket, height));
+                children.push((bucket, height, 1.0));
             }
             section = section.child(disclosure_body(children, &frame, !collapsed));
         }
@@ -2926,7 +3110,7 @@ impl Sidebar {
             if bucket_rows.is_empty() {
                 continue;
             }
-            let mut section = div().flex().flex_col().gap(px(2.0)).child(
+            let mut section = div().flex().flex_col().child(
                 div()
                     .px(px(Space::ROW_H))
                     .h(px(24.0))
@@ -2937,12 +3121,48 @@ impl Sidebar {
                     .text_color(colors.tertiary)
                     .child(bucket.label()),
             );
-            for row in bucket_rows {
-                let shortcut = self.shortcut_for(row.id());
+            let bucket_rows: Vec<_> = bucket_rows.into_iter().cloned().collect();
+            let slots = self.arrange_rows(bucket.label(), &bucket_rows);
+            for (row, presence, ghost) in super::row_motion::paint_order(&bucket_rows, &slots) {
+                let shortcut = (!ghost).then(|| self.shortcut_for(row.id())).flatten();
                 let id = row.id().clone();
-                let drop = self.row_drop_feedback(row, window, cx);
-                let rendered = self.session_row(row, shortcut, drop, false, colors, window, cx);
-                section = section.child(self.track_row_bounds(id, rendered, None));
+                let drop = (!ghost)
+                    .then(|| self.row_drop_feedback(row, window, cx))
+                    .flatten();
+                let working = self.working_row_rendered;
+                let moving = presence != super::row_motion::Presence::FULL || ghost;
+                let rendered =
+                    self.mount_session_row(row, shortcut, drop, false, colors, moving, window, cx);
+                self.working_row_rendered &= !ghost || working;
+                // Buckets interleave every project and the row names none of
+                // them, so here the row wears its project's hue.
+                let rendered = match self.hues.color(&row.session.project_id, colors) {
+                    Some(hue) => div()
+                        .relative()
+                        .child(rendered)
+                        .child(
+                            crate::project_hue::row_tick(hue, SIDEBAR_NAV_ROW_HEIGHT)
+                                .debug_selector({
+                                    let id = id.clone();
+                                    move || format!("PROJECT_HUE_{}", id.0)
+                                }),
+                        )
+                        .into_any_element(),
+                    None => rendered,
+                };
+                let rendered = Self::row_slot(rendered, presence, ghost);
+                let rendered = if ghost {
+                    rendered
+                } else {
+                    self.track_row_bounds(id, rendered, None)
+                };
+                // The 2 px above each row closes with its slot.
+                section = section.child(
+                    div()
+                        .flex_none()
+                        .mt(px(2.0 * presence.height))
+                        .child(rendered),
+                );
             }
             sections.push(section.into_any_element());
         }
@@ -3036,7 +3256,7 @@ impl Sidebar {
                 } else {
                     rendered
                 };
-                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT));
+                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT, 1.0));
             }
             section = section.child(disclosure_body(children, &frame, expanded));
         }
@@ -3107,7 +3327,8 @@ impl Sidebar {
     fn refresh_on_next_frame(weak: &WeakEntity<Self>, window: &mut Window) {
         let weak = weak.clone();
         window.on_next_frame(move |_, cx| {
-            let _ = weak.update(cx, |_, cx| cx.notify());
+            // Edge fades wrap rows from outside; their contents are unchanged.
+            let _ = weak.update(cx, |this, cx| this.notify_without_staling_rows(cx));
         });
     }
 
@@ -3133,6 +3354,50 @@ impl Sidebar {
     /// under the pointer pays for the store lookup; every other row gets
     /// `None` from the bounds check.
     fn row_drop_feedback(
+        &self,
+        row: &crate::store::SidebarRow,
+        window: &Window,
+        cx: &App,
+    ) -> Option<RowDrop> {
+        let drop = self.row_drop_under_pointer(row, window, cx)?;
+        self.insertion_marker_moved(&drop, row, window);
+        Some(drop)
+    }
+
+    /// One tick as the insertion marker appears in a new gap. The lower band
+    /// of one row and the upper band of the next mark the same gap, so the
+    /// gap is named by where its line is drawn. Rows that would take the session
+    /// as a handoff stay silent: every row is one, and a tick per row passed
+    /// would be a rattle.
+    fn insertion_marker_moved(
+        &self,
+        drop: &RowDrop,
+        row: &crate::store::SidebarRow,
+        window: &Window,
+    ) {
+        let gap = match drop {
+            RowDrop::Insert(zone) => self.row_bounds.borrow().get(row.id()).map(|bounds| {
+                let line = f32::from(if *zone == DropZone::Before {
+                    bounds.top()
+                } else {
+                    bounds.bottom()
+                });
+                let line = same_insertion_gap(self.insertion_line.get(), line);
+                self.insertion_line.set(Some(line));
+                haptics::key("sidebar-insertion", line.round() as i32)
+            }),
+            _ => None,
+        };
+        let entered = self
+            .insertion_haptic
+            .borrow_mut()
+            .moved_to(gap, window.mouse_position());
+        if let Some(target) = entered {
+            haptics::perform(Haptic::Snap, target);
+        }
+    }
+
+    fn row_drop_under_pointer(
         &self,
         row: &crate::store::SidebarRow,
         window: &Window,
@@ -3190,35 +3455,44 @@ impl Sidebar {
     /// the remote mark, so this row does not repeat it. Rows without a header
     /// (recency grouping) show their own.
     #[allow(clippy::too_many_arguments)]
+    /// Builds one session row from `props` alone, so a row whose props are
+    /// unchanged renders identically and its cached view can be reused (see
+    /// `rows.rs`). The only other reads are the title settle, which forces a
+    /// render while it runs, and the status glyph derived from the props.
     fn session_row(
         &mut self,
-        row: &crate::store::SidebarRow,
-        shortcut: Option<usize>,
-        drop: Option<RowDrop>,
-        host_marked_above: bool,
-        colors: SemanticColors,
+        props: &rows::SessionRowProps,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(test)]
+        render_probe::row_built();
+        let rows::SessionRowProps {
+            ref row,
+            shortcut,
+            ref drop,
+            host_marked_above,
+            colors,
+            selected,
+            multi,
+            ref drag_selection,
+            migrating,
+            activity_state,
+            activity_frame,
+            marked,
+            hovered,
+            focused,
+            lineage,
+            width,
+            ref filter,
+            renaming,
+            held_hint,
+            ..
+        } = *props;
+        let drop = drop.clone();
+        let drag_selection = drag_selection.clone();
         let session = &row.session;
         let id = session.id.clone();
-        let (selected, multi, drag_selection, migrating, unread) = {
-            let mut store = self.store.write().expect("session store lock poisoned");
-            (
-                store.selected_session_id() == Some(&id),
-                store.sidebar_selection().contains(&id),
-                (store.sidebar_selection().len() > 1).then(|| store.sidebar_selection_ordered()),
-                store.migrating().contains(&id),
-                store.notifications().session_unread(&id),
-            )
-        };
-        let activity_state = sidebar_activity_state(status_state(session, migrating), unread);
-        self.working_row_rendered |= activity_state == StatusState::Working;
-        let marked = self.ui.delegation_mark.as_ref() == Some(&id);
-        let hovered = self.ui.hovered_session.as_ref() == Some(&id);
-        let focused = self.focus_handle.is_focused(window)
-            && self.ui.renaming.is_none()
-            && self.ui.focus_cursor.as_ref() == Some(&id);
         let archived = session.is_archived();
         let hibernated = session.hibernation.is_some();
         let loading = is_loading(session, migrating);
@@ -3231,7 +3505,7 @@ impl Sidebar {
         // Read before the title moves into the marquee below.
         let ended_chip = ended && title != ENDED_TITLE;
         let title_available_width = (session_title_available_width(
-            self.ui.width,
+            width,
             row.depth,
             migrating,
             non_persistent,
@@ -3247,6 +3521,13 @@ impl Sidebar {
             })
         .max(36.0);
         let title_marquee_id = format!("session-title-marquee:{}", id.0);
+        let title_color = if selected {
+            colors.primary
+        } else if archived || hibernated {
+            colors.secondary
+        } else {
+            colors.primary.alpha(0.90)
+        };
         let fill = if selected {
             RowFill::Selected
         } else if multi {
@@ -3258,7 +3539,7 @@ impl Sidebar {
         };
         let fill_color = fill.color(colors);
 
-        if self.ui.renaming.as_ref() == Some(&id) {
+        if renaming {
             return div()
                 .id(format!("rename:{}", id.0))
                 .pl(px(Space::ROW_H))
@@ -3304,7 +3585,7 @@ impl Sidebar {
                     }
                 }))
                 .children(indent_rails(row, colors))
-                .child(activity_mark(activity_state, self.activity_frame, colors))
+                .child(activity_mark(activity_state, activity_frame, colors))
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -3358,7 +3639,7 @@ impl Sidebar {
             .items_center()
             .gap(px(8.0))
             .rounded(px(SIDEBAR_ROW_RADIUS))
-            .bg(fill.color(colors))
+            .bg(fill_color)
             .border_1()
             .border_color(if marked {
                 Palette::CLAY.alpha(0.78)
@@ -3499,9 +3780,9 @@ impl Sidebar {
             // Activity shares the project's icon column. Leaf rows reserve
             // no empty disclosure column; only parents get a trailing fold.
             // Hover keeps activity visible and swaps identity for the close action.
-            .child(activity_mark(activity_state, self.activity_frame, colors))
+            .child(activity_mark(activity_state, activity_frame, colors))
             .child(
-                if let Some(range) = super::filter::label_match(&title, self.filter_query.text()) {
+                if let Some(range) = super::filter::label_match(&title, filter) {
                     div()
                         .w(px(title_available_width))
                         .overflow_hidden()
@@ -3516,6 +3797,18 @@ impl Sidebar {
                             },
                         )]))
                         .into_any_element()
+                } else if let Some(settling) = self.settling_title(&id, title_available_width) {
+                    // The marquee's own box, so the title stays where it is.
+                    div()
+                        .min_w(px(0.0))
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(Typo::ROW.size))
+                        .font_weight(Typo::ROW.weight)
+                        .text_color(title_color)
+                        .child(settling)
+                        .into_any_element()
                 } else {
                     HoverMarquee::new(
                         title_marquee_id,
@@ -3523,13 +3816,7 @@ impl Sidebar {
                         hovered,
                         title_available_width,
                         Typo::ROW.size,
-                        if selected {
-                            colors.primary
-                        } else if archived || hibernated {
-                            colors.secondary
-                        } else {
-                            colors.primary.alpha(0.90)
-                        },
+                        title_color,
                     )
                     .font_weight(Typo::ROW.weight)
                     .into_any_element()
@@ -3562,6 +3849,9 @@ impl Sidebar {
             .when(remote_marked, |element| {
                 // This session's agent runs on another machine.
                 element.child(remote_mark(colors))
+            })
+            .when_some(lineage, |element, role| {
+                element.child(lineage_glyph(&id, role, colors))
             })
             .when(row.has_children, |element| {
                 element.child(self.disclosure(row, colors, cx))
@@ -3609,7 +3899,9 @@ impl Sidebar {
             // The hint belongs to the keyboard cursor. Pointer selection keeps
             // the trailing edge quiet (or shows the hover-only close control).
             .when_some(
-                (!hovered && focused).then_some(shortcut).flatten(),
+                (!hovered && focused && held_hint == 0.0)
+                    .then_some(shortcut)
+                    .flatten(),
                 |element, index| {
                     element.child(
                         div()
@@ -3623,16 +3915,23 @@ impl Sidebar {
             );
 
         let row = row.when(!hovered, |row| {
-            row.child(
-                div()
-                    .debug_selector({
-                        let id = id.clone();
-                        move || format!("session-agent-logo:{}", id.0)
-                    })
-                    .size(px(16.0))
-                    .flex_none()
-                    .child(self.status_glyph(session, migrating, colors, window, cx)),
-            )
+            let logo = div()
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("session-agent-logo:{}", id.0)
+                })
+                .size(px(16.0))
+                .flex_none()
+                .child(self.status_glyph(session, migrating, colors, window, cx))
+                .into_any_element();
+            row.child(crate::held_hints::in_slot(
+                logo,
+                16.0,
+                format!("held-hint:session:{}", id.0),
+                shortcut.and_then(crate::held_hints::session_label),
+                held_hint,
+                colors,
+            ))
         });
 
         // A selection fill arrives on ROW_SELECT instead of switching between
@@ -3816,7 +4115,7 @@ impl Sidebar {
                 } else {
                     rendered
                 };
-                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT));
+                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT, 1.0));
             }
             bucket = bucket.child(disclosure_body(children, &frame, expanded && interactive));
         }
@@ -3838,12 +4137,20 @@ impl Sidebar {
         let focused = self.focus_handle.is_focused(window)
             && self.ui.renaming.is_none()
             && self.ui.focus_cursor.as_ref() == Some(&id);
+        let lineage = self.lineage_roles.get(&id).copied();
         let selected = self
             .store
             .read()
             .expect("session store lock poisoned")
             .selected_session_id()
             == Some(&id);
+        let fill_color = if selected {
+            RowFill::Selected.color(colors)
+        } else if hovered || focused {
+            RowFill::Hover.color(colors)
+        } else {
+            RowFill::Clear.color(colors)
+        };
         let row_session = session.clone();
         let revive_id = id.clone();
         let title = display_title(session);
@@ -3860,13 +4167,7 @@ impl Sidebar {
             .items_center()
             .gap(px(8.0))
             .rounded(px(SIDEBAR_ROW_RADIUS))
-            .bg(if selected {
-                RowFill::Selected.color(colors)
-            } else if hovered || focused {
-                RowFill::Hover.color(colors)
-            } else {
-                RowFill::Clear.color(colors)
-            })
+            .bg(fill_color)
             .border_1()
             .border_color(colors.primary.alpha(0.0))
             .cursor_pointer()
@@ -3958,6 +4259,9 @@ impl Sidebar {
                     })
                     .child(title),
             )
+            .when_some(lineage, |element, role| {
+                element.child(lineage_glyph(&id, role, colors))
+            })
             // The identity column keeps the agent glyph at its resting tone:
             // an archived row is still that agent's work. Hover swaps it for
             // the revive control on the same column, mirroring the close
@@ -4111,7 +4415,8 @@ impl Sidebar {
                     .await;
                 let done = this
                     .update(cx, |this, cx| {
-                        cx.notify();
+                        // Footer numbers only: no row reads them.
+                        this.notify_without_staling_rows(cx);
                         !this.number_flows.running()
                     })
                     .unwrap_or(true);
@@ -4988,6 +5293,7 @@ impl Sidebar {
                                 },
                             );
                         this.ui.popover = None;
+                        cx.emit(SidebarEvent::FocusTerminal);
                         cx.notify();
                     }))
             })
@@ -6252,11 +6558,25 @@ impl Sidebar {
                         && !cx.reduce_motion()
                     {
                         this.activity_frame = (this.activity_frame + 1) % 8;
-                        cx.notify();
+                        this.notify_activity_frame(cx);
                     }
                 });
             }));
         }
+    }
+
+    /// Exactly what one activity-timer wake does, for render-cost benches.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn advance_activity_frame_for_test(&mut self, cx: &mut Context<Self>) {
+        self.activity_frame = (self.activity_frame + 1) % 8;
+        self.notify_activity_frame(cx);
+    }
+
+    /// One publication from the shared store.
+    pub(crate) fn store_changed(&mut self, cx: &mut Context<Self>) {
+        self.store.write().expect("store").reconcile();
+        // Rows read the store only through their props.
+        self.notify_without_staling_rows(cx);
     }
 
     /// Where a working mark can currently be seen: the sidebar panel, its
@@ -6431,6 +6751,7 @@ impl Sidebar {
                                         },
                                     );
                                 this.ui.delegation_notice = None;
+                                cx.emit(SidebarEvent::FocusTerminal);
                                 cx.notify();
                             }))
                             .child("Create sibling"),
@@ -6854,6 +7175,8 @@ impl Sidebar {
     /// Ends a drag gesture: clears the visual state and writes any staged
     /// reorder to disk exactly once.
     fn finish_drag(&mut self) {
+        self.insertion_haptic.borrow_mut().reset();
+        self.insertion_line.set(None);
         self.ui.drag = None;
         self.ui.drag_target = None;
         self.ui.project_order_at_drag_start = None;
@@ -7464,12 +7787,85 @@ fn reveal_tracked_row(
     true
 }
 
+impl Sidebar {
+    /// The session whose direct parent and children are marked. The pointer
+    /// wins while it rests on a row. A gap in the session list marks nothing,
+    /// so leaving a row cannot fall through to the selected session. The
+    /// keyboard cursor marks only while the sidebar is focused and the pointer
+    /// is outside that list.
+    fn lineage_target(&self, window: &Window) -> Option<&SessionId> {
+        let keyboard = if self.focus_handle.is_focused(window) && self.ui.renaming.is_none() {
+            self.ui.focus_cursor.as_ref()
+        } else {
+            None
+        };
+        lineage_anchor(
+            self.ui.hovered_session.as_ref(),
+            self.list_scroll.bounds().contains(&window.mouse_position()),
+            keyboard,
+        )
+    }
+}
+
+/// Per-thread render counters for cost regressions and benchmarks: how many
+/// session rows were built and how long `Sidebar::render` itself took.
+#[cfg(test)]
+pub(crate) mod render_probe {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    thread_local! {
+        static ROWS: Cell<usize> = const { Cell::new(0) };
+        static RENDERS: Cell<usize> = const { Cell::new(0) };
+        static RENDER_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
+    pub(crate) fn row_built() {
+        ROWS.with(|rows| rows.set(rows.get() + 1));
+    }
+
+    pub(crate) fn render_finished(elapsed: Duration) {
+        RENDERS.with(|renders| renders.set(renders.get() + 1));
+        RENDER_TIME.with(|time| time.set(time.get() + elapsed));
+    }
+
+    /// (session rows built, sidebar renders, time inside `Sidebar::render`)
+    pub(crate) fn take() -> (usize, usize, Duration) {
+        (
+            ROWS.with(|rows| rows.replace(0)),
+            RENDERS.with(|renders| renders.replace(0)),
+            RENDER_TIME.with(|time| time.replace(Duration::ZERO)),
+        )
+    }
+}
+
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        let render_started = std::time::Instant::now();
+        let root = self.render_sidebar(window, cx);
+        #[cfg(test)]
+        render_probe::render_finished(render_started.elapsed());
+        root
+    }
+}
+
+impl Sidebar {
+    fn render_sidebar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         self.reconcile_workspace_navigation(cx);
         self.fade_glass = self.colors().material() == diri_ui::Material::Glass;
         self.working_row_rendered = false;
+        self.animated_rows.clear();
+        // Requests the next frame on the sidebar while a fade moves, so the
+        // rows receive each step through their props.
+        self.row_held_hint = crate::held_hints::opacity(window, cx);
         self.disclosure_animating = false;
+        self.observe_titles(cx);
+        self.observe_rows(cx);
         if cx.reduce_motion() {
             self.activity_frame = 0;
         }
@@ -7509,6 +7905,8 @@ impl Render for Sidebar {
                 .collect();
             let recency_archives_expanded = store.preferences().sidebar_recency_archives_expanded
                 || !self.filter_query.text().trim().is_empty();
+            // From the unfiltered list: a filter must not recolor anything.
+            self.hues = store.project_hues();
             (
                 super::filter::filter_projection(
                     store.sidebar_projection(),
@@ -7568,14 +7966,22 @@ impl Render for Sidebar {
         self.row_bounds
             .borrow_mut()
             .retain(|id, _| visible_set.contains(id));
-        if self
-            .ui
-            .hovered_session
-            .as_ref()
-            .is_some_and(|id| !visible_set.contains(id))
+        let pointer_left_hovered_row = self.ui.hovered_session.as_ref().is_some_and(|id| {
+            self.row_bounds
+                .borrow()
+                .get(id)
+                .is_some_and(|bounds| !bounds.contains(&window.mouse_position()))
+        });
+        if (self.settings_nav.is_some()
+            || pointer_left_hovered_row
+            || self
+                .ui
+                .hovered_session
+                .as_ref()
+                .is_some_and(|id| !visible_set.contains(id)))
+            && self.ui.hovered_session.take().is_some()
         {
             self.dismiss_hover_card(cx);
-            self.ui.hovered_session = None;
         }
         self.shortcut_ranks.clear();
         let session_count = visible.len();
@@ -7591,10 +7997,32 @@ impl Render for Sidebar {
                 self.shortcut_ranks.insert(id.clone(), shortcut);
             }
         }
+        let lineage_target = self.lineage_target(window).cloned();
+        let lineage_roles = lineage_target
+            .as_ref()
+            .map(|target| {
+                let store = self.store.read().expect("session store lock poisoned");
+                if !store.preferences().sidebar_lineage_highlights {
+                    return HashMap::new();
+                }
+                let listed: Vec<LineageSession<'_>> = store
+                    .sessions()
+                    .values()
+                    .map(|session| LineageSession {
+                        id: &session.id,
+                        parent: session.parent.as_ref(),
+                        project: &session.project_id,
+                    })
+                    .collect();
+                lineage_marks(&listed, target)
+            })
+            .unwrap_or_default();
+        self.lineage_roles = lineage_roles;
         retain_live_glyphs(&mut self.glyphs, &projection.display_order);
         self.end_lift_if_released(cx);
         // The session list is the sidebar's most expensive frame work,
         // and settings has no use for it.
+        self.row_motion.begin_layout(self.title_now);
         let list = self.settings_nav.is_none().then(|| {
             let mut list = div()
                 .id("sidebar-list")
@@ -7628,6 +8056,14 @@ impl Render for Sidebar {
             list = list.child(self.empty_space_drop_target(colors, cx));
             list
         });
+        self.row_motion.end_layout();
+        self.disclosure_animating |= self.row_motion.is_animating(self.title_now);
+        self.rows_mounted = list.is_some();
+        self.rows_stale = false;
+        self.notify_keeps_rows = false;
+        // Rows mounted this pass (leaving ghosts included) keep their views.
+        let mounted = std::mem::take(&mut self.mounted_row_ids);
+        self.session_row_views.retain(|id, _| mounted.contains(id));
 
         if !self.disclosure_animating {
             self.disclosure_tick = None;
@@ -7641,11 +8077,13 @@ impl Render for Sidebar {
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     this.disclosure_tick = None;
-                    cx.notify();
+                    // The disclosure moves and fades rows from outside them.
+                    this.notify_without_staling_rows(cx);
                 });
             }));
         }
         self.schedule_activity_tick(cx);
+        self.schedule_title_tick(cx);
 
         let mut root = div()
             .id("sidebar")
@@ -7695,7 +8133,7 @@ impl Render for Sidebar {
                     cx.notify();
                 }
             }))
-            .child(self.top_bar(colors, cx));
+            .child(self.top_bar(crate::held_hints::opacity(window, cx), colors, cx));
         if let Some(nav) = self.settings_nav.clone() {
             root = root.child(self.settings_body(&nav, colors, cx));
         } else {
@@ -7705,7 +8143,7 @@ impl Render for Sidebar {
                 .min_h(px(0.0))
                 .flex()
                 .flex_col()
-                .child(self.new_agent_row(colors, cx));
+                .child(self.new_agent_row(crate::held_hints::opacity(window, cx), colors, cx));
             if projection.projects.is_empty() && !self.filter_query.text().trim().is_empty() {
                 body = body.child(
                     div()
@@ -7809,20 +8247,22 @@ impl Render for Sidebar {
 }
 
 /// Clip a naturally laid out list; moving the clip never compresses text.
+/// Each row is `(element, height, gap)`: `gap` scales the 2 px above it, so
+/// a row growing in or collapsing out takes its spacing with it.
 fn disclosure_body(
-    rows: Vec<(AnyElement, f32)>,
+    rows: Vec<(AnyElement, f32, f32)>,
     frame: &DisclosureFrame,
     interactive: bool,
 ) -> AnyElement {
-    let height: f32 = rows.iter().map(|(_, height)| height + 2.0).sum();
+    let height: f32 = rows.iter().map(|(_, height, gap)| height + 2.0 * gap).sum();
     let mut contents = div().absolute().top_0().left_0().w_full().flex().flex_col();
-    for (index, (row, height)) in rows.into_iter().enumerate() {
+    for (index, (row, height, gap)) in rows.into_iter().enumerate() {
         let progress = frame.rows.get(index).copied().unwrap_or(frame.reveal);
         contents = contents.child(
             div()
                 .relative()
                 .flex_none()
-                .mt(px(2.0))
+                .mt(px(2.0 * gap))
                 .h(px(height))
                 .top(px(-6.0 * (1.0 - progress)))
                 .opacity(progress)
@@ -7908,6 +8348,17 @@ fn sibling_run(projection: &crate::store::SidebarProjection, id: &SessionId) -> 
         .filter(|row| row.session.parent == parent)
         .map(|row| row.id().clone())
         .collect()
+}
+
+/// Rows sit a couple of pixels apart, so the marker under one row and the
+/// marker over the next are drawn that far apart while meaning one gap.
+/// Returns the line that names the gap: the previous one when `line` is the
+/// same gap seen from its other side. Rows are far taller than the slop.
+fn same_insertion_gap(previous: Option<f32>, line: f32) -> f32 {
+    const SLOP: f32 = 6.0;
+    previous
+        .filter(|previous| (previous - line).abs() <= SLOP)
+        .unwrap_or(line)
 }
 
 /// The insertion line an outline view draws between rows: a hollow dot at
@@ -8037,6 +8488,10 @@ fn trailing_remote_mark(colors: SemanticColors) -> AnyElement {
 /// the folder badge used to have, so titles keep their column against
 /// session rows and the fold still reads as a folder tile, not a stray glyph.
 fn project_disclosure(collapsed: bool, colors: SemanticColors) -> AnyElement {
+    disclosure_tile(collapsed, colors.secondary, colors)
+}
+
+fn disclosure_tile(collapsed: bool, ink: gpui::Rgba, colors: SemanticColors) -> AnyElement {
     div()
         .flex_none()
         .size(px(18.0))
@@ -8055,7 +8510,7 @@ fn project_disclosure(collapsed: bool, colors: SemanticColors) -> AnyElement {
             },
             9.0,
             SymbolWeight::Bold,
-            colors.secondary,
+            ink,
         ))
         .into_any_element()
 }
@@ -8789,6 +9244,26 @@ fn agent_picker_shortcut(
     }
 }
 
+/// A quiet ↰ on the parent or ↳ on a child of the marked session.
+fn lineage_glyph(id: &SessionId, role: LineageRole, colors: SemanticColors) -> AnyElement {
+    let (symbol, label) = match role {
+        LineageRole::Parent => ("arrow.turn.up.left", "parent"),
+        LineageRole::Child => ("arrow.turn.down.right", "child"),
+    };
+    div()
+        .debug_selector({
+            let id = id.clone();
+            move || format!("session-lineage-{label}:{}", id.0)
+        })
+        .size(px(16.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(sf_symbol(symbol, 12.0, colors.secondary))
+        .into_any_element()
+}
+
 /// Unread inbox entries share the completion mark, while active work and
 /// requests for input retain priority. There is never a second unread dot.
 fn sidebar_activity_state(state: StatusState, unread: bool) -> StatusState {
@@ -9133,6 +9608,7 @@ mod tests {
                             url: Some("https://opencode.ai/docs".into()),
                             install_hint: Some("Install OpenCode.".into()),
                             sign_in_hint: Some("Run /connect.".into()),
+                            ..diri_proto::AgentSetup::default()
                         }),
                         ..diri_proto::AgentDescriptor::default()
                     }),
@@ -9198,11 +9674,14 @@ mod tests {
         let (sidebar, _, cx) = drag_harness(cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        let paints = Rc::new(std::cell::Cell::new(0));
-        let observed = Rc::clone(&paints);
-        let _subscription =
-            cx.update(|_, cx| cx.observe(&sidebar, move |_, _| observed.set(observed.get() + 1)));
-        // No mouse movement or store events: the working mark must advance itself.
+        let (working, listed) = sidebar.read_with(cx, |sidebar, _| {
+            (sidebar.animated_rows.len(), sidebar.session_row_views.len())
+        });
+        assert!(working > 0, "the fixture must show a working row");
+        assert!(working < listed, "the fixture must show an idle row");
+        render_probe::take();
+        // No mouse movement or store events: the working mark must advance
+        // itself, re-rendering the working rows and reusing every other row.
         for _ in 0..3 {
             let frame = sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame);
             cx.executor().advance_clock(Duration::from_millis(125));
@@ -9211,11 +9690,114 @@ mod tests {
                 sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame),
                 (frame + 1) % 8,
             );
+            let (rows, renders, _) = render_probe::take();
+            assert_eq!(renders, 1, "working animation froze without pointer input");
+            assert_eq!(rows, working, "a tick re-renders exactly the working rows");
         }
+    }
+
+    /// Held-⌘ hints fade in and out on cached session rows: the fade reaches
+    /// rows through their props, and a settled hint reuses the rows again.
+    // Pins the hint clock through a macOS-only capture helper.
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn held_command_hints_fade_through_cached_rows(cx: &mut TestAppContext) {
+        use crate::held_hints::{FADE_IN, FADE_OUT, HOLD_DELAY, HeldHintsState, HintEffect};
+        let (sidebar, _, cx) = drag_harness(cx);
+        cx.run_until_parked();
+        let hint = "held-hint:session:preview-codex";
+        let row_hint = |cx: &mut VisualTestContext| {
+            sidebar.read_with(cx, |sidebar, cx| {
+                sidebar.session_row_views[&SessionId::new("preview-codex")]
+                    .read(cx)
+                    .held_hint_for_test()
+            })
+        };
+        assert!(cx.debug_bounds(hint).is_none());
+        let t0 = Instant::now();
+        let command = Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        };
+        let mut hints = crate::held_hints::HeldHints::default();
+        let HintEffect::Arm(generation) = hints.modifiers_changed(command, t0) else {
+            panic!("⌘ alone arms the hold");
+        };
+        let shown = t0 + HOLD_DELAY;
+        hints.delay_elapsed(generation, shown);
+        let window_id = cx.update(|window, _| window.window_handle().window_id());
+        let at = |now: Instant, hints, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                HeldHintsState::publish(window_id, hints, cx);
+                HeldHintsState::freeze_clock(Some(now), cx);
+            });
+            cx.run_until_parked();
+        };
+
+        at(shown + FADE_IN / 2, hints, cx);
+        let midway = row_hint(cx);
+        assert!(midway > 0.0 && midway < 1.0, "{midway}");
         assert!(
-            paints.get() > 0,
-            "working animation froze without pointer input"
+            cx.debug_bounds(hint).is_some(),
+            "the hint is painted mid-fade"
         );
+
+        at(shown + FADE_IN, hints, cx);
+        assert_eq!(row_hint(cx), 1.0);
+        assert!(cx.debug_bounds(hint).is_some());
+        // Settled: an unrelated publication reuses every row, hint included.
+        render_probe::take();
+        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+        cx.run_until_parked();
+        assert_eq!(render_probe::take().0, 0);
+        assert!(
+            cx.debug_bounds(hint).is_some(),
+            "a reused row keeps its hint"
+        );
+
+        let release = shown + Duration::from_secs(1);
+        hints.modifiers_changed(Modifiers::default(), release);
+        at(release + FADE_OUT / 2, hints, cx);
+        let leaving = row_hint(cx);
+        assert!(leaving > 0.0 && leaving < 1.0, "{leaving}");
+        at(release + FADE_OUT, hints, cx);
+        assert_eq!(row_hint(cx), 0.0);
+        assert!(cx.debug_bounds(hint).is_none(), "the hint is gone");
+    }
+
+    /// A store publication that changes nothing a row shows reuses every row.
+    #[gpui::test]
+    fn unchanged_store_publication_reuses_every_row(cx: &mut TestAppContext) {
+        let (sidebar, _, cx) = drag_harness(cx);
+        cx.run_until_parked();
+        render_probe::take();
+        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+        cx.run_until_parked();
+        let (rows, renders, _) = render_probe::take();
+        assert_eq!(renders, 1);
+        assert_eq!(rows, 0);
+        // A real change re-renders that row alone.
+        sidebar.update(cx, |sidebar, cx| {
+            let mut store = sidebar.store.write().unwrap();
+            let mut session = (**store
+                .sessions()
+                .get(&SessionId::new("preview-shell"))
+                .unwrap())
+            .clone();
+            session.title = "Renamed by the agent".into();
+            store.upsert_session(session);
+            drop(store);
+            sidebar.store_changed(cx);
+        });
+        cx.run_until_parked();
+        let (rows, _, _) = render_probe::take();
+        assert!(rows >= 1, "the changed row re-renders");
+        // Any other sidebar notify re-renders every row once, as a safety net.
+        let listed = sidebar.read_with(cx, |sidebar, _| sidebar.session_row_views.len());
+        sidebar.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let (rows, _, _) = render_probe::take();
+        assert_eq!(rows, listed);
     }
 
     #[gpui::test]
@@ -10203,6 +10785,137 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_insertion_marker_ticks_once_per_gap_and_handoff_rows_stay_silent(
+        cx: &mut TestAppContext,
+    ) {
+        let (sidebar, _, cx) = drag_harness(cx);
+        let claude = row_bounds(&sidebar, cx, "preview-claude");
+        let codex = row_bounds(&sidebar, cx, "preview-codex");
+        let shell = row_bounds(&sidebar, cx, "preview-shell");
+        let x = shell.center().x;
+        let move_to = |cx: &mut VisualTestContext, to: Point<Pixels>| {
+            cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+        };
+        let _ = haptics::testing::take();
+
+        // Lifting the row and crossing a pinned cousin's bands and another
+        // row's core offers handoffs only: every row is one, so none ticks.
+        drag_to(cx, codex.center(), claude.center());
+        move_to(cx, point(x, claude.bottom() - px(2.0)));
+        move_to(cx, shell.center());
+        assert_eq!(haptics::testing::take(), []);
+
+        // The marker appears under the last row: one tick, and none for
+        // moving on inside the same band or for holding still there.
+        let below = point(x, shell.bottom() - px(2.0));
+        move_to(cx, below);
+        assert!(cx.debug_bounds("insertion-marker:After").is_some());
+        let ticks = haptics::testing::take();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].0, Haptic::Snap);
+        move_to(cx, below - point(px(0.0), px(1.0)));
+        move_to(cx, below - point(px(0.0), px(1.0)));
+        assert_eq!(haptics::testing::take(), []);
+
+        // Back onto the core the marker goes away, silently; a different
+        // gap is a different slot, and ticks at once.
+        move_to(cx, shell.center());
+        assert_eq!(haptics::testing::take(), []);
+        move_to(cx, point(x, shell.top() + px(2.0)));
+        assert!(cx.debug_bounds("insertion-marker:Before").is_some());
+        let above = haptics::testing::take();
+        assert_eq!(above.len(), 1);
+        assert_ne!(above[0].1, ticks[0].1, "each gap is its own target");
+
+        // Releasing into the slot adds nothing: the hand already felt it.
+        cx.simulate_mouse_up(
+            point(x, shell.top() + px(2.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert_eq!(haptics::testing::take(), []);
+    }
+
+    #[test]
+    fn both_sides_of_one_gap_are_one_insertion_slot() {
+        assert_eq!(same_insertion_gap(None, 248.0), 248.0);
+        // Under one row, then over the next: the same gap.
+        assert_eq!(same_insertion_gap(Some(248.0), 250.0), 248.0);
+        assert_eq!(same_insertion_gap(Some(250.0), 248.0), 250.0);
+        // The far side of a row is another gap.
+        assert_eq!(same_insertion_gap(Some(250.0), 280.0), 280.0);
+    }
+
+    #[gpui::test]
+    fn a_project_trading_places_ticks_once_and_a_keyboard_reorder_never_does(
+        cx: &mut TestAppContext,
+    ) {
+        let (sidebar, _, cx) = drag_harness(cx);
+        let dirijor = cx.debug_bounds("PROJECT_preview-dirijor").unwrap();
+        let anara = cx.debug_bounds("PROJECT_preview-anara").unwrap();
+        let x = anara.center().x;
+        let _ = haptics::testing::take();
+
+        drag_to(cx, dirijor.center(), point(x, anara.top() + px(3.0)));
+        assert_eq!(
+            haptics::testing::take(),
+            [],
+            "reaching a header's near edge is not yet a crossing"
+        );
+        let below_midline = point(x, anara.bottom() - px(3.0));
+        cx.simulate_mouse_move(below_midline, MouseButton::Left, Modifiers::default());
+        assert_eq!(
+            haptics::testing::take(),
+            [(
+                Haptic::Snap,
+                haptics::key("project-slot", ProjectId::new("preview-anara"))
+            )]
+        );
+        // Still over the header that has not slid away yet.
+        cx.simulate_mouse_move(
+            below_midline - point(px(0.0), px(1.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(below_midline, MouseButton::Left, Modifiers::default());
+        assert_eq!(haptics::testing::take(), []);
+
+        // The same reorder from the keyboard is not the trackpad's business.
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.reorder_selected(1, cx);
+        });
+        assert_eq!(haptics::testing::take(), []);
+    }
+
+    #[gpui::test]
+    fn a_finder_drop_ticks_only_when_the_sidebar_takes_it(cx: &mut TestAppContext) {
+        let (sidebar, _, cx) = drag_harness(cx);
+        let folder = tempfile::tempdir().unwrap();
+        let _ = haptics::testing::take();
+
+        sidebar.update(cx, |sidebar, cx| {
+            let missing = ExternalPaths(smallvec::smallvec![folder.path().join("gone")]);
+            sidebar.external_drop(&missing, ExternalDropTarget::EmptySpace, cx);
+        });
+        assert_eq!(
+            haptics::testing::take(),
+            [],
+            "a refused drop is answered by the notice alone"
+        );
+
+        sidebar.update(cx, |sidebar, cx| {
+            let paths = ExternalPaths(smallvec::smallvec![folder.path().to_path_buf()]);
+            sidebar.external_drop(&paths, ExternalDropTarget::EmptySpace, cx);
+        });
+        assert_eq!(
+            haptics::testing::take(),
+            [(Haptic::Accepted, haptics::key("sidebar-drop", ()))]
+        );
+    }
+
+    #[gpui::test]
     fn a_cousin_row_offers_a_handoff_from_every_band(cx: &mut TestAppContext) {
         // preview-cursor is codex's child: not a sibling of claude, so its
         // bands cannot mean "reorder" and fall back to the drop-onto action.
@@ -10632,9 +11345,89 @@ mod tests {
             .unwrap();
     }
 
+    /// Hovers `DIRI_LINEAGE_TARGET` (default `preview-cursor`) with one
+    /// Anara session reparented under it, so a cross-project child shows.
+    /// `DIRI_VISUAL_LIGHT=1` for the light shell.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes a lineage hover PNG"]
+    fn render_lineage_hover_screenshot() {
+        let output = std::env::var_os("DIRI_VISUAL_OUTPUT")
+            .map(PathBuf::from)
+            .expect("set DIRI_VISUAL_OUTPUT");
+        let light = std::env::var_os("DIRI_VISUAL_LIGHT").is_some();
+        let target =
+            std::env::var("DIRI_LINEAGE_TARGET").unwrap_or_else(|_| "preview-cursor".into());
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        let window = cx
+            .open_window(size(px(260.0), px(560.0)), |_, cx| {
+                let sidebar = cx.new(|cx| {
+                    let mut sidebar = Sidebar::new(None, true, PreviewScenario::Typical, cx);
+                    sidebar.ui.width = 260.0;
+                    let mut store = sidebar.store.write().unwrap();
+                    store
+                        .update_preferences(|prefs| {
+                            prefs.terminal_theme = if light {
+                                "dirijor-light"
+                            } else {
+                                "dirijor-dark"
+                            }
+                            .into();
+                        })
+                        .unwrap();
+                    let away: Vec<_> = store
+                        .sessions()
+                        .values()
+                        .filter(|session| session.project_id == ProjectId::new("preview-anara"))
+                        .map(|session| (**session).clone())
+                        .collect();
+                    let mut away = away;
+                    away.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+                    if let Some(mut session) = away.into_iter().next() {
+                        session.parent = Some(SessionId::new("preview-cursor"));
+                        store.upsert_session(session);
+                    }
+                    store
+                        .update_preferences(|prefs| prefs.sidebar_collapsed_projects.clear())
+                        .unwrap();
+                    store.select(SessionId::new("preview-shell"));
+                    drop(store);
+                    sidebar
+                });
+                cx.new(|_| SidebarPopoverHarness { sidebar })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |view, window, cx| {
+            let view = view.downcast::<SidebarPopoverHarness>().unwrap();
+            let sidebar = view.read(cx).sidebar.clone();
+            let row = sidebar.read(cx).row_bounds.borrow()[&SessionId::new(target.as_str())];
+            window.simulate_mouse_move(row.center(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, _| window.refresh())
+            .unwrap();
+        cx.run_until_parked();
+        cx.capture_screenshot(window.into())
+            .unwrap()
+            .save(output)
+            .unwrap();
+    }
+
     /// Produces the sidebar layout variants used for material and hierarchy
     /// review without touching a running Diri instance. Set
-    /// `DIRI_VISUAL_GROUPING=recency`, `DIRI_VISUAL_LIGHT=1`, or
+    /// `DIRI_VISUAL_GROUPING=recency`, `DIRI_VISUAL_LIGHT=1`,
+    /// `DIRI_VISUAL_THEME=<theme id>`, or
     /// `DIRI_VISUAL_POPOVER=none|project|session` to select the state to
     /// capture (the default opens the grouping menu).
     /// `DIRI_VISUAL_BACKDROP=62616e` supplies a fixed RGB backdrop under glass;
@@ -10708,11 +11501,14 @@ mod tests {
                     }
                     let now = wall_clock_millis();
                     let mut store = sidebar.store.write().expect("preview session store");
-                    let sessions: Vec<_> = store
+                    let mut sessions: Vec<_> = store
                         .sessions()
                         .values()
                         .map(|session| (**session).clone())
                         .collect();
+                    // Map order would hand out the ages below differently on
+                    // every run.
+                    sessions.sort_by(|left, right| left.id.0.cmp(&right.id.0));
                     for (index, mut session) in sessions.into_iter().enumerate() {
                         let age = [
                             2.0 * 60.0 * 60.0 * 1_000.0,
@@ -10735,6 +11531,9 @@ mod tests {
                             } else {
                                 "dirijor-dark".into()
                             };
+                            if let Ok(theme) = std::env::var("DIRI_VISUAL_THEME") {
+                                prefs.terminal_theme = theme;
+                            }
                             prefs.sidebar_grouping = if recency {
                                 SidebarGrouping::Recency
                             } else {
@@ -11166,6 +11965,94 @@ mod tests {
         assert!(cx.debug_bounds("AGENT_OPTION_1").is_some());
     }
 
+    /// A still click on + opens the menu. Two gestures do not:
+    /// - the press moves, so GPUI drops hover and unmounts + before mouse-up;
+    /// - + was not the mouse-down target yet (the controls had just appeared),
+    ///   so the header owns the click.
+    /// Either way the header used to collapse the project.
+    #[gpui::test]
+    fn project_plus_click_survives_a_moving_press(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let sidebar = cx.new(|cx| Sidebar::new(None, true, PreviewScenario::Typical, cx));
+            SidebarPopoverHarness { sidebar }
+        });
+        let sidebar = view.read_with(cx, |harness, _| harness.sidebar.clone());
+        let project_id = ProjectId::new("preview-dirijor");
+        let collapsed = |sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext| {
+            sidebar.read_with(cx, |sidebar, _| {
+                sidebar
+                    .store
+                    .read()
+                    .expect("session store lock poisoned")
+                    .preferences()
+                    .sidebar_collapsed_projects
+                    .contains(&project_id)
+            })
+        };
+        let menu = Popover::NewAgent {
+            directory: Some("/Users/preview/Projects/dirijor".to_owned()),
+            host: None,
+        };
+
+        let project = cx
+            .debug_bounds("PROJECT_preview-dirijor")
+            .expect("project row");
+        cx.simulate_mouse_move(project.center(), None, Modifiers::default());
+        let plus = cx
+            .debug_bounds("PROJECT_ADD_preview-dirijor")
+            .expect("project add button");
+
+        // Press begins on the header, where + is not the hit target yet, and
+        // ends on +. No move event, so this is not a drag.
+        cx.simulate_mouse_down(project.center(), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(plus.center(), MouseButton::Left, Modifiers::default());
+        assert!(!collapsed(&sidebar, cx), "+ must not collapse the project");
+        assert_eq!(
+            sidebar.read_with(cx, |sidebar, _| sidebar.ui.popover.clone()),
+            Some(menu.clone()),
+            "+ must open the New Agent menu when the press started on the header"
+        );
+
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.ui.popover = None;
+            cx.notify();
+        });
+        let plus = cx
+            .debug_bounds("PROJECT_ADD_preview-dirijor")
+            .expect("project add button");
+        let down = plus.center();
+        // Under GPUI's 2px drag threshold, so this stays a click, and far
+        // enough that the header records a move while the button is down.
+        cx.simulate_mouse_down(down, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            down + point(px(1.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            down + point(px(1.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        assert!(
+            !collapsed(&sidebar, cx),
+            "+ must not collapse the project when the press moves"
+        );
+        assert_eq!(
+            sidebar.read_with(cx, |sidebar, _| sidebar.ui.popover.clone()),
+            Some(menu),
+            "+ must open the New Agent menu for that project"
+        );
+        assert!(
+            cx.debug_bounds("SESSION_preview-claude").is_some(),
+            "the project stays expanded"
+        );
+        assert!(
+            sidebar.read_with(cx, |sidebar, _| sidebar.ui.drag.is_none()),
+            "a short press on + must not drag the project"
+        );
+    }
+
     #[gpui::test]
     fn project_hover_keeps_the_disclosure_control_in_place(cx: &mut TestAppContext) {
         let (_view, cx) = cx.add_window_view(|_, cx| {
@@ -11187,6 +12074,44 @@ mod tests {
         assert_eq!(before, after, "hover affordances must not reflow the row");
         assert!(cx.debug_bounds("PROJECT_MENU_preview-dirijor").is_some());
         assert!(cx.debug_bounds("PROJECT_ADD_preview-dirijor").is_some());
+    }
+
+    #[gpui::test]
+    fn hovering_a_session_marks_its_family(cx: &mut TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, cx| {
+            let sidebar = cx.new(|cx| Sidebar::new(None, true, PreviewScenario::Typical, cx));
+            SidebarPopoverHarness { sidebar }
+        });
+
+        // Typical tree: codex → cursor → spawned-deep.
+        let cursor = cx
+            .debug_bounds("SESSION_preview-cursor")
+            .expect("cursor row");
+        cx.simulate_mouse_move(cursor.center(), None, Modifiers::default());
+        assert!(
+            cx.debug_bounds("session-lineage-parent:preview-codex")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("session-lineage-child:preview-spawned-deep")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("session-lineage-child:preview-cursor")
+                .is_none()
+        );
+        assert!(
+            cx.debug_bounds("session-lineage-parent:preview-cursor")
+                .is_none()
+        );
+
+        // A session with no relatives marks nothing.
+        let shell = cx.debug_bounds("SESSION_preview-shell").expect("shell row");
+        cx.simulate_mouse_move(shell.center(), None, Modifiers::default());
+        assert!(
+            cx.debug_bounds("session-lineage-parent:preview-codex")
+                .is_none()
+        );
     }
 
     #[gpui::test]

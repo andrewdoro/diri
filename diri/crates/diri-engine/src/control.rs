@@ -126,8 +126,9 @@ impl ControlServer {
         // updater can replace the bundle path underneath the live daemon.
         let _ = process_executable_hash();
         let socket_path = socket_path.into();
-        let workspaces =
-            crate::workspace::WorkspaceStore::new(registry.lock().expect("registry").state_file());
+        let workspaces = crate::workspace::WorkspaceStore::with_state_file(
+            registry.lock().expect("registry").state_file_handle(),
+        );
         let logs_dir = socket_path
             .parent()
             .map(|parent| parent.join("logs"))
@@ -517,7 +518,9 @@ impl ControlServer {
                         }
                         let _ = registry.ensure_session_awake(&attach.attach.0);
                         let _ = registry.mark_seen(&attach.attach.0);
-                        let _ = registry.persist();
+                        // Every tab switch attaches: leave the write to the
+                        // flusher instead of fsyncing on the attach path.
+                        registry.persist_deferred();
                         self.publish_updated(&registry, &attach.attach.0);
                     }
                     self.pr_monitor_wake.wake_session(attach.attach.0.clone());
@@ -683,12 +686,7 @@ impl ControlServer {
                         let Some(event) = stream.recv(std::time::Duration::from_millis(250)) else {
                             continue;
                         };
-                        let frame = ControlMessage::Event {
-                            name: event.name,
-                            seq: event.seq,
-                            params: event.params,
-                        };
-                        if write_message(&writer, &frame).is_err() {
+                        if write_event_frame(&writer, &event).is_err() {
                             break; // peer is gone; dropping the stream unsubscribes
                         }
                     }
@@ -724,10 +722,7 @@ impl ControlServer {
         );
 
         let current = |registry: &Registry| -> Option<diri_proto::SessionRecord> {
-            registry
-                .records()
-                .into_iter()
-                .find(|record| record.id.0 == p.session_id.0)
+            registry.record(&p.session_id.0)
         };
         let matches = |record: &diri_proto::SessionRecord| {
             p.until
@@ -1081,7 +1076,7 @@ impl ControlServer {
         // A linked worktree is an execution cwd inside the project selected
         // by the user; it does not become a new first-level sidebar project.
         record.project_id = crate::registry::session_project_id(&p.cwd, None);
-        registry.ensure_session_project(&p.cwd, None);
+        self.ensure_published_project(&mut registry, &p.cwd, None);
         if let Some(title) = &p.title {
             record.title = title.clone();
             record.title_source = diri_proto::TitleSource::DirijorAssigned;
@@ -1181,9 +1176,7 @@ impl ControlServer {
         let prompt = p.initial_prompt.clone().filter(|prompt| !prompt.is_empty());
         let accept_claude_workspace = kind == diri_proto::AgentKind::CLAUDE_CODE_ID;
         let record = registry
-            .records()
-            .into_iter()
-            .find(|record| record.id.0 == id)
+            .record(&id)
             .ok_or_else(|| ControlError::internal("the new session vanished"))?;
         drop(registry);
 
@@ -1424,7 +1417,7 @@ impl ControlServer {
         };
         self.spawn_session_with_intent(spec, Some(record), tracked)?;
         let mut registry = self.registry.lock().map_err(poisoned)?;
-        registry.ensure_session_project(&captured.cwd, Some(&host.id));
+        self.ensure_published_project(&mut registry, &captured.cwd, Some(&host.id));
         if tracked {
             registry.persist_for_shutdown().map_err(io_control_error)?;
         } else {
@@ -1435,9 +1428,7 @@ impl ControlServer {
         let prompt = p.initial_prompt.filter(|prompt| !prompt.is_empty());
         let accept_claude_workspace = kind == diri_proto::AgentKind::CLAUDE_CODE_ID;
         let record = registry
-            .records()
-            .into_iter()
-            .find(|record| record.id.0 == id)
+            .record(&id)
             .ok_or_else(|| ControlError::internal("the new remote session vanished"))?;
         drop(registry);
 
@@ -1553,9 +1544,7 @@ impl ControlServer {
         let record = {
             let registry = self.registry.lock().map_err(poisoned)?;
             registry
-                .records()
-                .into_iter()
-                .find(|record| record.id.0 == id)
+                .record(&id)
                 .ok_or_else(|| ControlError::not_found(id.clone()))?
         };
         if record.account_profile.is_some() {
@@ -1627,21 +1616,48 @@ impl ControlServer {
             })?;
 
         // Phase 1 (source agent still alive, everything retryable).
+        let target_name = target_host
+            .as_ref()
+            .map(|host| host.display_name())
+            .unwrap_or("local");
         let prepared = crate::migrate::prepare(
             &record.cwd,
             source_host.as_ref(),
             target_host.as_ref(),
             &target_repo,
-            target_host
-                .as_ref()
-                .map(|host| host.display_name())
-                .unwrap_or("local"),
+            target_name,
         )
         .map_err(migrate_control_error)?;
 
-        // Point of no return: stop the source agent.
+        // Stop the source agent. Phase 1 ran while it was still writing, so
+        // the target only becomes the truth once everything it changed since
+        // has been carried across too. Until then the source holds all the
+        // work: a failure leaves the stopped session where it was, resumable.
         let mut warnings: Vec<String> = Vec::new();
         self.terminate_session_unlocked(&id, Duration::from_secs(3))?;
+        if let Err(error) = crate::migrate::reconcile(
+            &prepared,
+            source_host.as_ref(),
+            target_host.as_ref(),
+            target_name,
+        ) {
+            // The same bookkeeping as `session.kill`: that is all that has
+            // happened to this session.
+            let mut registry = self.registry.lock().map_err(poisoned)?;
+            let _ = registry.persist();
+            if let Some(store) = &self.remote_bindings {
+                let _ = store.remove(&id);
+            }
+            self.publish_updated(&registry, &id);
+            return Err(ControlError::new(
+                "migrate_reconcile_failed",
+                format!(
+                    "session {id} was stopped but not moved: changes made while it was moving could not be carried to the target ({error}). All work is still in {}; resume the session there.",
+                    prepared.source_repo_root
+                ),
+            ));
+        }
+        // Point of no return.
         // Phase 2: transcript shuttle (source stopped ⇒ the jsonl is final).
         let shuttle = crate::migrate::shuttle_transcript(
             &record.cwd,
@@ -1666,7 +1682,7 @@ impl ControlServer {
             let worktree = prepared.target_is_worktree.then(|| cwd.clone());
             let transcript = shuttle.local_target_path.clone();
             let local = target_host.is_none();
-            registry.ensure_session_project(&cwd, target_id.as_deref());
+            self.ensure_published_project(&mut registry, &cwd, target_id.as_deref());
             registry.update_record(&id, |record| {
                 record.host = target_id;
                 record.cwd = cwd;
@@ -1906,9 +1922,7 @@ impl ControlServer {
             let (cwd, source_host) = {
                 let registry = self.registry.lock().map_err(poisoned)?;
                 let record = registry
-                    .records()
-                    .into_iter()
-                    .find(|record| record.id.0 == session_id.0)
+                    .record(&session_id.0)
                     .ok_or_else(|| ControlError::not_found(session_id.0.clone()))?;
                 (record.cwd, record.host)
             };
@@ -2429,7 +2443,9 @@ impl ControlServer {
         registry
             .mark_seen(&p.session_id.0)
             .map_err(io_control_error)?;
-        let _ = registry.persist();
+        // Last-seen is a view hint, not an acknowledged edit: the flusher
+        // writes it within the debounce window, off this request's thread.
+        registry.persist_deferred();
         self.publish_updated(&registry, &p.session_id.0);
         self.pr_monitor_wake.wake_session(p.session_id.0);
         Ok(json!({}))
@@ -2618,9 +2634,7 @@ impl ControlServer {
         let record = {
             let mut registry = self.registry.lock().map_err(poisoned)?;
             let record = registry
-                .records()
-                .into_iter()
-                .find(|record| record.id.0 == p.session_id.0)
+                .record(&p.session_id.0)
                 .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
             if record.remote_connection.is_some_and(|connection| {
                 connection.state == diri_proto::RemoteConnectionState::Failed
@@ -2647,13 +2661,28 @@ impl ControlServer {
             self.remote_resume_spec(&record)?
         } else {
             let registry = self.registry.lock().map_err(poisoned)?;
-            self.resume_spec(
-                &registry,
-                &record.id.0,
-                record.kind.id(),
-                &record.cwd,
-                record.agent_session_id.as_deref(),
-            )?
+            match claude_resume_target(&record) {
+                // Claude has no transcript for this tab: `--resume` would only
+                // print "No conversation found" and leave a bare shell, so
+                // start the tab's own id afresh instead.
+                Some(None) => self.fresh_spec(
+                    &registry,
+                    &record.id.0,
+                    record.kind.id(),
+                    &record.cwd,
+                    record.agent_session_id.as_deref(),
+                )?,
+                target => self.resume_spec(
+                    &registry,
+                    &record.id.0,
+                    record.kind.id(),
+                    &record.cwd,
+                    target
+                        .flatten()
+                        .as_deref()
+                        .or(record.agent_session_id.as_deref()),
+                )?,
+            }
         };
         if record.host.is_none()
             && let Some(mut profile) = record.account_profile.clone()
@@ -2677,9 +2706,7 @@ impl ControlServer {
         }
         let mut registry = self.registry.lock().map_err(poisoned)?;
         let record = registry
-            .records()
-            .into_iter()
-            .find(|record| record.id.0 == p.session_id.0)
+            .record(&p.session_id.0)
             .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
         let exited = matches!(record.status, diri_proto::SessionStatus::Exited(_));
         if registry.get(&p.session_id.0).is_some() {
@@ -2729,9 +2756,7 @@ impl ControlServer {
         let source = {
             let registry = self.registry.lock().map_err(poisoned)?;
             registry
-                .records()
-                .into_iter()
-                .find(|record| record.id == p.session_id)
+                .record(&p.session_id.0)
                 .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?
         };
         let kind = source.effective_kind().clone();
@@ -2782,7 +2807,7 @@ impl ControlServer {
                 .map_err(io_control_error)?;
         }
         let mut registry = self.registry.lock().map_err(poisoned)?;
-        registry.ensure_session_project(&source.cwd, source.host.as_deref());
+        self.ensure_published_project(&mut registry, &source.cwd, source.host.as_deref());
         let _ = registry.persist();
         self.publish_updated(&registry, &id);
         let record = registry
@@ -2977,16 +3002,14 @@ impl ControlServer {
             record.title_source = diri_proto::TitleSource::FirstPrompt;
         }
         let spec = self.resume_spec(&registry, &id, &kind, &p.entry.cwd, Some(&p.entry.id))?;
-        registry.ensure_session_project(&p.entry.cwd, None);
+        self.ensure_published_project(&mut registry, &p.entry.cwd, None);
         registry
             .spawn(spec, record)
             .map_err(|error| ControlError::internal(error.to_string()))?;
         let _ = registry.persist();
         self.publish_updated(&registry, &id);
         let record = registry
-            .records()
-            .into_iter()
-            .find(|record| record.id.0 == id)
+            .record(&id)
             .ok_or_else(|| ControlError::internal("the resumed session vanished"))?;
         drop(registry);
         let accept_claude_workspace = kind == diri_proto::AgentKind::CLAUDE_CODE_ID;
@@ -3139,16 +3162,31 @@ impl ControlServer {
         })
     }
 
-    /// Pops the most recently closed session whose folder still exists and
-    /// re-lists it (exited), ready for the resume path.
+    /// Pops the most recently closed session whose folder still exists,
+    /// re-lists it (exited), and relaunches it through the resume path. An
+    /// Agent that cannot resume stays listed as exited rather than failing
+    /// the reopen.
     fn session_reopen_last(&self) -> Result<JsonValue, ControlError> {
-        let mut registry = self.registry.lock().map_err(poisoned)?;
-        let record = registry
-            .reopen_last_closed()
-            .ok_or_else(|| ControlError::bad_request("no recently closed session"))?;
-        let _ = registry.persist();
-        self.publish_updated(&registry, &record.id.0);
-        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+        let record = {
+            let mut registry = self.registry.lock().map_err(poisoned)?;
+            let record = registry
+                .reopen_last_closed()
+                .ok_or_else(|| ControlError::bad_request("no recently closed session"))?;
+            let _ = registry.persist();
+            self.publish_updated(&registry, &record.id.0);
+            record
+        };
+        match self.session_resume(Some(serde_json::json!({ "sessionID": record.id.0 }))) {
+            Ok(resumed) => Ok(resumed),
+            Err(error) => {
+                eprintln!(
+                    "diri-engine: reopened session {} could not relaunch: {}",
+                    record.id.0, error.message
+                );
+                serde_json::to_value(&record)
+                    .map_err(|error| ControlError::internal(error.to_string()))
+            }
+        }
     }
 
     /// Manifest catalog plus executable facts for one execution target. The
@@ -3470,9 +3508,7 @@ impl ControlServer {
         let (cwd, host_id) = {
             let registry = self.registry.lock().map_err(poisoned)?;
             registry
-                .records()
-                .into_iter()
-                .find(|record| record.id.0 == p.session_id.0)
+                .record(&p.session_id.0)
                 .map(|record| (record.cwd, record.host))
                 .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?
         };
@@ -3644,13 +3680,27 @@ impl ControlServer {
         Ok(json!({}))
     }
 
+    /// Inserts the session root when it is not already a project, and tells
+    /// live clients. Hydrate only learns projects from `session.list`, so a
+    /// folder that first appears from a spawn stays out of the sidebar order
+    /// until this `project.updated`.
+    fn ensure_published_project(&self, registry: &mut Registry, root: &str, host: Option<&str>) {
+        let id = crate::registry::session_project_id(root, host).0;
+        let inserted = !registry
+            .projects_raw()
+            .iter()
+            .any(|project| project.get("id").and_then(|value| value.as_str()) == Some(id.as_str()));
+        let project = registry.ensure_session_project(root, host);
+        if inserted {
+            self.events
+                .publish(diri_proto::EventName::PROJECT_UPDATED, project, None);
+        }
+    }
+
     /// Publishes `session.updated` with the session's current record.
     fn publish_updated(&self, registry: &Registry, id: &str) {
-        if let Some(record) = registry
-            .records()
-            .into_iter()
-            .find(|record| record.id.0 == id)
-        {
+        // One folded record, not a folded copy of the whole table.
+        if let Some(record) = registry.record(id) {
             self.events
                 .publish_encoded(diri_proto::EventName::SESSION_UPDATED, &record, Some(id));
         }
@@ -3717,6 +3767,42 @@ impl Drop for ControlServer {
         // Leaving the socket file behind would make the next start think a
         // daemon is already running.
         let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+/// Which Claude conversation relaunching this local tab should re-enter:
+/// `None` leaves the record's id untouched (not Claude, or nothing to check
+/// against), `Some(Some(id))` resumes a conversation whose transcript exists,
+/// and `Some(None)` means the tab's id was never written and must start fresh.
+fn claude_resume_target(record: &diri_proto::SessionRecord) -> Option<Option<String>> {
+    claude_resume_target_in(record, Path::new(&std::env::var_os("HOME")?))
+}
+
+fn claude_resume_target_in(
+    record: &diri_proto::SessionRecord,
+    home: &Path,
+) -> Option<Option<String>> {
+    if record.host.is_some() || record.kind.id() != diri_proto::AgentKind::CLAUDE_CODE_ID {
+        return None;
+    }
+    let shared = home.join(".claude/projects");
+    if !shared.is_dir() {
+        return None;
+    }
+    let mut roots = vec![shared];
+    if let Some(profile) = &record.account_profile
+        && Path::new(&profile.config_home).is_absolute()
+    {
+        roots.push(Path::new(&profile.config_home).join("projects"));
+    }
+    let agent_session_id = record.agent_session_id.as_deref();
+    match crate::history::claude_resumable_conversation(
+        &roots,
+        agent_session_id,
+        record.transcript_path.as_deref(),
+    ) {
+        Some(id) => Some(Some(id)),
+        None => agent_session_id.map(|_| None),
     }
 }
 
@@ -3975,6 +4061,28 @@ fn read_bounded_control_line<R: BufRead>(reader: &mut R) -> std::io::Result<Opti
 fn write_message(writer: &Arc<Mutex<UnixStream>>, message: &ControlMessage) -> std::io::Result<()> {
     let mut bytes = serde_json::to_vec(message)?;
     bytes.push(b'\n');
+    let mut stream = writer
+        .lock()
+        .map_err(|_| std::io::Error::other("writer poisoned"))?;
+    stream.write_all(&bytes)?;
+    stream.flush()
+}
+
+/// Writes the same line `ControlMessage::Event` serializes to, around params
+/// the bus encoded once, instead of decoding and re-encoding them for every
+/// subscriber.
+fn write_event_frame(
+    writer: &Arc<Mutex<UnixStream>>,
+    event: &crate::events::Event,
+) -> std::io::Result<()> {
+    let mut bytes = Vec::with_capacity(event.encoded.len() + event.name.len() + 48);
+    bytes.extend_from_slice(b"{\"event\":");
+    serde_json::to_writer(&mut bytes, &event.name)?;
+    bytes.extend_from_slice(b",\"seq\":");
+    bytes.extend_from_slice(event.seq.to_string().as_bytes());
+    bytes.extend_from_slice(b",\"params\":");
+    bytes.extend_from_slice(&event.encoded);
+    bytes.extend_from_slice(b"}\n");
     let mut stream = writer
         .lock()
         .map_err(|_| std::io::Error::other("writer poisoned"))?;
@@ -4473,6 +4581,34 @@ mod tests {
     mod find_capture_tests;
     mod reconnect_tests;
     mod send_key_tests;
+
+    #[test]
+    fn a_shared_event_frame_is_the_line_control_message_writes() {
+        let bus = crate::events::EventBus::new();
+        let stream = bus.subscribe(None, crate::events::Filter::all());
+        let params = json!({ "id": "s_1", "title": "quote \" and \\ and \n 界" });
+        bus.publish("session.\"updated\"", params.clone(), Some("s_1"));
+        let event = stream.try_recv().expect("event");
+
+        let (mut read, write) = UnixStream::pair().unwrap();
+        let writer = Arc::new(Mutex::new(write));
+        write_event_frame(&writer, &event).unwrap();
+        write_message(
+            &writer,
+            &ControlMessage::Event {
+                name: event.name.clone(),
+                seq: event.seq,
+                params,
+            },
+        )
+        .unwrap();
+        drop(writer);
+        let mut output = String::new();
+        std::io::Read::read_to_string(&mut read, &mut output).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], lines[1]);
+    }
 
     #[test]
     fn explicit_launch_argv_is_literal_and_never_silently_repaired() {
@@ -5335,6 +5471,61 @@ mod tests {
     }
 
     #[test]
+    fn claude_resume_never_targets_an_unwritten_conversation() {
+        let home = tempfile::tempdir().expect("temp");
+        let project = home.path().join(".claude/projects/-work-repo");
+        let elsewhere = home.path().join(".claude/projects/-work-repo--wt-x");
+        std::fs::create_dir_all(&project).expect("project dir");
+        std::fs::create_dir_all(&elsewhere).expect("worktree dir");
+        let old = project.join("old-conv.jsonl");
+        std::fs::write(&old, b"{}\n").expect("old transcript");
+        std::fs::write(project.join("empty-conv.jsonl"), b"").expect("empty");
+        std::fs::write(elsewhere.join("moved-conv.jsonl"), b"{}\n").expect("moved");
+
+        let mut record = test_record("s_claude");
+        record.kind = diri_proto::AgentKind::new("claude-code");
+        record.cwd = "/work/repo".into();
+        let target =
+            |id: Option<&str>, path: Option<&Path>, record: &mut diri_proto::SessionRecord| {
+                record.agent_session_id = id.map(str::to_owned);
+                record.transcript_path = path.map(|path| path.to_string_lossy().into_owned());
+                claude_resume_target_in(record, home.path())
+            };
+
+        // Hooks moved the tab to a newer id (`/clear`, a fresh `--resume` id)
+        // that Claude never wrote: resume the conversation that exists.
+        assert_eq!(
+            target(Some("new-conv"), Some(&old), &mut record),
+            Some(Some("old-conv".into()))
+        );
+        assert_eq!(
+            target(Some("empty-conv"), Some(&old), &mut record),
+            Some(Some("old-conv".into()))
+        );
+        // A written id wins, wherever Claude filed it.
+        assert_eq!(
+            target(Some("moved-conv"), Some(&old), &mut record),
+            Some(Some("moved-conv".into()))
+        );
+        // Nothing was ever written: start the tab's id fresh instead of
+        // `--resume` into "No conversation found".
+        assert_eq!(target(Some("new-conv"), None, &mut record), Some(None));
+        assert_eq!(
+            target(
+                Some("new-conv"),
+                Some(&project.join("gone.jsonl")),
+                &mut record
+            ),
+            Some(None)
+        );
+        // Without an id there is nothing to verify; keep the manifest's path.
+        assert_eq!(target(None, None, &mut record), None);
+
+        record.kind = diri_proto::AgentKind::new("codex");
+        assert_eq!(target(Some("new-conv"), None, &mut record), None);
+    }
+
+    #[test]
     fn failed_revive_keeps_the_archived_conversation() {
         let temp = tempfile::tempdir().expect("temp");
         let registry = Arc::new(Mutex::new(Registry::new(
@@ -5555,6 +5746,42 @@ mod tests {
             Some(json!({ "sessionID": "s_missing", "text": "hi", "submit": false })),
         ));
         assert_eq!(error.code, "not_found");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mark_seen_replies_without_writing_and_the_flush_persists_it() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("state.json");
+        let registry = Arc::new(Mutex::new(Registry::new(engine(), &path)));
+        registry
+            .lock()
+            .expect("registry")
+            .insert_record(test_record("s_seen"));
+        registry.lock().expect("registry").persist_now().unwrap();
+        let identity = || {
+            let metadata = std::fs::metadata(&path).unwrap();
+            (metadata.ino(), metadata.mtime_nsec())
+        };
+        let before = identity();
+        // Past the debounce window, where a leading-edge persist would write.
+        std::thread::sleep(Duration::from_millis(600));
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.path().join("daemon.sock"),
+        ));
+
+        ok_of(call(
+            &server,
+            "session.mark_seen",
+            Some(json!({ "sessionID": "s_seen" })),
+        ));
+        assert_eq!(identity(), before, "the request thread must not write");
+
+        registry.lock().expect("registry").flush_dirty().unwrap();
+        let state: JsonValue = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(state["sessions"][0]["lastSeenAt"].is_number());
     }
 
     #[test]
@@ -5860,12 +6087,85 @@ mod tests {
 
         let reopened = ok_of(call(&server, "session.reopen_last", None));
         assert_eq!(reopened["id"], "s_gone");
+        // A shell cannot resume; it must come back exited, never still
+        // claiming the live status it had when closed.
+        assert!(
+            reopened["status"].get("exited").is_some(),
+            "a reopened session with nothing running must read as exited: {}",
+            reopened["status"]
+        );
         let list = ok_of(call(&server, "session.list", None));
         assert_eq!(list["sessions"].as_array().map(Vec::len), Some(1));
 
         // The stack is spent.
         let empty = err_of(call(&server, "session.reopen_last", None));
         assert_eq!(empty.code, "bad_request");
+    }
+
+    #[test]
+    fn reopening_a_resumable_session_relaunches_it() {
+        let temp = tempfile::tempdir().expect("temp");
+        let manifests = temp.path().join("manifests");
+        std::fs::create_dir_all(&manifests).expect("manifests dir");
+        std::fs::write(
+            manifests.join("probe.json"),
+            json!({
+                "schemaVersion": 2,
+                "id": "probe",
+                "version": "test",
+                "statusModel": "full",
+                "agent": {
+                    "binary": "/bin/sh",
+                    "spawnArgs": ["-c", "read line"],
+                    "resume": { "style": "flag", "token": "--resume" },
+                },
+                "rules": [],
+            })
+            .to_string(),
+        )
+        .expect("write manifest");
+        let (probe, _) = ManifestEngine::load_dir(&manifests).expect("load");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            Arc::new(probe),
+            temp.path().join("state.json"),
+        )));
+        {
+            let mut record = test_record("s_closed");
+            record.kind = diri_proto::AgentKind::new("probe");
+            record.agent_session_id = Some("conv-1".into());
+            record.resumability = diri_proto::Resumability::Resumable;
+            registry.lock().expect("registry").insert_record(record);
+        }
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.path().join("daemon.sock"),
+        ));
+
+        ok_of(call(
+            &server,
+            "session.remove",
+            Some(json!({ "sessionID": "s_closed" })),
+        ));
+        let reopened = ok_of(call(&server, "session.reopen_last", None));
+
+        assert_eq!(reopened["id"], "s_closed");
+        assert!(
+            reopened["status"].get("exited").is_none(),
+            "reopen must relaunch, not re-list a record with no PTY: {}",
+            reopened["status"]
+        );
+        assert!(
+            registry
+                .lock()
+                .expect("registry")
+                .get("s_closed")
+                .is_some_and(|session| !session.view().exited),
+            "the reopened session must be a live one"
+        );
+        let _ = registry
+            .lock()
+            .expect("registry")
+            .terminate("s_closed", Duration::from_millis(500));
     }
 
     #[test]

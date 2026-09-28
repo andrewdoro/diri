@@ -14,6 +14,7 @@ use gpui::{
 
 use crate::blocks::BlockGlyph;
 use crate::buffer::{ApplySummary, ChangedRenderRow, GridBuffer};
+use crate::cursor_motion::{CursorCell, CursorDamage, CursorDriver, CursorFrame, CursorSchedule};
 use crate::find::{
     FindSnapshot, FindSpan, NavigationTarget, SearchJob, SearchRequest, SearchResult,
     TerminalFindModel,
@@ -25,6 +26,7 @@ use crate::scrollback::{
 };
 use crate::selection::{SelectionPoint, TerminalSelection};
 use crate::selection_shimmer::SelectionShimmer;
+use crate::sprites::{AntialiasedShape, Sprite, SpriteGrid};
 use crate::theme::{ResolvedCellStyle, TermTheme, is_default_background};
 
 mod selection_paint;
@@ -100,6 +102,8 @@ pub struct TerminalElement {
     focus_override: Option<bool>,
     suspended: bool,
     hovered_reference: Option<ReferenceHit>,
+    reduce_motion: bool,
+    cursor_hidden: bool,
 }
 
 /// Selection and reading state only: deliberately does not retain an input
@@ -112,12 +116,23 @@ pub struct TerminalDamageObserver {
 
 /// Moves the reading view, dropping a selection that returning to live would
 /// leave attached to rows the next frame replaces.
+/// Moves a view that is pinned to a find capture. The capture holds every row
+/// on the way, so nothing is fetched and the pin is kept.
+fn place_glide(viewport: &mut ScrollbackViewport, rows: f64, visible_rows: usize) {
+    let position =
+        crate::smooth_scroll::ScrollPosition::from_rows(rows, viewport.max_offset(visible_rows));
+    viewport.set_scroll_position(position, visible_rows);
+}
+
 fn set_view_offset(
     shared: &ElementSharedState,
     buffer: &SharedGridBuffer,
     offset: i64,
     visible_rows: usize,
 ) -> bool {
+    // Keys, typing back to live, and the scroller all come through here:
+    // whoever moves the view owns it, and a find glide lets go.
+    mutex_lock(&shared.scroll_glide).glide = None;
     let mut viewport = mutex_lock(&shared.viewport);
     let changed = viewport.set_view_offset(offset, visible_rows);
     viewport.hold_reading_view(&read_lock(buffer));
@@ -148,6 +163,7 @@ impl TerminalDamageObserver {
         drop(viewport);
         let replaces_grid =
             update.is_full_snapshot || buffer.cols != update.cols || buffer.rows != update.rows;
+        note_cursor_damage(&self.shared.cursor, &buffer, update, replaces_grid);
         let damaged_cols = usize::from(if replaces_grid {
             buffer.cols.max(update.cols)
         } else {
@@ -202,11 +218,13 @@ struct TerminalInputHandler {
     view: TerminalDamageObserver,
     cursor_bounds: Bounds<Pixels>,
     cell_width: Pixels,
+    cursor: Arc<Mutex<CursorDriver>>,
 }
 
 impl TerminalInputHandler {
-    /// Forwards committed text and reports whether doing so brought a reading
-    /// view back to live, which the caller has to repaint.
+    /// Forwards committed text and reports whether the caller has to repaint:
+    /// either it brought a reading view back to live, or a dimmed cursor has
+    /// to come back solid.
     fn commit_text(&self, text: &str) -> bool {
         let mut state = mutex_lock(&self.ime_state);
         state.marked_text.clear();
@@ -226,8 +244,9 @@ impl TerminalInputHandler {
         // target offset is zero, so the visible row count cannot clamp it.
         let returned =
             !text.is_empty() && set_view_offset(&self.view.shared, &self.view.buffer, 0, 0);
+        let solid = note_keystroke(&self.cursor);
         (self.text_input)(text);
-        returned
+        returned || solid
     }
 
     fn mark_text(&self, text: &str) {
@@ -342,6 +361,24 @@ struct ElementSharedState {
     scroll_router: Mutex<ScrollRouter>,
     history_lines: Mutex<HistoryLineCache>,
     metrics: Mutex<Option<(Font, u32, CellMetrics)>>,
+    /// Behind its own `Arc` so the input handler and the blink wake can hold
+    /// it without holding the rest of the view's state.
+    cursor: Arc<Mutex<CursorDriver>>,
+    scroll_glide: Mutex<GlideState>,
+}
+
+/// The glide to a find match, if one is running, and the clock it reads.
+#[derive(Default)]
+struct GlideState {
+    glide: Option<crate::scroll_glide::ScrollGlide>,
+    /// Pinned by tests and frame-by-frame renders; the wall clock otherwise.
+    clock: Option<Instant>,
+}
+
+impl GlideState {
+    fn now(&self) -> Instant {
+        self.clock.unwrap_or_else(Instant::now)
+    }
 }
 
 #[derive(Default)]
@@ -429,28 +466,65 @@ impl HistoryLineCache {
 
 #[cfg(test)]
 fn digest_cells(cells: &[GridCell]) -> u64 {
-    digest_row(cells, &[])
+    digest_row(cells, &[], &[])
 }
 
-fn digest_row(cells: &[GridCell], graphemes: &[(u16, String)]) -> u64 {
+fn digest_row(cells: &[GridCell], graphemes: &[(u16, String)], tints: &[Tint]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     cells.hash(&mut hasher);
     graphemes.hash(&mut hasher);
+    for tint in tints {
+        (tint.start, tint.end).hash(&mut hasher);
+        for channel in [tint.color.r, tint.color.g, tint.color.b, tint.color.a] {
+            channel.to_bits().hash(&mut hasher);
+        }
+    }
     hasher.finish()
+}
+
+/// A selection or find overlay across part of one row. It is painted between
+/// the cells' backgrounds and their glyphs, so the glyphs under it are colored
+/// to stay readable against it and a row's shaped line depends on its tints.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Tint {
+    start: usize,
+    end: usize,
+    color: gpui::Rgba,
+}
+
+/// The combined overlay above `column`, later tints painted over earlier ones.
+fn tint_at(tints: &[Tint], column: usize) -> Option<gpui::Rgba> {
+    tints
+        .iter()
+        .filter(|tint| (tint.start..tint.end).contains(&column))
+        .map(|tint| tint.color)
+        .reduce(|below, above| crate::contrast::over(above, below))
 }
 
 #[derive(Clone)]
 struct CachedRow {
     cells: Vec<GridCell>,
     graphemes: Vec<(u16, String)>,
+    tints: Vec<Tint>,
     background_quads: Vec<PaintQuad>,
     decoration_quads: Vec<PaintQuad>,
+    sprite_shapes: Vec<AntialiasedShape>,
     line: ShapedLine,
 }
 
 impl CachedRow {
-    fn move_vertically(&mut self, dy: Pixels) {
+    /// Whether the row moved. Sprites are laid out on whole device pixels, so
+    /// a row holding any moves only by a whole number of them.
+    fn move_vertically(&mut self, dy: Pixels, grid: SpriteGrid) -> bool {
+        if !grid.keeps_snapping(dy)
+            && self
+                .cells
+                .iter()
+                .any(|cell| Sprite::from_scalar(cell.scalar).is_some())
+        {
+            return false;
+        }
         for quad in self
             .background_quads
             .iter_mut()
@@ -458,6 +532,10 @@ impl CachedRow {
         {
             quad.bounds.origin.y += dy;
         }
+        for shape in &mut self.sprite_shapes {
+            shape.move_vertically(dy);
+        }
+        true
     }
 }
 
@@ -493,6 +571,7 @@ struct RowRenderContext {
     line_height_bits: u32,
     origin_x_bits: u32,
     origin_y_bits: u32,
+    scale_bits: u32,
     visible_cols: usize,
     visible_rows: usize,
 }
@@ -501,6 +580,7 @@ pub struct TerminalPrepaintState {
     started_at: Option<Instant>,
     background_quads: Vec<PaintQuad>,
     decoration_quads: Vec<PaintQuad>,
+    sprite_shapes: Vec<AntialiasedShape>,
     overlay_quads: Vec<PaintQuad>,
     selection: SelectionPaint,
     /// Reading path: window row and the absolute row whose shape paint reads
@@ -533,9 +613,38 @@ struct ScrollPaint {
 struct CursorPaint {
     row: u16,
     col: u16,
+    /// Cells the block spans: two on a double-width glyph.
+    cols: u16,
     quad: PaintQuad,
+    /// Set while the pane does not hold the keyboard. Painted over the row's
+    /// own text, after whatever is left of the fill.
+    outline: Option<PaintQuad>,
+    /// Color of the glyph or block element drawn inside the cursor.
+    text: gpui::Rgba,
     glyph: Option<ShapedLine>,
     block: Option<BlockGlyph>,
+    sprite: Option<Sprite>,
+    frame: CursorFrame,
+    /// While the block is between cells it inverts whatever it covers: these
+    /// are the covered cells' glyphs in the cursor's text color, painted
+    /// clipped to the block so the glyphs stay put and only the block moves.
+    covered: Vec<CoveredGlyph>,
+}
+
+struct CoveredGlyph {
+    col: u16,
+    row: u16,
+    glyph: Option<ShapedLine>,
+    block: Option<BlockGlyph>,
+    sprite: Option<Sprite>,
+}
+
+impl CursorPaint {
+    /// The static cursor replaces its cell's text; a moving or translucent
+    /// one is painted over the row's own text instead.
+    fn replaces_text_at(&self, row: u16) -> bool {
+        self.row == row && self.frame.is_static()
+    }
 }
 
 impl TerminalElement {
@@ -558,6 +667,8 @@ impl TerminalElement {
                 scroll_router: Mutex::new(ScrollRouter::default()),
                 history_lines: Mutex::new(HistoryLineCache::default()),
                 metrics: Mutex::new(None),
+                cursor: Arc::new(Mutex::new(CursorDriver::default())),
+                scroll_glide: Mutex::new(GlideState::default()),
             }),
             theme: TermTheme::default(),
             background_opacity: 1.0,
@@ -569,6 +680,8 @@ impl TerminalElement {
             focus_override: None,
             suspended: false,
             hovered_reference: None,
+            reduce_motion: false,
+            cursor_hidden: false,
         }
     }
 
@@ -642,6 +755,12 @@ impl TerminalElement {
         self
     }
 
+    /// Whether committed text and IME input currently reach the PTY.
+    #[must_use]
+    pub fn text_input_enabled(&self) -> bool {
+        mutex_lock(&self.ime_state).enabled
+    }
+
     /// Temporarily hands text ownership to an overlay. Existing native handlers
     /// observe the same gate, including callbacks delivered before the next paint.
     pub fn set_text_input_enabled(&self, enabled: bool) {
@@ -664,6 +783,49 @@ impl TerminalElement {
         self
     }
 
+    /// A picture of a terminal rather than a pane: thumbnails and peeks have
+    /// no insertion point to mark, so they draw no cursor, not a hollow one.
+    #[must_use]
+    pub fn without_cursor(mut self) -> Self {
+        self.cursor_hidden = true;
+        self
+    }
+
+    /// Holds the cursor static: no blink, no glide.
+    #[must_use]
+    pub fn reduce_motion(mut self, reduce_motion: bool) -> Self {
+        self.reduce_motion = reduce_motion;
+        self
+    }
+
+    /// A key went to the program through the host rather than through
+    /// committed text. Keeps the cursor solid and marks the next short cursor
+    /// move as the user's, which is what lets it glide. Returns true when the
+    /// cursor is dimmed on screen and the host should repaint it solid.
+    #[must_use]
+    pub fn note_user_input(&self) -> bool {
+        note_keystroke(&self.shared.cursor)
+    }
+
+    /// Drives cursor motion from a caller-owned clock instead of the wall
+    /// clock, and schedules no frames. For tests and frame-by-frame renders.
+    pub fn set_cursor_clock(&self, now: Option<Instant>) {
+        mutex_lock(&self.shared.cursor).set_clock(now);
+    }
+
+    /// Whether the cursor was last painted filled (`true`) or hollow.
+    #[cfg(test)]
+    pub(crate) fn cursor_painted_focused(&self) -> Option<bool> {
+        mutex_lock(&self.shared.cursor).painted_focused()
+    }
+
+    /// What the last painted frame asked for next. `Rest` means the cursor
+    /// will not cause another frame.
+    #[must_use]
+    pub fn cursor_schedule(&self) -> Option<CursorSchedule> {
+        mutex_lock(&self.shared.cursor).last_schedule()
+    }
+
     #[must_use]
     pub fn suspended(mut self, suspended: bool) -> Self {
         self.suspended = suspended;
@@ -683,7 +845,8 @@ impl TerminalElement {
     ///
     /// Terminal hosts use this to keep the authoritative buffer current while
     /// coalescing bursts and suppressing paints for offscreen residents.
-    pub fn apply_damage(&self, update: GridUpdate) -> ApplySummary {
+    pub fn apply_damage(&self, mut update: GridUpdate) -> ApplySummary {
+        write_lock(&self.buffer).promote_fake_caret(&mut update);
         self.damage_observer().prepare(&update);
         write_lock(&self.buffer).apply(update)
     }
@@ -732,6 +895,27 @@ impl TerminalElement {
     #[must_use]
     pub fn max_view_offset(&self, visible_rows: usize) -> i64 {
         mutex_lock(&self.shared.viewport).max_offset(visible_rows)
+    }
+
+    /// [`Self::max_view_offset`] as a scroll indicator should depict it:
+    /// following live, the last reported history length rather than the
+    /// one-screen navigation guess.
+    #[must_use]
+    pub fn indicator_max_view_offset(&self, visible_rows: usize) -> i64 {
+        mutex_lock(&self.shared.viewport).indicator_max_offset(visible_rows)
+    }
+
+    /// The content generation to stamp a history-length probe with, when the
+    /// indicator is drawn from an estimate that a probe could correct.
+    #[must_use]
+    pub fn indicator_probe_generation(&self) -> Option<u64> {
+        let estimated = mutex_lock(&self.shared.viewport).indicator_extent_is_estimated();
+        (estimated && !self.alt_screen()).then(|| read_lock(&self.buffer).generation())
+    }
+
+    /// Adopts the history length a probe read reported.
+    pub fn note_history_rows(&self, live_start_row: i64) {
+        mutex_lock(&self.shared.viewport).note_history_rows(live_start_row);
     }
 
     /// True while the foreground program owns the whole screen, when there is
@@ -798,6 +982,7 @@ impl TerminalElement {
     /// Resolves a wheel event and applies local scrollback movement. Daemon
     /// routes are returned for the app to pass to `SessionAttachment::scroll`.
     pub fn route_wheel(&self, event: WheelEvent) -> Option<WheelRoute> {
+        self.cancel_scroll_glide();
         let modes = *mutex_lock(&self.shared.modes);
         if let WheelDelta::PrecisePoints(points) = event.delta
             && ScrollRouter::is_local(modes)
@@ -851,6 +1036,7 @@ impl TerminalElement {
     /// [`Self::set_view_offset`] for a fractional position, as a dragged
     /// scroller knob produces.
     pub fn set_scroll_position(&self, rows: f64, visible_rows: usize) -> bool {
+        self.cancel_scroll_glide();
         let mut viewport = mutex_lock(&self.shared.viewport);
         let position = crate::smooth_scroll::ScrollPosition::from_rows(
             rows,
@@ -1078,19 +1264,88 @@ impl TerminalElement {
     }
 
     pub fn find_next(&self, model: &mut TerminalFindModel) -> Option<NavigationTarget> {
-        model.navigate_with_live(
-            false,
-            &mut mutex_lock(&self.shared.viewport),
-            &read_lock(&self.buffer),
-        )
+        self.navigate_find(model, false)
     }
 
     pub fn find_previous(&self, model: &mut TerminalFindModel) -> Option<NavigationTarget> {
-        model.navigate_with_live(
-            true,
-            &mut mutex_lock(&self.shared.viewport),
-            &read_lock(&self.buffer),
-        )
+        self.navigate_find(model, true)
+    }
+
+    /// Steps to a match and, when that moves a history view, carries the view
+    /// there instead of cutting to it (see [`crate::scroll_glide`]). Navigation
+    /// has already pinned the capture and chosen the resting row; the glide
+    /// only decides what is painted on the way. A match on the live grid
+    /// returns to live at once, because the live edge is where the terminal
+    /// is, not a place in the capture.
+    fn navigate_find(
+        &self,
+        model: &mut TerminalFindModel,
+        backwards: bool,
+    ) -> Option<NavigationTarget> {
+        let mut viewport = mutex_lock(&self.shared.viewport);
+        let buffer = read_lock(&self.buffer);
+        let mut state = mutex_lock(&self.shared.scroll_glide);
+        // Mid-glide, what is on screen is the sample, not the last target.
+        let shown = viewport.scroll_position().as_rows();
+        let target = model.navigate_with_live(backwards, &mut viewport, &buffer);
+        state.glide = None;
+        if matches!(target, Some(NavigationTarget::History { .. })) {
+            let visible_rows = usize::from(buffer.rows);
+            let resting = viewport.scroll_position().as_rows();
+            let now = state.now();
+            if let Some(glide) =
+                crate::scroll_glide::ScrollGlide::new(shown, resting, visible_rows, now)
+            {
+                place_glide(&mut viewport, glide.start(), visible_rows);
+                state.glide = Some(glide);
+            }
+        }
+        target
+    }
+
+    /// Drives the find glide from a caller-owned clock and schedules no
+    /// frames. For tests and frame-by-frame renders.
+    pub fn set_scroll_glide_clock(&self, now: Option<Instant>) {
+        mutex_lock(&self.shared.scroll_glide).clock = now;
+    }
+
+    /// Whether a find glide still has frames to paint.
+    #[must_use]
+    pub fn scroll_glide_running(&self) -> bool {
+        mutex_lock(&self.shared.scroll_glide).glide.is_some()
+    }
+
+    /// Places the view for this frame: one sample per painted frame, and
+    /// Reduce Motion lands it at once. Returns whether another frame should
+    /// be requested, which is only while the glide runs on the wall clock.
+    fn step_scroll_glide(&self, viewport: &mut ScrollbackViewport, visible_rows: usize) -> bool {
+        let mut state = mutex_lock(&self.shared.scroll_glide);
+        let Some(glide) = state.glide else {
+            return false;
+        };
+        let now = state.now();
+        let finished = self.reduce_motion || glide.is_finished(now);
+        let position = if finished {
+            glide.target()
+        } else {
+            glide.sample(now)
+        };
+        place_glide(viewport, position, visible_rows);
+        if finished {
+            state.glide = None;
+        }
+        !finished && state.clock.is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn step_scroll_glide_for_test(&self, visible_rows: usize) {
+        let mut viewport = mutex_lock(&self.shared.viewport);
+        self.step_scroll_glide(&mut viewport, visible_rows);
+    }
+
+    /// Anything else that moves the view owns it from then on.
+    fn cancel_scroll_glide(&self) {
+        mutex_lock(&self.shared.scroll_glide).glide = None;
     }
 
     pub fn sync_find_highlights(&self, model: &TerminalFindModel) {
@@ -1115,6 +1370,7 @@ impl TerminalElement {
     }
 
     pub fn clear_find_source(&self) {
+        self.cancel_scroll_glide();
         mutex_lock(&self.shared.viewport).clear_find_source();
     }
 
@@ -1131,10 +1387,11 @@ impl TerminalElement {
         &self,
         row: &[GridCell],
         graphemes: &[(u16, String)],
+        tints: &[Tint],
         metrics: CellMetrics,
         window: &mut Window,
     ) -> ShapedLine {
-        let (text, runs) = self.row_text_and_runs(row, graphemes);
+        let (text, runs) = self.row_text_and_runs(row, graphemes, tints);
         window.text_system().shape_line(
             SharedString::from(text),
             self.font_size,
@@ -1143,32 +1400,37 @@ impl TerminalElement {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_row(
         &self,
         cells: Vec<GridCell>,
         graphemes: Vec<(u16, String)>,
+        tints: Vec<Tint>,
         row: u16,
-        origin: Point<Pixels>,
-        metrics: CellMetrics,
+        grid: SpriteGrid,
         window: &mut Window,
     ) -> CachedRow {
         let mut background_quads = Vec::new();
         let mut decoration_quads = Vec::new();
+        let mut sprite_shapes = Vec::new();
         append_row_quads(
             &cells,
             row,
-            origin,
-            metrics,
+            grid,
             self.theme,
+            &tints,
             &mut background_quads,
             &mut decoration_quads,
+            &mut sprite_shapes,
         );
-        let line = self.shape_row(&cells, &graphemes, metrics, window);
+        let line = self.shape_row(&cells, &graphemes, &tints, grid.metrics(), window);
         CachedRow {
             cells,
             graphemes,
+            tints,
             background_quads,
             decoration_quads,
+            sprite_shapes,
             line,
         }
     }
@@ -1205,6 +1467,7 @@ impl TerminalElement {
         &self,
         row: &[GridCell],
         graphemes: &[(u16, String)],
+        tints: &[Tint],
     ) -> (String, Vec<TextRun>) {
         let row = &row[..self.shaped_cells(row, graphemes)];
         let mut text = String::with_capacity(row.len());
@@ -1212,7 +1475,7 @@ impl TerminalElement {
 
         let mut graphemes = graphemes.iter().peekable();
         for (column, cell) in row.iter().enumerate() {
-            let resolved = self.theme.resolve_cell(*cell);
+            let resolved = self.theme.resolve_cell_under(*cell, tint_at(tints, column));
             let ch = render_char(*cell, resolved.visible);
             let mut byte_len = ch.len_utf8();
             text.push(ch);
@@ -1254,7 +1517,19 @@ impl TerminalElement {
     fn shape_cursor_glyph(
         &self,
         cell: GridCell,
+        color: gpui::Rgba,
         combining: &str,
+        metrics: CellMetrics,
+        window: &mut Window,
+    ) -> Option<ShapedLine> {
+        self.shape_glyph_under_cursor(cell, combining, color, metrics, window)
+    }
+
+    fn shape_glyph_under_cursor(
+        &self,
+        cell: GridCell,
+        combining: &str,
+        color: gpui::Rgba,
         metrics: CellMetrics,
         window: &mut Window,
     ) -> Option<ShapedLine> {
@@ -1267,7 +1542,7 @@ impl TerminalElement {
         let run = TextRun {
             len: text.len(),
             font: styled_font(&self.font, resolved),
-            color: self.theme.cursor_text.into(),
+            color: color.into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -1279,6 +1554,250 @@ impl TerminalElement {
             Some(metrics.cell_width),
         ))
     }
+
+    /// Applies blink and glide to the static cursor. A static frame returns
+    /// the cursor untouched, so rest paints exactly what it always has.
+    fn animate_cursor(
+        &self,
+        cursor: Option<CursorPaint>,
+        focused: bool,
+        metrics: CellMetrics,
+        visible_cols: usize,
+        window: &mut Window,
+    ) -> Option<CursorPaint> {
+        let mut driver = mutex_lock(&self.shared.cursor);
+        let Some(mut cursor) = cursor else {
+            driver.rest();
+            return None;
+        };
+        let cell = CursorCell {
+            col: cursor.col,
+            row: cursor.row,
+        };
+        let (frame, focus) = driver.sample_in_pane(cell, focused, self.reduce_motion);
+        drop(driver);
+        cursor.frame = frame;
+        if frame.is_static() {
+            return Some(cursor);
+        }
+        if focus.outlined() {
+            cursor.outline = Some(crate::cursor_focus::outline_quad(
+                cursor.quad.bounds,
+                window.scale_factor(),
+                cursor.quad.background.as_solid().unwrap_or_default(),
+            ));
+            if frame.opacity <= 0.0 {
+                // Hollow at rest: the row paints its own text and the fill
+                // and inverted glyph are not there to paint.
+                cursor.glyph = None;
+                cursor.block = None;
+                return Some(cursor);
+            }
+        }
+        cursor.quad.bounds.origin.x += metrics.cell_width * frame.offset_cols;
+        cursor.quad.bounds.origin.y += metrics.line_height * frame.offset_rows;
+        cursor.quad.background = cursor.quad.background.opacity(frame.opacity);
+        let cache = mutex_lock(&self.shared.row_cache);
+        if !frame.is_gliding() {
+            // Fading in place: the row's own text shows through the block and
+            // the inverted glyph fades with it.
+            if cursor.glyph.is_some()
+                && let Some(prepared) = cache.get(usize::from(cursor.row)).and_then(Option::as_ref)
+                && let Some(cell) = prepared.cells.get(usize::from(cursor.col)).copied()
+            {
+                let combining = prepared
+                    .graphemes
+                    .iter()
+                    .find(|(col, _)| *col == cursor.col)
+                    .map_or("", |(_, text)| text.as_str());
+                let color = faded(cursor.text, frame.opacity);
+                cursor.glyph =
+                    self.shape_glyph_under_cursor(cell, combining, color, metrics, window);
+            }
+            drop(cache);
+            return Some(cursor);
+        }
+        // The block overlaps at most two columns and two rows.
+        let col = f32::from(cursor.col) + frame.offset_cols;
+        let row = f32::from(cursor.row) + frame.offset_rows;
+        for covered_row in [row.floor(), row.ceil()] {
+            for covered_col in [col.floor(), col.ceil()] {
+                let (covered_col, covered_row) = (covered_col as u16, covered_row as u16);
+                if usize::from(covered_col) >= visible_cols
+                    || cursor
+                        .covered
+                        .iter()
+                        .any(|seen| (seen.col, seen.row) == (covered_col, covered_row))
+                {
+                    continue;
+                }
+                let Some(prepared) = cache.get(usize::from(covered_row)).and_then(Option::as_ref)
+                else {
+                    continue;
+                };
+                let Some(cell) = prepared.cells.get(usize::from(covered_col)).copied() else {
+                    continue;
+                };
+                let combining = prepared
+                    .graphemes
+                    .iter()
+                    .find(|(col, _)| *col == covered_col)
+                    .map_or("", |(_, text)| text.as_str());
+                cursor.covered.push(CoveredGlyph {
+                    col: covered_col,
+                    row: covered_row,
+                    glyph: self.shape_cursor_glyph(cell, cursor.text, combining, metrics, window),
+                    block: self
+                        .theme
+                        .resolve_cell(cell)
+                        .visible
+                        .then(|| BlockGlyph::from_scalar(cell.scalar))
+                        .flatten(),
+                    sprite: self
+                        .theme
+                        .resolve_cell(cell)
+                        .visible
+                        .then(|| Sprite::from_scalar(cell.scalar))
+                        .flatten(),
+                });
+            }
+        }
+        Some(cursor)
+    }
+
+    fn paint_moving_cursor(
+        &self,
+        cursor: CursorPaint,
+        bounds: Bounds<Pixels>,
+        metrics: CellMetrics,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let block_bounds = cursor.quad.bounds;
+        if cursor.frame.opacity > 0.0 {
+            window.paint_quad(cursor.quad);
+        }
+        if cursor.frame.is_gliding() {
+            let mask = ContentMask {
+                bounds: block_bounds.intersect(&bounds),
+            };
+            window.with_content_mask(Some(mask), |window| {
+                for covered in cursor.covered {
+                    paint_cursor_glyph(
+                        covered.glyph.as_ref(),
+                        covered.block,
+                        covered.sprite,
+                        (covered.col, covered.row),
+                        cursor.text,
+                        bounds,
+                        metrics,
+                        window,
+                        cx,
+                    );
+                }
+            });
+            return;
+        }
+        paint_cursor_glyph(
+            cursor.glyph.as_ref(),
+            cursor.block,
+            cursor.sprite,
+            (cursor.col, cursor.row),
+            faded(cursor.text, cursor.frame.opacity),
+            bounds,
+            metrics,
+            window,
+            cx,
+        );
+        if let Some(outline) = cursor.outline {
+            window.paint_quad(outline);
+        }
+    }
+}
+
+fn faded(color: gpui::Rgba, opacity: f32) -> gpui::Rgba {
+    gpui::Rgba {
+        a: color.a * opacity,
+        ..color
+    }
+}
+
+/// The inverted glyph of one cell: block elements and sprites as geometry,
+/// everything else as shaped text, all at the cell's own origin.
+#[allow(clippy::too_many_arguments)]
+fn paint_cursor_glyph(
+    glyph: Option<&ShapedLine>,
+    block: Option<BlockGlyph>,
+    sprite: Option<Sprite>,
+    (col, row): (u16, u16),
+    color: gpui::Rgba,
+    bounds: Bounds<Pixels>,
+    metrics: CellMetrics,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Some(block) = block {
+        for rect in block.rectangles(bounds.origin, metrics, usize::from(col), row) {
+            window.paint_quad(fill(rect, color));
+        }
+    }
+    if let Some(sprite) = sprite {
+        let grid = SpriteGrid::new(bounds.origin, metrics, window.scale_factor());
+        grid.paint(sprite, grid.cell(usize::from(col), row), color, window);
+    }
+    if let Some(glyph) = glyph {
+        let origin = point(
+            bounds.left() + metrics.x_for_col(col),
+            bounds.top() + metrics.y_for_row(row),
+        );
+        let _ = glyph.paint(
+            origin,
+            metrics.line_height,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+}
+
+fn note_keystroke(cursor: &Mutex<CursorDriver>) -> bool {
+    mutex_lock(cursor).note_keystroke()
+}
+
+fn note_cursor_damage(
+    cursor: &Mutex<CursorDriver>,
+    buffer: &GridBuffer,
+    update: &GridUpdate,
+    replaces_grid: bool,
+) {
+    let previous = buffer.cursor.visible.then_some(CursorCell {
+        col: buffer.cursor.col,
+        row: buffer.cursor.row,
+    });
+    let next = update.cursor_visible.then_some(CursorCell {
+        col: update.cursor_col,
+        row: update.cursor_row,
+    });
+    let mut cursor = mutex_lock(cursor);
+    let now = cursor.now();
+    cursor.motion.note_damage(
+        CursorDamage {
+            previous,
+            next,
+            rows_damaged: if replaces_grid {
+                usize::MAX
+            } else {
+                update.changed_rows.len()
+            },
+            touches_cursor_row: replaces_grid
+                || update
+                    .changed_rows
+                    .iter()
+                    .any(|changed| changed.y == update.cursor_row),
+        },
+        now,
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -1370,6 +1889,7 @@ impl Element for TerminalElement {
                 started_at: None,
                 background_quads: Vec::new(),
                 decoration_quads: Vec::new(),
+                sprite_shapes: Vec::new(),
                 overlay_quads: Vec::new(),
                 selection: SelectionPaint::default(),
                 lines: Vec::new(),
@@ -1394,6 +1914,7 @@ impl Element for TerminalElement {
                 started_at: None,
                 background_quads: Vec::new(),
                 decoration_quads: Vec::new(),
+                sprite_shapes: Vec::new(),
                 overlay_quads: Vec::new(),
                 selection: SelectionPaint::default(),
                 lines: Vec::new(),
@@ -1430,7 +1951,11 @@ impl Element for TerminalElement {
         // Hold the viewport lock for the whole prepaint instead of deep-cloning
         // it: every party that touches these mutexes runs on the main thread,
         // and the clone copied the entire fetched-history cell cache per frame.
-        let viewport = mutex_lock(&self.shared.viewport);
+        let mut viewport = mutex_lock(&self.shared.viewport);
+        if self.step_scroll_glide(&mut viewport, visible_rows) {
+            window.request_animation_frame();
+        }
+        let viewport = viewport;
         // Zero on the live grid and on a reading view resting on a whole row,
         // where `painted_rows` is `visible_rows` and nothing below differs.
         let scroll_shift = px(viewport
@@ -1442,12 +1967,75 @@ impl Element for TerminalElement {
             self.theme.background.alpha(self.background_opacity),
         )];
         let mut decoration_quads = Vec::new();
+        let mut sprite_shapes = Vec::new();
         let mut overlay_quads = Vec::new();
         let mut lines = Vec::with_capacity(visible_rows);
+        let grid = SpriteGrid::new(bounds.origin, metrics, window.scale_factor());
         let cursor;
         let cache_hits;
         let cache_misses;
         let mut paint_from_cache = false;
+
+        // Tints are gathered before any row is shaped: a glyph under a
+        // selection or find highlight is colored to stay readable against it.
+        // The spans are the ones the selection shape is built from, so a glyph
+        // is recolored exactly when the tint covers it, double-width ones too.
+        // `painted_rows` includes the partial row a sub-row scroll brings in.
+        let (selected, ..) = self.snapped_selection(&viewport, painted_rows, visible_cols);
+        let mut row_tints = vec![Vec::new(); painted_rows];
+        for span in &selected {
+            if let Some(tints) = row_tints.get_mut(span.row) {
+                tints.push(Tint {
+                    start: span.start_col,
+                    end: span.end_col_exclusive,
+                    color: self.theme.selection,
+                });
+            }
+        }
+        {
+            let buffer = read_lock(&self.buffer);
+            let mut highlights = mutex_lock(&self.shared.find_highlights);
+            if let Some((source, matches, current)) = &highlights.retained {
+                let pinned = viewport.has_find_source(source);
+                let top = if pinned {
+                    viewport.absolute_row(0)
+                } else {
+                    source.live_start_row
+                };
+                highlights.spans = matches
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        if !pinned
+                            && (!source.matches_live_row(item.absolute_row, &buffer)
+                                || viewport.is_reading())
+                        {
+                            return None;
+                        }
+                        let row = usize::try_from(item.absolute_row.checked_sub(top)?).ok()?;
+                        (row < painted_rows).then_some(FindSpan {
+                            row,
+                            start_col: item.start_col,
+                            end_col_exclusive: item.end_col_exclusive,
+                            is_current: index == *current,
+                        })
+                    })
+                    .collect();
+            }
+            for span in &highlights.spans {
+                if let Some(tints) = row_tints.get_mut(span.row) {
+                    tints.push(Tint {
+                        start: span.start_col,
+                        end: span.end_col_exclusive,
+                        color: if span.is_current {
+                            self.theme.find_match_current
+                        } else {
+                            self.theme.find_match
+                        },
+                    });
+                }
+            }
+        }
 
         if viewport.is_reading() {
             // History browsing composes owned rows per frame; quads are cheap
@@ -1468,21 +2056,22 @@ impl Element for TerminalElement {
             history.validate(key, viewport.absolute_row(0));
             let mut hits = 0u64;
             let mut cells = Vec::with_capacity(usize::from(grid_cols));
-            for row_index in 0..painted_rows {
+            for (row_index, tints) in row_tints.iter().enumerate() {
                 let absolute = viewport.absolute_row(row_index);
                 viewport.window_row_into(&buffer, row_index, &mut cells);
                 cells.truncate(visible_cols);
                 append_row_quads(
                     &cells,
                     row_index as u16,
-                    bounds.origin,
-                    metrics,
+                    grid,
                     self.theme,
+                    tints,
                     &mut background_quads,
                     &mut decoration_quads,
+                    &mut sprite_shapes,
                 );
                 let graphemes = viewport.row_graphemes(&buffer, absolute);
-                let digest = digest_row(&cells, graphemes);
+                let digest = digest_row(&cells, graphemes, tints);
                 if history.get(absolute, digest).is_some() {
                     hits += 1;
                 } else {
@@ -1492,7 +2081,7 @@ impl Element for TerminalElement {
                     // the fetch lands. The same holds for the held live rows
                     // under the history, which used to be reshaped and copied
                     // every frame.
-                    let line = self.shape_row(&cells, graphemes, metrics, window);
+                    let line = self.shape_row(&cells, graphemes, tints, metrics, window);
                     history.insert(absolute, digest, line);
                 }
                 lines.push((row_index as u16, absolute));
@@ -1509,6 +2098,7 @@ impl Element for TerminalElement {
                 line_height_bits: f32::from(metrics.line_height).to_bits(),
                 origin_x_bits: f32::from(bounds.origin.x).to_bits(),
                 origin_y_bits: f32::from(bounds.origin.y).to_bits(),
+                scale_bits: window.scale_factor().to_bits(),
                 visible_cols,
                 visible_rows,
             };
@@ -1542,24 +2132,40 @@ impl Element for TerminalElement {
                     && let Some(prepared) = cache[changed.row].as_mut()
                     && prepared.cells == changed.cells
                     && prepared.graphemes == changed.graphemes
+                    && prepared.tints == row_tints[changed.row]
                 {
                     // Shapes are independent of row position. Backgrounds and
                     // decorations carry absolute bounds and must move with it.
                     let old_row = (changed.row + offset) % visible_rows;
                     let dy =
                         metrics.y_for_row(changed.row as u16) - metrics.y_for_row(old_row as u16);
-                    prepared.move_vertically(dy);
-                    continue;
+                    if prepared.move_vertically(dy, grid) {
+                        continue;
+                    }
                 }
                 misses += 1;
                 cache[changed.row] = Some(self.prepare_row(
                     changed.cells,
                     changed.graphemes,
+                    row_tints[changed.row].clone(),
                     changed.row as u16,
-                    bounds.origin,
-                    metrics,
+                    grid,
                     window,
                 ));
+            }
+            // A selection drag or find step changes tints on rows whose cells
+            // did not change; only those rows are prepared again.
+            for (row, tints) in row_tints.into_iter().enumerate() {
+                let Some(prepared) = cache[row].as_ref() else {
+                    continue;
+                };
+                if prepared.tints == tints {
+                    continue;
+                }
+                misses += 1;
+                let (cells, graphemes) = (prepared.cells.clone(), prepared.graphemes.clone());
+                cache[row] =
+                    Some(self.prepare_row(cells, graphemes, tints, row as u16, grid, window));
             }
             cache_misses = misses;
             cache_hits = visible_rows as u64 - misses;
@@ -1603,36 +2209,7 @@ impl Element for TerminalElement {
                 ));
             }
         }
-        let buffer = read_lock(&self.buffer);
         let mut highlights = mutex_lock(&self.shared.find_highlights);
-        if let Some((source, matches, current)) = &highlights.retained {
-            let pinned = viewport.has_find_source(source);
-            let top = if pinned {
-                viewport.absolute_row(0)
-            } else {
-                source.live_start_row
-            };
-            highlights.spans = matches
-                .iter()
-                .enumerate()
-                .filter_map(|(index, item)| {
-                    if !pinned
-                        && (!source.matches_live_row(item.absolute_row, &buffer)
-                            || viewport.is_reading())
-                    {
-                        return None;
-                    }
-                    let row = usize::try_from(item.absolute_row.checked_sub(top)?).ok()?;
-                    (row < painted_rows).then_some(FindSpan {
-                        row,
-                        start_col: item.start_col,
-                        end_col_exclusive: item.end_col_exclusive,
-                        is_current: index == *current,
-                    })
-                })
-                .collect();
-        }
-        drop(buffer);
         highlights.current_bounds = highlights.spans.iter().find_map(|span| {
             if !span.is_current || span.row >= painted_rows {
                 return None;
@@ -1670,8 +2247,7 @@ impl Element for TerminalElement {
 
         drop(highlights);
 
-        let cursor_visible = cursor_should_render(focused, cursor.visible);
-        let cursor = if cursor_visible
+        let cursor = if cursor_should_render(!self.cursor_hidden, cursor.visible)
             && !viewport.is_reading()
             && usize::from(cursor.row) < visible_rows
             && usize::from(cursor.col) < visible_cols
@@ -1682,19 +2258,37 @@ impl Element for TerminalElement {
                 .and_then(|row| row.cells.get(usize::from(cursor.col)))
                 .copied()
                 .unwrap_or(GridCell::BLANK);
+            let cursor_cols = cache[usize::from(cursor.row)].as_ref().map_or(1, |row| {
+                crate::cursor_focus::cursor_cols(&row.cells, cursor.col)
+            });
             let origin = point(
                 bounds.left() + metrics.x_for_col(cursor.col),
                 bounds.top() + metrics.y_for_row(cursor.row),
             );
+            let cursor_tint = cache[usize::from(cursor.row)]
+                .as_ref()
+                .and_then(|row| tint_at(&row.tints, usize::from(cursor.col)));
+            let (cursor_fill, cursor_text) = self.theme.cursor_colors(cell, cursor_tint);
+            let visible = self.theme.resolve_cell(cell).visible;
             Some(CursorPaint {
                 row: cursor.row,
                 col: cursor.col,
+                cols: cursor_cols,
                 quad: fill(
-                    Bounds::new(origin, size(metrics.cell_width, metrics.line_height)),
-                    self.theme.cursor,
+                    Bounds::new(
+                        origin,
+                        size(
+                            metrics.cell_width * f32::from(cursor_cols),
+                            metrics.line_height,
+                        ),
+                    ),
+                    cursor_fill,
                 ),
+                outline: None,
+                text: cursor_text,
                 glyph: self.shape_cursor_glyph(
                     cell,
+                    cursor_text,
                     cache[usize::from(cursor.row)]
                         .as_ref()
                         .and_then(|row| row.graphemes.iter().find(|(col, _)| *col == cursor.col))
@@ -1702,16 +2296,17 @@ impl Element for TerminalElement {
                     metrics,
                     window,
                 ),
-                block: self
-                    .theme
-                    .resolve_cell(cell)
-                    .visible
+                block: visible
                     .then(|| BlockGlyph::from_scalar(cell.scalar))
                     .flatten(),
+                sprite: visible.then(|| Sprite::from_scalar(cell.scalar)).flatten(),
+                frame: CursorFrame::REST,
+                covered: Vec::new(),
             })
         } else {
             None
         };
+        let cursor = self.animate_cursor(cursor, focused, metrics, visible_cols, window);
 
         let scroll = (scroll_shift > px(0.0)).then(|| {
             let backdrop = background_quads.remove(0);
@@ -1721,6 +2316,9 @@ impl Element for TerminalElement {
                 .chain(&mut decoration_quads)
             {
                 quad.bounds.origin.y -= scroll_shift;
+            }
+            for shape in &mut sprite_shapes {
+                shape.move_vertically(-scroll_shift);
             }
             // A stepped selection is a path rather than a quad, so it is not
             // in the vectors above; its sheen ramps are.
@@ -1739,6 +2337,7 @@ impl Element for TerminalElement {
             started_at: Some(started_at),
             background_quads,
             decoration_quads,
+            sprite_shapes,
             overlay_quads,
             selection,
             lines,
@@ -1790,6 +2389,7 @@ impl Element for TerminalElement {
                     view: self.damage_observer(),
                     cursor_bounds,
                     cell_width,
+                    cursor: Arc::clone(&self.shared.cursor),
                 },
                 cx,
             );
@@ -1870,7 +2470,7 @@ impl Element for TerminalElement {
                     if prepaint
                         .cursor
                         .as_ref()
-                        .is_some_and(|cursor| cursor.row == row)
+                        .is_some_and(|cursor| cursor.replaces_text_at(row))
                     {
                         let cursor = prepaint.cursor.as_ref().unwrap();
                         paint_line_around_cursor(
@@ -1878,7 +2478,7 @@ impl Element for TerminalElement {
                             origin,
                             bounds,
                             metrics,
-                            cursor.col,
+                            (cursor.col, cursor.cols),
                             window,
                             cx,
                         );
@@ -1897,6 +2497,9 @@ impl Element for TerminalElement {
                     for prepared in cache.iter().flatten() {
                         for quad in &prepared.decoration_quads {
                             window.paint_quad(quad.clone());
+                        }
+                        for shape in &prepared.sprite_shapes {
+                            shape.paint(window);
                         }
                     }
                 });
@@ -1919,10 +2522,18 @@ impl Element for TerminalElement {
                 if prepaint
                     .cursor
                     .as_ref()
-                    .is_some_and(|cursor| cursor.row == *row)
+                    .is_some_and(|cursor| cursor.replaces_text_at(*row))
                 {
                     let cursor = prepaint.cursor.as_ref().unwrap();
-                    paint_line_around_cursor(line, origin, bounds, metrics, cursor.col, window, cx);
+                    paint_line_around_cursor(
+                        line,
+                        origin,
+                        bounds,
+                        metrics,
+                        (cursor.col, cursor.cols),
+                        window,
+                        cx,
+                    );
                 } else {
                     let _ = line.paint(
                         origin,
@@ -1939,8 +2550,27 @@ impl Element for TerminalElement {
                 for quad in prepaint.decoration_quads.drain(..) {
                     window.paint_quad(quad);
                 }
+                for shape in prepaint.sprite_shapes.drain(..) {
+                    shape.paint(window);
+                }
             });
 
+            let cursor_schedule = prepaint
+                .cursor
+                .as_ref()
+                .map_or(CursorSchedule::Rest, |cursor| cursor.frame.schedule);
+            let moving_cursor = prepaint.cursor.take_if(|cursor| !cursor.frame.is_static());
+            if let Some(cursor) = moving_cursor {
+                self.paint_moving_cursor(cursor, bounds, metrics, window, cx);
+            }
+            if cursor_schedule != CursorSchedule::Rest {
+                crate::cursor_motion::request_frame(
+                    &self.shared.cursor,
+                    cursor_schedule,
+                    window,
+                    cx,
+                );
+            }
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor.quad);
                 if let Some(block) = cursor.block {
@@ -1950,8 +2580,13 @@ impl Element for TerminalElement {
                         usize::from(cursor.col),
                         cursor.row,
                     ) {
-                        window.paint_quad(fill(rect, self.theme.cursor_text));
+                        window.paint_quad(fill(rect, cursor.text));
                     }
+                }
+                if let Some(sprite) = cursor.sprite {
+                    let grid = SpriteGrid::new(bounds.origin, metrics, window.scale_factor());
+                    let cell = grid.cell(usize::from(cursor.col), cursor.row);
+                    grid.paint(sprite, cell, cursor.text, window);
                 }
                 if let Some(glyph) = cursor.glyph {
                     let origin = point(
@@ -1984,8 +2619,11 @@ impl Element for TerminalElement {
     }
 }
 
-const fn cursor_should_render(focused: bool, protocol_visible: bool) -> bool {
-    focused && protocol_visible
+/// Focus no longer decides whether the cursor is painted, only how: filled in
+/// the pane that holds the keyboard, outlined in every other. A cursor the
+/// program hid (DECTCEM) stays hidden in both, and a thumbnail has none.
+const fn cursor_should_render(host_shows_cursor: bool, protocol_visible: bool) -> bool {
+    host_shows_cursor && protocol_visible
 }
 
 fn append_background_quads(
@@ -2029,15 +2667,18 @@ fn append_background_quads(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_row_quads(
     row: &[GridCell],
     row_index: u16,
-    origin: Point<Pixels>,
-    metrics: CellMetrics,
+    grid: SpriteGrid,
     theme: TermTheme,
+    tints: &[Tint],
     background_quads: &mut Vec<PaintQuad>,
     decoration_quads: &mut Vec<PaintQuad>,
+    sprite_shapes: &mut Vec<AntialiasedShape>,
 ) {
+    let (origin, metrics) = (grid.origin(), grid.metrics());
     // Plain terminal output is overwhelmingly default-background text with
     // no decorations. Recognize the entire row in one cheap pass instead of
     // scanning it once for backgrounds and again for decorations.
@@ -2048,39 +2689,62 @@ fn append_row_quads(
             && !cell
                 .style
                 .contains(diri_proto::grid::TermStyle::CROSSED_OUT)
-            && BlockGlyph::from_scalar(cell.scalar).is_none()
+            && !is_procedural(cell.scalar)
     });
     if is_plain {
         return;
     }
     append_background_quads(row, row_index, origin, metrics, theme, background_quads);
-    // Keep blocks in the foreground layer, above selection/search backgrounds
-    // and below the cursor. The same path serves cached live rows and history.
+    // Keep blocks and sprites in the foreground layer, above selection/search
+    // backgrounds and below the cursor. The same path serves cached live rows
+    // and history.
     let mut col = 0;
     while col < row.len() {
         let cell = row[col];
         let start = col;
         col += 1;
-        let Some(block) = BlockGlyph::from_scalar(cell.scalar) else {
+        if !is_procedural(cell.scalar) {
             continue;
-        };
-        let style = theme.resolve_cell(cell);
+        }
+        let style = theme.resolve_cell_under(cell, tint_at(tints, start));
         if !style.visible {
             continue;
         }
+        let continues = |(next, column): (&GridCell, usize)| {
+            let next_style = theme.resolve_cell_under(*next, tint_at(tints, column));
+            next.scalar == cell.scalar
+                && next_style.visible
+                && next_style.foreground == style.foreground
+        };
+        let Some(block) = BlockGlyph::from_scalar(cell.scalar) else {
+            let Some(sprite) = Sprite::from_scalar(cell.scalar) else {
+                continue;
+            };
+            let mut bounds = grid.cell(start, row_index);
+            if sprite.spans_cell_width() {
+                // A rule is one stroke repeated: the run is the same strokes
+                // across one wider cell, on the same snapped edges.
+                while row.get(col).map(|next| (next, col)).is_some_and(continues) {
+                    col += 1;
+                }
+                bounds.right = grid.x(col);
+            }
+            grid.append(
+                sprite,
+                bounds,
+                style.foreground,
+                decoration_quads,
+                sprite_shapes,
+            );
+            continue;
+        };
         let mut rectangles = block.rectangles(origin, metrics, start, row_index);
         if block.spans_cell_width()
             && let Some(mut bar) = rectangles.next()
         {
             // A progress bar is one block repeated; paint the run as one quad
             // for as long as that is provably the same pixels.
-            let continues = |next: &GridCell| {
-                let next_style = theme.resolve_cell(*next);
-                next.scalar == cell.scalar
-                    && next_style.visible
-                    && next_style.foreground == style.foreground
-            };
-            while row.get(col).is_some_and(continues)
+            while row.get(col).map(|next| (next, col)).is_some_and(continues)
                 && let Some(joined) = block
                     .rectangles(origin, metrics, col, row_index)
                     .next()
@@ -2094,7 +2758,15 @@ fn append_row_quads(
             decoration_quads.extend(rectangles.map(|bounds| fill(bounds, style.foreground)));
         }
     }
-    append_decoration_quads(row, row_index, origin, metrics, theme, decoration_quads);
+    append_decoration_quads(
+        row,
+        row_index,
+        origin,
+        metrics,
+        theme,
+        tints,
+        decoration_quads,
+    );
 }
 
 fn append_decoration_quads(
@@ -2103,18 +2775,19 @@ fn append_decoration_quads(
     origin: Point<Pixels>,
     metrics: CellMetrics,
     theme: TermTheme,
+    tints: &[Tint],
     quads: &mut Vec<PaintQuad>,
 ) {
     let mut col = 0;
     while col < row.len() {
-        let style = theme.resolve_cell(row[col]);
+        let style = theme.resolve_cell_under(row[col], tint_at(tints, col));
         if !style.underline && !style.strikethrough {
             col += 1;
             continue;
         }
         let mut end = col + 1;
         while end < row.len() {
-            let next = theme.resolve_cell(row[end]);
+            let next = theme.resolve_cell_under(row[end], tint_at(tints, end));
             if next.foreground != style.foreground
                 || next.underline != style.underline
                 || next.strikethrough != style.strikethrough
@@ -2183,12 +2856,12 @@ fn paint_line_around_cursor(
     origin: Point<Pixels>,
     terminal_bounds: Bounds<Pixels>,
     metrics: CellMetrics,
-    cursor_col: u16,
+    (cursor_col, cursor_cols): (u16, u16),
     window: &mut Window,
     cx: &mut App,
 ) {
     let cursor_left = origin.x + metrics.x_for_col(cursor_col);
-    let cursor_right = cursor_left + metrics.cell_width;
+    let cursor_right = cursor_left + metrics.cell_width * f32::from(cursor_cols);
     let row_top = origin.y;
     if cursor_left > terminal_bounds.left() {
         let mask = Bounds::from_corners(
@@ -2250,8 +2923,15 @@ fn is_bidi_sensitive(scalar: u32) -> bool {
     )
 }
 
+/// Whether the cell is painted as geometry rather than as a font glyph. Both
+/// families lie above U+2500, so text is answered by the first comparison.
+fn is_procedural(scalar: u32) -> bool {
+    scalar >= 0x2500
+        && (BlockGlyph::from_scalar(scalar).is_some() || Sprite::from_scalar(scalar).is_some())
+}
+
 fn render_char(cell: GridCell, visible: bool) -> char {
-    if !visible || cell.scalar == 0 || BlockGlyph::from_scalar(cell.scalar).is_some() {
+    if !visible || cell.scalar == 0 || is_procedural(cell.scalar) {
         return ' ';
     }
     char::from_u32(cell.scalar)
@@ -2336,7 +3016,9 @@ fn wrapped_url_at(
                     let row_number = start_row.checked_add(ahead as i64)?;
                     let next = read_row(row_number);
                     let mut next_start = if at_edge { 0 } else { lane_start };
-                    if closer.is_some() {
+                    // Apps that hard-wrap at the edge (Claude Code, Codex)
+                    // indent the continuation under their own gutter.
+                    if closer.is_some() || at_edge {
                         while next_start < next.len() && next[next_start].is_whitespace() {
                             next_start += 1;
                         }
@@ -2347,8 +3029,11 @@ fn wrapped_url_at(
                         }
                         break;
                     }
-                    // Do not jump to another table column across an empty cell.
-                    if !at_edge && next_start != lane_start {
+                    // Do not jump to another table column across an empty cell,
+                    // nor to text indented past where the URL itself began.
+                    if (!at_edge && next_start != lane_start)
+                        || (at_edge && closer.is_none() && next_start > start)
+                    {
                         break;
                     }
                     let next_end = reference_run_end(&next, next_start);
@@ -2529,11 +3214,12 @@ mod block_tests {
             append_row_quads(
                 &[cell],
                 1,
-                point(px(2.0), px(3.0)),
-                metrics,
+                SpriteGrid::new(point(px(2.0), px(3.0)), metrics, 1.0),
                 TermTheme::default(),
+                &[],
                 &mut backgrounds,
                 &mut foregrounds,
+                &mut Vec::new(),
             );
             assert_eq!(
                 foregrounds.len(),
@@ -2550,6 +3236,7 @@ mod block_tests {
                     cell,
                     GridCell::new('A' as u32, cell.fg, cell.bg, cell.style),
                 ],
+                &[],
                 &[],
             );
             assert_eq!(
@@ -2583,11 +3270,12 @@ mod block_tests {
         append_row_quads(
             &row,
             0,
-            point(px(0.0), px(0.0)),
-            metrics,
+            SpriteGrid::new(point(px(0.0), px(0.0)), metrics, 1.0),
             TermTheme::DIRIJOR_DARK,
+            &[],
             &mut backgrounds,
             &mut foregrounds,
+            &mut Vec::new(),
         );
         let widths: Vec<_> = foregrounds
             .iter()
@@ -2595,6 +3283,140 @@ mod block_tests {
             .collect();
         // Colour, glyph, and partial-width blocks each end a run.
         assert_eq!(widths, [4.0, 2.0, 2.0, 1.0, 0.5, 0.5]);
+    }
+
+    fn sprite_row(
+        row: &[GridCell],
+        grid: SpriteGrid,
+        theme: TermTheme,
+    ) -> (Vec<PaintQuad>, Vec<PaintQuad>, Vec<AntialiasedShape>) {
+        let (mut backgrounds, mut foregrounds, mut shapes) = (Vec::new(), Vec::new(), Vec::new());
+        append_row_quads(
+            row,
+            2,
+            grid,
+            theme,
+            &[],
+            &mut backgrounds,
+            &mut foregrounds,
+            &mut shapes,
+        );
+        (backgrounds, foregrounds, shapes)
+    }
+
+    fn colored(text: &str, fg: TermColor, bg: TermColor) -> impl Iterator<Item = GridCell> + '_ {
+        text.chars()
+            .map(move |ch| GridCell::new(ch as u32, fg, bg, TermStyle::empty()))
+    }
+
+    #[test]
+    fn a_rule_of_one_stroke_in_one_colour_is_one_quad() {
+        let metrics =
+            CellMetrics::from_measurements(px(7.8265624), px(12.0), px(3.0), px(0.0), FontId(0));
+        let default_bg = TermColor::DefaultInverted;
+        for scale in [1.0, 2.0] {
+            let grid = SpriteGrid::new(point(px(13.1), px(3.5)), metrics, scale);
+            let row: Vec<_> = colored(&"─".repeat(120), TermColor::Ansi(4), default_bg)
+                .chain(colored("──", TermColor::Ansi(2), default_bg))
+                .chain(colored("━━━", TermColor::Ansi(2), default_bg))
+                .chain(colored("══", TermColor::Ansi(2), default_bg))
+                .chain(colored("─┬─", TermColor::Ansi(2), default_bg))
+                .collect();
+            let (_, foregrounds, shapes) = sprite_row(&row, grid, TermTheme::DIRIJOR_DARK);
+            assert!(shapes.is_empty());
+            // Colour and glyph each end a run; ═ is two strokes, ┬ three.
+            let cells: Vec<_> = foregrounds
+                .iter()
+                .map(|quad| (f32::from(quad.bounds.size.width) / 7.8265624).round())
+                .collect();
+            assert_eq!(cells[..5], [120.0, 2.0, 3.0, 2.0, 2.0]);
+            assert_eq!(foregrounds.len(), 5 + 1 + 2 + 1);
+            // The run ends on the device pixels its first and last cells own.
+            let rule = foregrounds[0].bounds;
+            assert_eq!(f32::from(rule.left()) * scale, grid.x(0));
+            assert_eq!((f32::from(rule.right()) * scale).round(), grid.x(120));
+        }
+    }
+
+    #[test]
+    fn a_separator_starts_on_the_pixel_where_the_background_it_continues_ends() {
+        for (width, origin_x) in [(7.25, 0.0), (7.8265624, 13.1), (8.5, 2.25)] {
+            let metrics =
+                CellMetrics::from_measurements(px(width), px(12.0), px(3.0), px(0.0), FontId(0));
+            for scale in [1.0_f32, 2.0] {
+                let grid = SpriteGrid::new(point(px(origin_x), px(3.5)), metrics, scale);
+                let row: Vec<_> = colored(" main ", TermColor::Ansi(0), TermColor::Ansi(4))
+                    .chain(colored(
+                        "\u{e0b0}",
+                        TermColor::Ansi(4),
+                        TermColor::DefaultInverted,
+                    ))
+                    .collect();
+                let (backgrounds, foregrounds, shapes) =
+                    sprite_row(&row, grid, TermTheme::DIRIJOR_DARK);
+                assert!(foregrounds.is_empty());
+                let [AntialiasedShape::Polygon { path, color }] = &shapes[..] else {
+                    panic!("a solid separator is one polygon");
+                };
+                assert_eq!(*color, backgrounds[0].background);
+                // GPUI rounds the quad's edge half toward zero.
+                let edge = f32::from(backgrounds[0].bounds.right()) * scale;
+                let snapped = (edge.abs() - 0.5).ceil();
+                assert_eq!(f32::from(path.bounds.left()) * scale, snapped);
+                assert_eq!(f32::from(path.bounds.right()) * scale, grid.x(7));
+            }
+        }
+    }
+
+    #[test]
+    fn sprites_preserve_terminal_colors_styles_and_their_text_column() {
+        let metrics =
+            CellMetrics::from_measurements(px(8.0), px(12.0), px(4.0), px(0.0), FontId(0));
+        let grid = SpriteGrid::new(Point::default(), metrics, 2.0);
+        for theme in [TermTheme::DIRIJOR_DARK, TermTheme::DIRIJOR_LIGHT] {
+            for style in [
+                TermStyle::empty(),
+                TermStyle::DIM,
+                TermStyle::INVERSE,
+                TermStyle::BOLD | TermStyle::ITALIC,
+                TermStyle::INVISIBLE,
+            ] {
+                for ch in ['┼', '╭', '⣿', '╳', '\u{e0b1}'] {
+                    let cell =
+                        GridCell::new(ch as u32, TermColor::Ansi(2), TermColor::Ansi(0), style);
+                    let (_, foregrounds, shapes) = sprite_row(&[cell], grid, theme);
+                    if style.contains(TermStyle::INVISIBLE) {
+                        assert!(foregrounds.is_empty() && shapes.is_empty());
+                        continue;
+                    }
+                    assert!(!foregrounds.is_empty() || !shapes.is_empty());
+                    let foreground = theme.resolve_cell(cell).foreground;
+                    for quad in &foregrounds {
+                        assert_eq!(quad.background, fill(quad.bounds, foreground).background);
+                    }
+                    for shape in &shapes {
+                        match shape {
+                            AntialiasedShape::Arc { quad, .. } => {
+                                assert_eq!(quad.border_color, gpui::Hsla::from(foreground));
+                            }
+                            AntialiasedShape::Polygon { color, .. } => {
+                                assert_eq!(*color, foreground.into());
+                            }
+                        }
+                    }
+                    let terminal = TerminalElement::with_buffer(GridBuffer::default());
+                    let (text, _) = terminal.row_text_and_runs(
+                        &[
+                            cell,
+                            GridCell::new('A' as u32, cell.fg, cell.bg, cell.style),
+                        ],
+                        &[],
+                        &[],
+                    );
+                    assert_eq!(text, " A", "{ch} must not also paint a font glyph");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2620,11 +3442,12 @@ mod block_tests {
                 append_row_quads(
                     &[cell],
                     0,
-                    Point::default(),
-                    metrics,
+                    SpriteGrid::new(Point::default(), metrics, 1.0),
                     theme,
+                    &[],
                     &mut backgrounds,
                     &mut foregrounds,
+                    &mut Vec::new(),
                 );
                 assert_eq!(backgrounds.len(), 1);
                 if style.contains(TermStyle::INVISIBLE) {
@@ -2713,6 +3536,42 @@ mod link_tests {
             );
         }
         assert_eq!(terminal.link_at(16, 1), None);
+    }
+
+    #[test]
+    fn wrapped_url_with_indented_continuation_rows_opens_full_url() {
+        // Claude Code hard-wraps at the terminal edge and indents every
+        // continuation row under its `⏺ ` gutter.
+        let terminal = terminal_with_rows(&[
+            "⏺ Explore https://exampl",
+            "  e.com/search?q=laptop&",
+            "  color=silver to filter",
+            "                        ",
+        ]);
+        for (col, row) in [(12, 0), (2, 1), (23, 1), (4, 2)] {
+            assert_eq!(
+                terminal.link_at(col, row).as_deref(),
+                Some("https://example.com/search?q=laptop&color=silver"),
+                "click at row {row}, col {col}"
+            );
+        }
+        assert_eq!(terminal.link_at(15, 2), None);
+
+        let prose = terminal_with_rows(&[
+            "  See https://example.com/a ",
+            "  to filter by budget.      ",
+        ]);
+        assert_eq!(
+            prose.link_at(8, 0).as_deref(),
+            Some("https://example.com/a")
+        );
+        assert_eq!(prose.link_at(2, 1), None);
+
+        let outdented = terminal_with_rows(&["  https://example.com/", "        more text"]);
+        assert_eq!(
+            outdented.link_at(4, 0).as_deref(),
+            Some("https://example.com/")
+        );
     }
 
     #[test]
@@ -2827,6 +3686,83 @@ mod link_tests {
             !source.contains(&periodic_timer),
             "the terminal cursor must not own a periodic frame timer"
         );
+        // The blink's wake is the one timer in the renderer. It is one-shot,
+        // armed only by a painted frame, and `CursorSchedule::Rest` ends the
+        // chain (`an_idle_cursor_paints_a_bounded_number_of_frames_then_none`).
+        let motion = include_str!("cursor_motion.rs");
+        assert_eq!(motion.matches(&periodic_timer).count(), 1);
+        assert_eq!(motion.matches(&foreground_task).count(), 1);
+    }
+
+    fn cursor_update(col: u16, row: u16, rows: &[u16], full: bool) -> super::GridUpdate {
+        super::GridUpdate {
+            cols: 8,
+            rows: 4,
+            cursor_col: col,
+            cursor_row: row,
+            cursor_visible: true,
+            is_full_snapshot: full,
+            changed_rows: rows
+                .iter()
+                .map(|y| diri_proto::grid::ChangedRow::new(*y, vec![super::GridCell::BLANK; 8]))
+                .collect(),
+        }
+    }
+
+    fn cursor_frame(terminal: &super::TerminalElement, col: u16, row: u16) -> super::CursorFrame {
+        mutex_lock(&terminal.shared.cursor).sample(super::CursorCell { col, row }, false)
+    }
+
+    #[test]
+    fn typed_cursor_moves_glide_and_redraws_snap() {
+        let terminal = super::TerminalElement::with_buffer(crate::buffer::GridBuffer::new(8, 4));
+        let start = std::time::Instant::now();
+        let at = |ms: u64| Some(start + std::time::Duration::from_millis(ms));
+        terminal.set_cursor_clock(at(0));
+        terminal.apply_damage(cursor_update(2, 1, &[0, 1, 2, 3], true));
+        assert!(cursor_frame(&terminal, 2, 1).is_static());
+
+        // A key, then its echo moves the cursor one cell on one damaged row.
+        terminal.set_cursor_clock(at(1_000));
+        assert!(!terminal.note_user_input());
+        terminal.set_cursor_clock(at(1_006));
+        terminal.apply_damage(cursor_update(3, 1, &[1], false));
+        let frame = cursor_frame(&terminal, 3, 1);
+        assert_eq!((frame.offset_cols, frame.offset_rows), (-1.0, 0.0));
+        assert_eq!(frame.schedule, super::CursorSchedule::NextFrame);
+
+        // The same move without a keystroke is the program's: it snaps.
+        terminal.set_cursor_clock(at(3_000));
+        terminal.apply_damage(cursor_update(4, 1, &[1], false));
+        assert!(!cursor_frame(&terminal, 4, 1).is_gliding());
+
+        // A keystroke whose echo repaints the screen snaps too.
+        terminal.set_cursor_clock(at(4_000));
+        let _ = terminal.note_user_input();
+        terminal.apply_damage(cursor_update(5, 1, &[0, 1, 2], false));
+        assert!(!cursor_frame(&terminal, 5, 1).is_gliding());
+        let _ = terminal.note_user_input();
+        terminal.set_cursor_clock(at(4_100));
+        terminal.apply_damage(cursor_update(6, 1, &[1], true));
+        assert!(!cursor_frame(&terminal, 6, 1).is_gliding());
+    }
+
+    #[test]
+    fn a_keystroke_asks_for_a_repaint_only_while_the_cursor_is_dimmed() {
+        let terminal = super::TerminalElement::with_buffer(crate::buffer::GridBuffer::new(8, 4));
+        let start = std::time::Instant::now();
+        terminal.set_cursor_clock(Some(start));
+        terminal.apply_damage(cursor_update(2, 1, &[1], true));
+        assert_eq!(cursor_frame(&terminal, 2, 1).opacity, 1.0);
+        assert!(!terminal.note_user_input());
+
+        let low = crate::cursor_motion::BLINK_IDLE_DELAY + crate::cursor_motion::BLINK_FADE;
+        terminal.set_cursor_clock(Some(start + low));
+        assert!(cursor_frame(&terminal, 2, 1).opacity < 1.0);
+        assert!(terminal.note_user_input());
+        // Once asked, the repaint is on its way.
+        assert!(!terminal.note_user_input());
+        assert_eq!(cursor_frame(&terminal, 2, 1).opacity, 1.0);
     }
 
     #[test]
@@ -2857,6 +3793,7 @@ mod link_tests {
             view: terminal_with_rows(&["test"]).damage_observer(),
             cursor_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(16.0))),
             cell_width: px(8.0),
+            cursor: Arc::default(),
         };
 
         handler.mark_text("ni");
@@ -2877,6 +3814,7 @@ mod link_tests {
             view: terminal_with_rows(&["test"]).damage_observer(),
             cursor_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(16.0))),
             cell_width: px(8.0),
+            cursor: Arc::default(),
         };
 
         // AppKit may commit ETX after handling Command-C. ETX is Ctrl-C to a
@@ -2897,6 +3835,7 @@ mod link_tests {
             view: terminal.damage_observer(),
             cursor_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(16.0))),
             cell_width: px(8.0),
+            cursor: Arc::default(),
         };
         handler.mark_text("old");
         terminal.set_text_input_enabled(false);
@@ -2920,6 +3859,7 @@ mod link_tests {
             view: terminal.damage_observer(),
             cursor_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(16.0))),
             cell_width: px(8.0),
+            cursor: Arc::clone(&terminal.shared.cursor),
         };
         terminal.adopt_history_geometry(100, 102, 1, 2);
         let read_history = || {
@@ -2956,10 +3896,10 @@ mod link_tests {
     }
 
     #[test]
-    fn static_cursor_follows_focus_and_protocol_visibility() {
+    fn the_cursor_follows_the_host_and_protocol_visibility() {
         assert!(super::cursor_should_render(true, true));
-        assert!(!super::cursor_should_render(false, true));
         assert!(!super::cursor_should_render(true, false));
+        assert!(!super::cursor_should_render(false, true));
         assert!(!super::cursor_should_render(false, false));
     }
 
@@ -3043,15 +3983,15 @@ mod history_cache_tests {
         let cells = row("e");
         let mut cache = HistoryLineCache::default();
         cache.validate(key(), 0);
-        let original = digest_row(&cells, &[(0, "\u{301}".into())]);
+        let original = digest_row(&cells, &[(0, "\u{301}".into())], &[]);
         cache.insert(3, original, ShapedLine::default());
         assert!(cache.get(3, original).is_some());
         assert!(
             cache
-                .get(3, digest_row(&cells, &[(0, "\u{308}".into())]))
+                .get(3, digest_row(&cells, &[(0, "\u{308}".into())], &[]))
                 .is_none()
         );
-        assert!(cache.get(3, digest_row(&cells, &[])).is_none());
+        assert!(cache.get(3, digest_row(&cells, &[], &[])).is_none());
     }
 
     fn key() -> HistoryShapeKey {
@@ -3069,7 +4009,7 @@ mod history_cache_tests {
             .map(|ch| {
                 GridCell::new(
                     u32::from(ch),
-                    TermColor::Default,
+                    diri_proto::grid::TermColor::Default,
                     TermColor::DefaultInverted,
                     TermStyle::empty(),
                 )
@@ -3606,6 +4546,7 @@ mod live_scroll_cache_tests {
                 Some(CachedRow {
                     cells: cells(ch),
                     graphemes: Vec::new(),
+                    tints: Vec::new(),
                     background_quads: vec![fill(
                         Bounds::new(point(px(3.), px(row as f32 * 20.)), size(px(80.), px(20.))),
                         gpui::black(),
@@ -3617,6 +4558,7 @@ mod live_scroll_cache_tests {
                         ),
                         gpui::white(),
                     )],
+                    sprite_shapes: Vec::new(),
                     line: ShapedLine::default(),
                 })
             })
@@ -3650,7 +4592,10 @@ mod live_scroll_cache_tests {
                 let prepared = cache[row].as_mut().unwrap();
                 assert_eq!(prepared.cells, damage[row].cells);
                 let previous = (row + offset) % 4;
-                prepared.move_vertically(px((row as f32 - previous as f32) * 20.));
+                let metrics =
+                    CellMetrics::from_measurements(px(10.), px(16.), px(4.), px(0.), FontId(0));
+                let grid = SpriteGrid::new(point(px(3.), px(0.)), metrics, 2.0);
+                assert!(prepared.move_vertically(px((row as f32 - previous as f32) * 20.), grid));
                 assert_eq!(
                     prepared.background_quads[0].bounds.origin,
                     point(px(3.), px(row as f32 * 20.))
@@ -3696,14 +4641,80 @@ mod grapheme_paint_tests {
         grid.apply(parser.full_snapshot());
         let terminal = TerminalElement::with_buffer(grid.clone());
         let (text, runs) =
-            terminal.row_text_and_runs(grid.row(0).unwrap(), &grid.annotations[0].graphemes);
+            terminal.row_text_and_runs(grid.row(0).unwrap(), &grid.annotations[0].graphemes, &[]);
         assert!(text.starts_with("e\u{301} A🙂 B"));
         assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
         grid.cells[0].style = TermStyle::INVISIBLE;
         let (hidden, _) =
-            terminal.row_text_and_runs(grid.row(0).unwrap(), &grid.annotations[0].graphemes);
+            terminal.row_text_and_runs(grid.row(0).unwrap(), &grid.annotations[0].graphemes, &[]);
         assert!(!hidden.contains('\u{301}'));
         assert!(hidden.starts_with(' '));
+    }
+
+    #[test]
+    fn glyphs_under_a_tint_are_colored_against_it_and_the_rest_are_not() {
+        // Light text on the bright current-match highlight of a dark theme is
+        // the unreadable case: 2.6:1 on Dirijor Dark, 1.0:1 on Solarized Dark.
+        let theme = TermTheme::SOLARIZED_DARK;
+        let terminal = TerminalElement::with_buffer(GridBuffer::default()).theme(theme);
+        let row: Vec<_> = "find me here"
+            .chars()
+            .map(|ch| {
+                GridCell::new(
+                    u32::from(ch),
+                    diri_proto::grid::TermColor::Default,
+                    diri_proto::grid::TermColor::Default,
+                    TermStyle::empty(),
+                )
+            })
+            .collect();
+        let tints = [Tint {
+            start: 5,
+            end: 7,
+            color: theme.find_match_current,
+        }];
+
+        let (_, plain) = terminal.row_text_and_runs(&row, &[], &[]);
+        assert_eq!(plain.len(), 1);
+
+        let (_, runs) = terminal.row_text_and_runs(&row, &[], &tints);
+        assert_eq!(
+            runs.iter().map(|run| run.len).collect::<Vec<_>>(),
+            [5, 2, 5],
+            "only the glyphs under the tint change run"
+        );
+        assert_eq!(runs[0].color, plain[0].color);
+        assert_eq!(runs[2].color, plain[0].color);
+        assert_ne!(runs[1].color, plain[0].color);
+
+        assert_ne!(
+            digest_row(&row, &[], &tints),
+            digest_row(&row, &[], &[]),
+            "a history line shaped without the tint must not be reused under it"
+        );
+    }
+
+    #[test]
+    fn overlapping_tints_combine_and_columns_outside_have_none() {
+        let selection = Tint {
+            start: 2,
+            end: 6,
+            color: TermTheme::DIRIJOR_DARK.selection,
+        };
+        let find = Tint {
+            start: 4,
+            end: 8,
+            color: TermTheme::DIRIJOR_DARK.find_match,
+        };
+        let tints = [selection, find];
+        assert_eq!(tint_at(&tints, 1), None);
+        assert_eq!(tint_at(&tints, 2), Some(selection.color));
+        assert_eq!(tint_at(&tints, 7), Some(find.color));
+        assert_eq!(
+            tint_at(&tints, 5),
+            Some(crate::contrast::over(find.color, selection.color))
+        );
+        assert_eq!(tint_at(&tints, 8), None);
     }
 
     #[test]
@@ -3718,7 +4729,7 @@ mod grapheme_paint_tests {
                 .collect();
             row.resize(12, GridCell::BLANK);
             TerminalElement::with_buffer(GridBuffer::default())
-                .row_text_and_runs(&row, graphemes)
+                .row_text_and_runs(&row, graphemes, &[])
                 .0
         };
         assert_eq!(shaped("ab  c", &[]), "ab  c ");
@@ -3756,7 +4767,7 @@ mod grapheme_paint_tests {
         let changed = &damage.changed_rows[0];
         assert!(
             terminal
-                .row_text_and_runs(&changed.cells, &changed.graphemes)
+                .row_text_and_runs(&changed.cells, &changed.graphemes, &[])
                 .0
                 .starts_with("e\u{301}")
         );

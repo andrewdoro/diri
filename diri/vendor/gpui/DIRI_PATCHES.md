@@ -1,0 +1,124 @@
+# Diri GPUI patches
+
+This directory is `crates/gpui` from `zed-industries/zed` revision
+`dc2a339d5d043da448a3f7ddc7c0a85c63864aad`, routed in through
+`[patch."https://github.com/zed-industries/zed.git"]` in `diri/Cargo.toml`, the
+same way as `vendor/gpui_macos`. The first commit that added this directory
+is byte-identical to upstream `src/`. Every change since is marked in the code
+with `DIRI PATCH`.
+
+The manifest spells out Zed's workspace-inherited dependencies at the versions
+Zed's workspace pins at that revision. Zed's own crates point at the same git
+revision. Examples, tests, docs and dev-dependencies are omitted: this crate is
+not a Diri workspace member, so Cargo never builds them. Its behavior is tested
+from `diri-app` (`gpui_view_cache_tests`).
+
+## 1. Nested cached views survive a re-rendering cached ancestor
+
+**Upstream behavior.** When a cached view (`Entity::cached` / `AnyView::cached`)
+misses its cache, `ViewElement::prepaint` renders its subtree with
+`window.refreshing = true`. That forces every cached view nested inside it to
+re-render, even when it is not dirty. Upstream added this in #21165 (Nov 2024,
+"Do not reuse render cache for nested items whose parents are re-rendered") to
+fix a panic.
+
+The panic came from stale indices. A cached view stores its prepaint and paint
+ranges as absolute indices into the previous frame (hitboxes, tooltips,
+deferred draws, dispatch nodes, element states, line layouts, scene
+operations, listeners, input handlers, cursor styles, tab stops). Suppose the
+parent is reused wholesale for a frame. Nothing inside it is visited, so the
+nested view keeps indices from two frames ago. If the parent then re-renders
+and the nested view reuses those indices, it reads the wrong ranges.
+
+Notify also marks every ancestor dirty. Together, these rules meant a single
+row's spinner tick re-rendered the entire cached sidebar.
+
+**Patch.** Each cached view stores its ranges relative to the start of its
+nearest cached ancestor's ranges. A view with no cached ancestor is relative
+to the frame, which matches upstream's absolute indices. Every reuse primitive
+copies element for element:
+
+- `extend` for vectors;
+- `DispatchTree::reuse_subtree`, one node per node;
+- `LineLayoutCache::reuse_layouts`, one key pushed per key;
+- `Scene::replay`, where recorded primitives are non-empty and replay with the
+  same bounds and mask;
+- `TabStopMap::replay`, one operation per operation.
+
+So when an ancestor is reused wholesale, every relative offset inside it stays
+valid. `Window` keeps a stack of `CachedViewBase { owner, previous_start, start }`
+for the prepaint pass and another for the paint pass. When a cached view
+misses, it pushes itself with the position its own ranges had last frame. A
+nested view then reuses only if all of these hold:
+
+- it was measured against the same owner;
+- that owner knows its previous start;
+- the cache key matches: bounds, content mask, text style, and now opacity;
+- it is not dirty;
+- `window.refreshing` is false.
+
+When it reuses, it copies `previous_start + relative` and records its new
+position relative to the new start. Paint mirrors prepaint: a view reused in
+prepaint replays its paint range from its ancestor's previous paint start.
+
+**What stays conservative.**
+
+- `window.refresh()` still re-renders everything.
+- A fresh deferred draw is a base with no previous start, so cached views
+  inside it re-render.
+- A cached view whose base owner changed re-renders. For example, a parent that
+  switched between cached and uncached mounting.
+- While an accessibility tree is being built (`window.a11y.is_active()`), the
+  upstream forcing is kept, because a reused subtree contributes no
+  accessibility nodes. This matches upstream for nested views. Upstream already
+  drops a11y nodes for reused top-level cached views.
+
+**Opacity.** `Div` applied `opacity` only during paint, and painted alpha is
+baked into the primitives that reuse replays. `Interactivity::prepaint` now
+also applies the element opacity, which only the paint functions read. The
+view cache key includes the opacity seen at prepaint. Hover, active and
+drag-over styles, the only ones computed differently at paint, already
+refresh the window when they change.
+
+**Test support.** `debug_bounds` are now also recorded in paint order and
+replayed with a reused paint range (`Frame::debug_bounds_history`). Upstream
+lost the `debug_selector` bounds of any reused cached view.
+
+**Tests.** `crates/diri-app/src/gpui_view_cache_tests.rs`:
+
+- A nested view is reused under a re-rendering cached parent.
+- It stays hit-testable, click-dispatching, key-dispatching and painted across
+  interleaved parent re-renders and wholesale parent reuse, while index-shifting
+  elements are added ahead of both levels. With the ranges left absolute (the
+  naive fix), this test fails.
+- It still re-renders on its own notify, on an opacity change above it, and on
+  `window.refresh()`.
+
+## 2. `ViewElement::force_render_if`
+
+A parent that passes a cached child view new inputs while it renders cannot
+notify the child: a notify during a draw only takes effect in the next frame.
+`entity.cached(style).force_render_if(changed)` skips reuse for this frame, as
+if the child were dirty, and keeps its cache state for later frames. The sidebar
+uses it for rows whose props changed (`crates/diri-app/src/sidebar/view/rows.rs`).
+
+## Re-applying on a GPUI bump
+
+1. Replace `src/` (and `build.rs`, `README.md`, `resources/`) with the new
+   upstream crate. Commit that alone.
+2. Re-diff the manifest against upstream `crates/gpui/Cargo.toml` and Zed's
+   workspace `[workspace.dependencies]`. Keep `git`/`rev` for Zed crates in step
+   with `gpui`/`gpui_macos`/`gpui_platform` in `diri/Cargo.toml`. Check that
+   `git diff Cargo.lock` only drops gpui's `source` line.
+3. Re-apply every `DIRI PATCH` hunk: `view.rs` (`ViewElement` prepaint/paint,
+   `force_render_if`,
+   `ViewElementState`, `ViewElementCacheKey`), `window.rs` (index
+   `relative_to`/`rebased_on`, `CachedViewBase*`, base stacks, deferred-draw
+   bases, `insert_debug_bounds`, `debug_bounds_history` replay),
+   `text_system/line_layout.rs` (`LineLayoutIndex` arithmetic) and
+   `elements/div.rs` (prepaint opacity, `insert_debug_bounds`).
+4. If upstream added a new per-frame collection to `PrepaintStateIndex` or
+   `PaintIndex`, extend `relative_to`/`rebased_on`, and confirm its reuse
+   copies element for element.
+5. Run `cargo test -p diri-app --bin diri gpui_view_cache` and the sidebar
+   tests.

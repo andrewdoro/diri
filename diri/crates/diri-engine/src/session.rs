@@ -583,11 +583,25 @@ impl ScrollbackReader {
     pub(crate) fn capture_find(
         self,
     ) -> Result<diri_proto::CaptureFindResult, diri_proto::ControlError> {
-        if self.remote.is_some() {
-            return Err(diri_proto::ControlError::new(
-                "find_capture_unavailable",
-                "Retained history search is not available on this remote transport",
-            ));
+        if let Some(client) = &self.remote {
+            let is_alt_screen = self.shared.screen.lock().expect("screen").is_alt_screen();
+            let cells = capture_remote_find_cells(|first_row, max_rows| {
+                client.read_scrollback_cells(first_row, max_rows).ok()
+            })
+            .map_err(|error| diri_proto::ControlError::new("find_capture_unavailable", error))?;
+            return Ok(diri_proto::CaptureFindResult {
+                owner: self.shared.find_owner.clone(),
+                capture_revision: self
+                    .shared
+                    .find_capture_revision
+                    .fetch_add(1, Ordering::Relaxed),
+                session_id: diri_proto::SessionId(self.shared.id.clone()),
+                is_alt_screen,
+                visible_rows: usize::try_from(cells.total_rows - cells.live_start_row)
+                    .unwrap_or_default(),
+                partial: cells.first_row > 0,
+                cells,
+            });
         }
         let screen = self.shared.screen.lock().expect("screen");
         let (cols, visible_rows) = screen.size();
@@ -630,6 +644,278 @@ impl ScrollbackReader {
             .lock()
             .expect("screen")
             .scrollback_cells(first_row, max_rows)
+    }
+}
+
+/// Rows one remote scrollback request may carry (`ScrollbackRequest::validate`).
+const REMOTE_FIND_CHUNK_ROWS: i64 = 1024;
+/// Chunk reads allowed per capture: enough for the largest capture plus a few
+/// catch-up reads, and a bound on how long a streaming terminal is chased.
+const REMOTE_FIND_MAX_READS: usize = 16;
+
+/// Builds a find capture for a remote session from the history rows its Holder
+/// already serves on demand, so Find searches what scrolling can reach instead
+/// of only the mirrored screen. No Helper protocol is involved beyond the
+/// existing scrollback request.
+///
+/// The client requires one coherent tail: rows `first..total` with the visible
+/// grid last. Chunks are read upward; absolute rows never renumber, so output
+/// that arrives in between only adds rows at the end, which a further read
+/// picks up. Rows a full-screen program repaints between two reads can be a
+/// frame apart, as they can in any capture of a live terminal; the client
+/// already checks live-grid matches against the grid it is painting.
+fn capture_remote_find_cells(
+    mut read: impl FnMut(i64, i64) -> Option<diri_proto::ReadScrollbackCellsResult>,
+) -> Result<diri_proto::ReadScrollbackCellsResult, &'static str> {
+    const UNAVAILABLE: &str = "History search is unavailable on this host right now";
+    let probe = read(0, 1).ok_or(UNAVAILABLE)?;
+    let cols = usize::try_from(probe.cols)
+        .ok()
+        .filter(|cols| *cols > 0)
+        .ok_or("Invalid capture width")?;
+    let budget = (diri_proto::FIND_CAPTURE_MAX_CELLS / cols).min(diri_proto::FIND_CAPTURE_MAX_ROWS);
+    let visible = usize::try_from(probe.total_rows - probe.live_start_row).unwrap_or(usize::MAX);
+    if budget < visible {
+        return Err("This terminal is too large for a retained search view");
+    }
+
+    let first_wanted = (probe.total_rows - budget as i64).max(0);
+    let mut rows: std::collections::VecDeque<Vec<diri_proto::grid::GridCell>> =
+        std::collections::VecDeque::new();
+    let mut metadata = std::collections::VecDeque::new();
+    let mut annotated = true;
+    let mut next = first_wanted;
+    let mut last = probe;
+    let mut reads = 0;
+    while next < last.total_rows {
+        reads += 1;
+        if reads > REMOTE_FIND_MAX_READS {
+            return Err("The terminal is printing too fast to search. Try again in a moment");
+        }
+        let chunk =
+            read(next, (last.total_rows - next).min(REMOTE_FIND_CHUNK_ROWS)).ok_or(UNAVAILABLE)?;
+        let count = usize::try_from(chunk.row_count).unwrap_or_default();
+        if chunk.first_row != next || count == 0 || chunk.cols != last.cols {
+            // Trimmed history, a reset, or a resize: the rows read so far no
+            // longer belong to one terminal.
+            return Err("The terminal changed while it was being searched. Try again");
+        }
+        let decoded = diri_proto::grid::GridRowCodec::decode_rows(&chunk.payload, count)
+            .map_err(|_| "Invalid capture cells")?;
+        if decoded.iter().any(|row| row.len() != cols) {
+            return Err("Invalid capture row width");
+        }
+        // Older Helpers send no row metadata; the client accepts none at all
+        // but not a partial set.
+        annotated &= chunk.metadata.len() == count;
+        if annotated {
+            metadata.extend(chunk.metadata.iter().cloned());
+        }
+        rows.extend(decoded);
+        next += count as i64;
+        last = chunk;
+    }
+
+    // Catching up may have read past the budget; the newest rows are the ones
+    // that include the screen.
+    while rows.len() > budget {
+        rows.pop_front();
+        metadata.pop_front();
+    }
+    let rows = Vec::from(rows);
+    Ok(diri_proto::ReadScrollbackCellsResult {
+        metadata: if annotated {
+            Vec::from(metadata)
+        } else {
+            Vec::new()
+        },
+        payload: diri_proto::grid::GridRowCodec::encode_rows(&rows)
+            .map_err(|_| "Invalid capture cells")?,
+        first_row: last.total_rows - rows.len() as i64,
+        row_count: rows.len() as i64,
+        total_rows: last.total_rows,
+        live_start_row: last.live_start_row,
+        cols: last.cols,
+        content_seq: last.content_seq,
+    })
+}
+
+/// OSC 52 carries standard base64; padding is optional in practice.
+fn decode_clipboard(data: &str) -> Option<String> {
+    use base64::Engine as _;
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    const LENIENT: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
+    let bytes = LENIENT.decode(data).ok()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(test)]
+mod remote_find_capture_tests {
+    use super::capture_remote_find_cells;
+    use diri_proto::ReadScrollbackCellsResult;
+    use diri_proto::grid::{GridCell, GridRowCodec, RowMetadata, TermColor, TermStyle};
+
+    const COLS: usize = 200;
+    const VISIBLE: i64 = 40;
+
+    /// A Holder whose terminal has `total` rows; row `n` starts with the
+    /// character for `n % 10`, so a capture can be checked row by row.
+    struct Holder {
+        total: i64,
+        cols: usize,
+        annotated: bool,
+        reads: Vec<(i64, i64)>,
+    }
+
+    impl Holder {
+        fn new(total: i64) -> Self {
+            Self {
+                total,
+                cols: COLS,
+                annotated: true,
+                reads: Vec::new(),
+            }
+        }
+
+        fn read(&mut self, first: i64, max: i64) -> Option<ReadScrollbackCellsResult> {
+            assert!((0..=1024).contains(&max), "the Holder rejects larger reads");
+            self.reads.push((first, max));
+            let end = (first + max).min(self.total);
+            let rows: Vec<Vec<GridCell>> = (first..end)
+                .map(|row| {
+                    let mut cells = vec![GridCell::BLANK; self.cols];
+                    cells[0] = GridCell::new(
+                        u32::from(b'0') + (row % 10) as u32,
+                        TermColor::Default,
+                        TermColor::Default,
+                        TermStyle::empty(),
+                    );
+                    cells
+                })
+                .collect();
+            Some(ReadScrollbackCellsResult {
+                metadata: if self.annotated {
+                    vec![RowMetadata::default(); rows.len()]
+                } else {
+                    Vec::new()
+                },
+                payload: GridRowCodec::encode_rows(&rows).unwrap(),
+                first_row: first,
+                row_count: rows.len() as i64,
+                total_rows: self.total,
+                live_start_row: self.total - VISIBLE,
+                cols: self.cols as i64,
+                content_seq: self.total as u64,
+            })
+        }
+    }
+
+    fn first_scalars(cells: &ReadScrollbackCellsResult) -> Vec<u32> {
+        GridRowCodec::decode_rows(&cells.payload, cells.row_count as usize)
+            .unwrap()
+            .iter()
+            .map(|row| row[0].scalar)
+            .collect()
+    }
+
+    #[test]
+    fn a_remote_capture_is_the_newest_rows_the_budget_allows_ending_at_the_screen() {
+        let mut holder = Holder::new(5_000);
+        let cells = capture_remote_find_cells(|first, max| holder.read(first, max)).unwrap();
+        // 160_000 cells at 200 columns.
+        assert_eq!(cells.row_count, 800);
+        assert_eq!(cells.first_row, 4_200);
+        assert_eq!(cells.first_row + cells.row_count, cells.total_rows);
+        assert_eq!(cells.total_rows - cells.live_start_row, VISIBLE);
+        assert_eq!(cells.metadata.len(), 800);
+        let scalars = first_scalars(&cells);
+        assert_eq!(scalars[0], u32::from(b'0'), "row 4200");
+        assert_eq!(scalars[799], u32::from(b'9'), "row 4999");
+        assert_eq!(holder.reads, [(0, 1), (4_200, 800)]);
+    }
+
+    #[test]
+    fn a_narrow_terminal_is_read_in_chunks_the_holder_accepts() {
+        let mut holder = Holder::new(9_000);
+        holder.cols = 80;
+        let cells = capture_remote_find_cells(|first, max| holder.read(first, max)).unwrap();
+        assert_eq!(cells.row_count, 2_000);
+        assert_eq!(holder.reads, [(0, 1), (7_000, 1_024), (8_024, 976)]);
+    }
+
+    #[test]
+    fn a_short_history_is_captured_whole() {
+        let mut holder = Holder::new(120);
+        let cells = capture_remote_find_cells(|first, max| holder.read(first, max)).unwrap();
+        assert_eq!((cells.first_row, cells.row_count), (0, 120));
+    }
+
+    #[test]
+    fn output_that_arrives_between_reads_is_caught_up_and_the_oldest_rows_give_way() {
+        let mut holder = Holder::new(5_000);
+        let mut calls = 0;
+        let cells = capture_remote_find_cells(|first, max| {
+            calls += 1;
+            if calls == 2 {
+                holder.total += 30;
+            }
+            holder.read(first, max)
+        })
+        .unwrap();
+        assert_eq!(cells.total_rows, 5_030);
+        assert_eq!(cells.row_count, 800, "still within the budget");
+        assert_eq!(cells.first_row, 4_230);
+        assert_eq!(cells.first_row + cells.row_count, cells.total_rows);
+        assert_eq!(first_scalars(&cells)[0], u32::from(b'0'), "row 4230");
+    }
+
+    #[test]
+    fn a_terminal_that_outruns_the_capture_is_reported_instead_of_chased_forever() {
+        let mut holder = Holder::new(5_000);
+        let error = capture_remote_find_cells(|first, max| {
+            holder.total += 2_000;
+            holder.read(first, max)
+        })
+        .unwrap_err();
+        assert!(error.contains("too fast"), "{error}");
+        assert!(holder.reads.len() <= 17);
+    }
+
+    #[test]
+    fn a_resize_in_the_middle_of_a_capture_fails_it() {
+        let mut holder = Holder::new(9_000);
+        holder.cols = 80;
+        let mut calls = 0;
+        let error = capture_remote_find_cells(|first, max| {
+            calls += 1;
+            if calls == 3 {
+                holder.cols = 100;
+            }
+            holder.read(first, max)
+        })
+        .unwrap_err();
+        assert!(error.contains("changed"), "{error}");
+    }
+
+    #[test]
+    fn an_older_helper_without_row_metadata_still_captures() {
+        let mut holder = Holder::new(500);
+        holder.annotated = false;
+        let cells = capture_remote_find_cells(|first, max| holder.read(first, max)).unwrap();
+        assert_eq!(cells.row_count, 500);
+        assert!(
+            cells.metadata.is_empty(),
+            "none at all, never a partial set"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_holder_is_an_error_not_an_empty_capture() {
+        assert!(capture_remote_find_cells(|_, _| None).is_err());
     }
 }
 
@@ -1506,6 +1792,17 @@ impl Session {
             .lock()
             .expect("screen")
             .take_notifications()
+    }
+
+    /// The newest OSC 52 clipboard write since the last call, decoded.
+    pub fn take_clipboard(&self) -> Option<String> {
+        let data = self
+            .shared
+            .screen
+            .lock()
+            .expect("screen")
+            .take_clipboard()?;
+        decode_clipboard(&data)
     }
 
     pub fn state_version(&self) -> u64 {
@@ -2409,6 +2706,9 @@ impl Drop for Session {
     /// [`Session::adopt`].
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
+        // An attach pump idles on this wake source; a replacement Session has
+        // a new one, so tell the pump to go and look for it.
+        self.shared.grid_wake.notify();
         // A drop while the exec is still deferred wakes the launcher so the
         // join below is prompt; the child was never spawned.
         if let Some(deferred) = &self.deferred {
@@ -2743,9 +3043,14 @@ fn held_foreground_sample_due(
         || since_sample.is_none_or(|since| since >= LIVENESS_INTERVAL)
 }
 
-/// Rescans the visible screen for artifact URLs every ~2s, only when the
-/// content actually changed and only when it plausibly contains a URL —
-/// most screens never pay more than a substring check.
+/// Rows of scrollback each artifact scan covers besides the screen. Output
+/// that scrolls off between two scans is still read, so a PR link printed
+/// just before a long diff is not lost; the bound keeps a scan cheap.
+const ARTIFACT_SCAN_HISTORY_ROWS: usize = 400;
+
+/// Rescans the screen and recent scrollback for artifact URLs every ~2s,
+/// only when the content actually changed and only when it plausibly
+/// contains a URL — most screens never pay more than a substring check.
 fn scan_artifacts_if_due(
     shared: &Shared,
     last_scan_at: &mut Option<std::time::Instant>,
@@ -2755,21 +3060,21 @@ fn scan_artifacts_if_due(
         return;
     }
     *last_scan_at = Some(std::time::Instant::now());
-    let (seq, text) = {
+    let (seq, source) = {
         let screen = shared.screen.lock().expect("screen");
         let seq = screen.content_seq();
         if seq == *last_scan_seq {
             return;
         }
-        (seq, screen.lines().join("\n"))
+        (seq, screen.link_source(ARTIFACT_SCAN_HISTORY_ROWS))
     };
     *last_scan_seq = seq;
-    if !(text.contains("http") || text.contains("github.com") || text.contains("linear.app")) {
+    if !crate::artifacts::may_contain_links(&source) {
         return;
     }
     let now = diri_proto::DateMillis::from(SystemTime::now());
     let mut artifacts = shared.artifacts.lock().expect("artifacts");
-    *artifacts = crate::artifacts::scan(&text, &artifacts, now);
+    *artifacts = crate::artifacts::scan(&source, &artifacts, now);
 }
 
 /// Follows one remote Holder through any number of short-lived SSH Bridges.
@@ -5061,6 +5366,45 @@ mod notification_tests {
         apply_remote_output(&shared, &engine, "shell", &mut seq, end, bytes, false).unwrap();
         assert!(!shared.screen.lock().unwrap().has_notifications());
         assert_eq!(*shared.status.lock().unwrap(), SessionStatus::Idle);
+    }
+
+    #[test]
+    fn remote_clipboard_writes_are_decoded_once_and_never_replayed() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, _) = ManifestEngine::load_dir(&crate::detect::bundled_manifest_dir()).unwrap();
+        let spec = SessionSpec {
+            id: "clipboard-replay".into(),
+            pty: PtySpec::new(vec!["/bin/sh".into()], "/tmp"),
+            manifest_id: "shell".into(),
+            authority: Authority::ProcessOnly,
+            logs_dir: temp.path().to_path_buf(),
+            holder: None,
+            remote: None,
+            defer_launch: false,
+        };
+        let log = OutputLog::open(temp.path(), &spec.id, 4096, 8192, false).unwrap();
+        let shared = new_shared(&spec, log, &engine, true);
+        let mut seq = 0;
+        // Codex over SSH: `Copied 45 chars` arrives as OSC 52 alone.
+        let bytes = b"\x1b]52;c;Y29waWVkIGZyb20gY29kZXg=\x07";
+        let end = apply_remote_output(&shared, &engine, "shell", &mut seq, 0, bytes, true).unwrap();
+        assert_eq!(shared.screen.lock().unwrap().take_clipboard(), None);
+        let before = shared.state_version.load(Ordering::SeqCst);
+        apply_remote_output(&shared, &engine, "shell", &mut seq, end, bytes, false).unwrap();
+        assert!(shared.state_version.load(Ordering::SeqCst) > before);
+        let data = shared.screen.lock().unwrap().take_clipboard().unwrap();
+        assert_eq!(
+            decode_clipboard(&data).as_deref(),
+            Some("copied from codex")
+        );
+        assert_eq!(shared.screen.lock().unwrap().take_clipboard(), None);
+    }
+
+    #[test]
+    fn clipboard_payloads_decode_without_padding_and_reject_garbage() {
+        assert_eq!(decode_clipboard("aGk=").as_deref(), Some("hi"));
+        assert_eq!(decode_clipboard("aGk").as_deref(), Some("hi"));
+        assert_eq!(decode_clipboard("not base64!"), None);
     }
 }
 

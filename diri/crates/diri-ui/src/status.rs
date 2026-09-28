@@ -154,9 +154,9 @@ impl StatusGlyph {
 fn static_status_color(kind: AgentKind, state: StatusState, colors: SemanticColors) -> gpui::Rgba {
     match state {
         StatusState::Working => Ink::working(kind, colors).opacity(0.96),
-        StatusState::NeedsInput { destructive: false } => Ink::ATTENTION,
-        StatusState::NeedsInput { destructive: true } => Ink::DANGER,
-        StatusState::DoneUnseen => Ink::FRESH,
+        StatusState::NeedsInput { destructive: false } => Ink::on_surface(Ink::ATTENTION, colors),
+        StatusState::NeedsInput { destructive: true } => Ink::on_surface(Ink::DANGER, colors),
+        StatusState::DoneUnseen => Ink::on_surface(Ink::FRESH, colors),
         StatusState::IdleSeen => colors.secondary,
         StatusState::None => colors.tertiary,
         StatusState::Hibernated => colors.tertiary,
