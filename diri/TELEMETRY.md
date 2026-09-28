@@ -79,7 +79,78 @@ Each process adds its own catalog section below.
 
 <!-- Engine and Holder catalog: added by the engine instrumentation. -->
 
-<!-- App catalog: added by the app instrumentation. -->
+## App (`crates/diri-app`, `diri-client`, `diri-term`)
+
+Started in `main` via `telemetry::start` (never in tests, headless previews or
+`DIRI_SETTINGS_PREVIEW`): `init_default(App)`, panic hook, 60 s health
+sampler. Controls live in Settings › General › Privacy (upload toggle, name,
+Support ID, *Show in Finder*) and Help › Report a Problem…. There is no About
+surface, so the Support ID is shown only in Settings. The first run of a
+recording build shows one 20 s toast (*diri shares diagnostics*) and writes
+the default `telemetry/config.json`; the file's existence is the "seen" mark.
+
+**Health gauges:** `windows_main`, `windows_floating` (menus, palette,
+popovers: each is a window), `windows_opened` (lifetime), `terminal_panes`,
+`attached_sessions` (mounted session transports), `app_active`.
+
+**Metrics** (`timings` unless noted): `ui.frame` (root render → last paint
+of a main window), `term.paint` (one terminal element's prepaint + paint),
+`input.echo` (input → next screen change, first input of a burst, ≤ 2 s),
+`pane.attach`, `pane.first_grid`, `pane.first_paint`, `client.connect`,
+`rpc.<method>` per control method; counters `rpc.calls`, `rpc.errors`,
+`rpc.disconnected`, `pane.reseed`, `pane.attach_retries`,
+`pane.input_rejected`.
+
+**Stall watchdog:** a background thread posts a ping to the main thread once
+a second (every 5 s while diri is not frontmost); the answer's latency is the
+stall. Idle cost is one wakeup per interval per side and no main-thread timer.
+A ping unanswered for 5 s is recorded and flushed before the stall ends, so a
+hang that ends in Force Quit still leaves a record. Durations are lower bounds
+(± one interval).
+
+| kind | sev | fields | catches |
+|---|---|---|---|
+| `app.launch` | info | `ms` (main → first painted frame), `version`, `windows` | slow launches; the app's version (`process.start.version` is the recorder crate's) |
+| `app.activate` / `app.deactivate` | info | | context for stalls, OSC 52 refusals |
+| `app.sleep` / `app.wake` | info | | gaps that are sleep, not hangs; reconnect storms after wake |
+| `app.quit` | info | `uptime_s, windows_main, windows_opened` | clean exit vs crash (a timeline that just stops) |
+| `window.open` / `window.close` | info (main), debug (floating) | `kind` (`main`\|`floating`), `window`, `lived_s`, `open` | window churn vs RSS growth (closed-window leaks) |
+| `ui.frame` → `ui.slow_frame` | warn | `ms, window, surface` (`workbench`\|`settings`\|`palette`\|`launcher`), `workspace` | "diri is slow/janky"; frame ≥ 50 ms |
+| `ui.stall` | warn (1–3 s), incident (≥ 3 s) | `ms, ongoing, active` | beachballs, hangs; `ongoing=true` is written at 5 s while still stuck |
+| `ui.action` | debug | `action` (GPUI action name), `source` (`shortcut`\|`palette`) | what the user did just before a failure |
+| `ui.toast` | info | `title` (static toast title) | errors the user was shown ("Terminal", "Target unavailable", …) |
+| `privacy.notice_shown` / `privacy.upload_changed` | info | `upload` | consent history |
+| `settings.privacy_save_failed` | error | `error` (io kind) | toggle that doesn't stick |
+| `user.report` | incident | `version, support_id` | Help › Report a Problem…: the moment to look around |
+| `client.connected` | info | `reconnect, attempts, down_ms, connect_ms, hello_ms, first_failure, engine_build, engine_pid, proto` | slow Engine start, how long an outage lasted |
+| `client.disconnected` | warn | `kind, error, connected_s` | Engine crash/restart seen from the app |
+| `client.connect_failing` | error | `attempts, down_ms, kind, error, handshake` | Engine never came up (≈ 45 s of retries) |
+| `client.identity_rejected` | warn (`instance_changed`), error | `reason, engine_kind, engine_build, engine_pid, proto` | stale/foreign daemon on the socket |
+| `rpc.error` | error | `method, kind, code, error, ms` | failing spawn/resume/kill… by method and Engine error code |
+| `rpc.slow` | warn | `method, ms` (≥ 2 s; not `events.wait`/`test.run`) | slow Engine operations |
+| `attach.closed` | warn, error (decode) | `session, reason` (`eof`\|`read_error`\|`write_error`\|`keepalive_timeout`\|`decode_error`\|`bad_grid`\|`bad_modes`\|`commands_closed`), `live_ms` | why a terminal connection dropped; protocol corruption |
+| `pane.attached` | info | `session, reconnect, attempts, connect_ms, since_mount_ms` | attach latency, reattach loops |
+| `pane.attach_failing` | error | `session, attempts, reason, error, since_mount_ms` | a session that cannot be attached (3 failures) |
+| `pane.first_grid` | debug; warn if not a snapshot | `session, ms, snapshot` | first frame missing or a diff before a seed |
+| `pane.first_paint` | debug | `session, ms, grid_ms, parked` | attach → first painted content |
+| `pane.blank` | incident; warn if live with a (blank) grid | `session, agent, state, got_grid, frames, ms` | "session doesn't render": visible, running, nothing painted 10 s after mount |
+| `pane.detached` | warn | `session, live_ms, grids, reseeds` | "Terminal connection interrupted" toast |
+| `pane.drain_interrupted` | warn | `session` | input possibly lost on detach |
+| `pane.input_rejected` | warn (≤ 1 per 5 s per session) | `session, input` (`input`\|`mouse`\|`mouse_motion`\|`scroll`), `reason` (`passive_view`\|`disconnected`\|`overloaded`) | typing that goes nowhere; lost lease |
+| `pane.resize_storm` | warn (≤ 1/min) | `session, flips, cols, rows` | layouts fighting over the PTY size |
+| `pane.modes` | debug | `session, mouse, mouse_bits, alt_screen, bracketed_paste` | mouse tracking left on after an agent exits (`^[[<35;…M` in zsh) |
+| `pane.drop` | info | `session, files, outcome` (`paste`\|`upload`\|`refused`), `partial, remote` | Finder drops that did nothing |
+| `pane.drop_upload_failed` | error | `session` | remote drop copy failed |
+| `clipboard.copy` | info | `source` (`selection`\|`osc52`), `outcome` (`ok`\|`not_on_pasteboard`\|`empty_selection`\|`relayed`\|`stale`\|`app_inactive`\|`unknown_session`\|`no_listener`), `size`, `ms`/`age_ms`, `mouse_captured`, `session` | "copy doesn't work" (incl. agent-captured mouse) |
+| `clipboard.write_failed` | error | `source, size` | an agent's OSC 52 copy that never reached the pasteboard |
+| `clipboard.paste` | info | `outcome` (`sent`\|`review`\|`into_find`\|`image_staged`\|`image_stage_failed`\|`empty_clipboard`\|`no_session`\|`no_terminal`\|`no_text`\|`copy_mode`\|`ignored_in_find`), `kind, size, bracketed, ms` | "paste doesn't work" |
+| `clipboard.image_upload_failed` | error | `session` | image paste into a remote session |
+| `term.slow_paint` | warn | `ms, cols, rows, shape_misses` | one terminal paint ≥ 50 ms |
+| `update.check` / `update.download` / `update.install` | info; error on failure | `outcome, from, to, user_initiated, ms, error_kind, error` | updates that fail or never arrive |
+
+Sizes are buckets (`0`, `<64`, `<1k`, `<16k`, `<256k`, `<1m`, `>=1m`); no
+clipboard, paste, keystroke or terminal content is ever recorded.
+
 
 ## Upload
 
