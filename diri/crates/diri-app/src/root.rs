@@ -5571,6 +5571,54 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Process CPU time (user + system) so far, for render-cost benches.
+    #[cfg(target_os = "macos")]
+    fn bench_cpu_seconds() -> f64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+            0
+        );
+        let usage = unsafe { usage.assume_init() };
+        usage.ru_utime.tv_sec as f64
+            + usage.ru_utime.tv_usec as f64 / 1e6
+            + usage.ru_stime.tv_sec as f64
+            + usage.ru_stime.tv_usec as f64 / 1e6
+    }
+
+    // Production draws solid brand marks as cached CoreGraphics rasters
+    // (an `img` per row), not tessellated paths. AppKit drawing needs the
+    // main thread, which a test does not own, so stand in with a cached
+    // blank raster of the same size to keep the element shape identical.
+    #[cfg(target_os = "macos")]
+    fn bench_stand_in_raster(
+        _: diri_ui::BrandMarkKind,
+        size: f32,
+        _: f32,
+        _: gpui::Rgba,
+    ) -> Option<AnyElement> {
+        use std::sync::{LazyLock, Mutex};
+        static CACHE: LazyLock<Mutex<std::collections::HashMap<u32, Arc<gpui::RenderImage>>>> =
+            LazyLock::new(Default::default);
+        let image = CACHE
+            .lock()
+            .unwrap()
+            .entry(size.to_bits())
+            .or_insert_with(|| {
+                let pixels = (size * 2.0).ceil() as u32;
+                Arc::new(gpui::RenderImage::new(smallvec::smallvec![
+                    image::Frame::new(image::RgbaImage::new(pixels, pixels))
+                ]))
+            })
+            .clone();
+        Some(
+            gpui::img(image)
+                .flex_none()
+                .size(px(size))
+                .into_any_element(),
+        )
+    }
+
     /// Render cost of the sidebar under a busy fleet: 51 sessions over five
     /// projects, four of them working, mounted in the real RootView and
     /// painted by headless Metal. Measures one activity-mark tick and one
@@ -5588,38 +5636,7 @@ mod tests {
             gpui_platform::current_headless_renderer,
         );
         cx.update(|cx| crate::fonts::init(cx));
-        // Production draws solid brand marks as cached CoreGraphics rasters
-        // (an `img` per row), not tessellated paths. AppKit drawing needs the
-        // main thread, which a test does not own, so stand in with a cached
-        // blank raster of the same size to keep the element shape identical.
-        fn stand_in_raster(
-            _: diri_ui::BrandMarkKind,
-            size: f32,
-            _: f32,
-            _: gpui::Rgba,
-        ) -> Option<AnyElement> {
-            use std::sync::{LazyLock, Mutex};
-            static CACHE: LazyLock<Mutex<std::collections::HashMap<u32, Arc<gpui::RenderImage>>>> =
-                LazyLock::new(Default::default);
-            let image = CACHE
-                .lock()
-                .unwrap()
-                .entry(size.to_bits())
-                .or_insert_with(|| {
-                    let pixels = (size * 2.0).ceil() as u32;
-                    Arc::new(gpui::RenderImage::new(smallvec::smallvec![
-                        image::Frame::new(image::RgbaImage::new(pixels, pixels))
-                    ]))
-                })
-                .clone();
-            Some(
-                gpui::img(image)
-                    .flex_none()
-                    .size(px(size))
-                    .into_any_element(),
-            )
-        }
-        diri_ui::set_mark_rasterizer(stand_in_raster);
+        diri_ui::set_mark_rasterizer(bench_stand_in_raster);
         let services = test_services();
         services.store.store.write().unwrap().hydrate(
             SidebarPreviewFixture::bench_fleet(
@@ -5654,18 +5671,6 @@ mod tests {
             })
             .unwrap();
         cx.capture_screenshot(window.into()).unwrap();
-        fn cpu_seconds() -> f64 {
-            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-            assert_eq!(
-                unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
-                0
-            );
-            let usage = unsafe { usage.assume_init() };
-            usage.ru_utime.tv_sec as f64
-                + usage.ru_utime.tv_usec as f64 / 1e6
-                + usage.ru_stime.tv_sec as f64
-                + usage.ru_stime.tv_usec as f64 / 1e6
-        }
         let iterations: usize = std::env::var("DIRI_BENCH_ITERATIONS")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -5698,11 +5703,11 @@ mod tests {
             }
             render_probe::take();
             let mut draws = Vec::with_capacity(iterations);
-            let start_cpu = cpu_seconds();
+            let start_cpu = bench_cpu_seconds();
             for _ in 0..iterations {
                 draws.push(step(&mut cx));
             }
-            let cpu = cpu_seconds() - start_cpu;
+            let cpu = bench_cpu_seconds() - start_cpu;
             let (rows, renders, render_time) = render_probe::take();
             draws.sort();
             let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
@@ -5726,6 +5731,140 @@ mod tests {
                 .unwrap();
         }
         cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Horizontal tabs for the fleet `sidebar_fleet_render_cost` uses: the
+    /// sidebar hidden, sessions as tabs across the top, the selected project
+    /// holding a working session.
+    #[cfg(target_os = "macos")]
+    fn strip_bench_window(
+        cx: &mut gpui::HeadlessAppContext,
+        sessions: usize,
+    ) -> gpui::AnyWindowHandle {
+        let services = test_services();
+        {
+            let mut store = services.store.store.write().unwrap();
+            store.hydrate(SidebarPreviewFixture::bench_fleet(sessions, 4).list);
+            store
+                .update_preferences(|prefs| {
+                    prefs.tab_orientation = crate::store::TabOrientation::Horizontal;
+                    prefs.horizontal_tabs_visible = true;
+                    prefs.sidebar_visible = false;
+                })
+                .unwrap();
+            // Project 0 of five: bench-0 (working), bench-5, bench-10, ...
+            store.select(SessionId::new("bench-0"));
+        }
+        let window = cx
+            .open_window(size(px(1600.0), px(1000.0)), |window, cx| {
+                cx.new(|cx| RootView::new(services, false, PreviewScenario::Empty, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window.into()
+    }
+
+    /// Render cost of the horizontal tab strip under a busy fleet. RootView
+    /// paints the strip inline, so every window frame renders it: a terminal
+    /// output frame, a working mark's tick, a store publication that changes
+    /// nothing, and a bare root frame. Counts tabs built per frame and the
+    /// time spent building the strip (its tabs included).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal render-cost bench; run explicitly on macOS"]
+    fn strip_fleet_render_cost() {
+        use crate::sidebar::render_probe;
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        diri_ui::set_mark_rasterizer(bench_stand_in_raster);
+        let sessions = std::env::var("DIRI_BENCH_SESSIONS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(51);
+        let window = strip_bench_window(&mut cx, sessions);
+        let root = cx
+            .update_window(window, |root, _, _| root.downcast::<RootView>().unwrap())
+            .unwrap();
+        let (sidebar, terminal) = cx.update(|cx| {
+            let root = root.read(cx);
+            (root.sidebar.clone(), root.terminal.clone())
+        });
+        // Let the strip's entry slide finish before measuring.
+        std::thread::sleep(Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.capture_screenshot(window).unwrap();
+        let tabs = cx.update(|cx| sidebar.read(cx).strip_tab_count_for_test());
+        let iterations: usize = std::env::var("DIRI_BENCH_ITERATIONS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300);
+        let cases: [&str; 4] = [
+            "terminal-output-frame",
+            "activity-tick",
+            "noop-store-change",
+            "root-only-frame",
+        ];
+        for name in cases {
+            let step = |cx: &mut HeadlessAppContext| {
+                let start = Instant::now();
+                cx.update(|cx| match name {
+                    "terminal-output-frame" => match &terminal {
+                        Some(terminal) => terminal.update(cx, |_, cx| cx.notify()),
+                        None => root.update(cx, |_, cx| cx.notify()),
+                    },
+                    "activity-tick" => sidebar.update(cx, |sidebar, cx| {
+                        sidebar.advance_activity_frame_for_test(cx)
+                    }),
+                    "noop-store-change" => {
+                        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx))
+                    }
+                    _ => root.update(cx, |_, cx| cx.notify()),
+                });
+                cx.run_until_parked();
+                cx.update_window(window, |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+                start.elapsed()
+            };
+            for _ in 0..20 {
+                step(&mut cx);
+            }
+            render_probe::take_strip();
+            let mut draws = Vec::with_capacity(iterations);
+            let start_cpu = bench_cpu_seconds();
+            for _ in 0..iterations {
+                draws.push(step(&mut cx));
+            }
+            let cpu = bench_cpu_seconds() - start_cpu;
+            let (built, renders, strip_time) = render_probe::take_strip();
+            draws.sort();
+            let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
+            eprintln!(
+                "strip-fleet {name}: tabs={tabs} terminal={} steps={iterations} strip_renders={renders} \
+                 tabs_built_per_step={:.2} strip_render_ms={:.3} \
+                 step_ms_median={:.3} step_ms_p90={:.3} cpu_ms_per_step={:.3}",
+                terminal.is_some(),
+                built as f64 / iterations as f64,
+                ms(strip_time) / iterations as f64,
+                ms(draws[iterations / 2]),
+                ms(draws[iterations * 9 / 10]),
+                cpu * 1000.0 / iterations as f64,
+            );
+        }
+        drop(root);
+        drop(sidebar);
+        drop(terminal);
+        if let Ok(output) = std::env::var("DIRI_STRIP_BENCH_SCREENSHOT") {
+            cx.capture_screenshot(window).unwrap().save(output).unwrap();
+        }
+        cx.update_window(window, |_, window, _| window.remove_window())
             .unwrap();
         cx.run_until_parked();
     }

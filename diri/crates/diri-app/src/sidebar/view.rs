@@ -7821,6 +7821,30 @@ pub(crate) mod render_probe {
         static ROWS: Cell<usize> = const { Cell::new(0) };
         static RENDERS: Cell<usize> = const { Cell::new(0) };
         static RENDER_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+        static TABS: Cell<usize> = const { Cell::new(0) };
+        static STRIP_RENDERS: Cell<usize> = const { Cell::new(0) };
+        static STRIP_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
+    /// One horizontal-strip session tab built.
+    pub(crate) fn tab_built() {
+        TABS.with(|tabs| tabs.set(tabs.get() + 1));
+    }
+
+    pub(crate) fn strip_finished(elapsed: Duration) {
+        STRIP_RENDERS.with(|renders| renders.set(renders.get() + 1));
+        STRIP_TIME.with(|time| time.set(time.get() + elapsed));
+    }
+
+    /// (strip tabs built, strip renders, time inside the strip's render,
+    /// cached tab renders included)
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn take_strip() -> (usize, usize, Duration) {
+        (
+            TABS.with(|tabs| tabs.replace(0)),
+            STRIP_RENDERS.with(|renders| renders.replace(0)),
+            STRIP_TIME.with(|time| time.replace(Duration::ZERO)),
+        )
     }
 
     pub(crate) fn row_built() {

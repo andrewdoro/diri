@@ -462,6 +462,8 @@ impl Sidebar {
         let held_hint = self.strip_held_hint;
         let tab_count = tabs.sessions.len();
         for (index, (session, state)) in tabs.sessions.into_iter().zip(marks).enumerate() {
+            #[cfg(test)]
+            render_probe::tab_built();
             let id = session.id.clone();
             let active = selected.as_ref() == Some(&id);
             // The same rule the sidebar rows follow: ⌘1–⌘8, then ⌘9 = last.
@@ -687,6 +689,12 @@ impl Sidebar {
             .collect()
     }
 
+    /// How many session tabs the strip shows, for render-cost benches.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn strip_tab_count_for_test(&self) -> usize {
+        self.visible_tab_order().len()
+    }
+
     /// Whether the pointer has passed `target`'s midline in the direction
     /// `moved` is travelling along the strip. Nothing crosses while a
     /// previous reorder's slide is still in flight.
@@ -786,6 +794,8 @@ impl Sidebar {
         trailing: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(test)]
+        let started = std::time::Instant::now();
         // While horizontal tabs hide the panel this strip is the sidebar's
         // only painted surface, so the per-frame work `Sidebar::render`
         // does has to happen here: settle workspace navigation (a pending
@@ -803,6 +813,8 @@ impl Sidebar {
         let strip = self.horizontal_strip(available_width, trailing, cx);
         self.schedule_activity_tick(cx);
         self.schedule_title_tick(cx);
+        #[cfg(test)]
+        render_probe::strip_finished(started.elapsed());
         strip
     }
 
