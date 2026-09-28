@@ -111,17 +111,21 @@ mod tests {
         })
     }
 
+    /// One 120 Hz display-link tick: the frame request made by the last
+    /// paint is delivered and repaints the sidebar.
+    fn display_link_tick(cx: &mut VisualTestContext) {
+        advance(Duration::from_nanos(8_333_333));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+
     /// Runs the motion out the way the app does and counts the wakes.
     fn run_out(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) -> usize {
         let mut wakes = 0;
         while sidebar.read_with(cx, |sidebar, _| sidebar.disclosure_tick) {
             wakes += 1;
             assert!(wakes < 100, "a finite motion must stop asking for frames");
-            // One 120 Hz display-link tick: the request made by the last
-            // paint is delivered and repaints the sidebar.
-            advance(Duration::from_nanos(8_333_333));
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            cx.run_until_parked();
+            display_link_tick(cx);
         }
         wakes
     }
@@ -178,9 +182,7 @@ mod tests {
         let mut heights = Vec::new();
         let mut renders = row_renders(&sidebar, ARRIVAL, cx);
         while animating(&sidebar, cx) {
-            advance(Duration::from_millis(16));
-            cx.executor().advance_clock(Duration::from_millis(16));
-            cx.run_until_parked();
+            display_link_tick(cx);
             let now = row_renders(&sidebar, ARRIVAL, cx);
             assert!(now > renders, "the arriving row rendered this frame");
             renders = now;
@@ -206,9 +208,7 @@ mod tests {
         let mut frames = 0;
         let mut renders = row_renders(&sidebar, ARRIVAL, cx);
         while animating(&sidebar, cx) {
-            advance(Duration::from_millis(16));
-            cx.executor().advance_clock(Duration::from_millis(16));
-            cx.run_until_parked();
+            display_link_tick(cx);
             if animating(&sidebar, cx) {
                 let now = row_renders(&sidebar, ARRIVAL, cx);
                 assert!(now > renders, "the leaving row rendered this frame");
