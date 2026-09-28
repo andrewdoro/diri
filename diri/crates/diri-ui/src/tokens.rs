@@ -140,6 +140,10 @@ pub struct SemanticColors {
     sidebar_surface: Rgba,
     floating_surface: Rgba,
     material: Material,
+    /// Scales how much desktop the glass tints let through: 1 is the shipped
+    /// density, 0 paints every glass surface solid, and values above 1 thin
+    /// the tints toward clear. Ignored by opaque windows.
+    transparency: f32,
     /// How far the palette is from dark (0) to light (1). Every real theme
     /// sits at an end. A fade between a dark and a light theme passes through
     /// the middle, and the values that differ by appearance travel with it
@@ -159,6 +163,7 @@ impl SemanticColors {
             sidebar_surface: rgba_f32(0.949, 0.953, 0.941, 0.89),
             floating_surface: rgba_f32(0.949, 0.953, 0.941, 1.0),
             material: Material::Opaque,
+            transparency: 1.0,
             lightness: 1.0,
         }
     }
@@ -174,6 +179,7 @@ impl SemanticColors {
             sidebar_surface: rgba_f32(0.141, 0.161, 0.196, 0.89),
             floating_surface: rgba_f32(0.141, 0.161, 0.196, 1.0),
             material: Material::Opaque,
+            transparency: 1.0,
             lightness: 0.0,
         }
     }
@@ -227,6 +233,7 @@ impl SemanticColors {
             sidebar_surface,
             floating_surface,
             material: Material::Opaque,
+            transparency: 1.0,
             lightness: match appearance {
                 Appearance::Dark => 0.0,
                 Appearance::Light => 1.0,
@@ -275,12 +282,34 @@ impl SemanticColors {
         self.material
     }
 
+    /// Scales the desktop show-through of every glass tint, keeping each
+    /// surface's density relative to the others. See [`Self::transparency`].
+    pub const fn with_transparency(mut self, transparency: f32) -> Self {
+        self.transparency = transparency.clamp(0.0, Self::MAX_TRANSPARENCY);
+        self
+    }
+
+    pub const fn transparency(self) -> f32 {
+        self.transparency
+    }
+
+    /// Past this the sidebar tint is nearly gone and labels sit on raw
+    /// wallpaper.
+    pub const MAX_TRANSPARENCY: f32 = 1.5;
+
     fn glass_alpha(self, dark: f32, light: f32) -> f32 {
-        self.between(
-            rgba_f32(0.0, 0.0, 0.0, dark),
-            rgba_f32(0.0, 0.0, 0.0, light),
-        )
-        .a
+        let shipped = self
+            .between(
+                rgba_f32(0.0, 0.0, 0.0, dark),
+                rgba_f32(0.0, 0.0, 0.0, light),
+            )
+            .a;
+        // Return the authored constant untouched at the default so the
+        // shipped look is bit-for-bit what it was before the slider.
+        if self.transparency == 1.0 {
+            return shipped;
+        }
+        (1.0 - (1.0 - shipped) * self.transparency).clamp(0.0, 1.0)
     }
 
     /// The window's own fill: the base every panel composes over. Under glass
@@ -674,6 +703,28 @@ mod tests {
             assert!(colors.floating_surface().a > colors.sidebar_surface().a);
             assert_eq!(colors.floating_surface().a, 1.0);
             assert_eq!(colors.floating_fill(), colors.floating_surface());
+        }
+    }
+
+    #[test]
+    fn transparency_scales_glass_tints_and_keeps_the_default_exact() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let glass = SemanticColors::new(appearance).with_material(Material::Glass);
+            assert_eq!(glass.with_transparency(1.0), glass);
+
+            let solid = glass.with_transparency(0.0);
+            assert_eq!(solid.window_fill().a, 1.0);
+            assert_eq!(solid.sidebar_surface().a, 1.0);
+            assert_eq!(solid.work_surface().a, 1.0);
+
+            let clear = glass.with_transparency(SemanticColors::MAX_TRANSPARENCY);
+            assert!(clear.window_fill().a < glass.window_fill().a);
+            assert!(clear.sidebar_surface().a < glass.sidebar_surface().a);
+            assert!(clear.work_surface().a > clear.window_fill().a);
+            assert_eq!(clear.floating_fill(), glass.floating_fill());
+
+            let opaque = SemanticColors::new(appearance).with_transparency(0.4);
+            assert_eq!(opaque.window_fill(), opaque.background);
         }
     }
 

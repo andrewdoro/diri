@@ -89,6 +89,20 @@ impl Render for DraggedEditorResize {
     }
 }
 
+/// Drag payload so the transparency knob keeps tracking outside its track.
+#[derive(Clone, Copy)]
+struct DraggedTransparency;
+
+impl Render for DraggedTransparency {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// Slider steps: fine enough to feel continuous, coarse enough that a sweep
+/// saves preferences a few dozen times rather than once per mouse move.
+const TRANSPARENCY_STEP: f32 = 0.05;
+
 /// Hibernate-after choices: minutes and their labels.
 const HIBERNATE_OPTIONS: [(u32, &str); 6] = [
     (0, "Off"),
@@ -593,6 +607,7 @@ impl UtilitySurfaces {
                 .unwrap_or(&self.prefs.terminal_theme),
             self.prefs.window_material.to_ui(),
         )
+        .with_transparency(self.prefs.window_transparency)
     }
 
     fn settings_colors(&self) -> SemanticColors {
@@ -604,6 +619,7 @@ impl UtilitySurfaces {
                 .unwrap_or(&self.prefs.terminal_theme),
             self.prefs.window_material.to_ui(),
         )
+        .with_transparency(self.prefs.window_transparency)
     }
 
     pub(crate) fn open_worktrees(&mut self, cx: &mut Context<Self>) {
@@ -930,6 +946,39 @@ impl UtilitySurfaces {
         } else {
             cx.notify();
         }
+    }
+
+    /// Maps a pointer x inside the slider track to a transparency, keeping
+    /// the knob's centre under the pointer.
+    fn drag_window_transparency(
+        &mut self,
+        track: Bounds<Pixels>,
+        x: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        const KNOB: f32 = 14.0;
+        let travel = f32::from(track.size.width) - KNOB;
+        if travel <= 0.0 {
+            return;
+        }
+        let fraction = ((f32::from(x - track.left()) - KNOB / 2.0) / travel).clamp(0.0, 1.0);
+        self.set_window_transparency(fraction * SemanticColors::MAX_TRANSPARENCY, cx);
+    }
+
+    fn set_window_transparency(&mut self, value: f32, cx: &mut Context<Self>) {
+        let value = (value / TRANSPARENCY_STEP).round() * TRANSPARENCY_STEP;
+        if (value - self.prefs.window_transparency).abs() < TRANSPARENCY_STEP / 2.0 {
+            return;
+        }
+        // Rounding leaves float noise; land on the exact default so the
+        // palette takes its bit-for-bit shipped path.
+        let value = if (value - 1.0).abs() < TRANSPARENCY_STEP / 2.0 {
+            1.0
+        } else {
+            value
+        };
+        self.update_prefs(move |prefs| prefs.window_transparency = value);
+        cx.notify();
     }
 
     fn drag_editor_resize(&mut self, kind: QuickOpenEditor, y: f32, cx: &mut Context<Self>) {
@@ -4437,6 +4486,17 @@ impl UtilitySurfaces {
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
+                            "Transparency",
+                            window_transparency_slider(
+                                self.prefs.window_transparency,
+                                self.prefs.window_material == WindowMaterial::Glass,
+                                colors,
+                                cx,
+                            ),
+                            colors,
+                        ))
+                        .child(appearance_divider(colors))
+                        .child(appearance_setting_row(
                             "Background",
                             swatch(selected.background),
                             colors,
@@ -6550,6 +6610,132 @@ fn window_material_switch(
         .child(div().size(px(14.0)).rounded(px(7.0)).bg(colors.primary))
 }
 
+/// Drag toward "less" for a denser tint, toward "more" for clearer glass. The
+/// shipped density sits on a tick; clicking the value label returns to it.
+fn window_transparency_slider(
+    value: f32,
+    enabled: bool,
+    colors: SemanticColors,
+    cx: &mut Context<UtilitySurfaces>,
+) -> impl IntoElement {
+    const TRACK_WIDTH: f32 = 148.0;
+    const KNOB: f32 = 14.0;
+    let max = SemanticColors::MAX_TRANSPARENCY;
+    let fraction = (value / max).clamp(0.0, 1.0);
+    let default_fraction = 1.0 / max;
+    let travel = TRACK_WIDTH - KNOB;
+    let is_default = (value - 1.0).abs() < TRANSPARENCY_STEP / 2.0;
+    let label = if is_default {
+        "Default".to_owned()
+    } else if value <= 0.0 {
+        "Solid".to_owned()
+    } else {
+        format!("{:.0}%", value * 100.0)
+    };
+    let bounds_slot: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+    let track = div()
+        .id("window-transparency")
+        .relative()
+        .flex_none()
+        .w(px(TRACK_WIDTH))
+        .h(px(18.0))
+        .when(enabled, |track| track.cursor_pointer())
+        .child(
+            div()
+                .absolute()
+                .left(px(KNOB / 2.0))
+                .right(px(KNOB / 2.0))
+                .top(px(7.0))
+                .h(px(4.0))
+                .rounded(px(2.0))
+                .bg(colors.primary.alpha(0.14)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(KNOB / 2.0))
+                .top(px(7.0))
+                .w(px(travel * fraction))
+                .h(px(4.0))
+                .rounded(px(2.0))
+                .bg(Ink::FRESH.alpha(0.72)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(KNOB / 2.0 + travel * default_fraction - 1.0))
+                .top(px(3.0))
+                .w(px(2.0))
+                .h(px(12.0))
+                .rounded(px(1.0))
+                .bg(colors.primary.alpha(0.22)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(travel * fraction))
+                .top(px(2.0))
+                .size(px(KNOB))
+                .rounded(px(KNOB / 2.0))
+                .bg(colors.primary),
+        )
+        .child({
+            let bounds_slot = Rc::clone(&bounds_slot);
+            canvas(
+                move |bounds, _, _| bounds_slot.set(Some(bounds)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        });
+    let track = if enabled {
+        track
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(bounds) = bounds_slot.get() {
+                        this.drag_window_transparency(bounds, event.position.x, cx);
+                    }
+                }),
+            )
+            .on_drag(DraggedTransparency, |value, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| *value)
+            })
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<DraggedTransparency>, _, cx| {
+                    this.drag_window_transparency(event.bounds, event.event.position.x, cx);
+                }),
+            )
+            .into_any_element()
+    } else {
+        track.opacity(0.4).into_any_element()
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .child(
+            div()
+                .id("window-transparency-value")
+                .w(px(48.0))
+                .text_right()
+                .text_size(px(12.0))
+                .text_color(colors.secondary)
+                .when(enabled && !is_default, |label| {
+                    label
+                        .cursor_pointer()
+                        .hover(move |style| style.text_color(colors.primary))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_window_transparency(1.0, cx);
+                        }))
+                })
+                .child(label),
+        )
+        .child(track)
+}
+
 fn appearance_divider(colors: SemanticColors) -> impl IntoElement {
     div().h(px(1.0)).bg(colors.primary.alpha(0.055))
 }
@@ -7818,6 +8004,9 @@ mod tests {
             .map(PathBuf::from)
             .expect("set DIRI_VISUAL_OUTPUT to the target PNG path");
         let preview_theme = std::env::var("DIRI_APPEARANCE_THEME").ok();
+        let transparency = std::env::var("DIRI_APPEARANCE_TRANSPARENCY")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok());
         let platform = gpui_platform::current_platform(true);
         let mut cx = HeadlessAppContext::with_platform(
             platform.text_system(),
@@ -7842,6 +8031,11 @@ mod tests {
                             let theme_id = theme_id.clone();
                             surfaces.update_prefs(move |prefs| prefs.terminal_theme = theme_id);
                             cx.notify();
+                        });
+                    }
+                    if let Some(value) = transparency {
+                        harness.surfaces.update(cx, |surfaces, cx| {
+                            surfaces.set_window_transparency(value, cx);
                         });
                     }
                 });

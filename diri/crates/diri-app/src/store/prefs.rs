@@ -174,6 +174,10 @@ fn sidebar_lineage_highlights_default() -> bool {
     true
 }
 
+const fn window_transparency_default() -> f32 {
+    1.0
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Prefs {
@@ -220,6 +224,10 @@ pub struct Prefs {
     /// files written before it existed pick up glass.
     #[serde(default)]
     pub window_material: WindowMaterial,
+    /// How much desktop the glass lets through, as a multiple of the shipped
+    /// tint (1.0). Missing files keep the shipped look.
+    #[serde(default = "window_transparency_default")]
+    pub window_transparency: f32,
     /// Last size, position, and presentation mode of the key window.
     pub window_placement: Option<WindowPlacement>,
     /// The other windows open at the last quit, in no particular order. They
@@ -302,6 +310,7 @@ impl Default for Prefs {
             terminal_hide_pointer: true,
             terminal_paste_protection: false,
             window_material: WindowMaterial::Glass,
+            window_transparency: window_transparency_default(),
             window_placement: None,
             additional_windows: Vec::new(),
             sidebar_visible: false,
@@ -423,6 +432,12 @@ impl Prefs {
     }
 
     pub fn normalize(&mut self) {
+        self.window_transparency = if self.window_transparency.is_finite() {
+            self.window_transparency
+                .clamp(0.0, diri_ui::SemanticColors::MAX_TRANSPARENCY)
+        } else {
+            window_transparency_default()
+        };
         if !self.terminal_font_size.is_finite() {
             self.terminal_font_size = 13.0;
         }

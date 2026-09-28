@@ -56,11 +56,13 @@ pub(crate) fn sidebar_colors_with(id: &str, material: Material) -> SemanticColor
 pub(crate) fn colors_in(store: &SessionStore) -> SemanticColors {
     semantic_colors(terminal_theme_in(store), false)
         .with_material(store.preferences().window_material.to_ui())
+        .with_transparency(store.preferences().window_transparency)
 }
 
 pub(crate) fn sidebar_colors_in(store: &SessionStore) -> SemanticColors {
     semantic_colors(terminal_theme_in(store), true)
         .with_material(store.preferences().window_material.to_ui())
+        .with_transparency(store.preferences().window_transparency)
 }
 
 fn semantic_colors(theme: TermTheme, sidebar_tones: bool) -> SemanticColors {
