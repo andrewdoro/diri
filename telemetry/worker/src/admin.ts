@@ -148,8 +148,11 @@ async function incidents(url: URL, env: Env): Promise<Response> {
   const limit = limitParam(url, 100, 1000);
   filters.binds.push(limit);
   const { results } = await env.DB.prepare(
-    `SELECT id, install, t, seq, proc, pid, kind, sev, session, conv, agent, code, signature, app_version, fields
-     FROM incidents ${whereSql(filters)} ORDER BY t DESC LIMIT ?${filters.binds.length}`,
+    `SELECT n.id, n.install, n.t, n.seq, n.proc, n.pid, n.kind, n.sev, n.session, n.conv, n.agent, n.code,
+            n.signature, n.app_version, n.fields, i.name, i.support_id
+     FROM (SELECT * FROM incidents ${whereSql(filters)} ORDER BY t DESC LIMIT ?${filters.binds.length}) AS n
+     LEFT JOIN installs i ON i.install = n.install
+     ORDER BY n.t DESC`,
   )
     .bind(...filters.binds)
     .all<Record<string, unknown>>();

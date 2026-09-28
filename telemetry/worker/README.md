@@ -42,7 +42,7 @@ Every route needs `Authorization: Bearer <ADMIN_TOKEN>`, compared in constant ti
 |---|---|
 | `GET /v1/admin/installs?q=` | installs matching a name substring, Support ID (`D-…`, prefix ok) or install UUID prefix; no `q` lists the most recent |
 | `GET /v1/admin/installs/<uuid>` | install row, batch totals, incident counts by severity, session count, versions seen |
-| `GET /v1/admin/incidents?install=&kind=&sev=&version=&session=&conv=&signature=&since=&until=&limit=` | incident rows, newest first; `kind` accepts `*`/`?` globs |
+| `GET /v1/admin/incidents?install=&kind=&sev=&version=&session=&conv=&signature=&since=&until=&limit=` | incident rows with the install's `name` and `support_id`, newest first; `kind` accepts `*`/`?` globs |
 | `GET /v1/admin/incidents/summary?…same filters` | groups by signature: `count`, `installs` affected, `first_t`, `last_t`, `versions` |
 | `GET /v1/admin/batches?install=&since=&until=` | batches whose record time range overlaps the window, oldest first |
 | `GET /v1/admin/batch?key=<r2 key>` | the stored gzip body, streamed as `application/gzip` (the caller gunzips) |

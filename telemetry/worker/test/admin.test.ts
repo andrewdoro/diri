@@ -56,6 +56,7 @@ describe("admin queries", () => {
     expect(listed.incidents).toHaveLength(3);
     expect(listed.incidents[0].t).toBe(T0 + 2);
     expect(listed.incidents[1].fields.message).toBe("oob");
+    expect(listed.incidents[0]).toMatchObject({ name: "julia", support_id: supportId(a) });
 
     const onlyPanics = await adminJson(`/v1/admin/incidents?install=${a}&kind=pan*&sev=incident`);
     expect(onlyPanics.incidents).toHaveLength(2);
