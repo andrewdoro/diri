@@ -277,4 +277,125 @@ mod tests {
         assert_eq!(queue.try_pop(), Some((10, b"ab".to_vec())));
         assert_eq!(queue.try_pop(), Some((20, b"cd".to_vec())));
     }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn pause(&mut self) {
+            match self.next() % 16 {
+                0 => std::thread::sleep(Duration::from_micros(self.next() % 300)),
+                1..=3 => std::thread::yield_now(),
+                _ => {}
+            }
+        }
+    }
+
+    /// The pump, the output writer and the peer watcher on one queue, with a
+    /// tiny byte bound, random delays, short patience and a random hangup.
+    /// Every byte a push accepted must reach the reader exactly once, in
+    /// order, in frames that start where the last ended — and no round may
+    /// hang, whichever side gives up first.
+    fn stress(first: u64, rounds: u64) {
+        for round in first..first + rounds {
+            let seed = 0xD1B5_4A32_D192_ED03 ^ round.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut rng = Rng(seed | 1);
+            let queue = FrameQueue::new((rng.next() % 96 + 1) as usize);
+            let patience = Duration::from_micros(rng.next() % 2_000);
+            let reader = {
+                let queue = Arc::clone(&queue);
+                let mut rng = Rng(rng.next() | 1);
+                std::thread::spawn(move || {
+                    let mut frames = Vec::new();
+                    loop {
+                        let frame = if rng.next().is_multiple_of(2) {
+                            queue.pop()
+                        } else {
+                            match queue.try_pop() {
+                                Some(frame) => Some(frame),
+                                None => queue.pop(),
+                            }
+                        };
+                        let Some(frame) = frame else { break };
+                        frames.push(frame);
+                        rng.pause();
+                    }
+                    frames
+                })
+            };
+            let hangup = rng.next().is_multiple_of(4).then(|| {
+                let queue = Arc::clone(&queue);
+                let after = Duration::from_micros(rng.next() % 3_000);
+                std::thread::spawn(move || {
+                    std::thread::sleep(after);
+                    queue.close();
+                })
+            });
+            let mut accepted = Vec::new();
+            let mut offset = 0_u64;
+            for index in 0..(rng.next() % 500 + 20) {
+                let length = (rng.next() % 48 + 1) as usize;
+                let chunk: Vec<u8> = (0..length).map(|at| (index as usize ^ at) as u8).collect();
+                if !queue.push(offset, &chunk, patience) {
+                    // As `broadcast_output` does with a subscriber it gives up on.
+                    queue.close();
+                    break;
+                }
+                accepted.extend_from_slice(&chunk);
+                offset += length as u64;
+                rng.pause();
+            }
+            queue.close();
+            let (done, finished) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done.send(reader.join());
+            });
+            let frames = finished
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("round {round} (seed {seed:#x}) hung"))
+                .expect("reader");
+            if let Some(hangup) = hangup {
+                hangup.join().expect("hangup");
+            }
+            let mut next = 0_u64;
+            let mut delivered = Vec::new();
+            for (start, bytes) in frames {
+                assert_eq!(start, next, "round {round} (seed {seed:#x}): a gap");
+                assert!(!bytes.is_empty() && bytes.len() <= JOINED_FRAME_BYTES);
+                next += bytes.len() as u64;
+                delivered.extend_from_slice(&bytes);
+            }
+            assert!(
+                delivered == accepted,
+                "round {round} (seed {seed:#x}): accepted bytes lost or reordered"
+            );
+        }
+    }
+
+    #[test]
+    fn pump_writer_and_hangup_never_lose_a_wakeup_or_an_accepted_byte() {
+        stress(0, 100);
+    }
+
+    /// `DIRI_STRESS_ROUNDS` rounds (default 20,000) from `DIRI_STRESS_FIRST`.
+    #[test]
+    #[ignore = "long; run on demand"]
+    fn pump_writer_and_hangup_never_lose_a_wakeup_or_an_accepted_byte_at_length() {
+        let setting = |name: &str, default: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        stress(
+            setting("DIRI_STRESS_FIRST", 0),
+            setting("DIRI_STRESS_ROUNDS", 20_000),
+        );
+    }
 }

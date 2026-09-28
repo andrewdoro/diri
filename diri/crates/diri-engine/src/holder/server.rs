@@ -390,6 +390,7 @@ fn pump_pty(shared: &Arc<Shared>, reader: &mut crate::pty::PtyStream) {
         std::thread::Builder::new()
             .name(format!("holder-log-{}", shared.spec.session_id))
             .spawn(move || {
+                let _exit = super::log_feed::WriterExit(&feed);
                 let mut batch: Vec<u8> = Vec::new();
                 while feed.take(&mut batch) {
                     // A failed disk write must not stop the session: the child

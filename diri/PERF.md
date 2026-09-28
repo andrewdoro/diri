@@ -80,6 +80,24 @@ The Engine is now bound by terminal parsing, which is the terminal-feed work.
 Under heavy load its 100 ms `stat` sample still waits on Holder scheduling
 latency (about 15% of pump wall time at load 40+), but costs no CPU.
 
+**The one stalled holderbench run, root-caused.** A loop of holderbench's
+drain phase stalled 11 of 350 rounds on the branch and 11 of 550 on base. The
+pattern was the same on both: every running session had drained all 5 MiB,
+and each stalled one had never started. Its log held only the 16-byte
+header, with no socket and no child. The manager's stderr (normally
+`/dev/null`) held `PTY spawn: Unknown error: -6`. That is XNU's
+kernel-private `EREDRIVEOPEN` escaping `openpty(3)` under concurrent PTY
+creation and teardown. Sixteen processes doing `openpty`/`close` reproduce
+it with no diri code, a few times per 32,000 opens. The manager had already
+acknowledged the launch, so the session vanished silently. `Pty::spawn` now
+retries that code (and `EINTR`) up to 8 times. Retrying never lets the
+error through: 0 failures in 64,000 churned opens, against 22–32 without
+the retry.
+
+Separately, LogFeed and the byte-bounded subscriber queue each ran 80,000
+randomized rounds, with tiny thresholds, random delays on both sides and
+random hangups. None hung, and none lost or reordered a byte.
+
 Reproduce: `DIRI_HOLDER_BIN=target/release/diri-holder
 target/release/examples/fleetbench /private/tmp/dperf-payload.txt <n> 160 50`.
 The Holder manager is the `diri-holder --manager` whose parent is fleetbench.

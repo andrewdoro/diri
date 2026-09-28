@@ -58,21 +58,26 @@ impl Pty {
         let winsize_ptr = &mut winsize;
         let mut master: RawFd = -1;
         let mut slave: RawFd = -1;
-        // SAFETY: both output pointers refer to initialized local storage and
-        // `winsize` is fully initialized. On success both returned fds are new
-        // owned descriptors, transferred immediately into `OwnedFd`.
-        let result = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                winsize_ptr,
-            )
-        };
-        if result != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        retry_transient_open(|| {
+            // SAFETY: both output pointers refer to initialized local storage
+            // and `winsize` is fully initialized. On success both returned fds
+            // are new owned descriptors, transferred immediately into
+            // `OwnedFd`; on failure `openpty` has closed anything it opened.
+            let result = unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    winsize_ptr,
+                )
+            };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        })?;
         // SAFETY: `openpty` succeeded and returned two fresh descriptors.
         let master = unsafe { OwnedFd::from_raw_fd(master) };
         // SAFETY: same ownership argument as `master`; each fd is wrapped once.
@@ -259,6 +264,35 @@ fn exit_from(status: std::process::ExitStatus) -> Exit {
     status
         .signal()
         .map_or_else(|| Exit::Code(status.code().unwrap_or(-1)), Exit::Signal)
+}
+
+/// XNU's internal "redrive this open" code. Its pts open path uses it between
+/// its own layers, and under concurrent PTY creation and teardown it
+/// occasionally escapes `openpty(3)` as errno -6 ("Unknown error: -6"):
+/// about once in 8,000 opens with sixteen processes churning PTYs, and never
+/// twice in a row. Treated as fatal, it silently lost a session whose launch
+/// had already been acknowledged.
+const EREDRIVEOPEN: i32 = -6;
+
+/// Enough retries to ride out the transient, few enough that a genuinely
+/// failing open (descriptor or PTY exhaustion) still fails promptly.
+const OPEN_ATTEMPTS: u32 = 8;
+
+/// Runs `open` again while it fails transiently.
+fn retry_transient_open(mut open: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match open() {
+            Err(error)
+                if attempt < OPEN_ATTEMPTS
+                    && matches!(error.raw_os_error(), Some(EREDRIVEOPEN | libc::EINTR)) =>
+            {
+                attempt += 1;
+                std::thread::yield_now();
+            }
+            outcome => return outcome,
+        }
+    }
 }
 
 fn close_extra_fds() {
@@ -455,6 +489,94 @@ fn platform_exit_watcher(pid: u32) -> io::Result<OwnedFd> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leaked_redrive_code_is_retried_but_real_failures_are_not() {
+        let mut calls = 0;
+        let outcome = retry_transient_open(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(io::Error::from_raw_os_error(EREDRIVEOPEN))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(outcome.is_ok());
+        assert_eq!(calls, 3, "the transient failure is opened again");
+
+        let mut calls = 0;
+        let outcome = retry_transient_open(|| {
+            calls += 1;
+            Err(io::Error::from_raw_os_error(libc::EMFILE))
+        });
+        assert_eq!(outcome.unwrap_err().raw_os_error(), Some(libc::EMFILE));
+        assert_eq!(calls, 1, "exhaustion is reported at once");
+
+        let mut calls = 0;
+        let outcome = retry_transient_open(|| {
+            calls += 1;
+            Err(io::Error::from_raw_os_error(EREDRIVEOPEN))
+        });
+        assert!(outcome.is_err(), "and the retry is bounded");
+        assert_eq!(calls, OPEN_ATTEMPTS);
+    }
+
+    /// Many processes creating and closing PTYs at once, as a manager
+    /// launching a fleet does beside other PTY users. Before the retry,
+    /// `openpty` leaked `EREDRIVEOPEN` a few times per 32,000 opens on
+    /// macOS 27. `cargo test -p diri-pty --lib -- --ignored pty_churn`.
+    #[test]
+    #[ignore = "long; forks sixteen processes"]
+    fn pty_churn_never_fails_a_spawn_open() {
+        let mut children = Vec::new();
+        for _ in 0..16 {
+            // SAFETY: the child only opens and closes PTYs, then exits.
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid == 0 {
+                let mut failures = 0;
+                for _ in 0..4_000 {
+                    let (mut master, mut slave) = (-1, -1);
+                    let opened = retry_transient_open(|| {
+                        // SAFETY: local out-parameters; fds closed below.
+                        let result = unsafe {
+                            libc::openpty(
+                                &mut master,
+                                &mut slave,
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                            )
+                        };
+                        if result == 0 {
+                            Ok(())
+                        } else {
+                            Err(io::Error::last_os_error())
+                        }
+                    });
+                    match opened {
+                        // SAFETY: the two fds openpty just returned.
+                        Ok(()) => unsafe {
+                            libc::close(slave);
+                            libc::close(master);
+                        },
+                        Err(_) => failures += 1,
+                    }
+                }
+                // SAFETY: leave the forked test child without unwinding.
+                unsafe { libc::_exit(failures.min(255)) };
+            }
+            children.push(pid);
+        }
+        let mut failures = 0;
+        for pid in children {
+            let mut status = 0;
+            // SAFETY: waiting on our own forked child.
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+            failures += libc::WEXITSTATUS(status);
+        }
+        assert_eq!(failures, 0, "openpty failed under churn");
+    }
 
     #[test]
     fn pty_child_does_not_inherit_extra_descriptors() {

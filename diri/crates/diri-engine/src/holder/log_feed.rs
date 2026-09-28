@@ -169,6 +169,18 @@ impl LogFeed {
     }
 }
 
+/// Held by the writer thread: however it stops, a panic included, the feed
+/// closes, so the pump appends inline instead of waiting forever for room a
+/// dead writer will never make. (The channel this replaced failed its sends
+/// once the receiver was gone; this keeps that property.)
+pub(super) struct WriterExit<'a>(pub(super) &'a LogFeed);
+
+impl Drop for WriterExit<'_> {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +292,132 @@ mod tests {
         batch.clear();
         assert!(!feed.take(&mut batch));
         assert!(!feed.push(b"late"), "a closed feed refuses bytes");
+    }
+
+    #[test]
+    fn a_writer_that_dies_releases_the_pump_instead_of_stalling_it() {
+        let feed = Arc::new(LogFeed::with_limits(4, Duration::ZERO, 8));
+        assert!(feed.push(b"first"));
+        let writer = {
+            let feed = Arc::clone(&feed);
+            std::thread::spawn(move || {
+                let _exit = WriterExit(&feed);
+                let mut batch = Vec::new();
+                assert!(feed.take(&mut batch));
+                panic!("the disk write failed hard");
+            })
+        };
+        assert!(writer.join().is_err());
+        let (done, finished) = std::sync::mpsc::channel();
+        {
+            let feed = Arc::clone(&feed);
+            std::thread::spawn(move || {
+                // Far past the bound: with nobody draining, a pump that kept
+                // waiting for room would never return.
+                let accepted = (0..64).all(|_| feed.push(b"output"));
+                let _ = done.send(accepted);
+            });
+        }
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(5)),
+            Ok(false),
+            "the pump must learn the writer is gone and append inline"
+        );
+    }
+
+    /// A small xorshift, so a failing round can be replayed from its seed.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// Sometimes nothing, sometimes a yield, sometimes a short sleep:
+        /// enough to push either thread across every wait in `LogFeed`.
+        fn pause(&mut self) {
+            match self.next() % 16 {
+                0 => std::thread::sleep(Duration::from_micros(self.next() % 300)),
+                1..=3 => std::thread::yield_now(),
+                _ => {}
+            }
+        }
+    }
+
+    /// One pump and one writer at thresholds small enough that every round
+    /// crosses the park, the linger, the batch wake and the backpressure wait
+    /// many times, with random delays on both sides. Any lost wakeup shows as
+    /// a round that never finishes; any reordering or loss as a byte mismatch.
+    fn stress(first: u64, rounds: u64) {
+        for round in first..first + rounds {
+            let seed = 0x9E37_79B9_7F4A_7C15 ^ round.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            let mut rng = Rng(seed | 1);
+            let batch = (rng.next() % 64 + 1) as usize;
+            let limit = batch + (rng.next() % 256) as usize;
+            let linger = Duration::from_micros(rng.next() % 400);
+            let feed = Arc::new(LogFeed::with_limits(batch, linger, limit));
+            let writer = {
+                let feed = Arc::clone(&feed);
+                let mut rng = Rng(rng.next() | 1);
+                std::thread::spawn(move || {
+                    let mut written = Vec::new();
+                    let mut batch = Vec::new();
+                    while feed.take(&mut batch) {
+                        // The disk write, of whatever length.
+                        rng.pause();
+                        written.extend_from_slice(&batch);
+                        batch.clear();
+                    }
+                    written
+                })
+            };
+            let mut expected = Vec::new();
+            for index in 0..(rng.next() % 600 + 50) {
+                let length = (rng.next() % 3 + 1) as usize * (rng.next() % 40 + 1) as usize;
+                let chunk: Vec<u8> = (0..length).map(|at| (index as usize ^ at) as u8).collect();
+                expected.extend_from_slice(&chunk);
+                assert!(feed.push(&chunk));
+                rng.pause();
+            }
+            feed.close();
+            let (done, finished) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done.send(writer.join());
+            });
+            let written = finished
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("round {round} (seed {seed:#x}) hung"))
+                .expect("writer");
+            assert!(
+                written == expected,
+                "round {round} (seed {seed:#x}) lost or reordered bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pump_and_writer_never_lose_a_wakeup_or_a_byte() {
+        stress(0, 100);
+    }
+
+    /// The same, for as many rounds as `DIRI_STRESS_ROUNDS` asks (default
+    /// 20,000) from round `DIRI_STRESS_FIRST`:
+    /// `cargo test --release -p diri-engine --lib log_feed -- --ignored`.
+    #[test]
+    #[ignore = "long; run on demand"]
+    fn the_pump_and_writer_never_lose_a_wakeup_or_a_byte_at_length() {
+        let setting = |name: &str, default: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        stress(
+            setting("DIRI_STRESS_FIRST", 0),
+            setting("DIRI_STRESS_ROUNDS", 20_000),
+        );
     }
 }
