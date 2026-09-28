@@ -10,6 +10,7 @@ mod find_input;
 mod find_overlay;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod find_workflow_tests;
+mod path_picker;
 mod qol;
 mod reconnect;
 use qol::QolState;
@@ -544,6 +545,23 @@ struct ResidentTerminal {
     pointer_owner: Option<(MouseButton, PointerOwner)>,
     mouse_motion: MouseMotionLimiter,
     extent_probe: HistoryExtentProbe,
+    trace: PaneTrace,
+}
+
+/// A visible pane whose live session has shown nothing this long after it
+/// was mounted records `pane.blank`: the "session does not render" bug.
+const PANE_BLANK_AFTER: Duration = Duration::from_secs(10);
+
+/// What the flight recorder follows per resident: mount → first grid →
+/// first paint with content, and the check that fires when paint never
+/// comes.
+struct PaneTrace {
+    mounted_at: Instant,
+    /// Remounted onto an element that had already painted this session.
+    parked: bool,
+    first_grid: Option<Instant>,
+    painted: bool,
+    _blank_check: Task<()>,
 }
 
 /// How often a knob shown over streaming output may re-ask how long the
@@ -641,6 +659,9 @@ pub struct TerminalPane {
     #[cfg(test)]
     pub(crate) render_count: usize,
     qol: QolState,
+    /// The open Insert Path picker, bound to the session it was opened on.
+    path_picker: Option<path_picker::PathPickerState>,
+    path_picker_generation: u64,
     /// Overlay scroller and rubber band over the grid's scrollback.
     scroller: diri_ui::ScrollerState,
     reconnect: reconnect::ReconnectUi,
@@ -714,6 +735,7 @@ pub struct TerminalPane {
     _window_owner: gpui::Subscription,
     _pane_events: Task<()>,
     _store_changes: Task<()>,
+    _telemetry: crate::telemetry::Live,
 }
 
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
@@ -926,6 +948,8 @@ impl TerminalPane {
             session_links: SessionLinks::new(cx),
             main_viewport: gpui::Size::default(),
             qol: QolState::default(),
+            path_picker: None,
+            path_picker_generation: 0,
             scroller: diri_ui::ScrollerState::new(),
             reconnect: Default::default(),
             pending_resizes: HashMap::new(),
@@ -956,6 +980,7 @@ impl TerminalPane {
             _window_owner: window_owner,
             _pane_events: pane_events,
             _store_changes: store_changes,
+            _telemetry: crate::telemetry::Live::pane(),
         };
         pane.reconcile_residency(cx);
         pane.sync_status_glyphs(pane.current_colors(), window, cx);
@@ -1075,6 +1100,11 @@ impl TerminalPane {
                 .focus_handle(self.focus.clone())
                 .on_text_input(move |text| ime_attachment.input(text.as_bytes().to_vec()));
             controller.observe(&element);
+            let blank_id = id.clone();
+            let blank_check = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PANE_BLANK_AFTER).await;
+                let _ = this.update(cx, |this, _| this.check_blank(&blank_id, generation));
+            });
             self.residents.insert(
                 id,
                 ResidentTerminal {
@@ -1094,6 +1124,13 @@ impl TerminalPane {
                     pointer_owner: None,
                     mouse_motion: MouseMotionLimiter::default(),
                     extent_probe: HistoryExtentProbe::default(),
+                    trace: PaneTrace {
+                        mounted_at: Instant::now(),
+                        parked: reuse_parked,
+                        first_grid: None,
+                        painted: false,
+                        _blank_check: blank_check,
+                    },
                 },
             );
         }
@@ -1409,6 +1446,9 @@ impl TerminalPane {
                 if !self.attachment_is_current(&id, generation) {
                     return;
                 }
+                if let Some(resident) = self.residents.get_mut(&id) {
+                    resident.trace.first_grid.get_or_insert_with(Instant::now);
+                }
                 let now = self.started_at.elapsed();
                 let schedule = self.residents.get_mut(&id).is_some_and(|resident| {
                     let Some(find) = resident.find.as_mut() else {
@@ -1479,6 +1519,21 @@ impl TerminalPane {
                     return;
                 }
                 if let Some(resident) = self.residents.get_mut(&id) {
+                    if resident.element.mouse_modes() != mouse
+                        || resident.element.alt_screen() != alt_screen
+                    {
+                        // Mode flips are rare (an agent starting or exiting);
+                        // one left on after its program exits is how mouse
+                        // reports end up typed into a shell.
+                        diri_telemetry::debug_event!(
+                            "pane.modes",
+                            session = diri_telemetry::id(&id.0),
+                            mouse = mouse.is_reporting(),
+                            mouse_bits = mouse.detail_bits(),
+                            alt_screen = alt_screen,
+                            bracketed_paste = bracketed_paste
+                        );
+                    }
                     if resident.element.mouse_modes() != mouse {
                         resident.pointer_owner = None;
                         resident.mouse_motion.reset();
@@ -1624,6 +1679,10 @@ impl TerminalPane {
                     // scp's stderr can name hosts, users and key paths; it
                     // stays in the developer log and out of the app.
                     eprintln!("diri: clipboard image upload failed: {error}");
+                    diri_telemetry::error_event!(
+                        "clipboard.image_upload_failed",
+                        session = diri_telemetry::id(&id.0)
+                    );
                     self.show_terminal_feedback(
                         "Couldn't copy the clipboard image to the session's host",
                         window,
@@ -1640,6 +1699,10 @@ impl TerminalPane {
                 }
                 Err(error) => {
                     eprintln!("diri: dropped file upload failed: {error}");
+                    diri_telemetry::error_event!(
+                        "pane.drop_upload_failed",
+                        session = diri_telemetry::id(&id.0)
+                    );
                     cx.emit(TerminalPaneEvent::ExternalDropFeedback {
                         message: format!(
                             "Couldn't copy the dropped files to the session's host: {error}"
@@ -1686,6 +1749,18 @@ impl TerminalPane {
         let ssh = self.drop_destination(&id);
 
         let plan = plan_terminal_drop(paths.paths(), ssh.is_some());
+        diri_telemetry::event!(
+            "pane.drop",
+            session = diri_telemetry::id(&id.0),
+            files = paths.paths().len(),
+            outcome = match plan.action {
+                None => "refused",
+                Some(TerminalDropAction::Paste(_)) => "paste",
+                Some(TerminalDropAction::Upload(_)) => "upload",
+            },
+            partial = plan.action.is_some() && plan.feedback().is_some(),
+            remote = ssh.is_some()
+        );
         if let Some(message) = plan.feedback() {
             cx.emit(TerminalPaneEvent::ExternalDropFeedback { message });
         }
@@ -1797,6 +1872,93 @@ impl TerminalPane {
                 this.external_drop(paths, window, cx);
             }))
             .into_any_element()
+    }
+
+    /// Records the first frame the visible resident renders with content:
+    /// this render paints it.
+    fn trace_first_paint(&mut self) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        let Some(resident) = self.residents.get_mut(&id) else {
+            return;
+        };
+        if resident.trace.painted || !resident.element.has_content() {
+            return;
+        }
+        resident.trace.painted = true;
+        let trace = &resident.trace;
+        let ms = trace.mounted_at.elapsed();
+        diri_telemetry::observe("pane.first_paint", ms);
+        diri_telemetry::debug_event!(
+            "pane.first_paint",
+            session = diri_telemetry::id(&id.0),
+            ms = ms,
+            grid_ms = trace
+                .first_grid
+                .map(|at| at.duration_since(trace.mounted_at)),
+            parked = trace.parked
+        );
+    }
+
+    /// `PANE_BLANK_AFTER` after a resident mounted: if it is still the
+    /// visible one, its session is running, and nothing with content has
+    /// been rendered, record why the user is looking at an empty pane.
+    fn check_blank(&mut self, id: &SessionId, generation: AttachmentGeneration) {
+        if self.selected_id().as_ref() != Some(id) {
+            return;
+        }
+        self.trace_first_paint();
+        let Some(resident) = self.residents.get(id) else {
+            return;
+        };
+        if resident.attachment_generation != generation || resident.trace.painted {
+            return;
+        }
+        let agent = {
+            let store = self
+                .runtime
+                .store
+                .read()
+                .expect("session store lock poisoned");
+            let Some(session) = store.sessions().get(id) else {
+                return;
+            };
+            if session.is_archived() || matches!(session.status, SessionStatus::Exited(_)) {
+                return;
+            }
+            diri_telemetry::id(session.kind.id())
+        };
+        let state = match resident.attachment_state {
+            AttachmentState::Attaching => "attaching",
+            AttachmentState::Live => "live",
+            AttachmentState::Reconnecting => "reconnecting",
+        };
+        let stats = resident.element.stats();
+        let got_grid = resident.trace.first_grid.is_some();
+        if resident.attachment_state == AttachmentState::Live && got_grid {
+            // The Engine sent a screen and it is empty: odd, but a cleared
+            // terminal looks the same.
+            diri_telemetry::warn_event!(
+                "pane.blank",
+                session = diri_telemetry::id(&id.0),
+                agent = agent,
+                state = state,
+                got_grid = got_grid,
+                frames = stats.frames,
+                ms = resident.trace.mounted_at.elapsed()
+            );
+        } else {
+            diri_telemetry::incident!(
+                "pane.blank",
+                session = diri_telemetry::id(&id.0),
+                agent = agent,
+                state = state,
+                got_grid = got_grid,
+                frames = stats.frames,
+                ms = resident.trace.mounted_at.elapsed()
+            );
+        }
     }
 
     fn attachment_is_current(&self, id: &SessionId, generation: AttachmentGeneration) -> bool {
@@ -2201,6 +2363,7 @@ impl TerminalPane {
         let Some(id) = self.selected_id() else {
             return;
         };
+        self.close_path_picker();
         let Some(resident) = self.residents.get_mut(&id) else {
             return;
         };
@@ -2803,10 +2966,34 @@ impl TerminalPane {
             return;
         };
         let text = resident.element.selected_text();
-        if !text.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.show_terminal_feedback("Copied", window, cx);
+        if text.is_empty() {
+            // ⌘C with nothing selected: the agent may own the mouse (Codex
+            // copies for itself), so the user's drag selected nothing here.
+            diri_telemetry::event!(
+                "clipboard.copy",
+                source = "selection",
+                outcome = "empty_selection",
+                mouse_captured = resident.element.mouse_modes().is_reporting(),
+                session = diri_telemetry::id(&id.0)
+            );
+            return;
         }
+        let bytes = text.len();
+        let started = Instant::now();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let verified = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .is_some_and(|written| written.len() == bytes);
+        diri_telemetry::event!(
+            "clipboard.copy",
+            source = "selection",
+            outcome = if verified { "ok" } else { "not_on_pasteboard" },
+            size = crate::telemetry::size_bucket(bytes),
+            ms = started.elapsed(),
+            session = diri_telemetry::id(&id.0)
+        );
+        self.show_terminal_feedback("Copied", window, cx);
     }
 
     /// Captures terminal text together with the stable absolute scrollback
@@ -2877,15 +3064,29 @@ impl TerminalPane {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        let started = Instant::now();
+        let record = |outcome: &'static str, kind: &'static str, bytes: usize, bracketed: bool| {
+            diri_telemetry::event!(
+                "clipboard.paste",
+                outcome = outcome,
+                kind = kind,
+                size = crate::telemetry::size_bucket(bytes),
+                bracketed = bracketed,
+                ms = started.elapsed()
+            );
+        };
         if self.qol.copy_mode.is_some() {
+            record("copy_mode", "none", 0, false);
             self.show_terminal_feedback("Exit copy mode before pasting", window, cx);
             cx.stop_propagation();
             return;
         }
         let Some(item) = cx.read_from_clipboard() else {
+            record("empty_clipboard", "none", 0, false);
             return;
         };
         let Some(id) = self.selected_id() else {
+            record("no_session", "none", 0, false);
             return;
         };
 
@@ -2895,10 +3096,22 @@ impl TerminalPane {
                 .get(&id)
                 .is_some_and(|resident| resident.find.is_some());
             if in_find {
+                record("ignored_in_find", "image", bytes.len(), false);
                 return;
             }
 
+            let size = bytes.len();
             let staged = StagedClipboardImage::stage(bytes, extension);
+            record(
+                if staged.is_ok() {
+                    "image_staged"
+                } else {
+                    "image_stage_failed"
+                },
+                "image",
+                size,
+                false,
+            );
             self.paste_staged_clipboard_image(&id, staged, window, cx);
             cx.stop_propagation();
             cx.notify();
@@ -2906,20 +3119,37 @@ impl TerminalPane {
         }
 
         let Some(text) = item.text() else {
+            record("no_text", "other", 0, false);
             return;
         };
+        let bracketed = self
+            .residents
+            .get(&id)
+            .is_some_and(|resident| resident.bracketed_paste);
         if self
             .residents
             .get(&id)
             .is_some_and(|resident| resident.find.is_none())
             && self.stage_paste_if_needed(&id, &text, cx)
         {
+            record("review", "text", text.len(), bracketed);
             return;
         }
         let now = self.started_at.elapsed();
         let Some(resident) = self.residents.get_mut(&id) else {
+            record("no_terminal", "text", text.len(), bracketed);
             return;
         };
+        record(
+            if resident.find.is_some() {
+                "into_find"
+            } else {
+                "sent"
+            },
+            "text",
+            text.len(),
+            bracketed,
+        );
         if let Some(find) = resident.find.as_mut() {
             resident
                 .find_composition
@@ -3009,6 +3239,10 @@ impl TerminalPane {
         if switcher_handled {
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+
+        if self.path_picker_key_down(event, window, cx) {
             return;
         }
 
@@ -4320,6 +4554,7 @@ impl Render for TerminalPane {
             self.render_count += 1;
         }
         self.reconcile_residency(cx);
+        self.trace_first_paint();
         if window.is_window_active() && self.focus.is_focused(window) {
             self.claim_selected_control();
         }
@@ -4380,6 +4615,9 @@ impl Render for TerminalPane {
             if let Some(find) = self.render_find_bar(&session, colors, cx) {
                 terminal_surface = terminal_surface.child(find);
             }
+            if let Some(picker) = self.render_path_picker(&session, colors, cx) {
+                terminal_surface = terminal_surface.child(picker);
+            }
             pane = pane.child(terminal_surface);
             if let Some(summary) = self.render_session_links(&session, sidebar_colors, window, cx) {
                 pane = pane.child(summary);
@@ -4432,6 +4670,7 @@ impl Render for TerminalPane {
             .size_full()
             .text_color(colors.primary)
             .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::open_path_picker))
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::close_find))
@@ -5989,6 +6228,27 @@ mod tests {
                     } else {
                         None
                     };
+                    if scene.starts_with("insert-path") {
+                        // A shell prompt mid-command, or an agent's input line
+                        // pinned to the bottom of the screen.
+                        let bottom = scene == "insert-path-bottom";
+                        let lines: &[(u16, &str)] = if bottom {
+                            &[(1, "  Claude Code"), (2, "  ~/work/replay-web"), (25, "> what does ")]
+                        } else {
+                            &[(0, "replay-web  main"), (1, "> nvim ")]
+                        };
+                        grid.changed_rows.clear();
+                        for &(y, text) in lines {
+                            let mut cells = vec![GridCell::BLANK; 80];
+                            for (cell, ch) in cells.iter_mut().zip(text.chars()) {
+                                cell.scalar = ch as u32;
+                            }
+                            grid.changed_rows.push(ChangedRow::new(y, cells));
+                        }
+                        let (row, text) = lines[lines.len() - 1];
+                        grid.cursor_row = row;
+                        grid.cursor_col = text.chars().count() as u16;
+                    }
                     let resident = pane.residents.get_mut(&id).unwrap();
                     resident.element.apply_damage(grid);
                     if let Some((query, snapshot)) = find_fixture {
@@ -6046,6 +6306,36 @@ mod tests {
                         "controller-feedback" => pane.handle_pane_event(
                             PaneEvent::InputFeedback(id.clone(), "Terminal input queue is full. The latest input was not accepted.".into()), window, cx),
                         "copy" => pane.enter_copy_mode(window, cx),
+                        scene if scene.starts_with("insert-path") => {
+                            pane.open_path_picker(&crate::commands::InsertPath, window, cx);
+                            pane.path_picker_adopt_for_test(crate::path_picker::PathIndex::from_entries(
+                                std::path::Path::new("/work/replay-web"),
+                                &[
+                                    ("apps", true),
+                                    ("apps/license-lookup-app", true),
+                                    ("apps/license-lookup-app/README.md", false),
+                                    ("apps/license-lookup-app/playwright.config.ts", false),
+                                    ("apps/license-lookup-app/src", true),
+                                    ("apps/license-lookup-app/src/app.d.ts", false),
+                                    ("apps/license-lookup-app/src/providers/stripe.ts", false),
+                                    ("apps/license-lookup-app/src/providers/types.ts", false),
+                                    ("apps/license-lookup-app/src/types/License.ts", false),
+                                    ("apps/license-lookup-app/tests/test.ts", false),
+                                    ("design_assets", true),
+                                    ("dns", true),
+                                    ("docker-compose.yml", false),
+                                    ("Dockerfile", false),
+                                    ("eslint.config.mjs", false),
+                                    ("flake.lock", false),
+                                    ("flake.nix", false),
+                                    ("LICENSE", false),
+                                    ("node_modules", true),
+                                ],
+                            ));
+                            if let Ok(query) = std::env::var("DIRI_QOL_QUERY") {
+                                pane.path_picker_query_for_test(&query);
+                            }
+                        }
                         _ => (),
                     }
                     pane
@@ -6806,6 +7096,99 @@ mod tests {
                     "compatibility must not invent observed state"
                 );
             }
+        });
+    }
+
+    /// Insert Path owns the keyboard while open: the query never reaches the
+    /// PTY, and choosing a row types exactly one escaped path.
+    #[gpui::test]
+    fn insert_path_types_the_chosen_path_and_nothing_else(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let session = fixture_session();
+        let id = session.id.clone();
+        {
+            let mut store = runtime.store.write().unwrap();
+            store.upsert_session(session);
+            store.select(id.clone());
+        }
+        let (pane, cx) =
+            cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            let (tx, mut input) = mpsc::unbounded_channel();
+            let resident = pane.residents.get_mut(&id).unwrap();
+            resident.attachment.claim();
+            resident.attachment.input_observer = Some((id.clone(), tx));
+            resident.keyboard = None;
+
+            pane.open_path_picker(&crate::commands::InsertPath, window, cx);
+            assert!(!pane.residents[&id].element.text_input_enabled());
+            pane.path_picker_adopt_for_test(crate::path_picker::PathIndex::from_entries(
+                std::path::Path::new("/work/replay-web"),
+                &[
+                    ("apps", true),
+                    ("apps/My Notes.md", false),
+                    ("apps/src/License.ts", false),
+                ],
+            ));
+            for key in ["n", "o", "t", "e", "s", "down", "up"] {
+                let mut keystroke = Keystroke::parse(key).unwrap();
+                if key.len() == 1 {
+                    keystroke.key_char = Some(key.into());
+                }
+                pane.handle_key_down(
+                    &KeyDownEvent {
+                        keystroke,
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            }
+            assert!(
+                input.try_recv().is_err(),
+                "the query must not reach the PTY"
+            );
+            pane.handle_key_down(
+                &KeyDownEvent {
+                    keystroke: Keystroke::parse("enter").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                window,
+                cx,
+            );
+            assert_eq!(
+                input.try_recv().unwrap(),
+                (id.clone(), b"apps/My\\ Notes.md ".to_vec())
+            );
+            assert!(
+                input.try_recv().is_err(),
+                "Enter is consumed, never forwarded"
+            );
+            assert!(pane.path_picker.is_none());
+            assert!(pane.residents[&id].element.text_input_enabled());
+
+            // Escape closes without typing anything.
+            pane.open_path_picker(&crate::commands::InsertPath, window, cx);
+            pane.handle_key_down(
+                &KeyDownEvent {
+                    keystroke: Keystroke::parse("escape").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                window,
+                cx,
+            );
+            assert!(pane.path_picker.is_none());
+            assert!(input.try_recv().is_err());
         });
     }
 

@@ -873,6 +873,8 @@ impl StatusReducer {
             }
             // An idle reminder is not a question or an approval request.
             // It must not overwrite a completed turn or an actual blocker.
+            // A guard would send an unmatched reminder to the arms below.
+            #[allow(clippy::collapsible_match)]
             Some("idle_prompt") => {
                 if pending_work == Some(true)
                     && !matches!(self.status, SessionStatus::NeedsInput(_))

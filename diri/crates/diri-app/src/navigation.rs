@@ -932,7 +932,9 @@ impl NavigationOverlay {
             }
             PaletteCommand::Action(id) => {
                 self.close_overlay(window, cx);
-                window.dispatch_action(id.action(), cx);
+                let action = id.action();
+                crate::telemetry::action(action.name(), "palette");
+                window.dispatch_action(action, cx);
             }
             PaletteCommand::SpawnAgent { agent, cwd, host } => {
                 {
@@ -2120,7 +2122,10 @@ pub fn query_label(editor: &QueryEditor) -> AnyElement {
 
 /// Paint the characters the query actually matched in the brand accent, so a
 /// glance at the list explains why each row is there and in that order.
-fn highlighted_label(text: impl Into<SharedString>, matches: &[Range<usize>]) -> AnyElement {
+pub(crate) fn highlighted_label(
+    text: impl Into<SharedString>,
+    matches: &[Range<usize>],
+) -> AnyElement {
     highlighted_label_styled(
         text,
         matches,

@@ -19,7 +19,10 @@ pub type ShortcutOverrides = BTreeMap<String, Option<String>>;
 
 static ACTIVE_SHORTCUT_OVERRIDES: OnceLock<RwLock<ShortcutOverrides>> = OnceLock::new();
 
-actions!(diri_app, [Quit, HideApp, NewWindow, CloseWindow]);
+actions!(
+    diri_app,
+    [Quit, HideApp, NewWindow, CloseWindow, ReportProblem]
+);
 
 actions!(
     diri,
@@ -112,6 +115,7 @@ actions!(
         CopySelection,
         EnterCopyMode,
         FindSelection,
+        InsertPath,
         ExportScrollback,
         PreviousPrompt,
         NextPrompt,
@@ -196,6 +200,7 @@ pub enum CommandId {
     CopySelection,
     EnterCopyMode,
     FindSelection,
+    InsertPath,
     ExportScrollback,
     PreviousPrompt,
     NextPrompt,
@@ -949,6 +954,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         "find selection terminal"
     ),
     spec!(
+        InsertPath,
+        "terminal-insert-path",
+        Some("cmd-e"),
+        Some("⌘E"),
+        Some(TERMINAL_CONTEXT),
+        "Insert path",
+        "doc.text.magnifyingglass",
+        "insert path file picker fuzzy terminal"
+    ),
+    spec!(
         ExportScrollback,
         "terminal-export",
         Some("cmd-shift-e"),
@@ -1228,6 +1243,7 @@ impl CommandSpec {
             CommandId::CopySelection => KeyBinding::new(key, CopySelection, context),
             CommandId::EnterCopyMode => KeyBinding::new(key, EnterCopyMode, context),
             CommandId::FindSelection => KeyBinding::new(key, FindSelection, context),
+            CommandId::InsertPath => KeyBinding::new(key, InsertPath, context),
             CommandId::ExportScrollback => KeyBinding::new(key, ExportScrollback, context),
             CommandId::PreviousPrompt => KeyBinding::new(key, PreviousPrompt, context),
             CommandId::NextPrompt => KeyBinding::new(key, NextPrompt, context),
@@ -1725,6 +1741,11 @@ impl CommandId {
                 description: "Search for the selected terminal text",
                 category: ShortcutCategory::Terminal,
             },
+            Self::InsertPath => ShortcutMetadata {
+                title: "Insert path",
+                description: "Pick a file under the session's directory and type its path",
+                category: ShortcutCategory::Terminal,
+            },
             Self::ExportScrollback => ShortcutMetadata {
                 title: "Open scrollback in editor",
                 description: "Open retained terminal output in your text editor",
@@ -1867,6 +1888,7 @@ impl CommandId {
             Self::CopySelection => Box::new(CopySelection),
             Self::EnterCopyMode => Box::new(EnterCopyMode),
             Self::FindSelection => Box::new(FindSelection),
+            Self::InsertPath => Box::new(InsertPath),
             Self::ExportScrollback => Box::new(ExportScrollback),
             Self::PreviousPrompt => Box::new(PreviousPrompt),
             Self::NextPrompt => Box::new(NextPrompt),

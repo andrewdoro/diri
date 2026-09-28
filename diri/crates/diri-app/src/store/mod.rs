@@ -567,8 +567,33 @@ impl SessionStore {
         let known = self.sessions.get(&event.session_id).is_some_and(|session| {
             !session.is_archived() && session.created_at == event.session_created_at
         });
-        let fresh = (now_millis().0 - event.occurred_at.0).abs() <= MAX_AGE_MS;
-        known && fresh && self.app_is_active && self.terminal_clipboard.send(event.text).is_ok()
+        let age_ms = now_millis().0 - event.occurred_at.0;
+        let fresh = age_ms.abs() <= MAX_AGE_MS;
+        let size = crate::telemetry::size_bucket(event.text.len());
+        let session = diri_telemetry::id(&event.session_id.0);
+        let accepted = known
+            && fresh
+            && self.app_is_active
+            && self.terminal_clipboard.send(event.text).is_ok();
+        diri_telemetry::event!(
+            "clipboard.copy",
+            source = "osc52",
+            outcome = if accepted {
+                "relayed"
+            } else if !known {
+                "unknown_session"
+            } else if !fresh {
+                "stale"
+            } else if !self.app_is_active {
+                "app_inactive"
+            } else {
+                "no_listener"
+            },
+            size = size,
+            age_ms = age_ms,
+            session = session
+        );
+        accepted
     }
 
     fn notification_change(&self, dismiss: Vec<String>) {
@@ -1693,6 +1718,7 @@ impl SessionStore {
                                     thread_identifier: Some(event.session_id.0),
                                     action_data: None,
                                     use_system_sound: false,
+                                    reply: false,
                                 }),
                             }));
                         }
@@ -1895,7 +1921,55 @@ impl SessionStore {
                     .as_ref()
                     .is_some_and(|request| self.should_deliver_notification(request))
             })
+            .map(|mut effect| {
+                if let Some(request) = effect.notification.as_mut() {
+                    request.reply = request.thread_identifier.as_ref().is_some_and(|id| {
+                        self.sessions
+                            .get(&SessionId::new(id.clone()))
+                            .is_some_and(|session| crate::notifications::accepts_reply(session))
+                    });
+                }
+                effect
+            })
             .collect()
+    }
+
+    /// A reply typed into a needs-input banner. Returns the command to type
+    /// it, or `None` after posting a notice when the session moved on; the
+    /// text itself never leaves this call except inside the command.
+    #[cfg(target_os = "macos")]
+    pub fn take_notification_reply(
+        &mut self,
+        notification_id: &str,
+        session_id: &SessionId,
+        text: String,
+    ) -> Option<SendTextCommand> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        let session = self.sessions.get(session_id).cloned();
+        let entry = self
+            .notification_feed
+            .entries()
+            .iter()
+            .find(|entry| entry.id == notification_id);
+        if let Some(refusal) =
+            crate::notifications::reply_refusal(entry, session_id, session.as_deref())
+        {
+            self.emit(StoreEffect::StatusTransition(
+                crate::notifications::reply_refused_transition(
+                    session.as_deref().map(|session| session.title.as_str()),
+                    refusal,
+                ),
+            ));
+            return None;
+        }
+        self.set_notification_read(notification_id, true);
+        Some(SendTextCommand {
+            session_id: session_id.clone(),
+            text,
+            submit: true,
+        })
     }
 
     pub fn remove_session_record(&mut self, id: &SessionId) {

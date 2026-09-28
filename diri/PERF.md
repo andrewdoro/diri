@@ -12,6 +12,125 @@ frames never reallocate. Covered by
 `a_scene_gives_back_capacity_a_single_large_frame_left_behind`; no installed-app
 footprint change is claimed yet (it depends on how large a user's largest frame
 was).
+## One GraphQL request per PR sweep (2026-09-28)
+
+**Before.** The PR monitor ran one `gh pr view <url> --json …` per due PR:
+one process, about 75 ms CPU, about 1 s wall, and one GraphQL request each.
+When review threads were due (every 30 min) it also ran a second
+`gh api graphql` per PR. With 26 open PRs on screen, that was 26 processes a
+minute, or 52 when threads were due.
+
+**What changed.** A sweep iteration now sends one `gh api graphql` request
+per host for up to 25 due PRs. Each PR is an aliased
+`repository(owner:$oN,name:$nN){pullRequest(number:$pN)}`. Names travel as
+variables. The request asks for the same connections `gh pr view` does:
+comments and reviews `first:100`, `commits(last:1)` → rollup `contexts(first:100)`.
+It asks for `reviewThreads(first:100)` only for PRs whose thread TTL is due.
+`gh_view_from_graphql` turns each node into the JSON `gh pr view --json`
+prints, following gh 2.101.0's `api/export_pr.go` and its Go structs:
+
+- GraphQL nulls become Go zero values.
+- A PR author with no User id becomes `app/<login>`.
+- A check run always has `workflowName`, empty when it has no workflow.
+- Comments and reviews keep only `author.login`.
+- An empty comment `url` is omitted.
+
+The existing `parse` then reads that JSON. Some PRs fall back to the per-PR
+path in the next iteration, at most two per iteration as before:
+
+- the request fails or times out;
+- an alias comes back null, such as a deleted repository;
+- a connection has another page, which gh would have fetched.
+
+An iteration runs either one batch or the per-PR fetches, never both. A slow
+batch therefore costs one 15 s watchdog. That is less than the 2 × (15 + 15) s
+per-PR bound, which is unchanged. Cadence, backoff, forced refresh and
+settled-PR handling are unchanged. A chunk shares one attempt time, so it
+comes due again as one request.
+
+`run_gh` also had a latent hang: it polled for exit before reading stdout.
+Any reply bigger than the pipe buffer blocked gh on write until the 15 s
+watchdog killed it. A 26-PR batch reply is about 230 KB. Stdout is now
+drained on a thread.
+
+**Equivalence.** `examples/prbatch.rs capture` records `gh pr view` and the
+thread query for each PR. It then records the batch, then the per-PR pair
+again. A PR counts only when both per-PR snapshots agree. The run covered
+49 real PRs from cristicretu/diri, cli/cli and kubernetes/kubernetes, all
+read-only:
+
+- 45 were field-for-field identical to `parse(gh pr view)` + thread counts.
+  They cover open, draft, merged, closed, failing, pending, no checks,
+  StatusContext, workflow-less check runs, bot authors, every review
+  decision, conflicting PRs and resolved threads.
+- 3 changed between the two per-PR snapshots because CI moved. For each of
+  them the batch matched one snapshot.
+- 1, a PR with 185 reviews, correctly fell back.
+
+An earlier run found no mapping differences either. Its only mismatches
+were CI moving and GitHub computing `mergeable` lazily on first ask.
+
+`batch_payloads_parse_exactly_like_gh_pr_view` replays 16 of these pairs,
+with bodies replaced by placeholders on both sides. Each is parsed with and
+without threads, and the test fails if the fixtures stop covering any of
+those cases. `graphql_nulls_become_what_gh_exports` covers the null shapes
+no recorded PR had.
+
+**Measured.** One sweep over the first 26 open cristicretu/diri PRs, release
+`prbatch sweep-old|sweep-new` under `/usr/bin/time -p`. The CPU figures
+include the gh children, and a PATH shim counted spawns. Old and new
+alternated for three rounds, with the machine at load 30+:
+
+| 26 PRs, one sweep | gh processes | gh + probe CPU (user+sys) | wall |
+| --- | ---: | ---: | ---: |
+| per-PR, threads due | 52 | 3.81 / 4.03 / 3.84 s | 44.7–45.8 s |
+| per-PR, steady state | 26 | 2.03 / 1.96 / 1.89 s | 27.6–29.0 s |
+| batched, threads due | 2 | 0.18 / 0.13 / 0.14 s | 4.7–5.9 s |
+| batched, steady state | 2 | 0.17 / 0.14 / 0.15 s | 4.2–5.5 s |
+
+Two processes, because 26 PRs is one chunk of 25 plus one of 1. GitHub's own
+`rateLimit{cost nodeCount}` gives the request cost:
+
+| Request | GraphQL points | nodes |
+| --- | ---: | ---: |
+| one PR (`gh pr view`'s connections) | 1 | 301 |
+| one PR's thread query | 1 | 100 |
+| 26 PRs batched, with threads | 1 | 10,426 |
+| 26 PRs batched, without threads | 1 | 7,826 |
+| 38 PRs batched, with threads | 2 | 15,238 |
+
+At the 60 s foreground cadence, the steady state drops from 26 points and
+26 processes a minute to 2 and 2. With threads due, it drops from 52 to 2.
+
+**Not claimed.** The REST `gh api rate_limit` graphql bucket did not track
+these requests: it read `used: 1` while GraphQL's own `rateLimit` said 1,013.
+The same token also served other agents at the same time, so the point
+figures come from `rateLimit` per request, not from before/after deltas.
+Wall times are dominated by GitHub and the loaded machine. A batch moves
+more bytes per request than one `gh pr view`, since bodies are included.
+PRs whose refresh phases differ, such as after a forced refresh of one
+session, go out as separate batches rather than being pulled forward.
+## Busy shells stop blocking on Holder facts (2026-09-28)
+
+`fleetbench` with four sessions draining colored logs showed the aggregate
+throughput of four sessions no higher than one (≈73 vs ≈79 MB/s). A 5 s stack
+sample of the Engine put 30% of every session pump's time inside
+`sample_held_pty_facts` → `HolderClient::stat`: after every output frame from a
+shell session, the pump made a synchronous round trip to the Holder manager,
+which every local session shares, to read the foreground process and the
+termios secret-input state.
+
+While output streams, the pump now samples at most every 100 ms. The settle
+path after output stops is unchanged and still samples at once, which is when
+a password prompt or a new foreground program becomes visible. Agent sessions
+already skipped most samples; plain terminals running builds or `cat` paid
+them all.
+
+After the change the same sample shows 0% of pump time in Holder stats. Wall
+throughput could not be compared reliably: the machine was shared with
+unrelated Rust builds (load average 34–77), and alternating runs swung more
+than the effect. Engine CPU per 4 × 32 MiB run went from 2.07–2.42 s to
+1.99–2.20 s. No throughput number is claimed.
 
 ## Sidebar rows re-render only when they change (2026-09-28)
 
