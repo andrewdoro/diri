@@ -9,6 +9,8 @@
 //! - its props changed;
 //! - it is renaming, its title is settling, or it is growing in or collapsing
 //!   out (`row_motion`);
+//! - it is fading out of hover (`hover_linger`, a prop that changes each
+//!   frame of the fade);
 //! - it was notified itself (the activity tick notifies only working rows);
 //! - the sidebar was notified for anything other than a store publication or
 //!   one of its own animation ticks (`rows_stale`, a safety net for inputs the
@@ -53,6 +55,9 @@ pub(in crate::sidebar) struct SessionRowProps {
     pub(super) settling: bool,
     /// The held-⌘ shortcut hint's opacity, for rows that have a shortcut.
     pub(super) held_hint: f32,
+    /// How much of the hover fill a row the pointer just left still wears.
+    /// It changes every frame of the fade, so only fading rows re-render.
+    pub(super) hover_linger: f32,
 }
 
 pub(in crate::sidebar) struct SessionRowView {
@@ -143,6 +148,7 @@ impl Sidebar {
             } else {
                 0.0
             },
+            hover_linger: self.session_hover_linger(id),
         }
     }
 

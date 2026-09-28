@@ -380,6 +380,7 @@ impl Sidebar {
             (tabs, selected, custom, marks)
         };
         let reduce_motion = cx.reduce_motion();
+        self.observe_tab_hover(&tabs.sessions, selected.as_ref(), reduce_motion);
         if self.tab_shift.settled.get() {
             self.tab_shift.deltas.clear();
         }
@@ -522,6 +523,7 @@ impl Sidebar {
             custom_ordering,
             held_hint,
             pill_drawn,
+            hover_linger,
             ..
         } = *props;
         let id = id.clone();
@@ -612,6 +614,11 @@ impl Sidebar {
             // The shared pill layer draws the selection; a tab fills itself
             // only while that layer stands down.
             .glass_pill(colors, active && !pill_drawn)
+            // The tab the pointer just left keeps a fading fill; the
+            // declarative hover below still lights the new tab at once.
+            .when(!active && hover_linger > 0.0, |row| {
+                row.bg(colors.primary.alpha(0.06 * hover_linger))
+            })
             .hover(move |row| {
                 if active {
                     row
@@ -619,6 +626,23 @@ impl Sidebar {
                     row.bg(colors.primary.alpha(0.06))
                 }
             })
+            .on_hover(cx.listener({
+                let id = id.clone();
+                move |this, hovering: &bool, _, cx| {
+                    this.hover_trails.tabs.hover_event(
+                        &id,
+                        *hovering,
+                        Instant::now(),
+                        cx.reduce_motion(),
+                    );
+                    // Only a leave has something new to paint: the fade's
+                    // first frame. The fading tab's `hover_linger` prop
+                    // changes, so only it re-renders.
+                    if !*hovering && this.hover_trails.tabs.is_fading() {
+                        this.notify_without_staling_rows(cx);
+                    }
+                }
+            }))
             .when(custom_ordering, |row| {
                 let drag_id = id.clone();
                 let drag_entity = entity.clone();
@@ -877,7 +901,7 @@ impl Sidebar {
         let strip = self.horizontal_strip(available_width, trailing, cx);
         self.schedule_activity_tick(cx);
         self.schedule_title_tick();
-        if self.title_tick {
+        if self.title_tick || self.hover_trails.is_fading() {
             // Notifies the sidebar, not the caller: `RootView` read it to
             // paint the strip, so the strip repaints on the display link.
             self.request_motion_frame(window, cx);

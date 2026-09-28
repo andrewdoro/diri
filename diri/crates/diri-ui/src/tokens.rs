@@ -619,6 +619,11 @@ impl Motion {
     pub const OVERLAY_FADE: f32 = 0.12;
     /// The way out of an overlay fade: shorter, because the hand has moved on.
     pub const OVERLAY_FADE_OUT: f32 = 0.08;
+    /// Hover-out on list rows and tabs. Hover-in is instant; only the row the
+    /// pointer just left keeps a fading fill this long, so a sweep reads as a
+    /// soft trail rather than rows blinking. Short enough that the trail never
+    /// looks like a second, lagging cursor.
+    pub const HOVER_LINGER: f32 = 0.11;
     /// Sidebar and inspector open/close. Longer than the fades above because
     /// the seam moves a whole panel width and pushes the workbench with it.
     pub const SEAM_SLIDE_MS: u64 = 260;

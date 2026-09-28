@@ -1,6 +1,7 @@
 mod accounts;
 mod arrivals;
 mod filter;
+mod hover_linger;
 #[cfg(test)]
 mod hue_tests;
 mod lineage;
@@ -721,6 +722,7 @@ pub struct Sidebar {
     /// Sessions that arrive grow into the list and ones that leave collapse
     /// out of it, sampled on the title clock.
     row_motion: super::row_motion::RowMotion<SessionId, crate::store::SidebarRow>,
+    hover_trails: hover_linger::HoverTrails,
 }
 
 /// The sidebar state that asked for a native folder pick, captured when the
@@ -886,6 +888,7 @@ impl Sidebar {
             title_now: Instant::now(),
             title_tick: false,
             row_motion: Default::default(),
+            hover_trails: hover_linger::HoverTrails::default(),
         };
         sidebar.ui.preview_account = preview;
         sidebar._self_observer = Some(cx.observe_self(|sidebar, _| sidebar.note_self_notified()));
@@ -3431,7 +3434,7 @@ impl Sidebar {
     }
 
     /// Asks for the next frame of a finite motion (rows, disclosures, title
-    /// settles, number flows). Each is sampled from elapsed time, so the
+    /// settles, number flows, hover-out trails). Each is sampled from elapsed time, so the
     /// display link paces it: 120 Hz on ProMotion, where the 16 ms timers
     /// this replaces beat against vsync and landed at 40 to 53 fps.
     ///
@@ -3448,7 +3451,11 @@ impl Sidebar {
                 cx.background_executor().timer(MOTION_BACKSTOP).await;
                 let _ = this.update(cx, |this, cx| {
                     this.motion_backstop = None;
-                    if this.disclosure_tick || this.title_tick || this.number_flows.running() {
+                    if this.disclosure_tick
+                        || this.title_tick
+                        || this.number_flows.running()
+                        || this.hover_trails.is_fading()
+                    {
                         this.notify_without_staling_rows(cx);
                     }
                 });
@@ -3622,6 +3629,7 @@ impl Sidebar {
             ref filter,
             renaming,
             held_hint,
+            hover_linger,
             ..
         } = *props;
         let drop = drop.clone();
@@ -3674,7 +3682,11 @@ impl Sidebar {
         } else {
             RowFill::Clear
         };
-        let fill_color = fill.color(colors);
+        let mut fill_color = fill.color(colors);
+        if fill == RowFill::Clear {
+            // The row the pointer just left keeps a fading hover fill.
+            fill_color.a = RowFill::Hover.color(colors).a * hover_linger;
+        }
 
         if renaming {
             return div()
@@ -4092,17 +4104,18 @@ impl Sidebar {
         });
 
         // A selection fill arrives on ROW_SELECT instead of switching between
-        // two frames. Hover deliberately does not animate: hover should feel
-        // like the cursor is touching the row, and a highlight that ramps in
-        // reads as lag rather than as polish.
+        // two frames. Hover-in deliberately does not animate: hover should
+        // feel like the cursor is touching the row, and a highlight that
+        // ramps in reads as lag rather than as polish. Hover-out lingers for
+        // HOVER_LINGER through the view's hover trail (see `hover_linger`),
+        // which is already folded into `fill_color` above.
         //
         // Cost drives the same split. A running animation asks for a window
         // frame per tick, and a window frame repaints everything in it --
-        // live terminal grids included. Hover changes on every row a pointer
-        // crosses, so animating it would schedule repaints for the length of
-        // a sweep down the sidebar; selection changes once per click. An
-        // unselected row therefore carries no animation state at all, rather
-        // than animating an invisible zero-alpha fill.
+        // live terminal grids included. The trail's frames are bounded to
+        // one short fade after the pointer last crossed a row, and stop the
+        // moment it lapses; an unselected row carries no per-row animation
+        // state at all, rather than animating an invisible zero-alpha fill.
         if !selected && !multi {
             return row.into_any_element();
         }
@@ -4306,7 +4319,9 @@ impl Sidebar {
         } else if hovered || focused {
             RowFill::Hover.color(colors)
         } else {
-            RowFill::Clear.color(colors)
+            let mut trail = RowFill::Hover.color(colors);
+            trail.a *= self.session_hover_linger(&id);
+            trail
         };
         let row_session = session.clone();
         let revive_id = id.clone();
@@ -8296,6 +8311,7 @@ impl Sidebar {
         {
             self.dismiss_hover_card(cx);
         }
+        self.observe_session_hover(&visible_set, selected.as_ref(), cx.reduce_motion());
         self.shortcut_ranks.clear();
         let session_count = visible.len();
         for (index, id) in visible.iter().enumerate() {
@@ -8382,7 +8398,7 @@ impl Sidebar {
         self.disclosure_tick = self.disclosure_animating;
         self.schedule_activity_tick(cx);
         self.schedule_title_tick();
-        if self.disclosure_tick || self.title_tick {
+        if self.disclosure_tick || self.title_tick || self.hover_trails.is_fading() {
             self.request_motion_frame(window, cx);
         }
 

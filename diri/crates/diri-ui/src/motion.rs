@@ -66,6 +66,24 @@ impl Spring {
 impl Motion {
     /// Row selection and focus fills, as a `Duration` an animation can take.
     pub const ROW_SELECT_TIME: Duration = Duration::from_millis((Self::ROW_SELECT * 1000.0) as u64);
+
+    /// Hover-out fade, as a `Duration` (see [`crate::hover_trail`]).
+    pub const HOVER_LINGER_TIME: Duration =
+        Duration::from_millis((Self::HOVER_LINGER * 1000.0) as u64);
+
+    /// Stiffness of the hover-out curve. Much looser than the seam's: at 7 the
+    /// fill is mostly gone by the midpoint and the trail reads as a blink
+    /// again; at 3 about half the fill remains halfway through, which is what
+    /// makes the trail visible at all in ~110 ms.
+    const HOVER_LINGER_STIFFNESS: f32 = 3.0;
+
+    /// Fraction of the hover fill still showing `progress` (0..1) of the way
+    /// through a hover-out. Starts at exactly 1 and ends at exactly 0, so
+    /// neither end of the fade shows a step.
+    #[must_use]
+    pub fn hover_linger(progress: f32) -> f32 {
+        1.0 - settle_with(Self::HOVER_LINGER_STIFFNESS, progress)
+    }
 }
 
 #[cfg(test)]
@@ -139,5 +157,14 @@ mod tests {
     #[test]
     fn the_token_duration_survives_the_conversion_to_time() {
         assert_eq!(Motion::ROW_SELECT_TIME, Duration::from_millis(160));
+        assert_eq!(Motion::HOVER_LINGER_TIME, Duration::from_millis(110));
+    }
+
+    #[test]
+    fn hover_linger_leaves_from_full_and_ends_clear() {
+        assert_eq!(Motion::hover_linger(0.0), 1.0);
+        assert_eq!(Motion::hover_linger(1.0), 0.0);
+        let mid = Motion::hover_linger(0.5);
+        assert!((0.3..0.6).contains(&mid), "{mid}");
     }
 }
