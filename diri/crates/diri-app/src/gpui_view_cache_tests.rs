@@ -323,8 +323,15 @@ fn a_scene_gives_back_capacity_a_single_large_frame_left_behind() {
         scene.quads.extend(std::iter::repeat_n(quad, 10));
         scene.clear();
     }
-    assert_eq!(scene.quads.capacity(), peak, "not before two seconds of sparse frames");
+    assert_eq!(
+        scene.quads.capacity(),
+        peak,
+        "not before two seconds of sparse frames"
+    );
     scene.quads.extend(std::iter::repeat_n(quad, 10));
     scene.clear();
-    assert!(scene.quads.capacity() <= 64, "shrunk to about twice the last frame");
+    assert!(
+        scene.quads.capacity() <= 64,
+        "shrunk to about twice the last frame"
+    );
 }
