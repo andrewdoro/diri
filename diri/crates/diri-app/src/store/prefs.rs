@@ -218,6 +218,9 @@ pub struct Prefs {
     pub follow_system_theme: bool,
     pub terminal_font_size: f32,
     pub terminal_copy_on_select: bool,
+    /// Open a terminal URL on a plain click. When off, links still open with
+    /// Command- or Control-click.
+    pub terminal_open_links_on_click: bool,
     pub terminal_hide_pointer: bool,
     pub terminal_paste_protection: bool,
     /// Whether the window blurs the desktop behind it. Field-level default so
@@ -307,6 +310,7 @@ impl Default for Prefs {
             follow_system_theme: false,
             terminal_font_size: 13.0,
             terminal_copy_on_select: false,
+            terminal_open_links_on_click: true,
             terminal_hide_pointer: true,
             terminal_paste_protection: false,
             window_material: WindowMaterial::Glass,
