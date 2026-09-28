@@ -1,0 +1,49 @@
+name: Telemetry
+
+# The ingest Worker (and the diri-debug CLI stacked on it) are TypeScript and
+# JavaScript beside the Rust workspace. Like the website they get their own
+# path-filtered workflow, so the Rust gate in ci.yml stays untouched.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'telemetry/**'
+      - '.github/workflows/telemetry.yml'
+  pull_request:
+    paths:
+      - 'telemetry/**'
+      - '.github/workflows/telemetry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telemetry-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  worker:
+    name: Telemetry Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: telemetry/worker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      # package.json pins the pnpm version through packageManager.
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm run typecheck
+      - name: Test
+        run: pnpm test
+      - name: Bundle (dry run, no Cloudflare account)
+        run: pnpm exec wrangler deploy --dry-run --outdir .wrangler/dry-run

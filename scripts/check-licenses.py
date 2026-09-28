@@ -123,6 +123,18 @@ def main() -> int:
                 f"npm dependency {name} declares {package['license']}, policy says {entry['license']}"
             )
 
+    # The telemetry Worker and CLI ship nothing from npm: the Worker bundle is
+    # our own source and the CLI is zero-dependency. Their devDependencies
+    # (wrangler, vitest, TypeScript) are build and test tooling that is never
+    # distributed, so they are not inventoried; a runtime dependency would be.
+    for manifest in sorted((ROOT / "telemetry").glob("*/package.json")):
+        runtime = json.loads(manifest.read_text()).get("dependencies") or {}
+        for name in sorted(runtime):
+            failures.append(
+                f"{manifest.relative_to(ROOT)} adds runtime npm dependency {name}; "
+                "review its license and add it to manually_reviewed_non_rust"
+            )
+
     for ecosystem, name in sorted(set(reviewed) - found_non_rust):
         failures.append(f"stale {ecosystem} license review entry for {name}")
 
