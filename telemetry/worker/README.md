@@ -114,22 +114,22 @@ The free-plan limits used below (check the current pricing pages before relying 
 
 Assumptions for one install with Diri open 8 hours a day:
 
-- 6 uploads per hour gives about 48 batches per day.
-- Health and metrics from 3 or 4 processes plus events come to roughly 5,000 records, about 1.5 MB raw or about 150 KB gzipped per day.
+- Routine uploads are hourly (`ROUTINE_INTERVAL` in `diri-telemetry`'s `upload.rs`); incidents upload within a minute. With one upload at start and a couple of incidents that is about 10 batches per day.
+- Health and metrics from 3 or 4 processes plus events come to roughly 5,000 records, about 1.5 MB raw or about 150 KB gzipped per day. Uploading less often doesn't change this, only how it's split into batches.
 
 | Resource | Per install per day | Free limit | Installs it covers |
 |---|---|---|---|
-| Worker requests | 48 | 100,000/day | ~2,000 |
-| R2 PUT (Class A) | 48 | ~33,000/day | ~690 |
-| R2 storage, 30 days | ~4.5 MB | 10 GB | ~2,200 |
-| D1 rows written (≈5/batch incl. indexes) | ~240 | 100,000/day | **~415** |
-| D1 rows read (rate-limit count ≤ 30/batch at this rate) | ~1,500 | 5M/day | ~3,300 |
+| Worker requests | ~10 | 100,000/day | ~10,000 |
+| R2 PUT (Class A) | ~10 | ~33,000/day | ~3,300 |
+| R2 storage, 30 days | ~4.5 MB | 10 GB | **~2,200** |
+| D1 rows written (≈5/batch incl. indexes) | ~50 | 100,000/day | **~2,000** |
+| D1 rows read (rate-limit count + upserts, ≈10/batch) | ~100 | 5M/day | ~50,000 |
 
-So the free tier carries about **400 daily-active installs**, and D1 row writes run out first. Admin queries and the daily sweep cost a few thousand reads and are negligible.
+So the free tier carries about **2,000 daily-active installs**, with D1 row writes and R2 storage running out at about the same point. Batch count is the lever for writes, PUTs and requests; retention is the lever for storage (`RETENTION_DAYS` of 14 roughly doubles it). Admin queries and the daily sweep cost a few thousand reads and are negligible.
 
 Past that, Workers Paid is $5/month. It includes 10M requests, 50M D1 rows written and 25B D1 rows read per month, and 30 s of CPU per request. R2 beyond its free tier costs $4.50 per million PUTs and $0.015 per GB-month, which is still cents at a few thousand installs.
 
-**CPU.** A routine 10-minute batch (about 100 KB raw) takes well under 1 ms to scan. A full 4 MiB backlog batch (about 32k records) took about 15–25 ms on an M-series Mac in Node, about 5 ms of that in gzip. That is over the free plan's 10 ms, so the free plan may kill a large backlog upload (error 1102). A killed upload returns 5xx and the client retries it on every cycle, and a batch that can never succeed that way blocks the uploads queued behind it. Either use Workers Paid, or lower `BATCH_RAW_BYTES` in `upload.rs` to 1 MiB (about 5 ms) to stay safely on the free plan.
+**CPU.** The client caps a batch at 1 MiB raw (`BATCH_RAW_BYTES`), about 8k records, which scans in about 5 ms, inside the free plan's 10 ms. An hourly batch is typically around 200 KB. (A 4 MiB batch measured 15–25 ms, which is why the cap is 1 MiB: a batch the free plan kills with error 1102 returns 5xx and would be retried every cycle.)
 
 ## Develop
 
