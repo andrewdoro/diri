@@ -60,7 +60,7 @@ pub(in crate::sidebar) struct SessionRowView {
     pub(super) renders: usize,
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 impl SessionRowView {
     pub(super) fn held_hint_for_test(&self) -> f32 {
         self.props.held_hint
