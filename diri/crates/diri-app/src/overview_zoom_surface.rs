@@ -3,28 +3,60 @@
 //! `crate::overview_zoom`; this file only maps it onto the store and onto
 //! elements.
 //!
-//! The calm overview's cards are the pane itself at a smaller font in the
-//! pane's own aspect, so nothing is swapped mid-flight: the flying element is
-//! the session's terminal drawn through the same card builder the grid uses,
-//! in an interpolated frame at an interpolated (ladder-snapped) font size,
-//! with the card's title strip and chrome fading in. At progress 1 it is the
-//! card, pixel for pixel.
+//! The flight is a picture, not a layout: when it starts, the page (or, on
+//! the way back, the resting card) is captured as a bitmap from the last
+//! drawn frame, and only that bitmap flies, scaled by one factor about the
+//! terminal grid, so no text re-shapes and no row appears or disappears on
+//! the way. The card's own rendering cross-fades in over the last part of
+//! the flight, so at progress 1 the screen is the resting card itself.
 use super::overview_calm::miniature_box;
 use super::*;
 use crate::overview_zoom::{
-    CardPose, Grip, Landing, OverviewZoom, ZoomRect, card_pose, grid_alpha, page_frame,
+    GridAnchor, Grip, Landing, OverviewZoom, ZoomRect, card_fade, card_snap, chrome_fade,
+    chrome_pose, grid_alpha, live_fade, mip_blend, page_frame, snap_frame, snapshot_rect,
 };
 use crate::terminal_pane::TerminalViewport;
 use diri_term::metrics::CellMetrics;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// The pane's grid inset below its title bar and inside its left border:
-/// `render_grid_and_overlays` pads the grid 12 pt sideways and 2 pt on top.
+/// The pane's grid inset below its title bar: `render_grid_and_overlays`
+/// pads the grid 12 pt sideways, 2 pt on top and 10 pt below.
 const PAGE_GRID_LEFT: f32 = 12.0;
-const PAGE_GRID_TOP: f32 = 1.0;
-/// The pane's grid bottom padding, for a grid that overflows and anchors low.
-const PAGE_GRID_MIN_BOTTOM: f32 = 9.0;
+const PAGE_GRID_TOP: f32 = 2.0;
+const PAGE_GRID_BOTTOM: f32 = 10.0;
+/// Mip levels captured with a snapshot: enough for the page to shrink 8x
+/// with every painted level at most 2x minified.
+const SNAPSHOT_LEVELS: usize = 4;
+
+/// What the page's picture was taken of, so a later flight home can tell
+/// whether it still shows the page as it is.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PageKey {
+    page: ZoomRect,
+    header: f32,
+    scale: f32,
+    /// The mirrored screen's buffer and its generation.
+    screen: Option<(usize, u64)>,
+}
+
+/// A bitmap in flight: the page as it looked when the pinch began, or the
+/// resting card when a card is pinched open without a fresh page picture.
+pub(super) struct ZoomSnapshot {
+    pub(super) session: SessionId,
+    /// Mip levels, largest first, ready for `paint_image`.
+    levels: Vec<Arc<gpui::RenderImage>>,
+    /// The captured region's size in points.
+    size: (f32, f32),
+    /// The terminal grid inside the captured region.
+    anchor: GridAnchor,
+    /// `Page`: a picture of the page; `Overview`: of the resting card.
+    pub(super) source: Landing,
+    key: PageKey,
+    /// How long the capture took, for the frame budget (read by the tests).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) cost: std::time::Duration,
+}
 
 /// Everything the zoom needs besides the pure state machine.
 #[derive(Default)]
@@ -44,9 +76,35 @@ pub(super) struct ZoomPresentation {
     /// This transition cross-fades instead of flying: Reduce Motion, a layout
     /// other than the mini windows, or a destination with no card.
     pub(super) crossfade: bool,
+    /// The bitmap the current flight paints.
+    pub(super) snapshot: Option<Rc<ZoomSnapshot>>,
+    /// The last picture of the page, kept while the overview is open so a
+    /// card pinched back open grows from sharp pixels instead of an
+    /// upscaled card. Only valid while the page and its screen are unchanged.
+    pub(super) page_cache: Option<Rc<ZoomSnapshot>>,
+    /// Images no longer painted, to leave the sprite atlas on the next render.
+    retired: Vec<Arc<gpui::RenderImage>>,
 }
 
 impl ZoomPresentation {
+    fn release(&mut self, snapshot: Option<Rc<ZoomSnapshot>>) {
+        if let Some(snapshot) = snapshot
+            && let Ok(snapshot) = Rc::try_unwrap(snapshot)
+        {
+            self.retired.extend(snapshot.levels);
+        }
+    }
+
+    pub(super) fn set_snapshot(&mut self, snapshot: Option<Rc<ZoomSnapshot>>) {
+        let old = std::mem::replace(&mut self.snapshot, snapshot);
+        self.release(old);
+    }
+
+    pub(super) fn set_page_cache(&mut self, snapshot: Option<Rc<ZoomSnapshot>>) {
+        let old = std::mem::replace(&mut self.page_cache, snapshot);
+        self.release(old);
+    }
+
     /// Drop measured cards; the next painted grid measures them again.
     pub(super) fn forget_cards(&self) {
         self.cards.borrow_mut().clear();
@@ -95,8 +153,10 @@ impl SessionSurfaces {
             Landing::Page
         });
         self.zoom.grip = None;
+        self.zoom.set_snapshot(None);
         if !visible {
             self.zoom.session = None;
+            self.zoom.set_page_cache(None);
         }
         if was_active {
             cx.notify();
@@ -184,6 +244,14 @@ impl SessionSurfaces {
         }
         let slot = selected.as_ref().and_then(|id| self.zoom_slot(id, window));
         self.zoom.crossfade = !self.zoom_can_fly(cx) || slot.is_none();
+        if let (Some(id), Some(slot), false) = (&selected, slot, self.zoom.crossfade) {
+            let taken = if visible {
+                self.take_page_snapshot(id, window)
+            } else {
+                self.take_return_snapshot(id, slot, window)
+            };
+            self.zoom.crossfade = !taken;
+        }
         if visible {
             self.zoom.zoom.reset(Landing::Page);
             if let Some(id) = selected {
@@ -301,6 +369,22 @@ impl SessionSurfaces {
         } else {
             Landing::Page
         };
+        let has_picture = self
+            .zoom
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.session == session);
+        if let (Some(slot), false) = (slot, self.zoom.crossfade)
+            && !(grabbing_flight && has_picture)
+        {
+            // Take the picture before anything moves: the last frame is
+            // still exactly what is on screen.
+            let taken = match at_rest {
+                Landing::Page => self.take_page_snapshot(&session, window),
+                Landing::Overview => self.take_return_snapshot(&session, slot, window),
+            };
+            self.zoom.crossfade = !taken;
+        }
         if !grabbing_flight {
             // At rest the presentation is wherever the store says it is.
             self.zoom.zoom.reset(at_rest);
@@ -377,13 +461,197 @@ impl SessionSurfaces {
     /// air. A resting or finger-driven zoom schedules nothing.
     pub(super) fn advance_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = cx.background_executor().now();
-        if self.zoom.zoom.advance(now) == Some(Landing::Page) {
-            self.zoom.session = None;
-            self.zoom.grip = None;
+        match self.zoom.zoom.advance(now) {
+            Some(Landing::Page) => {
+                self.zoom.session = None;
+                self.zoom.grip = None;
+                self.zoom.set_snapshot(None);
+                // The live pane is back; its picture goes stale from here.
+                self.zoom.set_page_cache(None);
+            }
+            Some(Landing::Overview) => self.zoom.set_snapshot(None),
+            None => {}
         }
         if self.zoom.zoom.is_flying() {
             window.request_animation_frame();
         }
+    }
+
+    /// Nothing shows the zoom any more: let its pictures go, and take the
+    /// ones already let go out of the sprite atlas.
+    pub(super) fn settle_zoom_images(&mut self, overview_visible: bool, window: &mut Window) {
+        if !self.zoom.zoom.is_active() {
+            self.zoom.set_snapshot(None);
+            if !overview_visible {
+                self.zoom.set_page_cache(None);
+            }
+        }
+        for image in self.zoom.retired.drain(..) {
+            let _ = window.drop_image(image);
+        }
+    }
+
+    fn page_key(&self, id: &SessionId, window: &Window) -> PageKey {
+        PageKey {
+            page: self.zoom.page,
+            header: self.zoom.page_header,
+            scale: window.scale_factor(),
+            screen: self.card_terminal(id).map(|element| {
+                let buffer = element.buffer();
+                let generation = buffer.read().map_or(u64::MAX, |buffer| buffer.generation());
+                (Arc::as_ptr(&buffer) as *const () as usize, generation)
+            }),
+        }
+    }
+
+    /// The page's grid corner and cell width, relative to the page.
+    fn page_anchor(&self, window: &Window) -> GridAnchor {
+        let size = self
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .terminal_font_size;
+        let metrics = CellMetrics::measure(
+            window.text_system(),
+            &crate::fonts::terminal_font(),
+            px(size),
+        );
+        GridAnchor {
+            x: PAGE_GRID_LEFT,
+            y: self.zoom.page_header + PAGE_GRID_TOP,
+            cell: f32::from(metrics.cell_width),
+        }
+    }
+
+    /// The card's grid corner and cell width, relative to a card at `slot`:
+    /// inside the one-point border, below the strip, anchored to the bottom
+    /// of the miniature the way `miniature_box` paints it.
+    fn card_anchor(&self, id: &SessionId, slot: ZoomRect, window: &Window) -> GridAnchor {
+        let geometry = self.calm_card_geometry(window);
+        let pose = geometry.pose;
+        let metrics = CellMetrics::measure(window.text_system(), &geometry.font, px(pose.font));
+        let rows = self
+            .card_terminal(id)
+            .map_or_else(|| self.calm_fleet_rows(), |element| element.grid_rows())
+            .max(1);
+        let mini = slot.height - pose.strip - 2.0;
+        GridAnchor {
+            x: 1.0 + pose.grid_left,
+            y: 1.0 + pose.strip + mini
+                - pose.grid_bottom
+                - f32::from(metrics.line_height) * f32::from(rows),
+            cell: f32::from(metrics.cell_width),
+        }
+    }
+
+    fn capture(
+        &self,
+        id: &SessionId,
+        region: ZoomRect,
+        anchor: GridAnchor,
+        source: Landing,
+        window: &Window,
+    ) -> Option<Rc<ZoomSnapshot>> {
+        let started = std::time::Instant::now();
+        let bounds = gpui::Bounds::new(
+            point(px(region.x), px(region.y)),
+            gpui::size(px(region.width), px(region.height)),
+        );
+        match window.capture_region(bounds, SNAPSHOT_LEVELS) {
+            Ok(levels) if !levels.is_empty() => {
+                let cost = started.elapsed();
+                Some(Rc::new(ZoomSnapshot {
+                    session: id.clone(),
+                    levels,
+                    size: (region.width, region.height),
+                    anchor,
+                    source,
+                    key: self.page_key(id, window),
+                    cost,
+                }))
+            }
+            // No picture (no renderer, a window with no frame yet): the
+            // transition cross-fades instead of flying.
+            Ok(_) | Err(_) => None,
+        }
+    }
+
+    /// Picture the page as the last frame drew it. The picture stops just
+    /// below the grid's last row: the rest of the pane is its background,
+    /// which the flying card's own fill already paints.
+    fn take_page_snapshot(&mut self, id: &SessionId, window: &Window) -> bool {
+        let page = self.zoom.page;
+        let anchor = self.page_anchor(window);
+        let rows = self
+            .card_terminal(id)
+            .map_or(0, |element| element.grid_rows());
+        let size = self
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .terminal_font_size;
+        let line = f32::from(
+            CellMetrics::measure(
+                window.text_system(),
+                &crate::fonts::terminal_font(),
+                px(size),
+            )
+            .line_height,
+        );
+        let content = anchor.y + line * f32::from(rows) + PAGE_GRID_BOTTOM;
+        let region = ZoomRect {
+            height: if rows > 0 {
+                content.min(page.height)
+            } else {
+                page.height
+            },
+            ..page
+        };
+        let snapshot = self.capture(id, region, anchor, Landing::Page, window);
+        let taken = snapshot.is_some();
+        self.zoom.set_page_cache(snapshot.clone());
+        self.zoom.set_snapshot(snapshot);
+        taken
+    }
+
+    /// Picture for a card growing back into the page: the page's own picture
+    /// if it still shows the page as it is, else the resting card.
+    pub(super) fn take_return_snapshot(
+        &mut self,
+        id: &SessionId,
+        slot: ZoomRect,
+        window: &Window,
+    ) -> bool {
+        let key = self.page_key(id, window);
+        let cached = self
+            .zoom
+            .page_cache
+            .clone()
+            .filter(|cache| cache.session == *id && cache.key == key);
+        if let Some(cached) = cached {
+            self.zoom.set_snapshot(Some(cached));
+            return true;
+        }
+        // Only the miniature below the card's strip: the flying frame draws
+        // its own strip, and a picture of the title would grow to headline
+        // size on the way to the page.
+        let top = 1.0 + self.calm_card_geometry(window).pose.strip;
+        let anchor = self.card_anchor(id, slot, window);
+        let anchor = GridAnchor {
+            y: anchor.y - top,
+            ..anchor
+        };
+        let region = ZoomRect {
+            y: slot.y + top,
+            height: (slot.height - top).max(1.0),
+            ..slot
+        };
+        let snapshot = self.capture(id, region, anchor, Landing::Overview, window);
+        let taken = snapshot.is_some();
+        self.zoom.set_snapshot(snapshot);
+        taken
     }
 
     /// Records where a card painted, for the next frame's flight.
@@ -410,36 +678,6 @@ impl SessionSurfaces {
     /// This card is in flight above the grid, so its place paints nothing.
     pub(super) fn zoom_card_in_flight(&self, id: &SessionId) -> bool {
         self.zoom.session.as_ref() == Some(id) && self.zoom_painting() && !self.zoom.crossfade
-    }
-
-    /// The page's inside at progress 0: its title bar, its font, and its grid
-    /// top-anchored under the title bar the way the pane paints it.
-    fn page_pose(
-        &self,
-        element: Option<&TerminalElement>,
-        font: &gpui::Font,
-        window: &Window,
-    ) -> CardPose {
-        let size = self
-            .store
-            .read()
-            .expect("session store lock poisoned")
-            .preferences()
-            .terminal_font_size;
-        let rows = element.map_or(0, |element| element.grid_rows());
-        let grid_height =
-            f32::from(CellMetrics::measure(window.text_system(), font, px(size)).line_height)
-                * f32::from(rows);
-        // The flying card's area below the strip sits inside a one-point
-        // border, like the card it becomes.
-        let area = self.zoom.page.height - self.zoom.page_header - 2.0;
-        CardPose {
-            strip: self.zoom.page_header,
-            font: size,
-            grid_left: PAGE_GRID_LEFT,
-            grid_bottom: (area - PAGE_GRID_TOP - grid_height).max(PAGE_GRID_MIN_BOTTOM),
-            radius: 0.0,
-        }
     }
 
     pub(super) fn render_overview_zoom(
@@ -493,44 +731,33 @@ impl SessionSurfaces {
             )
         };
         let page = self.zoom.page;
-        let frame = self.zoom_frame(slot);
+        let fingers_frame = self.zoom_frame(slot);
+        // Near the card the picture settles onto the card's own size, so the
+        // card's rendering fades in exactly under it.
+        let frame = snap_frame(
+            fingers_frame,
+            (slot.width, slot.height),
+            card_snap(progress),
+        );
+        let page_scale = self.zoom.zoom.page_scale() * frame.width / fingers_frame.width.max(1.0);
         let geometry = self.calm_card_geometry(window);
-        let element = self.card_terminal(&session.id).cloned();
-        let page_pose = self.page_pose(element.as_ref(), &geometry.font, window);
-        let pose = card_pose(page_pose, geometry.pose, progress);
-        let mini = miniature_box(
-            element.as_ref(),
-            frame.width,
-            (frame.height - pose.strip - 2.0).max(0.0),
-            pose.grid_left,
-            pose.grid_bottom,
-            pose.font,
-            &geometry.font,
-            theme,
-            session.hibernation.is_some(),
-            window,
-        );
-        // The flying page is the card: the same builder the grid uses, at the
-        // pose between the two, so progress 1 paints the resting card itself.
-        let card = self.calm_window_card(
-            &session,
-            pose.strip,
-            pose.radius,
-            progress,
-            focused,
-            mini.into_any_element(),
-            theme,
-            colors,
-            window,
-            cx,
-        );
-        let flying_page = div()
-            .absolute()
-            .left(px(frame.x))
-            .top(px(frame.y))
-            .w(px(frame.width))
-            .h(px(frame.height))
-            .child(card);
+        let fade = card_fade(progress);
+        let snapshot = self
+            .zoom
+            .snapshot
+            .clone()
+            .filter(|snapshot| snapshot.session == session.id);
+        // A picture of the page as it still is needs no hand-over at the
+        // page end; anything else (a card picture, or a page that has since
+        // printed more) fades into the live pane under it on the way home.
+        let current_page = snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.source == Landing::Page && snapshot.key == self.page_key(&session.id, window)
+        });
+        let home = if current_page {
+            1.0
+        } else {
+            live_fade(progress)
+        };
         layer = layer
             // The workbench under the shrinking page is revealed as the
             // overview's desk, never as a second copy of the terminal.
@@ -541,6 +768,7 @@ impl SessionSurfaces {
                     .top(px(page.y))
                     .w(px(page.width))
                     .h(px(page.height))
+                    .opacity(home)
                     .bg(self.calm_desk()),
             )
             .child(
@@ -550,10 +778,144 @@ impl SessionSurfaces {
                     .size_full()
                     .opacity(grid_alpha(progress))
                     .child(grid),
-            )
-            .child(flying_page);
+            );
+        if fade < 1.0 {
+            let (strip, radius) = chrome_pose(self.zoom.page_header, geometry.pose, progress);
+            let backdrop = snapshot.as_ref().map(|snapshot| {
+                let rect = snapshot_rect(
+                    frame,
+                    self.page_anchor(window),
+                    self.card_anchor(&session.id, slot, window),
+                    snapshot.anchor,
+                    snapshot.size,
+                    progress,
+                    page_scale,
+                    slot.width / page.width.max(1.0),
+                );
+                snapshot_layer(snapshot, rect, radius, window.scale_factor())
+            });
+            let mini = div()
+                .flex_none()
+                .w(px(frame.width))
+                .h(px((frame.height - strip - 2.0).max(0.0)));
+            let card = self.calm_window_card(
+                &session,
+                strip,
+                radius,
+                chrome_fade(progress),
+                false,
+                mini.into_any_element(),
+                backdrop,
+                theme,
+                colors,
+                window,
+                cx,
+            );
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .left(px(frame.x))
+                    .top(px(frame.y))
+                    .w(px(frame.width))
+                    .h(px(frame.height))
+                    .opacity(home)
+                    .child(card),
+            );
+        }
+        if fade > 0.0 {
+            // The card's own rendering, at its own size, over the picture.
+            // At progress 1 this is the only thing painted, so the flight
+            // lands as the resting card with no swap.
+            let pose = geometry.pose;
+            let element = self.card_terminal(&session.id).cloned();
+            let mini = miniature_box(
+                element.as_ref(),
+                slot.width,
+                (slot.height - pose.strip - 2.0).max(0.0),
+                pose.grid_left,
+                pose.grid_bottom,
+                pose.font,
+                &geometry.font,
+                theme,
+                session.hibernation.is_some(),
+                window,
+            );
+            let card = self.calm_window_card(
+                &session,
+                pose.strip,
+                pose.radius,
+                1.0,
+                focused,
+                mini.into_any_element(),
+                None,
+                theme,
+                colors,
+                window,
+                cx,
+            );
+            let mut real = div()
+                .absolute()
+                .left(px(frame.x + (frame.width - slot.width) / 2.0))
+                .top(px(frame.y + (frame.height - slot.height) / 2.0))
+                .w(px(slot.width))
+                .h(px(slot.height));
+            if fade < 1.0 {
+                real = real.opacity(fade);
+            }
+            layer = layer.child(real.child(card));
+        }
         // The grid is a picture until the flight lands; clicks mid-flight
         // would act on cards that are still moving.
         layer.child(shield).into_any_element()
     }
+}
+
+/// The snapshot painted at `rect` (window coordinates), blending the two mip
+/// levels that bracket its on-screen size so shrinking text neither aliases
+/// nor pops between levels.
+fn snapshot_layer(
+    snapshot: &ZoomSnapshot,
+    rect: ZoomRect,
+    radius: f32,
+    scale_factor: f32,
+) -> AnyElement {
+    let source_px = snapshot
+        .levels
+        .first()
+        .map_or(0.0, |level| level.size(0).width.0 as f32);
+    let (fine, coarse, mix) =
+        mip_blend(source_px, rect.width * scale_factor, snapshot.levels.len());
+    let bounds = gpui::Bounds::new(
+        point(px(rect.x), px(rect.y)),
+        gpui::size(px(rect.width), px(rect.height)),
+    );
+    let paint = move |image: Arc<gpui::RenderImage>| {
+        gpui::canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let _ = window.paint_image(
+                    bounds,
+                    gpui::Corners::all(px(radius)),
+                    image.clone(),
+                    0,
+                    false,
+                );
+            },
+        )
+        .absolute()
+        .inset_0()
+    };
+    let mut layer = div().absolute().inset_0();
+    if mix > 0.0 {
+        layer = layer.child(paint(snapshot.levels[coarse].clone()));
+    }
+    if mix < 1.0 {
+        let finest = paint(snapshot.levels[fine].clone());
+        layer = if mix > 0.0 {
+            layer.child(div().absolute().inset_0().opacity(1.0 - mix).child(finest))
+        } else {
+            layer.child(finest)
+        };
+    }
+    layer.into_any_element()
 }

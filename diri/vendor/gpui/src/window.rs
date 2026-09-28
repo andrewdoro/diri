@@ -2414,6 +2414,56 @@ impl Window {
             .render_to_image(&self.rendered_frame.scene)
     }
 
+    /// DIRI PATCH (scene region capture): a bitmap of `bounds` as the last
+    /// drawn frame shows it, with `levels` mip levels (largest first), each
+    /// ready to paint with [`Window::paint_image`]. Renders the last frame's
+    /// scene offscreen and reads the region back, so it costs one extra GPU
+    /// frame and a blocking read-back; it never presents or disturbs the next
+    /// frame. The caller owns the images: pass each to [`Window::drop_image`]
+    /// once it is no longer painted, or it stays in the sprite atlas.
+    pub fn capture_region(
+        &self,
+        bounds: Bounds<Pixels>,
+        levels: usize,
+    ) -> anyhow::Result<Vec<Arc<RenderImage>>> {
+        let scale = self.scale_factor();
+        let viewport = self.viewport_size();
+        let device = |value: Pixels, limit: Pixels| {
+            (f32::from(value) * scale)
+                .round()
+                .clamp(0.0, (f32::from(limit) * scale).round()) as i32
+        };
+        let left = device(bounds.origin.x, viewport.width);
+        let top = device(bounds.origin.y, viewport.height);
+        let right = device(bounds.origin.x + bounds.size.width, viewport.width);
+        let bottom = device(bounds.origin.y + bounds.size.height, viewport.height);
+        if right <= left || bottom <= top {
+            anyhow::bail!("capture bounds {bounds:?} are outside the window");
+        }
+        let region = Bounds {
+            origin: point(DevicePixels(left), DevicePixels(top)),
+            size: size(DevicePixels(right - left), DevicePixels(bottom - top)),
+        };
+        let captures =
+            self.platform_window
+                .capture_scene_region(&self.rendered_frame.scene, region, levels)?;
+        captures
+            .into_iter()
+            .map(|capture| {
+                let buffer = image::RgbaImage::from_raw(
+                    capture.size.width.0 as u32,
+                    capture.size.height.0 as u32,
+                    capture.bgra,
+                )
+                .ok_or_else(|| anyhow::anyhow!("captured level has the wrong length"))?;
+                Ok(Arc::new(RenderImage::new(SmallVec::from_elem(
+                    image::Frame::new(buffer),
+                    1,
+                ))))
+            })
+            .collect()
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);

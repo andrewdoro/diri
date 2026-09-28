@@ -1898,6 +1898,22 @@ impl PlatformWindow for MacWindow {
         this.renderer.render_to_image(scene)
     }
 
+    // DIRI PATCH (scene region capture): see `MetalRenderer::capture_scene_region`.
+    fn capture_scene_region(
+        &self,
+        scene: &gpui::Scene,
+        region: gpui::Bounds<gpui::DevicePixels>,
+        levels: usize,
+    ) -> anyhow::Result<Vec<gpui::SceneCapture>> {
+        let mut this = self.0.lock();
+        let viewport = this
+            .renderer
+            .drawable_viewport()
+            .ok_or_else(|| anyhow::anyhow!("capture needs a layer-backed renderer"))?;
+        this.renderer
+            .capture_scene_region(scene, viewport, region, levels)
+    }
+
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
         let mut lock = self.0.lock();
 

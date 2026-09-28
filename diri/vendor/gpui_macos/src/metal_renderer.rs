@@ -767,6 +767,171 @@ impl MetalRenderer {
         }
     }
 
+    /// DIRI PATCH (scene region capture): the window's drawable size, for
+    /// capturing from a layer-backed renderer.
+    pub fn drawable_viewport(&self) -> Option<Size<DevicePixels>> {
+        let drawable = self.layer.as_ref()?.drawable_size();
+        Some(size(
+            (drawable.width.ceil() as i32).into(),
+            (drawable.height.ceil() as i32).into(),
+        ))
+    }
+
+    /// DIRI PATCH (scene region capture): render `scene` into an offscreen
+    /// target of `viewport_size`, copy `region` into a mipmapped texture,
+    /// let the GPU build `levels` box-filtered levels, and read each back as
+    /// BGRA. Nothing is presented; the next frame is untouched.
+    pub fn capture_scene_region(
+        &mut self,
+        scene: &Scene,
+        viewport_size: Size<DevicePixels>,
+        region: Bounds<DevicePixels>,
+        levels: usize,
+    ) -> Result<Vec<gpui::SceneCapture>> {
+        if viewport_size.width.0 <= 0 || viewport_size.height.0 <= 0 {
+            anyhow::bail!("Invalid viewport for capture_scene_region: {viewport_size:?}");
+        }
+        let left = region.origin.x.0.clamp(0, viewport_size.width.0);
+        let top = region.origin.y.0.clamp(0, viewport_size.height.0);
+        let right = (region.origin.x.0 + region.size.width.0).clamp(left, viewport_size.width.0);
+        let bottom = (region.origin.y.0 + region.size.height.0).clamp(top, viewport_size.height.0);
+        let (width, height) = ((right - left) as u64, (bottom - top) as u64);
+        if width == 0 || height == 0 {
+            anyhow::bail!("capture region {region:?} is outside the viewport");
+        }
+        let max_levels = 64 - width.max(height).leading_zeros() as usize;
+        let levels = levels.clamp(1, max_levels);
+
+        let target_descriptor = metal::TextureDescriptor::new();
+        target_descriptor.set_width(viewport_size.width.0 as u64);
+        target_descriptor.set_height(viewport_size.height.0 as u64);
+        target_descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        target_descriptor.set_usage(metal::MTLTextureUsage::RenderTarget);
+        target_descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+        let target = self.device.new_texture(&target_descriptor);
+
+        let mip_descriptor = metal::TextureDescriptor::new();
+        mip_descriptor.set_width(width);
+        mip_descriptor.set_height(height);
+        mip_descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        mip_descriptor.set_mipmap_level_count(levels as u64);
+        mip_descriptor.set_usage(metal::MTLTextureUsage::ShaderRead);
+        mip_descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+        let mips = self.device.new_texture(&mip_descriptor);
+
+        loop {
+            let mut instance_buffer = self
+                .instance_buffer_pool
+                .lock()
+                .acquire(&self.device, self.is_unified_memory);
+            let command_buffer =
+                self.draw_primitives_to_texture(scene, &mut instance_buffer, &target, viewport_size);
+            match command_buffer {
+                Ok(command_buffer) => {
+                    let instance_buffer_pool = self.instance_buffer_pool.clone();
+                    let instance_buffer = Cell::new(Some(instance_buffer));
+                    let block = ConcreteBlock::new(move |_| {
+                        if let Some(instance_buffer) = instance_buffer.take() {
+                            instance_buffer_pool.lock().release(instance_buffer);
+                        }
+                    });
+                    let block = block.copy();
+                    command_buffer.add_completed_handler(&block);
+
+                    let blit = command_buffer.new_blit_command_encoder();
+                    blit.copy_from_texture(
+                        &target,
+                        0,
+                        0,
+                        metal::MTLOrigin {
+                            x: left as u64,
+                            y: top as u64,
+                            z: 0,
+                        },
+                        metal::MTLSize {
+                            width,
+                            height,
+                            depth: 1,
+                        },
+                        &mips,
+                        0,
+                        0,
+                        metal::MTLOrigin { x: 0, y: 0, z: 0 },
+                    );
+                    if levels > 1 {
+                        blit.generate_mipmaps(&mips);
+                    }
+                    // The GPU lays every level out linearly in one buffer, so
+                    // reading back is a plain copy instead of a CPU detile.
+                    let dims: Vec<(u64, u64, u64)> = (0..levels)
+                        .scan(0u64, |offset, level| {
+                            let w = (width >> level).max(1);
+                            let h = (height >> level).max(1);
+                            let at = *offset;
+                            *offset += w * h * 4;
+                            Some((w, h, at))
+                        })
+                        .collect();
+                    let total = dims.last().map_or(0, |(w, h, at)| at + w * h * 4);
+                    let options = if self.is_unified_memory {
+                        MTLResourceOptions::StorageModeShared
+                    } else {
+                        MTLResourceOptions::StorageModeManaged
+                    };
+                    let readback = self.device.new_buffer(total, options);
+                    for (level, (w, h, at)) in dims.iter().enumerate() {
+                        blit.copy_from_texture_to_buffer(
+                            &mips,
+                            0,
+                            level as u64,
+                            metal::MTLOrigin { x: 0, y: 0, z: 0 },
+                            metal::MTLSize {
+                                width: *w,
+                                height: *h,
+                                depth: 1,
+                            },
+                            &readback,
+                            *at,
+                            w * 4,
+                            w * h * 4,
+                            metal::MTLBlitOption::empty(),
+                        );
+                    }
+                    if !self.is_unified_memory {
+                        blit.synchronize_resource(&readback);
+                    }
+                    blit.end_encoding();
+                    command_buffer.commit();
+                    command_buffer.wait_until_completed();
+
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(readback.contents() as *const u8, total as usize)
+                    };
+                    let captures: Vec<gpui::SceneCapture> = dims
+                        .iter()
+                        .map(|(w, h, at)| gpui::SceneCapture {
+                            size: size(DevicePixels(*w as i32), DevicePixels(*h as i32)),
+                            bgra: bytes[*at as usize..(at + w * h * 4) as usize].to_vec(),
+                        })
+                        .collect();
+                    return Ok(captures);
+                }
+                Err(err) => {
+                    log::error!(
+                        "failed to capture: {}. retrying with larger instance buffer size",
+                        err
+                    );
+                    let mut instance_buffer_pool = self.instance_buffer_pool.lock();
+                    let buffer_size = instance_buffer_pool.buffer_size;
+                    if buffer_size >= 256 * 1024 * 1024 {
+                        anyhow::bail!("instance buffer size grew too large: {}", buffer_size);
+                    }
+                    instance_buffer_pool.reset(buffer_size * 2);
+                }
+            }
+        }
+    }
+
     /// Renders a scene to an image without requiring a window or CAMetalLayer.
     ///
     /// This is the primary method for headless rendering. It creates an offscreen
@@ -1953,6 +2118,17 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+
+    fn capture_scene_region(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        region: Bounds<DevicePixels>,
+        levels: usize,
+    ) -> anyhow::Result<Vec<gpui::SceneCapture>> {
+        self.renderer
+            .capture_scene_region(scene, size, region, levels)
     }
 }
 

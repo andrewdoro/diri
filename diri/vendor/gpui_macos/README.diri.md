@@ -39,3 +39,14 @@ onto the default button when an alert has only a default and a Cancel
 button. Upstream leaves focus on Cancel there, and newer macOS routes Return
 to the focused button, so Return cancelled a "Close / Cancel" alert instead
 of closing. Three-button alerts keep upstream's focus on the middle button.
+
+The scene capture patch (`MetalRenderer::capture_scene_region`, used by
+`MacWindow::capture_scene_region` and `MetalHeadlessRenderer`) implements
+GPUI's `Window::capture_region` (see `vendor/gpui/DIRI_PATCHES.md` section 3).
+It re-renders the last frame's scene into a transient private offscreen
+target the size of the drawable (it never touches the layer's drawables or
+presents), blits the requested region into a private mipmapped texture,
+lets the GPU generate the mip levels, copies every level linearly into one
+shared buffer, and waits for that one command buffer. Reading back is then a
+plain copy rather than a CPU detile of a managed texture. Nothing is cached
+between captures, so it adds no resident memory.

@@ -394,13 +394,11 @@ pub(crate) fn grid_alpha(progress: f32) -> f32 {
     Motion::SETTLE.settle((progress * 1.25).clamp(0.0, 1.0))
 }
 
-/// The inside of a card at one end of the flight, relative to the card's
-/// frame: the title strip above the grid, the terminal font, and where the
-/// grid sits inside the area below the strip.
+/// The mini-window card's inside, relative to the card's frame: the title
+/// strip above the grid, the terminal font, and where the grid sits inside
+/// the area below the strip.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CardPose {
-    /// Height of the title region: the pane's title bar (or none under the
-    /// horizontal tabs) on the page, the card's own strip in the grid.
     pub strip: f32,
     pub font: f32,
     /// Distance from the left edge of the area below the strip to the grid.
@@ -410,31 +408,153 @@ pub(crate) struct CardPose {
     pub radius: f32,
 }
 
-/// Snap to the miniatures' font ladder so the flying grid always paints a
-/// font size a card could paint, and lands on the card's size exactly.
-pub(crate) fn snap_font(size: f32) -> f32 {
-    ((size / FONT_STEP).round() * FONT_STEP).max(FONT_STEP)
-}
-
-/// The card's inside at `t` (the zoom progress; slightly above 1 while
-/// rubber-banding). 0 and 1 are the two poses exactly, so the flight starts
-/// as the page and lands as the card without a swap.
-pub(crate) fn card_pose(page: CardPose, card: CardPose, t: f32) -> CardPose {
+/// The flying frame's chrome at `t`: the title region grows from the page's
+/// title bar to the card's strip and the corners round, while everything
+/// inside stays one bitmap. 0 and 1 are the two ends exactly.
+pub(crate) fn chrome_pose(page_strip: f32, card: CardPose, t: f32) -> (f32, f32) {
     let t = t.max(0.0);
-    if t == 0.0 {
-        return page;
-    }
     if t == 1.0 {
-        return card;
+        return (card.strip, card.radius);
     }
     let mix = |a: f32, b: f32| a + (b - a) * t;
-    CardPose {
-        strip: mix(page.strip, card.strip).max(0.0),
-        font: snap_font(mix(page.font, card.font)),
-        grid_left: mix(page.grid_left, card.grid_left),
-        grid_bottom: mix(page.grid_bottom, card.grid_bottom),
-        radius: mix(page.radius, card.radius).max(0.0),
+    (
+        mix(page_strip, card.strip).max(0.0),
+        mix(0.0, card.radius).max(0.0),
+    )
+}
+
+/// A terminal grid's top-left corner and cell width, in points, relative to
+/// whatever frame it is painted in (the page, a card, or a snapshot of one).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GridAnchor {
+    pub x: f32,
+    pub y: f32,
+    pub cell: f32,
+}
+
+/// Where the snapshot bitmap paints, in window coordinates.
+///
+/// The bitmap never re-lays out: it is scaled by one factor about its own
+/// grid. That factor follows the fingers (`page_scale`), bent just enough
+/// that the grid's cells land on the card's cells at progress 1, and the
+/// grid's corner rides from the page's grid position to the card's. So a
+/// page snapshot at progress 0 and a card snapshot at progress 1 paint
+/// exactly over what they were taken from.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn snapshot_rect(
+    frame: ZoomRect,
+    page: GridAnchor,
+    card: GridAnchor,
+    snapshot: GridAnchor,
+    snapshot_size: (f32, f32),
+    progress: f32,
+    page_scale: f32,
+    slot_scale: f32,
+) -> ZoomRect {
+    let t = progress.clamp(0.0, 1.0);
+    let slot_scale = slot_scale.max(MIN_SLOT_SCALE);
+    let mix = |a: f32, b: f32| a + (b - a) * t;
+    let to_card = page_scale / slot_scale;
+    let cell = mix(page.cell * page_scale, card.cell * to_card);
+    let x = mix(page.x * page_scale, card.x * to_card);
+    let y = mix(page.y * page_scale, card.y * to_card);
+    let scale = if snapshot.cell > 0.0 {
+        cell / snapshot.cell
+    } else {
+        page_scale
+    };
+    ZoomRect {
+        x: frame.x + x - snapshot.x * scale,
+        y: frame.y + y - snapshot.y * scale,
+        width: snapshot_size.0 * scale,
+        height: snapshot_size.1 * scale,
     }
+}
+
+/// Where the card's own rendering starts to show through the flying bitmap.
+/// The two only line up exactly at the card, so the hand-over happens where
+/// the flight is already almost there; see `card_fade`.
+pub(crate) const CARD_FADE_FROM: f32 = 0.9;
+/// A flight home without a fresh page snapshot hands over to the live pane
+/// below this progress.
+pub(crate) const LIVE_FADE_UNTIL: f32 = 0.15;
+
+fn smoothstep(from: f32, to: f32, value: f32) -> f32 {
+    let t = ((value - from) / (to - from)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Opacity of the real card over the flying bitmap: 0 until
+/// `CARD_FADE_FROM`, exactly 1 at the card (and past it, rubber-banding).
+pub(crate) fn card_fade(progress: f32) -> f32 {
+    if progress >= 1.0 {
+        return 1.0;
+    }
+    smoothstep(CARD_FADE_FROM, 1.0, progress)
+}
+
+/// How far the flying frame has been pulled onto the card's own size, so the
+/// picture and the card under it line up before the card shows through.
+/// It finishes early in the cross-fade: a picture fading over a card of a
+/// different size reads as a double image.
+pub(crate) fn card_snap(progress: f32) -> f32 {
+    if progress >= 1.0 {
+        return 1.0;
+    }
+    smoothstep(
+        CARD_FADE_FROM,
+        CARD_FADE_FROM + (1.0 - CARD_FADE_FROM) * 0.4,
+        progress,
+    )
+}
+
+/// `frame` pulled `weight` of the way onto a `card`-sized rect centred on it.
+pub(crate) fn snap_frame(frame: ZoomRect, card: (f32, f32), weight: f32) -> ZoomRect {
+    let target = ZoomRect {
+        x: frame.x + (frame.width - card.0) / 2.0,
+        y: frame.y + (frame.height - card.1) / 2.0,
+        width: card.0,
+        height: card.1,
+    };
+    if weight >= 1.0 {
+        return target;
+    }
+    let mix = |a: f32, b: f32| a + (b - a) * weight;
+    ZoomRect {
+        x: mix(frame.x, target.x),
+        y: mix(frame.y, target.y),
+        width: mix(frame.width, target.width),
+        height: mix(frame.height, target.height),
+    }
+}
+
+/// How far the card's own chrome (title, hairlines, shadow) has come in.
+/// It waits until the page is well on its way, so the card's title never
+/// reads over the page's own title bar in the picture.
+pub(crate) fn chrome_fade(progress: f32) -> f32 {
+    smoothstep(0.35, 1.0, progress)
+}
+
+/// Opacity of the flying bitmap near the page when it is not a picture of
+/// the page as it is now: it hands over to the live pane underneath.
+pub(crate) fn live_fade(progress: f32) -> f32 {
+    smoothstep(0.0, LIVE_FADE_UNTIL, progress)
+}
+
+/// Trilinear filtering by hand: the mip level whose pixels are at most as
+/// dense as twice the screen's, the next coarser one, and how much of the
+/// coarser one to show. `source_px` is level 0's width, `screen_px` the
+/// painted width, both in device pixels.
+pub(crate) fn mip_blend(source_px: f32, screen_px: f32, levels: usize) -> (usize, usize, f32) {
+    if levels <= 1 || screen_px <= 0.0 || source_px <= screen_px {
+        return (0, 0, 0.0);
+    }
+    let lod = (source_px / screen_px).log2().max(0.0);
+    let finest = (lod.floor() as usize).min(levels - 1);
+    if finest + 1 >= levels {
+        return (finest, finest, 0.0);
+    }
+    (finest, finest + 1, lod - finest as f32)
 }
 
 #[cfg(test)]
@@ -696,13 +816,6 @@ mod tests {
         );
     }
 
-    const PAGE_POSE: CardPose = CardPose {
-        strip: 42.0,
-        font: 13.0,
-        grid_left: 12.0,
-        grid_bottom: 31.0,
-        radius: 0.0,
-    };
     const CARD_POSE: CardPose = CardPose {
         strip: 26.0,
         font: 4.75,
@@ -712,24 +825,88 @@ mod tests {
     };
 
     #[test]
-    fn the_pose_is_the_page_and_then_exactly_the_card() {
-        assert_eq!(card_pose(PAGE_POSE, CARD_POSE, 0.0), PAGE_POSE);
-        assert_eq!(card_pose(PAGE_POSE, CARD_POSE, 1.0), CARD_POSE);
+    fn the_chrome_is_the_page_and_then_exactly_the_card() {
+        assert_eq!(chrome_pose(42.0, CARD_POSE, 0.0), (42.0, 0.0));
+        assert_eq!(chrome_pose(42.0, CARD_POSE, 1.0), (26.0, 10.0));
+    }
+
+    const PAGE_GRID: GridAnchor = GridAnchor {
+        x: 12.0,
+        y: 44.0,
+        cell: 7.8,
+    };
+    const CARD_GRID: GridAnchor = GridAnchor {
+        x: 4.1,
+        y: 31.0,
+        cell: 2.1,
+    };
+
+    #[test]
+    fn a_page_snapshot_starts_on_the_page_and_its_grid_lands_on_the_cards() {
+        let slot_scale = SLOT.width / PAGE.width;
+        let size = (PAGE.width, PAGE.height);
+        let start = snapshot_rect(PAGE, PAGE_GRID, CARD_GRID, PAGE_GRID, size, 0.0, 1.0, 0.3);
+        assert!(close(start, PAGE), "{start:?}");
+        let end = snapshot_rect(
+            SLOT, PAGE_GRID, CARD_GRID, PAGE_GRID, size, 1.0, slot_scale, slot_scale,
+        );
+        let scale = end.width / PAGE.width;
+        assert!((scale * PAGE_GRID.cell - CARD_GRID.cell).abs() < 1e-4);
+        assert!((end.x + PAGE_GRID.x * scale - SLOT.x - CARD_GRID.x).abs() < 1e-3);
+        assert!((end.y + PAGE_GRID.y * scale - SLOT.y - CARD_GRID.y).abs() < 1e-3);
+        // One scale factor: the aspect never changes along the way.
+        for step in 0..=10 {
+            let t = step as f32 / 10.0;
+            let page_scale = 1.0 - t * (1.0 - slot_scale);
+            let frame = page_frame(PAGE, SLOT, None, 0.0, t, page_scale);
+            let rect = snapshot_rect(
+                frame, PAGE_GRID, CARD_GRID, PAGE_GRID, size, t, page_scale, slot_scale,
+            );
+            assert!((rect.width / rect.height - size.0 / size.1).abs() < 1e-4);
+        }
     }
 
     #[test]
-    fn the_flying_font_stays_on_the_miniature_ladder_and_only_shrinks() {
-        let mut previous = f32::INFINITY;
-        for step in 0..=100 {
-            let pose = card_pose(PAGE_POSE, CARD_POSE, step as f32 / 100.0);
-            let rungs = pose.font / FONT_STEP;
-            assert!((rungs - rungs.round()).abs() < 1e-4, "{}", pose.font);
-            assert!(pose.font <= previous, "font grew at {step}");
-            previous = pose.font;
-        }
-        // Rubber-banding past the card keeps shrinking, never below a rung.
-        let band = card_pose(PAGE_POSE, CARD_POSE, 1.06);
-        assert!(band.font <= CARD_POSE.font && band.font >= FONT_STEP);
+    fn a_card_snapshot_sits_exactly_on_its_card() {
+        let slot_scale = SLOT.width / PAGE.width;
+        let rect = snapshot_rect(
+            SLOT,
+            PAGE_GRID,
+            CARD_GRID,
+            CARD_GRID,
+            (SLOT.width, SLOT.height),
+            1.0,
+            slot_scale,
+            slot_scale,
+        );
+        assert!(close(rect, SLOT), "{rect:?}");
+    }
+
+    #[test]
+    fn the_card_takes_over_only_at_the_end() {
+        assert_eq!(card_fade(0.0), 0.0);
+        assert_eq!(card_fade(CARD_FADE_FROM), 0.0);
+        assert_eq!(card_fade(1.0), 1.0);
+        assert_eq!(card_fade(1.04), 1.0);
+        assert_eq!(card_snap(CARD_FADE_FROM), 0.0);
+        assert_eq!(card_snap(1.0), 1.0);
+        // The picture is on the card's size before the card is half shown.
+        let halfway = CARD_FADE_FROM + (1.0 - CARD_FADE_FROM) * 0.5;
+        assert!(card_snap(halfway) == 1.0 && card_fade(halfway) <= 0.5);
+        let snapped = snap_frame(SLOT, (SLOT.width, SLOT.height), 0.5);
+        assert!(close(snapped, SLOT));
+        assert_eq!(live_fade(0.0), 0.0);
+        assert_eq!(live_fade(LIVE_FADE_UNTIL), 1.0);
+    }
+
+    #[test]
+    fn mip_levels_keep_minification_under_two() {
+        assert_eq!(mip_blend(2400.0, 2400.0, 4), (0, 0, 0.0));
+        assert_eq!(mip_blend(2400.0, 1200.0, 4), (1, 2, 0.0));
+        let (fine, coarse, mix) = mip_blend(2400.0, 650.0, 4);
+        assert_eq!((fine, coarse), (1, 2));
+        assert!(mix > 0.8 && mix < 1.0, "{mix}");
+        assert_eq!(mip_blend(2400.0, 100.0, 4), (3, 3, 0.0));
     }
 
     #[test]

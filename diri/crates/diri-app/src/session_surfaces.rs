@@ -303,6 +303,7 @@ impl Render for SessionSurfaces {
             self.follow_overview_visibility(overview_visible, window, cx);
         }
         self.advance_zoom(window, cx);
+        self.settle_zoom_images(overview_visible, window);
         if !overview_visible && !self.zoom.zoom.is_active() {
             // Previews refresh on every open; drop them once nothing shows them.
             self.screen_requests.clear();
@@ -2700,9 +2701,64 @@ mod tests {
         });
     }
 
-    /// The zoom's landing is the card itself: the flying page at progress 1
-    /// paints the calm overview pixel for pixel, so the flight ends without a
-    /// swap. Set `DIRI_VISUAL_OUTPUT_DIR` to keep both frames.
+    /// The workbench a zoom flies out of: a pane (title bar over the grid,
+    /// padded the way `TerminalPane` pads it) under the overview surfaces.
+    struct ZoomHarness {
+        surfaces: Entity<SessionSurfaces>,
+        page: TerminalElement,
+    }
+
+    impl Render for ZoomHarness {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let colors = self.surfaces.read(cx).colors();
+            let theme = {
+                let surfaces = self.surfaces.read(cx);
+                let store = surfaces.store.read().unwrap();
+                crate::app_theme::terminal_theme_in(&store)
+            };
+            let pane = div()
+                .absolute()
+                .left(px(240.0))
+                .top(px(0.0))
+                .w(px(1200.0))
+                .h(px(900.0))
+                .flex()
+                .flex_col()
+                .bg(theme.background)
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(42.0))
+                        .flex()
+                        .items_center()
+                        .px(px(14.0))
+                        .border_b_1()
+                        .border_color(colors.primary.alpha(0.08))
+                        .text_size(px(13.0))
+                        .text_color(colors.secondary)
+                        .child("Overflowing session 01 — feature/session-01"),
+                )
+                .child(
+                    div().flex_1().pt(px(2.0)).pb(px(10.0)).px(px(12.0)).child(
+                        self.page
+                            .clone()
+                            .font(crate::fonts::terminal_font())
+                            .font_size(px(13.0))
+                            .theme(theme),
+                    ),
+                );
+            div().size_full().bg(colors.background).child(pane).child(
+                self.surfaces
+                    .clone()
+                    .cached(StyleRefinement::default().absolute().inset_0()),
+            )
+        }
+    }
+
+    /// The zoom flies a picture of the page and lands as the card itself:
+    /// the flight never re-lays the terminal out, and at progress 1 it paints
+    /// the calm overview pixel for pixel, so it ends without a swap. Set
+    /// `DIRI_VISUAL_OUTPUT_DIR` to keep the frame strip.
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "headless Metal pixel comparison; run explicitly on macOS"]
@@ -2733,14 +2789,16 @@ mod tests {
                     record.last_seen_at = Some(DateMillis(2.0));
                 }
                 runtime.store.write().unwrap().hydrate(fleet);
+                let buffers: Vec<_> = screens
+                    .iter()
+                    .map(|screen| Arc::new(RwLock::new(fx::screen(screen))))
+                    .collect();
+                let page = TerminalElement::new(buffers[1].clone()).focused(false);
                 let surfaces = cx.new(|cx| {
                     let mut view = SessionSurfaces::new(runtime, None, cx);
                     view.overview_variant = OverviewVariant::Windows;
-                    for (i, screen) in screens.iter().enumerate() {
-                        view.set_resident_buffer(
-                            session(i).id,
-                            Arc::new(RwLock::new(fx::screen(screen))),
-                        );
+                    for (i, buffer) in buffers.iter().enumerate() {
+                        view.set_resident_buffer(session(i).id, buffer.clone());
                     }
                     view.set_page_region(
                         crate::terminal_pane::TerminalViewport {
@@ -2751,33 +2809,65 @@ mod tests {
                         },
                         42.0,
                     );
-                    {
-                        let mut store = view.store.write().unwrap();
-                        store.select(session(1).id);
-                        store.toggle_overview();
-                    }
+                    view.store.write().unwrap().select(session(1).id);
                     view
                 });
-                cx.new(|_| OverviewHarness {
-                    surfaces,
-                    background_scrolls: Arc::new(AtomicUsize::new(0)),
-                })
+                cx.new(|_| ZoomHarness { surfaces, page })
             })
             .unwrap();
         let surfaces = cx
             .update_window(window.into(), |root, _, cx| {
-                root.downcast::<OverviewHarness>()
+                root.downcast::<ZoomHarness>()
                     .unwrap()
                     .read(cx)
                     .surfaces
                     .clone()
             })
             .unwrap();
-        // Land the opening zoom, then take the resting grid.
+        let out = std::env::var("DIRI_VISUAL_OUTPUT_DIR")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let save = |image: &image::RgbaImage, name: &str| {
+            if let Some(dir) = &out {
+                image
+                    .save(dir.join(format!("calm-zoom-{name}.png")))
+                    .unwrap();
+            }
+        };
+        // The page, then ⇧⌘O: the first overview frame takes its picture.
         cx.run_until_parked();
+        let page = cx.capture_screenshot(window.into()).unwrap();
+        save(&page, "0-page");
         cx.update(|cx| {
             surfaces.update(cx, |view, cx| {
-                assert!(view.zoom.zoom.is_flying(), "⇧⌘O zooms the page in");
+                view.store.write().unwrap().toggle_overview();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let cost = cx.update(|cx| {
+            let view = surfaces.read(cx);
+            assert!(view.zoom.zoom.is_flying(), "⇧⌘O zooms the page in");
+            let snapshot = view.zoom.snapshot.as_ref().expect("the page was captured");
+            assert_eq!(snapshot.source, Landing::Page);
+            snapshot.cost
+        });
+        // Re-capture a few times for a steadier number than the first call.
+        let repeat = cx
+            .update_window(window.into(), |_, window, _| {
+                let bounds =
+                    gpui::Bounds::new(point(px(240.0), px(0.0)), size(px(1200.0), px(662.0)));
+                let started = std::time::Instant::now();
+                for _ in 0..10 {
+                    window.capture_region(bounds, 4).unwrap();
+                }
+                started.elapsed() / 10
+            })
+            .unwrap();
+        eprintln!("page snapshot: first capture {cost:?}, steady {repeat:?}");
+        // Land, then take the resting grid.
+        cx.update(|cx| {
+            surfaces.update(cx, |view, cx| {
                 view.zoom.zoom.reset(Landing::Overview);
                 cx.notify();
             })
@@ -2785,29 +2875,80 @@ mod tests {
         cx.run_until_parked();
         cx.capture_screenshot(window.into()).unwrap();
         let resting = cx.capture_screenshot(window.into()).unwrap();
+        save(&resting, "resting");
+        let card = cx.update(|cx| surfaces.read(cx).zoom.cards.borrow()[&session(1).id]);
+        // The strip along the way: the page picture, scaled about its grid.
+        let hold = |cx: &mut HeadlessAppContext, progress: f32| {
+            cx.update(|cx| {
+                surfaces.update(cx, |view, cx| {
+                    let now = cx.background_executor().now();
+                    view.zoom.session = Some(session(1).id);
+                    view.zoom.crossfade = false;
+                    view.zoom.grip = None;
+                    let page = view.zoom.page_cache.clone();
+                    view.zoom.set_snapshot(page);
+                    view.zoom.zoom.reset(Landing::Page);
+                    view.zoom.zoom.begin(Landing::Page, now);
+                    let scale = 1.0 - progress * (1.0 - card.width / 1200.0);
+                    view.zoom
+                        .zoom
+                        .pinch(scale - 1.0, now + std::time::Duration::from_millis(16));
+                    assert!((view.zoom.zoom.progress() - progress).abs() < 1e-3);
+                    assert!(view.zoom_painting());
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            cx.capture_screenshot(window.into()).unwrap()
+        };
+        for progress in [0.25_f32, 0.5, 0.75, 0.85, 0.9, 0.95] {
+            let frame = hold(&mut cx, progress);
+            save(&frame, &format!("{:03}", (progress * 100.0).round() as u32));
+        }
+        let landed = hold(&mut cx, 1.0);
+        save(&landed, "100");
+        // Pinching a card open with no current page picture grows the card's
+        // own picture and hands over to the live pane near the end.
         cx.update(|cx| {
             surfaces.update(cx, |view, cx| {
-                assert!(!view.zoom.zoom.is_active(), "the opening zoom must land");
-                assert!(view.zoom.cards.borrow().contains_key(&session(1).id));
-                // Hold the flight exactly at the card: tracking at progress 1
-                // paints the transition layer with the page as the card.
-                let now = cx.background_executor().now();
-                view.zoom.session = Some(session(1).id);
-                view.zoom.crossfade = false;
-                view.zoom.grip = None;
+                view.zoom.set_page_cache(None);
                 view.zoom.zoom.reset(Landing::Overview);
-                view.zoom.zoom.begin(Landing::Overview, now);
-                assert!(view.zoom_painting());
                 cx.notify();
             })
         });
         cx.run_until_parked();
-        let card = cx.update(|cx| surfaces.read(cx).zoom.cards.borrow()[&session(1).id]);
-        let landed = cx.capture_screenshot(window.into()).unwrap();
-        if let Ok(dir) = std::env::var("DIRI_VISUAL_OUTPUT_DIR") {
-            let dir = std::path::PathBuf::from(dir);
-            resting.save(dir.join("calm-zoom-resting.png")).unwrap();
-            landed.save(dir.join("calm-zoom-landed.png")).unwrap();
+        cx.update_window(window.into(), |root, window, cx| {
+            let harness = root.downcast::<ZoomHarness>().unwrap();
+            harness.read(cx).surfaces.clone().update(cx, |view, _| {
+                assert!(view.take_return_snapshot(&session(1).id, card, window));
+                let snapshot = view.zoom.snapshot.as_ref().unwrap();
+                assert_eq!(snapshot.source, Landing::Overview);
+            });
+        })
+        .unwrap();
+        for progress in [0.5_f32, 0.08] {
+            cx.update(|cx| {
+                surfaces.update(cx, |view, cx| {
+                    let now = cx.background_executor().now();
+                    view.zoom.session = Some(session(1).id);
+                    view.zoom.grip = None;
+                    view.zoom.zoom.reset(Landing::Overview);
+                    view.zoom.zoom.begin(Landing::Overview, now);
+                    let scale = 1.0 - progress * (1.0 - card.width / 1200.0);
+                    let from = card.width / 1200.0;
+                    view.zoom.zoom.pinch(
+                        scale / from - 1.0,
+                        now + std::time::Duration::from_millis(16),
+                    );
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            save(
+                &image,
+                &format!("out-{:03}", (progress * 100.0).round() as u32),
+            );
         }
         assert_eq!(resting.dimensions(), landed.dimensions());
         let scale = resting.width() as f32 / 1440.0;
@@ -2836,28 +2977,6 @@ mod tests {
             }
         }
         assert!(card_pixels > 10_000, "the card was measured: {card:?}");
-        // Frames along the way, for looking at rather than asserting.
-        if let Ok(dir) = std::env::var("DIRI_VISUAL_OUTPUT_DIR") {
-            for (name, progress) in [("quarter", 0.25), ("half", 0.5), ("late", 0.8)] {
-                cx.update(|cx| {
-                    surfaces.update(cx, |view, cx| {
-                        let now = cx.background_executor().now();
-                        view.zoom.zoom.reset(Landing::Page);
-                        view.zoom.zoom.begin(Landing::Page, now);
-                        let scale = 1.0 - progress * (1.0 - card.width / 1200.0);
-                        view.zoom
-                            .zoom
-                            .pinch(scale - 1.0, now + std::time::Duration::from_millis(16));
-                        cx.notify();
-                    })
-                });
-                cx.run_until_parked();
-                cx.capture_screenshot(window.into())
-                    .unwrap()
-                    .save(std::path::Path::new(&dir).join(format!("calm-zoom-{name}.png")))
-                    .unwrap();
-            }
-        }
     }
 
     /// Phase-1 design exploration. `DIRI_VISUAL_VARIANT` = current | a | b | c.

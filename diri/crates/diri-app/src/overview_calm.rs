@@ -406,6 +406,10 @@ impl SessionSurfaces {
         self.zoom.shift_cards(before - scroll);
     }
 
+    pub(super) fn calm_fleet_rows(&self) -> u16 {
+        self.fleet_grid().1
+    }
+
     fn fleet_grid(&self) -> (u16, u16) {
         self.resident_previews
             .values()
@@ -687,6 +691,7 @@ impl SessionSurfaces {
         chrome: f32,
         focused: bool,
         mini: AnyElement,
+        backdrop: Option<AnyElement>,
         theme: diri_term::theme::TermTheme,
         colors: SemanticColors,
         window: &mut Window,
@@ -694,6 +699,7 @@ impl SessionSurfaces {
     ) -> gpui::Div {
         let dark = colors.appearance == diri_ui::Appearance::Dark;
         let chrome = chrome.clamp(0.0, 1.0);
+        let veiled = backdrop.is_some();
         let glyph = self.status_glyph(session, 12.0, colors, window, cx);
         let title = div()
             .min_w_0()
@@ -718,7 +724,8 @@ impl SessionSurfaces {
             .gap(px(6.0))
             .child(glyph)
             .child(title);
-        let card = div()
+        let mut card = div()
+            .relative()
             .flex()
             .flex_col()
             .rounded(px(radius))
@@ -726,10 +733,22 @@ impl SessionSurfaces {
             .border_1()
             .border_color(hairline)
             .shadow(shadow)
-            .bg(theme.background)
+            .bg(theme.background);
+        if let Some(backdrop) = backdrop {
+            // A flying snapshot paints under the strip and the grid area;
+            // the strip's own fill fades in over the page's title bar.
+            card = card.child(backdrop);
+        }
+        let mut title_strip = div().flex_none();
+        if veiled {
+            title_strip = title_strip.bg(gpui::Rgba {
+                a: theme.background.a * chrome,
+                ..theme.background
+            });
+        }
+        let card = card
             .child(
-                div()
-                    .flex_none()
+                title_strip
                     .h(px(strip))
                     .flex()
                     .items_center()
@@ -882,6 +901,7 @@ impl SessionSurfaces {
                         1.0,
                         focused,
                         mini,
+                        None,
                         theme,
                         colors,
                         window,

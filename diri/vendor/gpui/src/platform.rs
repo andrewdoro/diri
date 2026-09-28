@@ -951,6 +951,85 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn render_to_image(&self, _scene: &Scene) -> Result<RgbaImage> {
         anyhow::bail!("render_to_image not implemented for this platform")
     }
+
+    /// DIRI PATCH (scene region capture): render `scene` offscreen, without
+    /// presenting it, and read back `region` (device pixels) as BGRA with
+    /// `levels` box-filtered mip levels, largest first. Unlike
+    /// `render_to_image` this is available in release builds; see
+    /// `DIRI_PATCHES.md`.
+    fn capture_scene_region(
+        &self,
+        _scene: &Scene,
+        _region: Bounds<DevicePixels>,
+        _levels: usize,
+    ) -> Result<Vec<SceneCapture>> {
+        anyhow::bail!("capture_scene_region not implemented for this platform")
+    }
+}
+
+/// DIRI PATCH (scene region capture): one mip level of a captured region,
+/// tightly packed BGRA rows.
+#[derive(Clone, Debug)]
+pub struct SceneCapture {
+    /// Pixel size of this level.
+    pub size: Size<DevicePixels>,
+    /// `size.width * size.height * 4` bytes in BGRA order.
+    pub bgra: Vec<u8>,
+}
+
+impl SceneCapture {
+    /// Crop `region` out of a full RGBA frame and build `levels` BGRA mip
+    /// levels on the CPU. The fallback for renderers without a GPU path.
+    pub fn from_rgba_frame(
+        frame: &image::RgbaImage,
+        region: Bounds<DevicePixels>,
+        levels: usize,
+    ) -> Result<Vec<SceneCapture>> {
+        let (x, y) = (region.origin.x.0.max(0) as u32, region.origin.y.0.max(0) as u32);
+        let width = (region.size.width.0.max(0) as u32).min(frame.width().saturating_sub(x));
+        let height = (region.size.height.0.max(0) as u32).min(frame.height().saturating_sub(y));
+        if width == 0 || height == 0 {
+            anyhow::bail!("capture region {region:?} is outside the frame");
+        }
+        let mut bgra = Vec::with_capacity((width * height * 4) as usize);
+        for row in y..y + height {
+            for column in x..x + width {
+                let [r, g, b, a] = frame.get_pixel(column, row).0;
+                bgra.extend_from_slice(&[b, g, r, a]);
+            }
+        }
+        let mut captures = vec![SceneCapture {
+            size: size(DevicePixels(width as i32), DevicePixels(height as i32)),
+            bgra,
+        }];
+        while captures.len() < levels.max(1) {
+            let last = captures.last().expect("one level");
+            let (w, h) = (last.size.width.0 as usize, last.size.height.0 as usize);
+            if w == 1 && h == 1 {
+                break;
+            }
+            let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+            let mut next = vec![0u8; nw * nh * 4];
+            for row in 0..nh {
+                for column in 0..nw {
+                    for channel in 0..4 {
+                        let mut sum = 0u32;
+                        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                            let sx = (column * 2 + dx).min(w - 1);
+                            let sy = (row * 2 + dy).min(h - 1);
+                            sum += u32::from(last.bgra[(sy * w + sx) * 4 + channel]);
+                        }
+                        next[(row * nw + column) * 4 + channel] = ((sum + 2) / 4) as u8;
+                    }
+                }
+            }
+            captures.push(SceneCapture {
+                size: size(DevicePixels(nw as i32), DevicePixels(nh as i32)),
+                bgra: next,
+            });
+        }
+        Ok(captures)
+    }
 }
 
 /// A renderer for headless windows that can produce real rendered output.
@@ -972,6 +1051,20 @@ pub trait PlatformHeadlessRenderer {
 
     /// Returns the sprite atlas used by this renderer.
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+
+    /// DIRI PATCH (scene region capture): see
+    /// `PlatformWindow::capture_scene_region`. The default renders the whole
+    /// frame and crops and filters it on the CPU.
+    fn capture_scene_region(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        region: Bounds<DevicePixels>,
+        levels: usize,
+    ) -> Result<Vec<SceneCapture>> {
+        let frame = self.render_scene_to_image(scene, size)?;
+        SceneCapture::from_rgba_frame(&frame, region, levels)
+    }
 }
 
 /// Type alias for runnables with metadata.

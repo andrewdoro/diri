@@ -322,6 +322,23 @@ impl PlatformWindow for TestWindow {
         Some(self)
     }
 
+    // DIRI PATCH (scene region capture): headless windows capture through
+    // their renderer, so tests exercise (and can time) the real GPU path.
+    fn capture_scene_region(
+        &self,
+        scene: &Scene,
+        region: Bounds<DevicePixels>,
+        levels: usize,
+    ) -> anyhow::Result<Vec<crate::SceneCapture>> {
+        let scale_factor = self.scale_factor();
+        let mut state = self.0.lock();
+        let device_size: Size<DevicePixels> = state.bounds.size.to_device_pixels(scale_factor);
+        match &mut state.renderer {
+            Some(renderer) => renderer.capture_scene_region(scene, device_size, region, levels),
+            None => anyhow::bail!("capture_scene_region needs a HeadlessRenderer"),
+        }
+    }
+
     #[cfg(target_os = "windows")]
     fn get_raw_handle(&self) -> windows::Win32::Foundation::HWND {
         unimplemented!()
