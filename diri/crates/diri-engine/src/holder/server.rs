@@ -656,8 +656,7 @@ fn watch_exit(
     // The leader stays an unreaped zombie until the sweep is done: that is
     // what keeps its pid, and so the group id the sweep and the guard both
     // name, from being handed to anyone else.
-    wait_for_exit_unreaped(exit_watcher.as_ref());
-    drop(exit_watcher);
+    wait_for_exit_unreaped(shared.child_pid, exit_watcher);
     let mut frozen = shared.frozen.lock().expect("frozen");
     process_tree::kill_stragglers(shared.child_pid, &frozen);
     if let Some(guard) = &shared.guard {
@@ -996,19 +995,75 @@ fn write_pid_file(path: &str) -> HolderResult<()> {
 ///
 /// A readiness fd rather than `waitid(WEXITED | WNOWAIT)`: macOS's `waitid`
 /// also returns for a child that merely stopped, so a hibernation would read
-/// as an exit. Without a watcher the child had already exited when the holder
-/// tried to watch it, and is a zombie until this holder reaps it.
-fn wait_for_exit_unreaped(watcher: Option<&diri_pty::ExitWatcher>) {
-    let Some(watcher) = watcher else { return };
-    let mut descriptor = libc::pollfd {
-        fd: watcher.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
+/// as an exit. Returning here is what licenses the SIGKILL sweep of the
+/// child's group, so only proof of exit may end the wait. A watcher that could
+/// not be armed (a full descriptor table, a kernel without pidfd) is re-armed
+/// instead of being read as "already exited".
+fn wait_for_exit_unreaped(pid: i32, watcher: Option<diri_pty::ExitWatcher>) {
+    let mut watcher = watcher;
+    loop {
+        if let Some(watcher) = &watcher {
+            let mut descriptor = libc::pollfd {
+                fd: watcher.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd; no timeout.
+            let ready = loop {
+                let result = unsafe { libc::poll(&mut descriptor, 1, -1) };
+                if result >= 0
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                {
+                    break result;
+                }
+            };
+            if ready > 0 || child_has_exited(pid) {
+                return;
+            }
+        } else if child_has_exited(pid) {
+            return;
+        }
+        match diri_pty::ExitWatcher::new(pid as u32) {
+            Ok(armed) => watcher = Some(armed),
+            // Registration fails with ESRCH only once the child has exited.
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return,
+            Err(_) => {
+                watcher = None;
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+}
+
+/// Whether `pid`, our child, has exited (it stays unreaped). Stops and
+/// continues are reported by macOS even without `WSTOPPED`, so the reason is
+/// checked rather than trusted.
+fn child_has_exited(pid: i32) -> bool {
+    // SAFETY: zeroed siginfo is a valid out-param for waitid.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: waitid on our own child with a valid out-param.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
     };
-    // SAFETY: one valid pollfd; no timeout.
-    while unsafe { libc::poll(&mut descriptor, 1, -1) } < 0
-        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
-    {}
+    if result != 0 {
+        // ECHILD: nothing left to wait for, which is also an exit.
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+    }
+    #[cfg(target_os = "linux")]
+    // SAFETY: waitid filled the SIGCHLD member.
+    let reported = unsafe { info.si_pid() };
+    #[cfg(not(target_os = "linux"))]
+    let reported = info.si_pid;
+    reported == pid
+        && matches!(
+            info.si_code,
+            libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+        )
 }
 
 fn set_nonblocking(fd: i32) {
@@ -1024,6 +1079,40 @@ fn set_nonblocking(fd: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_exit_watcher_never_reads_a_live_agent_as_exited() {
+        // #524 armed the sweep on `ExitWatcher::new(..).ok()`: any arming
+        // failure (EMFILE, a kernel without pidfd) returned at once and the
+        // straggler sweep SIGKILLed a freshly spawned, healthy agent.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        let (done, finished) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            wait_for_exit_unreaped(pid, None);
+            let _ = done.send(());
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_millis(600)).is_err(),
+            "a live child is not an exit"
+        );
+        // SAFETY: signalling our own child.
+        unsafe { libc::kill(pid, libc::SIGSTOP) };
+        assert!(
+            finished.recv_timeout(Duration::from_millis(600)).is_err(),
+            "a hibernated (stopped) child is not an exit"
+        );
+        // SAFETY: signalling our own child.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        finished
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a real exit ends the wait");
+        waiter.join().expect("waiter");
+        assert!(!child.try_wait().expect("reap").unwrap().success());
+    }
 
     fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);

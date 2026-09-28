@@ -89,7 +89,13 @@ pub fn accept_raw(
         if finished() {
             return Ok(None);
         }
-        return Err(HolderError::io("accept", error));
+        // Never leave the accept loop while the listener is live: a manager
+        // that returns exits and its guard SIGKILLs every agent it hosts, and
+        // a holder that returns strands its still-running agent. The usual
+        // cause, descriptor exhaustion, clears once something closes.
+        let delay = crate::limits::accept_retry_delay(&error);
+        eprintln!("diri-holder: accept: {error}; retrying in {delay:?}");
+        std::thread::sleep(delay);
     }
 }
 

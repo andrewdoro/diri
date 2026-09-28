@@ -65,6 +65,10 @@ fn main() {
     }
 
     let result = if let Some(directory) = value_after(&arguments, "--manager") {
+        // The manager holds a PTY, socket and exit watcher per session; at a
+        // launchd 256-descriptor soft limit it runs out long before the fleet
+        // does. Raise it the way the daemon does.
+        let _ = diri_engine::limits::raise_fd_limit();
         // Tests shorten the idle window so managers don't outlive them.
         let idle = std::env::var("DIRI_HOLDER_IDLE_SECONDS")
             .ok()
