@@ -137,7 +137,8 @@ fn render_row_motion_frames() {
             if std::env::var_os("DIRI_ROWS_CACHED").is_some() {
                 // Drive frames the way the app does, so cached rows are
                 // reused wherever GPUI allows: compare against a refreshed run.
-                root.sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+                root.sidebar
+                    .update(cx, |sidebar, cx| sidebar.store_changed(cx));
             } else {
                 root.sidebar.update(cx, |_, cx| cx.notify());
                 window.refresh();
