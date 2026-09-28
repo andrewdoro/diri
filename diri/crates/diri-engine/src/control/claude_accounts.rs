@@ -807,7 +807,7 @@ mod tests {
         let executable = tmp.path().join("claude");
         fs::write(
             &executable,
-            "#!/bin/sh\nif [ \"$1\" = auth ]; then printf '%s' '{\"loggedIn\":true,\"email\":\"two@example.test\",\"orgId\":\"org-2\",\"orgName\":\"Two\"}'; exit 0; fi\n{ printf 'launch\\n'; printf '%s\\n' \"$@\"; printf 'config-dir=%s\\n' \"${CLAUDE_CONFIG_DIR:-unset}\"; } >> \"$CLAUDE_SECURESTORAGE_CONFIG_DIR/launches\"\nexec /bin/sleep 30\n",
+            "#!/bin/sh\nif [ \"$1\" = auth ]; then printf '%s' '{\"loggedIn\":true,\"email\":\"two@example.test\",\"orgId\":\"org-2\",\"orgName\":\"Two\"}'; exit 0; fi\nout=$(printf 'launch\\n'; printf '%s\\n' \"$@\"; printf 'config-dir=%s' \"${CLAUDE_CONFIG_DIR:-unset}\")\nprintf '%s\\n' \"$out\" >> \"$CLAUDE_SECURESTORAGE_CONFIG_DIR/launches\"\nexec /bin/sleep 30\n",
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();

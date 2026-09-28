@@ -89,9 +89,12 @@ impl ControlServer {
                 "Continue with another account currently supports Claude Code conversations",
             ));
         }
-        let conversation = source
-            .agent_session_id
+        // The id hooks last reported may never have been written (`/clear`,
+        // a re-login); hand off the conversation that actually exists.
+        let written = super::claude_resume_target(&source).flatten();
+        let conversation = written
             .as_deref()
+            .or(source.agent_session_id.as_deref())
             .filter(|id| safe_component(id))
             .ok_or_else(|| {
                 ControlError::bad_request("Claude has not saved a resumable conversation yet")

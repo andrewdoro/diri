@@ -302,7 +302,11 @@ pub(crate) fn find_codex_thread_for_launch(
             {
                 continue;
             }
-            let distance = born.duration_since(launched_at).unwrap_or(Duration::ZERO);
+            // Absolute distance: a rollout born just before the launch (another
+            // tab opened a moment earlier) is not a perfect match for this one.
+            let distance = born
+                .duration_since(launched_at)
+                .unwrap_or_else(|early| early.duration());
             if best.as_ref().is_none_or(|(d, _, _)| distance < *d) {
                 best = Some((distance, meta.id, path));
             }

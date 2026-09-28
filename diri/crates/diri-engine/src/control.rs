@@ -3785,11 +3785,9 @@ fn claude_resume_target_in(
     if record.host.is_some() || record.kind.id() != diri_proto::AgentKind::CLAUDE_CODE_ID {
         return None;
     }
-    let shared = home.join(".claude/projects");
-    if !shared.is_dir() {
-        return None;
-    }
-    let mut roots = vec![shared];
+    // A missing projects directory is an empty one: on a first-use machine a
+    // tab that never wrote a transcript must still start fresh.
+    let mut roots = vec![home.join(".claude/projects")];
     if let Some(profile) = &record.account_profile
         && Path::new(&profile.config_home).is_absolute()
     {
@@ -5516,6 +5514,14 @@ mod tests {
                 Some(&project.join("gone.jsonl")),
                 &mut record
             ),
+            Some(None)
+        );
+        // No transcript has ever been written on this machine.
+        let fresh_home = tempfile::tempdir().expect("temp");
+        record.agent_session_id = Some("new-conv".into());
+        record.transcript_path = None;
+        assert_eq!(
+            claude_resume_target_in(&record, fresh_home.path()),
             Some(None)
         );
         // Without an id there is nothing to verify; keep the manifest's path.
