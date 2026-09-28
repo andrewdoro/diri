@@ -438,6 +438,8 @@ impl TerminalPane {
     }
     /// Applies a keystroke to the search field when it is a text edit.
     fn links_edit_query(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        // `apply` mutates the query; keeping it out of a match guard keeps that visible.
+        #[allow(clippy::collapsible_match)]
         match query_editor::edit_for(&event.keystroke) {
             Some(Edit::Local(local)) => {
                 if self.session_links.query.apply(local) {
