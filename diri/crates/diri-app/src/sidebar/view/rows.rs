@@ -41,7 +41,6 @@ pub(in crate::sidebar) struct SessionRowProps {
     pub(super) hovered: bool,
     pub(super) focused: bool,
     pub(super) lineage: Option<LineageRole>,
-    pub(super) dimmed: bool,
     pub(super) width: f32,
     pub(super) filter: String,
     pub(super) renaming: bool,
@@ -111,7 +110,6 @@ impl Sidebar {
                 && self.ui.renaming.is_none()
                 && self.ui.focus_cursor.as_ref() == Some(id),
             lineage: self.lineage_roles.get(id).copied(),
-            dimmed: self.lineage_dims(id),
             width: self.ui.width,
             filter: self.filter_query.text().to_owned(),
             renaming: self.ui.renaming.as_ref() == Some(id),

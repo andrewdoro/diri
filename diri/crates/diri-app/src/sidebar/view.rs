@@ -3484,7 +3484,6 @@ impl Sidebar {
             hovered,
             focused,
             lineage,
-            dimmed,
             width,
             ref filter,
             renaming,
