@@ -583,8 +583,20 @@ fn control_request(
     method: &str,
     params: Option<serde_json::Value>,
 ) -> io::Result<serde_json::Value> {
+    control_request_with_timeout(socket_path, id, method, params, Duration::from_secs(1))
+}
+
+/// [`control_request`] for a request the Engine may take `read_timeout` to
+/// answer.
+pub(crate) fn control_request_with_timeout(
+    socket_path: &Path,
+    id: u64,
+    method: &str,
+    params: Option<serde_json::Value>,
+    read_timeout: Duration,
+) -> io::Result<serde_json::Value> {
     let mut stream = UnixStream::connect(socket_path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    stream.set_read_timeout(Some(read_timeout))?;
     stream.set_write_timeout(Some(Duration::from_secs(1)))?;
     let request = ControlMessage::Request {
         id,

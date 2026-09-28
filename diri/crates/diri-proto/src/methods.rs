@@ -90,6 +90,7 @@ impl Method {
     pub const DAEMON_PREPARE_SHUTDOWN: &'static str = "daemon.prepare_shutdown";
     pub const DAEMON_SHUTDOWN_IF_IDLE: &'static str = "daemon.shutdown_if_idle";
     pub const DAEMON_SHUTDOWN: &'static str = "daemon.shutdown";
+    pub const TELEMETRY_UPLOAD_NOW: &'static str = "telemetry.upload_now";
 }
 
 /// Event names pushed on subscribed control channels.
@@ -158,6 +159,19 @@ pub struct DaemonShutdownIfIdleResult {
     pub will_exit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Result of a user-requested diagnostics upload. `status` is `sent`,
+/// `up_to_date` (nothing new), `failed` (kept for the next attempt),
+/// `timeout` (still trying) or `unavailable` (uploads not configured).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryUploadNowResult {
+    pub status: String,
+    #[serde(default)]
+    pub batches: u32,
+    #[serde(default)]
+    pub records: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

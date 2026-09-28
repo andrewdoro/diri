@@ -631,11 +631,48 @@ pub(crate) fn take_first_run_notice() -> bool {
     true
 }
 
+/// Asks the Engine to upload everything recorded so far, now, even with
+/// sharing off (the user asked). Blocks up to a minute: call it off the main
+/// thread.
+pub(crate) fn upload_now_blocking() -> Result<diri_proto::TelemetryUploadNowResult, String> {
+    // Tests never reach the real Engine.
+    let home = std::env::var_os("HOME")
+        .filter(|_| !cfg!(test))
+        .ok_or_else(|| "no home directory".to_owned())?;
+    // What this process recorded a moment ago goes in the same upload.
+    diri_telemetry::flush(Duration::from_millis(200));
+    let socket = diri_proto::paths::DirijorPaths::socket(home);
+    let value = crate::daemon_launch::control_request_with_timeout(
+        &socket,
+        1,
+        diri_proto::Method::TELEMETRY_UPLOAD_NOW,
+        None,
+        Duration::from_secs(60),
+    )
+    .map_err(|error| error.to_string())?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+/// One line for the user about an [`upload_now_blocking`] outcome.
+pub(crate) fn upload_now_summary(
+    result: &Result<diri_proto::TelemetryUploadNowResult, String>,
+) -> &'static str {
+    match result.as_ref().map(|result| result.status.as_str()) {
+        Ok("sent") => "Sent. Thanks, this helps.",
+        Ok("up_to_date") => "Already sent. Nothing new since the last upload.",
+        Ok("failed") => "Couldn't reach the server. diri will try again.",
+        Ok("timeout") => "Still sending in the background.",
+        Ok("unavailable") => "Uploading isn't set up in this build.",
+        Ok(_) => "Sent.",
+        Err(_) => "The diri engine isn't running. Try again in a moment.",
+    }
+}
+
 pub(crate) const REPORT_ISSUE_URL: &str = "https://github.com/cristicretu/diri/issues/new";
 
-/// Help > Report a Problem: marks the moment in the timeline (an incident,
-/// so it uploads within a minute), copies the Support ID, and opens a new
-/// GitHub issue that already names this install and build.
+/// Help > Report a Problem: marks the moment in the timeline, uploads it
+/// right away (even with sharing off), copies the Support ID, and opens a
+/// new GitHub issue that already names this install and build.
 pub(crate) fn report_problem(cx: &mut App) {
     let support_id = state_dir()
         .and_then(|dir| Identity::load_or_create(&dir).ok())
@@ -650,6 +687,14 @@ pub(crate) fn report_problem(cx: &mut App) {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(support_id.clone()));
     }
     cx.open_url(&report_url(support_id.as_deref()));
+    // Reporting is explicit consent to send what led up to it, now.
+    if state_dir().is_some() {
+        let _ = std::thread::Builder::new()
+            .name("diri-report-upload".into())
+            .spawn(|| {
+                let _ = upload_now_blocking();
+            });
+    }
 }
 
 fn report_url(support_id: Option<&str>) -> String {
@@ -685,6 +730,24 @@ mod tests {
         assert!(url.contains("D-7K3MQ9XA"));
         assert!(url.contains(crate::updates::CURRENT_VERSION));
         assert!(!url.contains(' '));
+    }
+
+    #[test]
+    fn upload_now_summaries_cover_every_status() {
+        let status = |status: &str| {
+            Ok(diri_proto::TelemetryUploadNowResult {
+                status: status.into(),
+                ..Default::default()
+            })
+        };
+        assert!(upload_now_summary(&status("sent")).starts_with("Sent"));
+        assert!(upload_now_summary(&status("failed")).contains("try again"));
+        assert!(upload_now_summary(&status("unavailable")).contains("isn't set up"));
+        assert!(upload_now_summary(&Err("refused".into())).contains("engine"));
+        assert!(
+            upload_now_blocking().is_err(),
+            "tests never reach the real Engine"
+        );
     }
 
     #[test]

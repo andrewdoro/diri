@@ -11,6 +11,16 @@ pub(super) struct PrivacyState {
     name: QueryEditor,
     name_active: bool,
     copied: bool,
+    send: SendState,
+}
+
+/// The "Send now" button: idle, waiting on the Engine, or the last outcome.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SendState {
+    #[default]
+    Idle,
+    Sending,
+    Done(&'static str),
 }
 
 impl UtilitySurfaces {
@@ -25,10 +35,35 @@ impl UtilitySurfaces {
         self.privacy.settings = settings;
         self.privacy.name_active = false;
         self.privacy.copied = false;
+        if self.privacy.send != SendState::Sending {
+            self.privacy.send = SendState::Idle;
+        }
     }
 
     pub(super) fn deactivate_privacy_name(&mut self) {
         self.privacy.name_active = false;
+    }
+
+    /// Uploads everything recorded so far, now, even with sharing off: the
+    /// click is the consent. The Engine does the upload; this waits for it.
+    fn send_diagnostics_now(&mut self, cx: &mut Context<Self>) {
+        if self.privacy.send == SendState::Sending {
+            return;
+        }
+        self.privacy.send = SendState::Sending;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { crate::telemetry::upload_now_blocking() })
+                .await;
+            let summary = crate::telemetry::upload_now_summary(&result);
+            let _ = this.update(cx, |this, cx| {
+                this.privacy.send = SendState::Done(summary);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn toggle_diagnostics_upload(&mut self, cx: &mut Context<Self>) {
@@ -165,6 +200,26 @@ impl UtilitySurfaces {
                                 },
                             ))
                         }),
+                    colors,
+                ))
+                .child(setting_divider(colors))
+                .child(setting_row(
+                    "Send diagnostics now",
+                    match privacy.send {
+                        SendState::Done(summary) => summary,
+                        _ => "Uploads what's been recorded so far, even with sharing off.",
+                    },
+                    surface_button(
+                        if privacy.send == SendState::Sending {
+                            "Sending…"
+                        } else {
+                            "Send now"
+                        },
+                        "send-diagnostics-now",
+                        colors,
+                        cx,
+                        |this, cx| this.send_diagnostics_now(cx),
+                    ),
                     colors,
                 ))
                 .child(setting_divider(colors))

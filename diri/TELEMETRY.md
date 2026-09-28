@@ -214,7 +214,10 @@ recorded by the Engine, not the Holder.
 Started in `main` via `telemetry::start` (never in tests, headless previews or
 `DIRI_SETTINGS_PREVIEW`): `init_default(App)`, panic hook, 60 s health
 sampler. Controls live in Settings › General › Privacy (upload toggle, name,
-Support ID, *Show in Finder*) and Help › Report a Problem…. There is no About
+Support ID, *Send now*, *Show in Finder*) and Help › Report a Problem…. *Send now*
+and Report a Problem call the Engine's `telemetry.upload_now` RPC, which runs
+one upload immediately (flushing the Engine's own recorder first) and ignores
+the sharing toggle: the click is the consent. There is no About
 surface, so the Support ID is shown only in Settings. The first run of a
 recording build shows one 20 s toast (*diri shares diagnostics*) and writes
 the default `telemetry/config.json`; the file's existence is the "seen" mark.
@@ -251,7 +254,8 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `ui.toast` | info | `title` (static toast title) | errors the user was shown ("Terminal", "Target unavailable", …) |
 | `privacy.notice_shown` / `privacy.upload_changed` | info | `upload` | consent history |
 | `settings.privacy_save_failed` | error | `error` (io kind) | toggle that doesn't stick |
-| `user.report` | incident | `version, support_id` | Help › Report a Problem…: the moment to look around |
+| `user.report` | incident | `version, support_id` | Help › Report a Problem…: the moment to look around (uploaded immediately) |
+| `telemetry.upload_now` | info | `status, batches` | Engine: a user-requested upload and its outcome (`sent`, `up_to_date`, `failed`, `timeout`, `unavailable`) |
 | `client.connected` | info | `reconnect, attempts, down_ms, connect_ms, hello_ms, first_failure, engine_build, engine_pid, proto` | slow Engine start, how long an outage lasted |
 | `client.disconnected` | warn | `kind, error, connected_s` | Engine crash/restart seen from the app |
 | `client.connect_failing` | error | `attempts, down_ms, kind, error, handshake` | Engine never came up (≈ 45 s of retries) |
