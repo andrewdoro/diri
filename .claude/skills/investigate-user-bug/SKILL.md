@@ -1,6 +1,6 @@
 ---
 name: investigate-user-bug
-description: Investigate a bug a specific diri user hit (crash, hang, slowness, memory leak, blank or garbled terminal, spawn/resume/remote failure, copy/paste not working) from diri's telemetry with the diri-debug CLI. Use when given a user's name, Support ID (D-XXXXXXXX), session id (s_…) or Claude/Codex conversation UUID, or asked "what happened to <person>", "look at julia's crash", "why is it slow for them", or to check this Mac's own spool.
+description: Investigate a bug a specific diri user hit (crash, hang, slowness, memory leak, blank or garbled terminal, spawn/resume/remote failure, copy/paste not working) from diri's telemetry with the diri-debug CLI. Use when given a user's name, Support ID (D-XXXXXXXX), session id (s_…) or Claude/Codex conversation UUID, or asked "what happened to <person>", "look at alex's crash", "why is it slow for them", or to check this Mac's own spool.
 ---
 
 # Investigate a user's bug from telemetry
@@ -18,7 +18,7 @@ Add `--json` when you want to filter the output with `jq`. The human output is a
 ## Workflow
 
 1. **Identify the install.** Start from whatever you were given.
-   - A name or Support ID: `diri-debug who julia`. If several match, use the Support ID from now on.
+   - A name or Support ID: `diri-debug who alex`. If several match, use the Support ID from now on.
    - A session id or conversation UUID (for example from an error message such as `No conversation found with session ID: 0a40e747-…`): `diri-debug find <id>`. It names the install and suggests a `timeline` command.
    - Note the app version and when the install was last seen. Data older than 30 days is gone.
 2. **Find the incident.** Run `diri-debug incidents <who> --since 7d`.

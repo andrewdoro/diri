@@ -34,7 +34,7 @@ async function run(args, env = {}) {
 describe("time", () => {
   it("parses durations, clock times, dates and epoch ms", () => {
     assert.equal(parseDuration("1h30m"), 5_400_000);
-    assert.equal(parseDuration("julia"), null);
+    assert.equal(parseDuration("alex"), null);
     assert.equal(parseTime("2h", NOW), NOW - 7_200_000);
     assert.equal(parseTime("2026-09-27 23:40", NOW), T0);
     assert.equal(parseTime("23:40", NOW), T0);
@@ -89,25 +89,25 @@ describe("health analysis", () => {
 
 describe("remote commands", () => {
   it("who finds an install by name and prints its Support ID", async () => {
-    const { code, stdout } = await run(["who", "julia"]);
+    const { code, stdout } = await run(["who", "alex"]);
     assert.equal(code, 0);
-    assert.match(stdout, new RegExp(`${SUPPORT_ID}\\s+julia\\s+0\\.9\\.0`));
-    assert.ok(stub.requests.includes("/v1/admin/installs?q=julia"));
+    assert.match(stdout, new RegExp(`${SUPPORT_ID}\\s+alex\\s+0\\.9\\.0`));
+    assert.ok(stub.requests.includes("/v1/admin/installs?q=alex"));
   });
 
   it("incidents resolves who, lists newest first and suggests the timeline", async () => {
-    const { stdout } = await run(["incidents", "julia", "--since", "7d"]);
+    const { stdout } = await run(["incidents", "alex", "--since", "7d"]);
     const lines = stdout.split("\n");
-    assert.match(lines[0], /julia \(D-190EEHZT\).*3 errors\/incidents/);
+    assert.match(lines[0], /alex \(D-190EEHZT\).*3 errors\/incidents/);
     assert.match(lines[1], /^09-27 23:45:00\.000 app\s+900 ! panic\s+message="index out of bounds"/);
     assert.match(stdout, /session\.resume_failed\s+session=s_26bf32debd4c agent=claude-code conv=0a40e747/);
-    assert.match(stdout, /next: diri-debug timeline julia --around "2026-09-27 23:45" --window 20m/);
+    assert.match(stdout, /next: diri-debug timeline alex --around "2026-09-27 23:45" --window 20m/);
   });
 
   it("incidents across installs name each install; filters by kind glob", async () => {
     const { stdout } = await run(["incidents", "--kind", "session.*"]);
     assert.match(stdout, /^all installs: 2 errors/);
-    assert.match(stdout, /D-190EEHZT julia\s+09-27/);
+    assert.match(stdout, /D-190EEHZT alex\s+09-27/);
     assert.doesNotMatch(stdout, /panic/);
   });
 
@@ -117,8 +117,8 @@ describe("remote commands", () => {
     assert.match(stdout, /session\.resume_failed:no_conversation/);
   });
 
-  it("timeline merges batches across processes, folds health and shows julia's failure in one screen", async () => {
-    const { code, stdout } = await run(["timeline", "julia", "--around", "2026-09-27 23:38", "--window", "10m"]);
+  it("timeline merges batches across processes, folds health and shows alex's failure in one screen", async () => {
+    const { code, stdout } = await run(["timeline", "alex", "--around", "2026-09-27 23:38", "--window", "10m"]);
     assert.equal(code, 0);
     const body = stdout.split("\n").filter((l) => /^\d\d-\d\d /.test(l));
     const kinds = body.map((l) => l.split(/\s+/)[4] === "!" || l.split(/\s+/)[4] === "W" ? l.split(/\s+/)[5] : l.split(/\s+/)[4]);
@@ -141,12 +141,12 @@ describe("remote commands", () => {
   });
 
   it("timeline dedupes a batch delivered twice", async () => {
-    const { stdout } = await run(["timeline", "julia", "--around", "23:45", "--window", "2m", "--kind", "panic", "--json"]);
+    const { stdout } = await run(["timeline", "alex", "--around", "23:45", "--window", "2m", "--kind", "panic", "--json"]);
     assert.equal(JSON.parse(stdout).records.length, 1);
   });
 
   it("health plots per-process trends with a leak hint", async () => {
-    const { stdout } = await run(["health", "julia", "--since", "24h"]);
+    const { stdout } = await run(["health", "alex", "--since", "24h"]);
     assert.match(stdout, /^engine 812 /m);
     assert.match(stdout, /^ {2}rss_mb\s+[▁▂▃▄▅▆▇█]+\s+\d+/m);
     assert.match(stdout, /^ {2}frame_ms p99\s+[▁▂▃▄▅▆▇█]+/m);
@@ -155,14 +155,14 @@ describe("remote commands", () => {
   });
 
   it("sessions groups conversations under their session", async () => {
-    const { stdout } = await run(["sessions", "julia"]);
+    const { stdout } = await run(["sessions", "alex"]);
     assert.match(stdout, /s_26bf32debd4c\s+claude-code/);
     assert.match(stdout, new RegExp(`conv ${CONV}`));
   });
 
   it("find locates the install from a conversation uuid", async () => {
     const { stdout } = await run(["find", CONV]);
-    assert.match(stdout, /julia \(D-190EEHZT\).*session s_26bf32debd4c conv 0a40e747/);
+    assert.match(stdout, /alex \(D-190EEHZT\).*session s_26bf32debd4c conv 0a40e747/);
     assert.match(stdout, /next: diri-debug timeline D-190EEHZT --session s_26bf32debd4c/);
     const json = JSON.parse((await run(["find", CONV, "--json"])).stdout);
     assert.equal(json.matches[0].install, INSTALL);
@@ -175,7 +175,7 @@ describe("remote commands", () => {
   });
 
   it("every command supports --json", async () => {
-    for (const args of [["who", "julia"], ["incidents", "julia"], ["top"], ["health", "julia"], ["sessions", "julia"]]) {
+    for (const args of [["who", "alex"], ["incidents", "alex"], ["top"], ["health", "alex"], ["sessions", "alex"]]) {
       const { code, stdout } = await run([...args, "--json"]);
       assert.equal(code, 0, args.join(" "));
       assert.doesNotThrow(() => JSON.parse(stdout), args.join(" "));
@@ -183,10 +183,10 @@ describe("remote commands", () => {
   });
 
   it("fails clearly without configuration or with a bad token", async () => {
-    const missing = await run(["who", "julia"], { DIRI_TELEMETRY_URL: "" });
+    const missing = await run(["who", "alex"], { DIRI_TELEMETRY_URL: "" });
     assert.equal(missing.code, 1);
     assert.match(missing.stderr, /DIRI_TELEMETRY_URL/);
-    const bad = await run(["who", "julia"], { DIRI_TELEMETRY_ADMIN_TOKEN: "wrong" });
+    const bad = await run(["who", "alex"], { DIRI_TELEMETRY_ADMIN_TOKEN: "wrong" });
     assert.match(bad.stderr, /HTTP 401/);
     const unknown = await run(["timeline", "nobody"]);
     assert.match(unknown.stderr, /no install matches "nobody"/);
@@ -197,7 +197,7 @@ describe("local spool", () => {
   it("timeline reads open and sealed files from every process", async () => {
     const { code, stdout } = await run(["local", "timeline", "--dir", spool, "--around", "23:38", "--window", "10m"]);
     assert.equal(code, 0);
-    assert.match(stdout.split("\n")[0], /^julia \(D-190EEHZT\).*6 records \(2 errors\/incidents\) from 6 spool files, 3 unreadable lines/);
+    assert.match(stdout.split("\n")[0], /^alex \(D-190EEHZT\).*6 records \(2 errors\/incidents\) from 6 spool files, 3 unreadable lines/);
     assert.match(stdout, /holder\s+4242 ! session\.exit\s+session=s_26bf32debd4c code=exit_1/);
   });
 

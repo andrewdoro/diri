@@ -1,4 +1,4 @@
-// Deterministic fixture: julia's evening. A Claude tab resumed a
+// Deterministic fixture: alex's evening. A Claude tab resumed a
 // conversation Claude never wrote and dropped to zsh; the Engine's memory
 // crept up all evening. Written as a spool (for `local`) and served as
 // gzip batches by a stub admin API (for the remote commands).
@@ -61,7 +61,7 @@ export function writeSpool() {
   const dir = join(telemetry, "spool");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(telemetry, "install.json"), JSON.stringify({ install_id: INSTALL, created_ms: T0 - 86_400_000 }));
-  writeFileSync(join(telemetry, "config.json"), JSON.stringify({ upload: true, name: "julia" }));
+  writeFileSync(join(telemetry, "config.json"), JSON.stringify({ upload: true, name: "alex" }));
   writeFileSync(join(dir, "offsets.json"), "{}");
   const records = buildRecords();
   const byProc = new Map();
@@ -88,7 +88,7 @@ function buildBatches() {
   for (let i = 0; i < records.length; i += size) {
     const chunk = records.slice(i, i + size);
     const sentAt = chunk[chunk.length - 1].t + 1000;
-    const header = { v: 1, type: "batch", install: INSTALL, support_id: SUPPORT_ID, name: "julia", app_version: "0.9.0", sent_at: sentAt, lines: chunk.length };
+    const header = { v: 1, type: "batch", install: INSTALL, support_id: SUPPORT_ID, name: "alex", app_version: "0.9.0", sent_at: sentAt, lines: chunk.length };
     // Re-sending the same batch must not duplicate records in a timeline.
     const body = [header, ...chunk].map(line).join("\n");
     batches.push({
@@ -109,7 +109,7 @@ function buildBatches() {
 const INSTALL_ROW = {
   install: INSTALL,
   support_id: SUPPORT_ID,
-  name: "julia",
+  name: "alex",
   app_version: "0.9.0",
   os: "macos",
   os_version: "27.0",
@@ -130,7 +130,7 @@ export async function startStub() {
     .map((r, i) => ({
       id: i + 1,
       install: INSTALL,
-      name: "julia",
+      name: "alex",
       support_id: SUPPORT_ID,
       t: r.t,
       seq: r.seq,
@@ -166,7 +166,7 @@ export async function startStub() {
     switch (url.pathname) {
       case "/v1/admin/installs": {
         const term = (q.get("q") ?? "").toLowerCase();
-        const hit = !term || "julia".includes(term) || SUPPORT_ID.toLowerCase().startsWith(term) || INSTALL.startsWith(term);
+        const hit = !term || "alex".includes(term) || SUPPORT_ID.toLowerCase().startsWith(term) || INSTALL.startsWith(term);
         return send(200, { installs: hit ? [INSTALL_ROW] : [] });
       }
       case `/v1/admin/installs/${INSTALL}`:
@@ -212,7 +212,7 @@ export async function startStub() {
         const id = q.get("id");
         const matches = sessions
           .filter((s) => s.session === id || (s.conv && s.conv === id))
-          .map((s) => ({ ...s, install: INSTALL, support_id: SUPPORT_ID, name: "julia", app_version: "0.9.0" }));
+          .map((s) => ({ ...s, install: INSTALL, support_id: SUPPORT_ID, name: "alex", app_version: "0.9.0" }));
         return send(200, { matches });
       }
     }
