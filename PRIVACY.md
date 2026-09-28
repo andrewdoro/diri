@@ -27,7 +27,7 @@ text, file contents, environment variables, command lines, URLs you open,
 passwords or keys.
 
 **Where it goes:** unless you turn sharing off, the Engine uploads the log
-every ten minutes (within a minute after a crash or other incident) to a
+about once an hour (within a minute after a crash or other incident) to a
 Cloudflare Worker operated by the project. Uploads carry a random install id,
 the short Support ID derived from it, and the name you chose (your macOS login
 name unless you change or clear it). They are kept for 30 days and then

@@ -284,8 +284,9 @@ clipboard, paste, keystroke or terminal content is ever recorded.
 
 ## Upload
 
-The Engine's uploader wakes once a minute. If `spool/urgent` exists, or ten
-minutes have passed, it uploads. It sends every spool file's new complete
+The Engine's uploader wakes once a minute. If `spool/urgent` exists, or an
+hour has passed, it uploads (hourly keeps each install to about ten
+batches a day, which is what the Worker's free-tier budget is sized on). It sends every spool file's new complete
 lines (across app, Engine and Holders) as gzip NDJSON, at most 1 MiB raw per
 request:
 
