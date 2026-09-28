@@ -3,6 +3,7 @@
 //! The daemon remains authoritative: this module only composes
 //! `diri-client::SessionAttachment`, `diri-term`, and the T9 session store.
 
+mod autoscroll;
 mod controller;
 use controller::{AttachmentControl, ControllerLease};
 mod find_input;
