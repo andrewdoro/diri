@@ -32,8 +32,8 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
     let mut tools = vec![
         ToolDefinition::new(
             "submit_task",
-            "Assign a tracked task to an authorized Agent. Returns a durable task_id and delivery receipt, and tells the Agent to acknowledge and report that exact task. Reuse request_id on retries. Identical target/text defaults to one task; use a new request_id only for intentional additional work. Unknown delivery never permits a fresh copy. Use wait_for_task to await its explicit result.",
-            json!({"type":"object","properties":{"session_id":{"type":"string"},"text":{"type":"string","minLength":1,"maxLength":1048576},"request_id":message_id_schema()},"required":["session_id","text"]}),
+            "Assign a tracked task to an authorized Agent. Returns a durable task_id and delivery receipt, and tells the Agent to acknowledge and report that exact task. Reuse request_id on retries. Identical target/text defaults to one task; use a new request_id only for intentional additional work. Unknown delivery never permits a fresh copy. Pass result_schema to require a JSON result of that shape. Await it with wait_any (several tasks) or wait_for_task.",
+            json!({"type":"object","properties":{"session_id":{"type":"string"},"text":{"type":"string","minLength":1,"maxLength":1048576},"request_id":message_id_schema(),"result_schema":result_schema()},"required":["session_id","text"]}),
         ),
         ToolDefinition::new(
             "get_task",
@@ -51,6 +51,40 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
             json!({"type":"object","properties":{"task_id":message_id_schema(),"status":{"type":"string","enum":["acknowledged","blocked","completed","failed"]},"result":{"type":"string","maxLength":16384}},"required":["task_id","status"]}),
         ),
         ToolDefinition::new(
+            "submit_tasks",
+            "Assign several tracked tasks in one call (at most 16). Each entry behaves exactly like submit_task, including request_id deduplication; one failure does not stop the others. Returns one result per entry, in order, and the task_ids to pass to wait_any.",
+            json!({"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"session_id":{"type":"string","minLength":1},"text":{"type":"string","minLength":1,"maxLength":1048576},"request_id":message_id_schema(),"result_schema":result_schema()},"required":["session_id","text"],"additionalProperties":false}}},"required":["tasks"]}),
+        ),
+        ToolDefinition::new(
+            "answer_task",
+            "Answer a task you submitted, typically after it reported blocked with a question. The answer is recorded on the task, delivered to the assigned Agent, and a blocked task returns to acknowledged. Only the submitting session may answer.",
+            json!({"type":"object","properties":{"task_id":message_id_schema(),"text":{"type":"string","minLength":1,"maxLength":65536}},"required":["task_id","text"]}),
+        ),
+        ToolDefinition::new(
+            "cancel_task",
+            "Withdraw a task you submitted. It becomes terminal (cancelled) immediately and the assigned Agent is told to stop. Only the submitting session may cancel; finished tasks cannot be cancelled.",
+            json!({"type":"object","properties":{"task_id":message_id_schema(),"reason":{"type":"string","maxLength":16384}},"required":["task_id"]}),
+        ),
+        ToolDefinition::new(
+            "list_tasks",
+            "List tasks you submitted (role sent), were assigned (role assigned), or both, newest first. Open tasks only unless include_terminal is true.",
+            json!({"type":"object","properties":{"role":{"type":"string","enum":["sent","assigned","all"]},"include_terminal":{"type":"boolean"},"limit":{"type":"number","minimum":1,"maximum":200}}}),
+        ),
+        ToolDefinition::new(
+            "wait_any",
+            "Wait until at least one of the given tasks or sessions needs attention, then return every one that does (ready) and the rest (pending). Tasks are ready when completed, failed, cancelled, or blocked. Sessions are ready per until: settled (default: turn done, needs input, or exited), done, needs_me, or exited. Pass since_ms from the spawn/send/submit result so a session that was already idle before your message does not count as done. Handle the ready items, then call again with only the pending ids. Returns immediately if something is already ready.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "task_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                    "session_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                    "until": {"type": "string", "enum": ["settled", "done", "needs_me", "exited"]},
+                    "since_ms": since_ms_schema(),
+                    "timeout_s": {"type": "number", "default": 600, "minimum": 0, "maximum": 600}
+                }
+            }),
+        ),
+        ToolDefinition::new(
             "spawn_agent",
             "Open a new Diri session running an agent or shell, locally or on a configured remote host. Use this whenever the user asks to spawn another agent, session, or terminal. Identical arguments are deduplicated for this caller; reuse operation_id on retries and supply a new operation_id only for an intentional additional session. Inspect spawn_receipt: unknown/failed must never be retried under a new identity blindly.",
             json!({
@@ -64,9 +98,42 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
                     "base": {"type": "string", "description": "Starting ref for a new worktree, e.g. main. Omitted preserves HEAD behavior."},
                     "prompt": {"type": "string"},
                     "name": {"type": "string"},
-                    "operation_id": message_id_schema()
+                    "operation_id": message_id_schema(),
+                    "task": {"type": "boolean", "description": "Deliver prompt as a tracked Diri task instead of an untracked initial prompt. The result then includes task.task_id for wait_any or wait_for_task."},
+                    "result_schema": result_schema()
                 },
                 "required": ["kind", "cwd"]
+            }),
+        ),
+        ToolDefinition::new(
+            "spawn_agents",
+            "Fan out: open several sessions in one call (at most 8), concurrently. Each entry takes the same fields as spawn_agent (kind, cwd, worktree, branch, base, host, prompt, name, operation_id, task, result_schema) and is deduplicated the same way. Use worktree:true per entry for parallel edits. Returns one result per entry in order, plus the session_ids and task_ids to pass to wait_any.",
+            json!({"type":"object","properties":{"agents":{"type":"array","items":spawn_entry_schema()}},"required":["agents"]}),
+        ),
+        ToolDefinition::new(
+            "fork_agent",
+            "Fork an authorized session's conversation into a new child of yours, keeping its context, for example to try an alternative approach. Optionally send the fork a prompt (as a tracked task with task:true). Supported for agents whose conversations can be forked (Claude Code, Codex).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "prompt": {"type": "string"},
+                    "task": {"type": "boolean"},
+                    "result_schema": result_schema()
+                },
+                "required": ["session_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "manage_agent",
+            "Park or revive an authorized session without losing it: hibernate freezes its whole process tree (no CPU) while keeping the conversation and terminal, wake resumes it, and resume restarts an exited Agent in its saved conversation. Same authorization as release_agent.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "action": {"type": "string", "enum": ["hibernate", "wake", "resume"]}
+                },
+                "required": ["session_id", "action"]
             }),
         ),
         ToolDefinition::new(
@@ -95,12 +162,13 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "wait_for_agent",
-            "Wait for a session status without model polling. Already matching states return immediately; this does not acknowledge completion of a particular message. Exit or removal also ends the wait; inspect matched, removed, and session before assuming success.",
+            "Wait for a session status without model polling. Already matching states return immediately unless since_ms is given: then done/idle require a turn that finished after that time (pass since_ms from your send_prompt/spawn result). This does not acknowledge completion of a particular message. Exit or removal also ends the wait; inspect matched, removed, and session before assuming success.",
             json!({
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string"},
                     "until": {"type": "string", "enum": ["done", "needs_me", "idle", "exited"]},
+                    "since_ms": since_ms_schema(),
                     "timeout_s": {"type": "number", "default": 600, "minimum": 0, "maximum": 600}
                 },
                 "required": ["session_id"]
@@ -108,13 +176,15 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "read_output",
-            "Read the current rendered screen of an agent session.",
+            "Read what a session produced. last_message (best for results) returns the Agent's final answer from its transcript; transcript returns the last N turns; since returns only terminal lines added after cursor (pass back the returned cursor next time); screen/tail return the rendered screen. Transcript modes fall back to the screen tail when a session has no readable transcript (remote, shells, other agents).",
             json!({
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["screen", "tail"]},
-                    "lines": {"type": "number", "default": 50}
+                    "mode": {"type": "string", "enum": ["screen", "tail", "last_message", "transcript", "since"]},
+                    "lines": {"type": "number", "default": 50},
+                    "turns": {"type": "number", "default": 6, "minimum": 1, "maximum": 100},
+                    "cursor": {"type": "number", "minimum": 0}
                 },
                 "required": ["session_id"]
             }),
@@ -123,6 +193,34 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
             "get_artifacts",
             "Return PRs, issues, preview URLs, and listening ports discovered for a session.",
             session_id_schema(),
+        ),
+        ToolDefinition::new(
+            "get_diff",
+            "Summarize a session's code changes: changed files with +/- counts against its base (default branch merge-base, or HEAD for uncommitted work only), whether it is committed, and overlaps: files also changed by its live sibling sessions, which would conflict on integration. Set patch:true to include the unified diff (bounded by max_patch_bytes).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "base": {"type": "string", "enum": ["default_branch", "head"]},
+                    "patch": {"type": "boolean"},
+                    "max_patch_bytes": {"type": "number", "default": 32768, "minimum": 0, "maximum": 1048576},
+                    "overlaps": {"type": "boolean", "default": true}
+                },
+                "required": ["session_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "integrate",
+            "Bring an authorized child session's committed branch into your own checkout (merge, squash, or cherry_pick). Both checkouts must have no uncommitted tracked changes. Conflicts abort cleanly, change nothing, and are returned as paths. Local sessions in the same project only.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "strategy": {"type": "string", "enum": ["merge", "squash", "cherry_pick"]},
+                    "message": {"type": "string", "maxLength": 4096}
+                },
+                "required": ["session_id"]
+            }),
         ),
         ToolDefinition::new(
             "create_worktree",
@@ -183,33 +281,19 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
             browser_schema(),
         ),
         ToolDefinition::new(
-            "get_quick_open_include",
-            "Read ~/.diri-include, the gitignore-style extra folders Quick Open (Cmd+P) indexes even when they are hidden or skipped. Returns the file path, raw text, and active patterns.",
-            json!({"type": "object", "properties": {}}),
-        ),
-        ToolDefinition::new(
-            "add_quick_open_include",
-            "Append unique gitignore-style patterns to ~/.diri-include so Quick Open indexes matching folders. Trailing slashes are equivalent. Examples: **/.worktrees/ or */.worktrees/. Existing comments and order are kept.",
+            "quick_open_include",
+            "Read or change ~/.diri-include, the gitignore-style extra folders Quick Open (Cmd+P) indexes even when hidden or skipped. action get returns the path, text, and patterns; add appends unique patterns (e.g. **/.worktrees/); set replaces the whole file with text (empty clears it).",
             json!({
                 "type": "object",
                 "properties": {
+                    "action": {"type": "string", "enum": ["get", "add", "set"]},
                     "patterns": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1, "maxLength": 256}
-                    }
-                },
-                "required": ["patterns"]
-            }),
-        ),
-        ToolDefinition::new(
-            "set_quick_open_include",
-            "Replace ~/.diri-include with this text. Use after get_quick_open_include when removing or rewriting patterns. Empty text clears the list.",
-            json!({
-                "type": "object",
-                "properties": {
+                    },
                     "text": {"type": "string", "maxLength": 65536}
                 },
-                "required": ["text"]
+                "required": ["action"]
             }),
         ),
         ToolDefinition::new(
@@ -230,19 +314,20 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "wait_for_children",
-            "Wait until selected child sessions settle, finish, or exit. Already matching states return immediately. Removed children are reported separately and cannot settle other working children. Omit session_ids for all direct children; an explicit empty array selects none.",
+            "Wait until ALL selected child sessions settle, finish, or exit (use wait_any to handle each as soon as it is ready). Already matching states return immediately. Removed children are reported separately and cannot settle other working children. Omit session_ids for all direct children; an explicit empty array selects none.",
             json!({
                 "type": "object",
                 "properties": {
                     "session_ids": {"type": "array", "items": {"type": "string"}},
                     "until": {"type": "string", "enum": ["settled", "done", "exited"]},
+                    "since_ms": since_ms_schema(),
                     "timeout_s": {"type": "number", "default": 600, "minimum": 0, "maximum": 600}
                 }
             }),
         ),
         ToolDefinition::new(
             "summarize_children",
-            "Collect compact screen tails, status, and artifacts for this session's children without interpreting their output.",
+            "Collect compact screen tails, each child's last agent message (when its transcript is readable), status, and artifacts for this session's children without interpreting their output.",
             json!({
                 "type": "object",
                 "properties": {
@@ -253,7 +338,7 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "report_to_parent",
-            "Deliver a structured update, result, blocker, or question to the session that delegated this work at most once. Identical reports are deduplicated. Reuse message_id on retries; choose a new one only for an intentional repeat. Inspect unknown outcomes without resending.",
+            "Deliver a structured update, result, blocker, or question to the session that delegated this work at most once. If your parent assigned you an open Diri task, the report is recorded on that task instead (update→progress, blocked→blocked, done→completed, failed→failed) and reaches the parent through wait_any/wait_for_task; set deliver:true to also type it into the parent's terminal. Identical reports are deduplicated. Reuse message_id on retries; choose a new one only for an intentional repeat. Inspect unknown outcomes without resending.",
             json!({
                 "type": "object",
                 "properties": {
@@ -267,7 +352,8 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
                     "changed_paths": string_array(),
                     "artifacts": string_array(),
                     "proof": string_array(),
-                    "submit": {"type": "boolean"}
+                    "submit": {"type": "boolean"},
+                    "deliver": {"type": "boolean"}
                 },
                 "required": ["summary"]
             }),
@@ -323,7 +409,7 @@ pub(crate) fn validate_arguments(tool: &str, arguments: &Value) -> Result<(), St
     validate_value(arguments, &definition.input_schema, "arguments")
 }
 
-fn validate_value(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+pub(crate) fn validate_value(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
     let expected = schema["type"].as_str().unwrap_or("any");
     let valid = match expected {
         "object" => value.is_object(),
@@ -331,6 +417,8 @@ fn validate_value(value: &Value, schema: &Value, path: &str) -> Result<(), Strin
         "string" => value.is_string(),
         "boolean" => value.is_boolean(),
         "number" => value.as_f64().is_some_and(f64::is_finite),
+        "integer" => value.is_i64() || value.is_u64(),
+        "null" => value.is_null(),
         _ => true,
     };
     if !valid {
@@ -418,6 +506,37 @@ fn browser_schema() -> Value {
     })
 }
 
+fn result_schema() -> Value {
+    json!({"type":"object",
+        "description":"Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked)."})
+}
+
+fn since_ms_schema() -> Value {
+    json!({"type":"number", "minimum":0,
+        "description":"Unix time in milliseconds, as returned in since_ms by spawn_agent, send_prompt, and submit_task. A session counts as done only after a turn that finished later."})
+}
+
+fn spawn_entry_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "minLength": 1},
+            "cwd": {"type": "string", "minLength": 1},
+            "host": {"type": "string", "minLength": 1},
+            "worktree": {"type": "boolean"},
+            "branch": {"type": "string", "minLength": 1},
+            "base": {"type": "string", "minLength": 1},
+            "prompt": {"type": "string"},
+            "name": {"type": "string", "minLength": 1},
+            "operation_id": message_id_schema(),
+            "task": {"type": "boolean"},
+            "result_schema": result_schema()
+        },
+        "required": ["kind", "cwd"],
+        "additionalProperties": false
+    })
+}
+
 fn message_id_schema() -> Value {
     json!({"type":"string", "minLength":1, "maxLength":200,
         "description":"Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat."})
@@ -450,22 +569,69 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), total);
-        assert!(names.contains(&"get_quick_open_include".into()));
-        assert!(names.contains(&"add_quick_open_include".into()));
-        assert!(names.contains(&"set_quick_open_include".into()));
+        for name in [
+            "quick_open_include",
+            "wait_any",
+            "spawn_agents",
+            "submit_tasks",
+            "answer_task",
+            "cancel_task",
+            "list_tasks",
+            "get_diff",
+            "integrate",
+            "fork_agent",
+            "manage_agent",
+        ] {
+            assert!(names.contains(&name.to_owned()), "{name}");
+        }
     }
 
     #[test]
-    fn add_quick_open_include_requires_pattern_strings() {
-        assert!(validate_arguments("add_quick_open_include", &json!({})).is_err());
+    fn quick_open_include_requires_an_action_and_pattern_strings() {
+        assert!(validate_arguments("quick_open_include", &json!({})).is_err());
         assert!(
             validate_arguments(
-                "add_quick_open_include",
-                &json!({"patterns": ["**/.worktrees/"]})
+                "quick_open_include",
+                &json!({"action": "add", "patterns": ["**/.worktrees/"]})
             )
             .is_ok()
         );
-        assert!(validate_arguments("set_quick_open_include", &json!({"text": ""})).is_ok());
+        assert!(
+            validate_arguments(
+                "quick_open_include",
+                &json!({"action": "add", "patterns": [7]})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments("quick_open_include", &json!({"action": "set", "text": ""})).is_ok()
+        );
+    }
+
+    #[test]
+    fn batch_entries_reject_unknown_fields_and_bad_types() {
+        assert!(
+            validate_arguments(
+                "spawn_agents",
+                &json!({"agents": [{"kind": "claude", "cwd": "/tmp", "worktree": true}]})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "spawn_agents",
+                &json!({"agents": [{"kind": "claude", "cwd": "/tmp", "bogus": 1}]})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "submit_tasks",
+                &json!({"tasks": [{"session_id": "s1", "text": ""}]})
+            )
+            .is_err()
+        );
+        assert!(validate_arguments("wait_any", &json!({"task_ids": [], "since_ms": -1})).is_err());
     }
 
     #[test]

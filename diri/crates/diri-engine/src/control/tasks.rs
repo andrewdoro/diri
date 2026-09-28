@@ -3,7 +3,8 @@
 use super::message_delivery::{digest, open};
 use super::operations::{identity, storage_error};
 use diri_proto::tasks::{
-    TaskGetParams, TaskRecord, TaskReportParams, TaskStatus, TaskSubmitParams,
+    MAX_TASK_UPDATES, TaskAnswerParams, TaskCancelParams, TaskGetParams, TaskListParams,
+    TaskRecord, TaskReportParams, TaskStatus, TaskSubmitParams, TaskUpdate,
 };
 use diri_proto::{ControlError, DeliverMessageParams, SessionId};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -50,7 +51,11 @@ fn reserve(path: &Path, p: &TaskSubmitParams) -> Result<(TaskRecord, bool), Cont
         ));
     }
     let id = format!("task_{}", digest(&json!([p.caller_id, p.request_id])));
-    let fingerprint = digest(&json!([p.session_id, p.text]));
+    // Schemaless submissions keep their original fingerprint.
+    let fingerprint = match &p.result_schema {
+        None => digest(&json!([p.session_id, p.text])),
+        Some(schema) => digest(&json!([p.session_id, p.text, schema])),
+    };
     let mut db = database(path)?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -89,6 +94,8 @@ fn reserve(path: &Path, p: &TaskSubmitParams) -> Result<(TaskRecord, bool), Cont
         status: TaskStatus::AwaitingAcknowledgement,
         result: None,
         revision: 0,
+        updates: Vec::new(),
+        result_schema: p.result_schema.clone(),
     };
     tx.execute(
         "INSERT INTO tasks_v1 VALUES (?1, ?2, ?3)",
@@ -172,12 +179,133 @@ fn report(path: &Path, p: &TaskReportParams) -> Result<TaskRecord, ControlError>
             "a terminal task report requires result evidence",
         ));
     }
+    let kind = if record.status == p.status {
+        "progress"
+    } else {
+        "status"
+    };
     record.status = p.status.clone();
     record.result = p.result.clone();
     record.revision += 1;
+    push_update(&mut record, kind, &p.caller_id, p.result.clone());
     save(&tx, &record)?;
     tx.commit().map_err(storage_error)?;
     Ok(record)
+}
+
+fn push_update(record: &mut TaskRecord, kind: &str, by: &str, text: Option<String>) {
+    record.updates.push(TaskUpdate {
+        kind: kind.into(),
+        by: by.into(),
+        status: Some(record.status.clone()),
+        text,
+        revision: record.revision,
+    });
+    let excess = record.updates.len().saturating_sub(MAX_TASK_UPDATES);
+    record.updates.drain(..excess);
+}
+
+/// Sender-side mutation shared by answer and cancel: only the task's sender
+/// may act, and a terminal task never changes again.
+fn sender_update(
+    path: &Path,
+    caller: &str,
+    task_id: &str,
+    apply: impl FnOnce(&mut TaskRecord),
+) -> Result<TaskRecord, ControlError> {
+    identity(task_id)?;
+    let mut db = database(path)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    let mut record = load(&tx, task_id)?;
+    if caller != record.sender_id {
+        return Err(ControlError::new(
+            "forbidden",
+            "only the session that submitted this task may answer or cancel it",
+        ));
+    }
+    if record.status.is_terminal() {
+        return Err(ControlError::new(
+            "task_terminal",
+            "a terminal task result is immutable",
+        ));
+    }
+    record.revision += 1;
+    apply(&mut record);
+    save(&tx, &record)?;
+    tx.commit().map_err(storage_error)?;
+    Ok(record)
+}
+
+fn answer(path: &Path, p: &TaskAnswerParams) -> Result<TaskRecord, ControlError> {
+    if p.text.trim().is_empty() || p.text.len() > 65_536 {
+        return Err(ControlError::bad_request(
+            "a task answer must contain 1–65536 bytes",
+        ));
+    }
+    sender_update(path, &p.caller_id, &p.task_id, |record| {
+        // Answering a blocker resumes the work; the Agent still owns the result.
+        if record.status == TaskStatus::Blocked {
+            record.status = TaskStatus::Acknowledged;
+        }
+        push_update(record, "answer", &p.caller_id, Some(p.text.clone()));
+    })
+}
+
+fn cancel(path: &Path, p: &TaskCancelParams) -> Result<TaskRecord, ControlError> {
+    if p.reason
+        .as_ref()
+        .is_some_and(|reason| reason.len() > 16_384)
+    {
+        return Err(ControlError::bad_request(
+            "cancel reason exceeds 16384 bytes",
+        ));
+    }
+    sender_update(path, &p.caller_id, &p.task_id, |record| {
+        record.status = TaskStatus::Cancelled;
+        record.result = p.reason.clone();
+        push_update(record, "cancel", &p.caller_id, p.reason.clone());
+    })
+}
+
+/// The newest tasks a caller sent or received. Receipts are small; the table
+/// is capped, so a bounded newest-first scan stays cheap.
+fn list(path: &Path, p: &TaskListParams) -> Result<Vec<TaskRecord>, ControlError> {
+    identity(&p.caller_id)?;
+    let (sent, assigned) = match p.role.as_deref() {
+        None | Some("all") => (true, true),
+        Some("sent") => (true, false),
+        Some("assigned") => (false, true),
+        Some(_) => {
+            return Err(ControlError::bad_request(
+                "role must be sent, assigned, or all",
+            ));
+        }
+    };
+    let limit = p.limit.unwrap_or(50).clamp(1, 200) as usize;
+    let db = database(path)?;
+    let mut statement = db
+        .prepare("SELECT record FROM tasks_v1 ORDER BY rowid DESC LIMIT 5000")
+        .map_err(storage_error)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(storage_error)?;
+    let mut tasks = Vec::new();
+    for raw in rows {
+        let Ok(record) = serde_json::from_str::<TaskRecord>(&raw.map_err(storage_error)?) else {
+            continue;
+        };
+        let mine = (sent && record.sender_id == p.caller_id)
+            || (assigned && record.session_id == p.caller_id);
+        if mine && (p.include_terminal || !record.status.is_terminal()) {
+            tasks.push(record);
+            if tasks.len() == limit {
+                break;
+            }
+        }
+    }
+    Ok(tasks)
 }
 
 impl super::ControlServer {
@@ -240,12 +368,67 @@ impl super::ControlServer {
     pub(super) fn task_report(&self, params: Option<Value>) -> Result<Value, ControlError> {
         let p: TaskReportParams = super::decode(params)?;
         let record = report(&self.tasks_path(), &p)?;
+        self.publish_task(&record);
+        super::encode(&record)
+    }
+    pub(super) fn task_answer(&self, params: Option<Value>) -> Result<Value, ControlError> {
+        let p: TaskAnswerParams = super::decode(params)?;
+        let record = answer(&self.tasks_path(), &p)?;
+        self.publish_task(&record);
+        let receipt = self.notify_task_agent(
+            &record,
+            "answer",
+            &format!(
+                "[Diri task {} — answer from session {}]\n{}\n\nContinue the task, then report_task with this task_id.",
+                record.task_id, record.sender_id, p.text
+            ),
+        );
+        Ok(json!({"ok": receipt == "sent", "delivery": receipt, "task": record}))
+    }
+    pub(super) fn task_cancel(&self, params: Option<Value>) -> Result<Value, ControlError> {
+        let p: TaskCancelParams = super::decode(params)?;
+        let record = cancel(&self.tasks_path(), &p)?;
+        self.publish_task(&record);
+        let reason = p
+            .reason
+            .as_deref()
+            .map(|reason| format!("\nReason: {reason}"))
+            .unwrap_or_default();
+        let receipt = self.notify_task_agent(
+            &record,
+            "cancel",
+            &format!(
+                "[Diri task {} cancelled by session {}]{reason}\nStop working on this task. Do not report it again.",
+                record.task_id, record.sender_id
+            ),
+        );
+        Ok(json!({"ok": true, "delivery": receipt, "task": record}))
+    }
+    pub(super) fn task_list(&self, params: Option<Value>) -> Result<Value, ControlError> {
+        let p: TaskListParams = super::decode(params)?;
+        Ok(json!({"tasks": list(&self.tasks_path(), &p)?}))
+    }
+    fn publish_task(&self, record: &TaskRecord) {
         self.events.publish(
             "task.updated",
             json!({"task_id":record.task_id,"revision":record.revision}),
             None,
         );
-        super::encode(&record)
+    }
+    /// Best-effort, at-most-once notice to the assigned Agent. The task
+    /// receipt is already durable; delivery is reported, never retried here.
+    fn notify_task_agent(&self, record: &TaskRecord, kind: &str, text: &str) -> String {
+        let message = DeliverMessageParams {
+            session_id: SessionId::new(&record.session_id),
+            sender_id: record.sender_id.clone(),
+            message_id: format!("{}:{kind}:{}", record.task_id, record.revision),
+            submit: true,
+            text: text.to_owned(),
+        };
+        self.session_deliver_message(Some(serde_json::to_value(message).unwrap()))
+            .ok()
+            .and_then(|receipt| receipt["delivery"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into())
     }
 }
 
@@ -258,6 +441,7 @@ mod tests {
             request_id: "work-1".into(),
             session_id: "child".into(),
             text: "private task".into(),
+            result_schema: None,
         }
     }
     #[test]
@@ -297,5 +481,73 @@ mod tests {
             .is_err()
         );
         assert!(!String::from_utf8_lossy(&std::fs::read(path).unwrap()).contains("private task"));
+    }
+
+    #[test]
+    fn senders_answer_blockers_and_cancel_while_agents_keep_the_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tasks.sqlite");
+        let (task, _) = reserve(&path, &submission()).unwrap();
+        let mut p = TaskReportParams {
+            caller_id: "child".into(),
+            task_id: task.task_id.clone(),
+            status: TaskStatus::Acknowledged,
+            result: None,
+        };
+        report(&path, &p).unwrap();
+        p.status = TaskStatus::Blocked;
+        p.result = Some("which database?".into());
+        report(&path, &p).unwrap();
+        let answer_params = |caller: &str| TaskAnswerParams {
+            caller_id: caller.into(),
+            task_id: task.task_id.clone(),
+            text: "sqlite".into(),
+        };
+        assert_eq!(
+            answer(&path, &answer_params("child")).unwrap_err().code,
+            "forbidden"
+        );
+        let answered = answer(&path, &answer_params("parent")).unwrap();
+        assert_eq!(answered.status, TaskStatus::Acknowledged);
+        assert_eq!(answered.updates.last().unwrap().kind, "answer");
+
+        let listed = list(
+            &path,
+            &TaskListParams {
+                caller_id: "parent".into(),
+                role: Some("sent".into()),
+                include_terminal: false,
+                limit: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 1);
+
+        let cancelled = cancel(
+            &path,
+            &TaskCancelParams {
+                caller_id: "parent".into(),
+                task_id: task.task_id.clone(),
+                reason: Some("superseded".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+        p.status = TaskStatus::Completed;
+        p.result = Some("done anyway".into());
+        assert_eq!(report(&path, &p).unwrap_err().code, "task_terminal");
+        assert!(
+            list(
+                &path,
+                &TaskListParams {
+                    caller_id: "child".into(),
+                    role: Some("assigned".into()),
+                    include_terminal: false,
+                    limit: None,
+                },
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 }

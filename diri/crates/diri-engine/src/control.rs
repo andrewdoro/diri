@@ -30,6 +30,7 @@ mod claude_accounts;
 mod codex_accounts;
 mod message_delivery;
 mod operations;
+mod orchestration;
 mod tasks;
 mod workspaces;
 
@@ -610,6 +611,9 @@ impl ControlServer {
                         | Method::HOST_USAGE
                         | Method::HOST_LIST_DIRECTORIES
                         | Method::SESSION_READ_DIFF
+                        | Method::WORKTREE_INTEGRATE
+                        | Method::TASK_ANSWER
+                        | Method::TASK_CANCEL
                         | Method::SESSION_CAPTURE_FIND
                         | Method::SESSION_READ_SCROLLBACK_CELLS
                         | Method::SESSION_KILL
@@ -869,6 +873,9 @@ impl ControlServer {
             Method::TASK_SUBMIT => self.task_submit(params),
             Method::TASK_GET => self.task_get(params),
             Method::TASK_REPORT => self.task_report(params),
+            Method::TASK_ANSWER => self.task_answer(params),
+            Method::TASK_CANCEL => self.task_cancel(params),
+            Method::TASK_LIST => self.task_list(params),
             Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),
             Method::SESSION_DELIVER_MESSAGE => self.session_deliver_message(params),
             Method::SESSION_SEND_KEY => self.session_send_key(params),
@@ -921,6 +928,8 @@ impl ControlServer {
             Method::AGENT_CONFIGURE => self.agent_configure(params),
             Method::PROJECT_ADD => self.project_add(params),
             Method::SESSION_READ_DIFF => self.session_read_diff(params),
+            Method::SESSION_READ_TRANSCRIPT => self.session_read_transcript(params),
+            Method::WORKTREE_INTEGRATE => self.worktree_integrate(params),
             Method::SESSION_HIBERNATE => self.session_hibernate(params),
             Method::SESSION_WAKE => self.session_wake(params),
             Method::DAEMON_PREPARE_SHUTDOWN => self.daemon_prepare_shutdown(),
@@ -2914,7 +2923,7 @@ impl ControlServer {
         record.project_id = source.project_id.clone();
         record.worktree_path = source.worktree_path.clone();
         record.git_branch = source.git_branch.clone();
-        record.parent = Some(source.id.clone());
+        record.parent = Some(p.parent.clone().unwrap_or_else(|| source.id.clone()));
         record.host = source.host.clone();
         record.remote_persistence = remote_persistence;
         record.title = format!("Fork of {}", source.title);

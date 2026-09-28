@@ -649,3 +649,166 @@ fn task_completion_is_explicit_and_specific_to_the_submitted_task() {
         .call("release_agent", &json!({"session_id":id}))
         .unwrap();
 }
+
+#[test]
+fn fanned_out_tasks_surface_through_wait_any_as_each_needs_the_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = temp.path().join("prompt-fixture");
+    std::fs::write(
+        &fixture,
+        "#!/bin/sh\nstty raw -echo\nexec cat > /dev/null\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server = start_server(temp.path(), &fixture, temp.path());
+    let parent = Bridge::new(server.socket_path().into(), Some("s_parent".into()));
+    let schema =
+        json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"integer"}}});
+    let fanned = parent
+        .call(
+            "spawn_agents",
+            &json!({"agents": [
+                {"kind":"prompt-fixture", "cwd":temp.path(), "name":"one", "prompt":"first job", "task":true},
+                {"kind":"prompt-fixture", "cwd":temp.path(), "name":"two", "prompt":"second job", "task":true, "result_schema":schema},
+            ]}),
+        )
+        .unwrap();
+    assert_eq!(fanned["ok"], true, "{fanned}");
+    let sessions: Vec<String> = fanned["session_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect();
+    let tasks: Vec<String> = fanned["task_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!((sessions.len(), tasks.len()), (2, 2));
+    let first = Bridge::new(server.socket_path().into(), Some(sessions[0].clone()));
+    let second = Bridge::new(server.socket_path().into(), Some(sessions[1].clone()));
+
+    let idle = parent
+        .call("wait_any", &json!({"task_ids":tasks, "timeout_s":0}))
+        .unwrap();
+    assert_eq!(idle["timed_out"], true);
+    assert_eq!(idle["pending"].as_array().unwrap().len(), 2);
+
+    // A progress report is recorded on the open task instead of typed.
+    let progress = first
+        .call(
+            "report_to_parent",
+            &json!({"summary":"halfway", "status":"update"}),
+        )
+        .unwrap();
+    assert_eq!(progress["recorded_on_task"]["status"], "acknowledged");
+
+    let waiter = {
+        let parent = parent.clone();
+        let tasks = tasks.clone();
+        std::thread::spawn(move || {
+            parent
+                .call("wait_any", &json!({"task_ids":tasks, "timeout_s":5}))
+                .unwrap()
+        })
+    };
+    first
+        .call(
+            "report_task",
+            &json!({"task_id":tasks[0], "status":"blocked", "result":"which port?"}),
+        )
+        .unwrap();
+    let woke = waiter.join().unwrap();
+    assert_eq!(woke["ready"][0]["id"], tasks[0].as_str());
+    assert_eq!(woke["ready"][0]["reason"], "blocked");
+    assert_eq!(woke["pending"][0]["id"], tasks[1].as_str());
+
+    let answered = parent
+        .call("answer_task", &json!({"task_id":tasks[0], "text":"8080"}))
+        .unwrap();
+    assert_eq!(answered["task"]["status"], "acknowledged");
+    assert!(
+        second
+            .call("answer_task", &json!({"task_id":tasks[0], "text":"no"}))
+            .is_err()
+    );
+
+    second
+        .call(
+            "report_task",
+            &json!({"task_id":tasks[1], "status":"acknowledged"}),
+        )
+        .unwrap();
+    assert!(
+        second
+            .call(
+                "report_task",
+                &json!({"task_id":tasks[1], "status":"completed", "result":"{\"answer\":\"x\"}"}),
+            )
+            .is_err(),
+        "a result violating result_schema must be rejected"
+    );
+    second
+        .call(
+            "report_task",
+            &json!({"task_id":tasks[1], "status":"completed", "result":"{\"answer\":42}"}),
+        )
+        .unwrap();
+    let cancelled = parent
+        .call(
+            "cancel_task",
+            &json!({"task_id":tasks[0], "reason":"superseded"}),
+        )
+        .unwrap();
+    assert_eq!(cancelled["task"]["status"], "cancelled");
+
+    let settled = parent
+        .call("wait_any", &json!({"task_ids":tasks, "timeout_s":0}))
+        .unwrap();
+    assert_eq!(settled["ready"].as_array().unwrap().len(), 2);
+    let open = parent.call("list_tasks", &json!({"role":"sent"})).unwrap();
+    assert!(open["tasks"].as_array().unwrap().is_empty());
+
+    for id in &sessions {
+        parent
+            .call("release_agent", &json!({"session_id":id}))
+            .unwrap();
+    }
+}
+
+#[test]
+fn anchored_waits_ignore_an_idle_state_from_before_the_message() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = temp.path().join("prompt-fixture");
+    std::fs::write(&fixture, "#!/bin/sh\nexec cat > /dev/null\n").unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server = start_server(temp.path(), &fixture, temp.path());
+    let parent = Bridge::new(server.socket_path().into(), Some("s_parent".into()));
+    let child = parent
+        .call(
+            "spawn_agent",
+            &json!({"kind":"prompt-fixture", "cwd":temp.path()}),
+        )
+        .unwrap();
+    let id = child["id"].as_str().unwrap().to_owned();
+    let since = diri_proto::DateMillis::from(std::time::SystemTime::now()).0;
+    let anchored = parent
+        .call(
+            "wait_any",
+            &json!({"session_ids":[id], "until":"done", "since_ms":since, "timeout_s":0.3}),
+        )
+        .unwrap();
+    assert_eq!(anchored["timed_out"], true, "{anchored}");
+    let anchored = parent
+        .call(
+            "wait_for_agent",
+            &json!({"session_id":id, "until":"done", "since_ms":since, "timeout_s":0.3}),
+        )
+        .unwrap();
+    assert_eq!(anchored["matched"], false, "{anchored}");
+    parent
+        .call("release_agent", &json!({"session_id":id}))
+        .unwrap();
+}

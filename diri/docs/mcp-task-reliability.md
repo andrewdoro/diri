@@ -31,11 +31,14 @@ For work whose completion matters:
 
 1. Spawn an Agent without an initial prompt, using a stable `operation_id`.
 2. `submit_task(session_id, text, request_id)` assigns a logical task once.
+   `spawn_agent(..., prompt, task: true)` does steps 1–2 in one call; the task's
+   `request_id` derives from the spawn identity (`spawn:<operation_id>`), so a
+   retried spawn never assigns the work twice.
 3. The assigned Agent calls `report_task(task_id, status: "acknowledged")`.
 4. It does the work and calls `report_task` with `completed` or `failed`, plus
    a `result` describing the outcome and evidence. `blocked` is nonterminal.
-5. The parent calls `wait_for_task(task_id)` and inspects `completed` and the
-   returned task result. A timeout is not completion.
+5. The parent calls `wait_for_task(task_id)` (or `wait_any` for several) and
+   inspects `completed` and the returned task result. A timeout is not completion.
 
 Submission adds a short task-ID/reporting instruction to the delivered text.
 Use the same `request_id` when a reply is lost; a new ID means new work. Without
@@ -59,7 +62,7 @@ bound by the MCP process environment, not a new multi-user authentication system
 
 Task waits subscribe before refreshing the durable record and use absolute
 bounded deadlines. Cancelling a wait closes its sockets and never cancels the
-Agent's task. Task cancellation/undo is not implied by MCP request cancellation.
+Agent's task. Only an explicit `cancel_task` from the sender withdraws a task.
 
 ### Storage and compatibility
 
@@ -74,6 +77,54 @@ The old message receipt schema and Helper protocol are unchanged. The new MCP
 fails closed against an Engine without tracked spawn/task methods. Existing
 Holders remain usable. This adds no dependency to the production Helper;
 `dirijor-mcp` is a test-only dependency of `diri-remote`.
+
+## Multi-agent orchestration
+
+These tools sit on the same receipts; none infers completion from a screen.
+
+- **Fan-out.** `spawn_agents` launches up to 8 sessions concurrently (one
+  tracked-spawn identity each) and `submit_tasks` assigns up to 16 tasks. Both
+  return per-entry results in order; one failure never stops the others.
+- **First-ready waits.** `wait_any(task_ids, session_ids)` returns as soon as
+  any target needs the caller, with every ready target and the still-pending
+  ones. Tasks are ready when completed, failed, cancelled, or blocked. It is
+  stateless: the caller drops handled IDs and calls again, so a lost reply
+  never hides an event.
+- **Anchored session waits.** `spawn_agent`, `send_prompt`, and `submit_task`
+  return `since_ms`. Passing it to `wait_for_agent`, `wait_for_children`, or
+  `wait_any` makes an idle session count as done only after a turn completed
+  later (the Engine's `last_turn_completed_at`) or after the wait watched it
+  work. Without `since_ms` the historical behavior is unchanged.
+- **Blockers and withdrawal.** `answer_task` (sender only) records the answer,
+  delivers it to the Agent, and returns a blocked task to acknowledged.
+  `cancel_task` makes a task terminal as `cancelled` and tells the Agent to
+  stop. Every change appends to a bounded audit trail (`updates`, 32 entries).
+  `list_tasks` lists open (or all) tasks by role.
+- **Structured results.** `submit_task(result_schema)` stores a JSON Schema;
+  `report_task(completed)` must then carry JSON matching it (validated by the
+  MCP with the same subset used for tool arguments).
+- **One reporting channel.** When the caller has an open task from its parent,
+  `report_to_parent` is recorded on that task (update → progress, blocked →
+  blocked, done → completed, failed → failed) instead of being typed into the
+  parent's terminal, unless `deliver: true`.
+- **Reading results.** `read_output` adds `last_message` and `transcript`,
+  projected by the Engine (`session.read_transcript`) from local Claude Code and
+  Codex transcripts with the inspector's identity checks, and `since`, which
+  returns only scrollback added after a cursor. Other sessions fall back to the
+  screen tail.
+- **Bringing work back.** `get_diff` summarizes a session's changed files and
+  reports overlaps with live siblings. `integrate` (`worktree.integrate`)
+  merges, squashes, or cherry-picks a child's committed branch into the
+  caller's clean checkout using the user's own Git identity; conflicts abort
+  and are returned as paths. Local sessions only.
+- **Lifecycle.** `fork_agent` forks a conversation into a child of the caller
+  (`session.fork` now takes an optional `parent`); `manage_agent` hibernates,
+  wakes, or resumes.
+- **Limits.** Spawns are denied past delegation depth `DIRIJOR_MAX_SPAWN_DEPTH`
+  (default 3) or `DIRIJOR_MAX_LIVE_CHILDREN` live children (default 16).
+
+Long waits emit `notifications/progress` every 10 s when the client supplies a
+progress token, and object results are also returned as `structuredContent`.
 
 ## Continuous failure testing
 
