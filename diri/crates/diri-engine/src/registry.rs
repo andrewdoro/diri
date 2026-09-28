@@ -905,6 +905,10 @@ impl Registry {
             .unwrap_or_default()
     }
 
+    pub fn take_clipboard(&self, id: &str) -> Option<String> {
+        self.sessions.get(id)?.take_clipboard()
+    }
+
     pub fn changed_since(
         &mut self,
         published: &mut HashMap<String, u64>,

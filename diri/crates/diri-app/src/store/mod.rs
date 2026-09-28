@@ -443,6 +443,9 @@ pub struct SessionStore {
     /// Wakes the settle task when a window is armed early enough to beat the
     /// one it is currently sleeping on.
     attention_wake: Arc<Notify>,
+    /// Text terminal programs copied with OSC 52, for the application to put
+    /// on the system clipboard.
+    terminal_clipboard: broadcast::Sender<String>,
     effects: mpsc::UnboundedSender<StoreEffect>,
 }
 
@@ -530,6 +533,7 @@ impl SessionStore {
                 agent_install: None,
                 notification_feed,
                 attention_wake: Arc::new(Notify::new()),
+                terminal_clipboard: broadcast::channel(4).0,
                 effects,
             },
             receiver,
@@ -538,6 +542,23 @@ impl SessionStore {
 
     pub fn notifications(&self) -> &crate::notification_feed::NotificationFeed {
         &self.notification_feed
+    }
+
+    pub fn terminal_clipboard_writes(&self) -> broadcast::Receiver<String> {
+        self.terminal_clipboard.subscribe()
+    }
+
+    /// Relays an OSC 52 copy while the user is in Diri. A write from a session
+    /// this store does not know, or one delayed past a gesture's plausible
+    /// reach (an event replayed after a reconnect), must not replace the
+    /// clipboard.
+    fn accept_terminal_clipboard(&self, event: diri_proto::SessionClipboardEvent) -> bool {
+        const MAX_AGE_MS: f64 = 5_000.0;
+        let known = self.sessions.get(&event.session_id).is_some_and(|session| {
+            !session.is_archived() && session.created_at == event.session_created_at
+        });
+        let fresh = (now_millis().0 - event.occurred_at.0).abs() <= MAX_AGE_MS;
+        known && fresh && self.app_is_active && self.terminal_clipboard.send(event.text).is_ok()
     }
 
     fn notification_change(&self, dismiss: Vec<String>) {
@@ -1620,6 +1641,14 @@ impl SessionStore {
                 } else {
                     self.refresh_workspaces();
                 }
+            }
+            EventName::SESSION_CLIPBOARD => {
+                if let Ok(event) =
+                    serde_json::from_value::<diri_proto::SessionClipboardEvent>(event.params)
+                {
+                    self.accept_terminal_clipboard(event);
+                }
+                return StoreEventChange::None;
             }
             EventName::SESSION_NOTIFICATION => {
                 if let Ok(mut event) =

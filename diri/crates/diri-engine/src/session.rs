@@ -740,6 +740,19 @@ fn capture_remote_find_cells(
     })
 }
 
+/// OSC 52 carries standard base64; padding is optional in practice.
+fn decode_clipboard(data: &str) -> Option<String> {
+    use base64::Engine as _;
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    const LENIENT: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
+    let bytes = LENIENT.decode(data).ok()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    (!text.is_empty()).then_some(text)
+}
+
 #[cfg(test)]
 mod remote_find_capture_tests {
     use super::capture_remote_find_cells;
@@ -1779,6 +1792,17 @@ impl Session {
             .lock()
             .expect("screen")
             .take_notifications()
+    }
+
+    /// The newest OSC 52 clipboard write since the last call, decoded.
+    pub fn take_clipboard(&self) -> Option<String> {
+        let data = self
+            .shared
+            .screen
+            .lock()
+            .expect("screen")
+            .take_clipboard()?;
+        decode_clipboard(&data)
     }
 
     pub fn state_version(&self) -> u64 {
@@ -5245,6 +5269,45 @@ mod notification_tests {
         apply_remote_output(&shared, &engine, "shell", &mut seq, end, bytes, false).unwrap();
         assert!(!shared.screen.lock().unwrap().has_notifications());
         assert_eq!(*shared.status.lock().unwrap(), SessionStatus::Idle);
+    }
+
+    #[test]
+    fn remote_clipboard_writes_are_decoded_once_and_never_replayed() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, _) = ManifestEngine::load_dir(&crate::detect::bundled_manifest_dir()).unwrap();
+        let spec = SessionSpec {
+            id: "clipboard-replay".into(),
+            pty: PtySpec::new(vec!["/bin/sh".into()], "/tmp"),
+            manifest_id: "shell".into(),
+            authority: Authority::ProcessOnly,
+            logs_dir: temp.path().to_path_buf(),
+            holder: None,
+            remote: None,
+            defer_launch: false,
+        };
+        let log = OutputLog::open(temp.path(), &spec.id, 4096, 8192, false).unwrap();
+        let shared = new_shared(&spec, log, &engine, true);
+        let mut seq = 0;
+        // Codex over SSH: `Copied 45 chars` arrives as OSC 52 alone.
+        let bytes = b"\x1b]52;c;Y29waWVkIGZyb20gY29kZXg=\x07";
+        let end = apply_remote_output(&shared, &engine, "shell", &mut seq, 0, bytes, true).unwrap();
+        assert_eq!(shared.screen.lock().unwrap().take_clipboard(), None);
+        let before = shared.state_version.load(Ordering::SeqCst);
+        apply_remote_output(&shared, &engine, "shell", &mut seq, end, bytes, false).unwrap();
+        assert!(shared.state_version.load(Ordering::SeqCst) > before);
+        let data = shared.screen.lock().unwrap().take_clipboard().unwrap();
+        assert_eq!(
+            decode_clipboard(&data).as_deref(),
+            Some("copied from codex")
+        );
+        assert_eq!(shared.screen.lock().unwrap().take_clipboard(), None);
+    }
+
+    #[test]
+    fn clipboard_payloads_decode_without_padding_and_reject_garbage() {
+        assert_eq!(decode_clipboard("aGk=").as_deref(), Some("hi"));
+        assert_eq!(decode_clipboard("aGk").as_deref(), Some("hi"));
+        assert_eq!(decode_clipboard("not base64!"), None);
     }
 }
 

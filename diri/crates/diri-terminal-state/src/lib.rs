@@ -453,10 +453,16 @@ impl HeadlessScreen {
         }
     }
 
+    /// Whether notifications or an OSC 52 clipboard write await delivery.
     pub fn has_notifications(&self) -> bool {
         self.notifications
             .as_ref()
-            .is_some_and(|parser| !parser.ready.is_empty())
+            .is_some_and(|parser| !parser.ready.is_empty() || parser.clipboard.is_some())
+    }
+
+    /// The newest undelivered OSC 52 clipboard write, still base64-encoded.
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.notifications.as_mut()?.clipboard.take()
     }
 
     pub fn take_notifications(&mut self) -> Vec<TerminalNotification> {

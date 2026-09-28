@@ -28,6 +28,28 @@ pub(crate) fn install(
     if cx.has_global::<ApplicationNotifications>() {
         return;
     }
+    if !preview {
+        let mut copies = services
+            .store
+            .store
+            .read()
+            .expect("store")
+            .terminal_clipboard_writes();
+        cx.spawn(async move |cx| {
+            loop {
+                match copies.recv().await {
+                    Ok(text) => {
+                        cx.update(|cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
+                        });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+        .detach();
+    }
     #[cfg(target_os = "macos")]
     let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
     #[cfg(target_os = "macos")]

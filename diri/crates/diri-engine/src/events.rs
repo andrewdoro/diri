@@ -550,7 +550,26 @@ pub fn spawn_registry_watcher(
                         &record,
                         Some(&id),
                     );
-                    let notifications = registry.lock().expect("registry").take_notifications(&id);
+                    let (notifications, clipboard) = {
+                        let registry = registry.lock().expect("registry");
+                        (
+                            registry.take_notifications(&id),
+                            registry.take_clipboard(&id),
+                        )
+                    };
+                    if let Some(text) = clipboard {
+                        let event = diri_proto::SessionClipboardEvent {
+                            session_id: record.id.clone(),
+                            session_created_at: record.created_at,
+                            occurred_at: diri_proto::DateMillis::from(std::time::SystemTime::now()),
+                            text,
+                        };
+                        events.publish_encoded(
+                            diri_proto::EventName::SESSION_CLIPBOARD,
+                            &event,
+                            Some(&id),
+                        );
+                    }
                     for notification in notifications {
                         let event = diri_proto::SessionNotificationEvent {
                             id: format!(

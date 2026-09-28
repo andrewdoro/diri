@@ -16,7 +16,7 @@ use crate::notifications::NotificationSound;
 use super::{
     ClickModifiers, ClientStartup, EventEnvelope, InspectorTab, Prefs, SavedWindow, SessionStore,
     SidebarOrdering, SidebarProjection, StoreEffect, StoreEventChange, StoreRuntime,
-    TerminalResidency, WindowMode, WindowPlacement, event_publication_policy,
+    TerminalResidency, WindowMode, WindowPlacement, event_publication_policy, now_millis,
 };
 use crate::switcher::{OverviewFilter, OverviewLane, SwitcherKey};
 
@@ -2894,6 +2894,49 @@ fn custom_notification(session: &SessionRecord, event_id: &str) -> EventEnvelope
         .unwrap(),
         seq: 1,
     }
+}
+
+fn terminal_copy(session: &SessionRecord, occurred_at: DateMillis) -> EventEnvelope {
+    EventEnvelope {
+        name: diri_proto::EventName::SESSION_CLIPBOARD.into(),
+        params: serde_json::to_value(diri_proto::SessionClipboardEvent {
+            session_id: session.id.clone(),
+            session_created_at: session.created_at,
+            occurred_at,
+            text: "copied in codex".into(),
+        })
+        .unwrap(),
+        seq: 1,
+    }
+}
+
+#[test]
+fn terminal_copies_reach_the_clipboard_only_while_fresh_active_and_known() {
+    let record = session("codex", "p", 1.0);
+    let (mut store, _effects) = hydrated(
+        vec![record.clone()],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    let mut copies = store.terminal_clipboard_writes();
+
+    assert!(!store.handle_event(terminal_copy(&record, now_millis())));
+    assert_eq!(copies.try_recv().unwrap(), "copied in codex");
+
+    // A replay after a reconnect is long past the gesture that caused it.
+    store.handle_event(terminal_copy(
+        &record,
+        DateMillis(now_millis().0 - 60_000.0),
+    ));
+    let mut stranger = record.clone();
+    stranger.id = id("unknown");
+    store.handle_event(terminal_copy(&stranger, now_millis()));
+    let mut reincarnated = record.clone();
+    reincarnated.created_at = DateMillis(record.created_at.0 + 1.0);
+    store.handle_event(terminal_copy(&reincarnated, now_millis()));
+    store.set_active(false);
+    store.handle_event(terminal_copy(&record, now_millis()));
+    assert!(copies.try_recv().is_err());
 }
 
 #[test]

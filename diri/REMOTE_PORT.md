@@ -1559,6 +1559,15 @@ required. Replayed output must not redeliver notifications. Alerts produced
 while the Engine is disconnected are not recovered from replay; reliable
 offline notification delivery remains an independent enhancement.
 
+The same scanner relays OSC 52 clipboard writes as a local `session.clipboard`
+event, which the app writes to the system clipboard. This is how a program on a
+remote host copies (Codex, for one, switches to OSC 52 when it detects SSH, and
+selects with the mouse in its alternate screen, so a local drag never happens).
+Only writes are relayed: clipboard reads and clears are ignored, one write is
+bounded to 1 MiB of base64, replayed output never rewrites the clipboard, and
+the app drops a write that arrives more than a few seconds late. The Holder is
+unchanged; no Helper protocol or capability changes are required.
+
 The local Rust Engine persists causal attention identities and native-source
 receipts in a per-session SQLite journal. Adoption retains the journal namespace;
 a newly launched process creates a new namespace. The app consumes the additive

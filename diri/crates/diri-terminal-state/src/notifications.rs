@@ -1,6 +1,13 @@
 //! Bounded OSC notification extraction, enabled only by the local Engine.
 //! Content is data: it cannot acknowledge prompts or alter execution status.
+//! OSC 52 clipboard writes ride the same scanner so a replayed prefix can
+//! never rewrite the user's clipboard; reads are never answered.
 use std::collections::VecDeque;
+
+/// Other OSC payloads stay small; a copied selection may be long.
+const OSC_PAYLOAD_LIMIT: usize = 8192;
+/// Base64 bytes of one OSC 52 write, about 768 KiB of copied text.
+const CLIPBOARD_PAYLOAD_LIMIT: usize = 1 << 20;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TerminalNotification {
@@ -14,6 +21,9 @@ pub(crate) struct NotificationParser {
     payload: Vec<u8>,
     pending: VecDeque<(String, TerminalNotification)>,
     pub ready: VecDeque<TerminalNotification>,
+    /// Base64 payload of the newest OSC 52 clipboard write. Later writes
+    /// replace it: only the last copy would survive on the clipboard anyway.
+    pub clipboard: Option<String>,
 }
 
 impl NotificationParser {
@@ -54,7 +64,7 @@ impl NotificationParser {
                         self.payload.clear();
                         self.state = 0;
                     }
-                    _ if self.payload.len() < 8192 => self.payload.push(byte),
+                    _ if self.payload.len() < self.payload_limit() => self.payload.push(byte),
                     _ => {
                         self.payload.clear();
                         self.state = 4;
@@ -88,10 +98,29 @@ impl NotificationParser {
         }
     }
 
+    fn payload_limit(&self) -> usize {
+        if self.payload.starts_with(b"52;") {
+            CLIPBOARD_PAYLOAD_LIMIT
+        } else {
+            OSC_PAYLOAD_LIMIT
+        }
+    }
+
     fn finish(&mut self) {
         let Ok(payload) = std::str::from_utf8(&self.payload) else {
             return;
         };
+        if let Some(content) = payload.strip_prefix("52;") {
+            // `52;<targets>;<base64>`. A `?` asks to read the clipboard and an
+            // empty payload asks to clear it; a program may do neither.
+            if let Some((_, data)) = content.split_once(';')
+                && !data.is_empty()
+                && data != "?"
+            {
+                self.clipboard = Some(data.to_owned());
+            }
+            return;
+        }
         let notification = if let Some(body) = payload.strip_prefix("9;") {
             // OSC 9;4 is progress, never a desktop notification.
             if body.starts_with("4;") {
@@ -222,6 +251,42 @@ mod tests {
         }
         assert_eq!(parser.ready.len(), 32);
     }
+    #[test]
+    fn clipboard_writes_keep_the_newest_payload_and_never_answer_reads() {
+        let mut parser = NotificationParser::default();
+        parser.feed(b"\x1b]52;c;Zmlyc3Q=\x07\x1b]52;c;c2Vjb25k\x1b\\");
+        parser.feed(b"\x1b]52;c;?\x07\x1b]52;c;\x07");
+        assert_eq!(parser.clipboard.as_deref(), Some("c2Vjb25k"));
+        assert!(parser.ready.is_empty());
+    }
+
+    #[test]
+    fn a_long_clipboard_write_survives_the_notification_bound() {
+        let mut parser = NotificationParser::default();
+        let data = "QUJD".repeat(10_000);
+        parser.feed(format!("\x1b]52;c;{data}\x07").as_bytes());
+        assert_eq!(parser.clipboard.as_deref(), Some(data.as_str()));
+
+        parser.clipboard = None;
+        parser.feed(b"\x1b]52;c;");
+        parser.feed(&vec![b'A'; CLIPBOARD_PAYLOAD_LIMIT + 1]);
+        parser.feed(b"\x07");
+        assert!(parser.clipboard.is_none());
+    }
+
+    #[test]
+    fn a_replayed_clipboard_write_is_not_delivered() {
+        let mut screen = crate::HeadlessScreen::new(80, 24).with_notifications();
+        let old = b"\x1b]52;c;b2xk\x07";
+        screen.feed_with_history(old, old.len());
+        assert!(!screen.has_notifications());
+        assert_eq!(screen.take_clipboard(), None);
+        screen.feed(b"\x1b]52;c;bmV3\x07");
+        assert!(screen.has_notifications());
+        assert_eq!(screen.take_clipboard().as_deref(), Some("bmV3"));
+        assert!(!screen.has_notifications());
+    }
+
     #[test]
     fn osc_inside_another_string_is_not_a_notification() {
         let mut parser = NotificationParser::default();
