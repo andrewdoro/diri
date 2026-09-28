@@ -1,5 +1,158 @@
 # diri performance record
 
+## Terminal feed: scrolling without decompression, moved-row fingerprints (2026-09-28)
+
+After #529, a stack sample of four Engine sessions draining a colored build log
+through `fleetbench` put 44–56% of pump time in `HeadlessScreen::feed`, most of
+it scrolling: `rotate_reset` decompressed the oldest history block to recycle
+one row, built a new `Vec<Cell>` for it, and encoded each block as rows left
+the screen. At small reads every scroll re-fingerprinted the whole screen, and
+every settle walked every history block to measure stored bytes.
+
+Changes. No wire, checkpoint or history-budget accounting change:
+
+- Encoding a block records one bit per row: whether `Row::reset` of that row
+  yields only template cells. Nearly all output lines qualify, and recycling
+  them no longer decompresses or indexes the block. The bits fit in `Block`
+  without changing its counted size.
+- Recycled rows reuse the allocations of the rows the last seal encoded. Spare
+  rows are dropped at each settle's history bound, so they are never counted
+  and an idle terminal holds none.
+- The payload bytes in `history_storage_bytes` are kept current as blocks are
+  pushed and popped. Read caches are released only after a history read. The
+  per-settle history bound no longer visits every block.
+- The vendored `Term` tracks where each screen line's cells came from. With
+  that, full damage from scrolling moves line sources instead of discarding
+  them. `HeadlessScreen::settle` keeps the fingerprints of rows that only
+  moved and hashes rows that anything wrote.
+  - Because `input` relies on cursor damage, the cursor line is marked before
+    a scroll moves it.
+  - A wide character's leading-spacer edit on the line above the cursor is
+    now marked; it was never damaged.
+  - Rows left stale by such undamaged edits are re-hashed at the next full
+    damage, exactly as before.
+
+Details are in `vendor/alacritty_terminal/DIRI-PATCH.md`. VTE is unchanged.
+
+**Lazy compaction (encoding history in larger batches, or when idle) was
+measured and not done.** In a sustained stream every row that enters history
+is encoded exactly once before the 10,000-row limit evicts it. Batching
+therefore cannot remove encode work; it only holds more raw rows (about
+3.9 KB each at 160 columns) against the memory gates, and idle-time compaction
+would need a timer. Doubling blocks to 64 rows measured +2–5% cycles at 4 KiB
+reads, because more spare rows were dropped per settle, and −1% at 64 KiB.
+
+### Measurements
+
+Apple M4 Max, macOS 27.0, release builds, load average 45–70 from unrelated
+builds. Wall time was 2–4× CPU time, so this reports hardware counters from
+`/usr/bin/time -l` (cycles and instructions retired) and process CPU time.
+`feedbench` gained an optional fourth argument that runs one configuration,
+so the process counters describe it; the base ran the same harness. Values
+are medians of three alternating base/branch runs at 160×50. The base is
+`f44bcf0`.
+
+| Payload, read size | Gcycles, base → branch | CPU MB/s, base → branch |
+| --- | ---: | ---: |
+| Colored build log (64 MiB), 4 KiB | 2.94 → 2.53 (−14%) | 86 → 101 |
+| same, 16 KiB | 2.34 → 1.92 (−18%) | 109 → 133 |
+| same, 64 KiB | 2.17 → 1.72 (−21%) | 117 → 147 |
+| same, one call | 2.14 → 1.65 (−23%) | 118 → 155 |
+| same, Engine config (notifications), 4 KiB | 3.03 → 2.56 (−16%) | 83 → 99 |
+| same, Engine config, 64 KiB | 2.26 → 1.81 (−20%) | 112 → 139 |
+| `git log -p --color` (32 MiB), 4 KiB | 2.93 → 2.31 (−21%) | 44 → 55 |
+| same, 64 KiB | 2.53 → 1.85 (−27%) | 50 → 68 |
+
+Instructions retired, colored log: 15.46 → 12.96 G at 4 KiB and
+10.63 → 8.58 G at 64 KiB.
+
+A 64 KiB sample of the branch attributes feed time as follows:
+
+- `encode_cells`: about 23%.
+- LZ compression: about 16%.
+- Resetting recycled rows: about 15%. The base also paid this, inside
+  `reset_cell_row`.
+- The parser's writes: about 15%.
+
+Decompression and row allocation no longer appear. At 4 KiB, fingerprints of
+newly written rows are about a quarter of feed time. With about 40 new lines
+per 4 KiB read on a 50-row screen, 10 rows are reused.
+
+**`fleetbench`** (4 sessions × 64 MiB, 160×50, sampled for the whole run,
+three alternating runs):
+
+| Metric | Base | Branch |
+| --- | ---: | ---: |
+| Benchmark process user CPU | 3.87–4.08 s | 3.34–3.44 s |
+| Instructions retired | 57.3–58.6 G | 50.9–51.6 G |
+| Cycles | 18.0–18.7 G | 16.2–16.7 G |
+| `feed` share of pump-thread busy samples | 76–78% | 68–72% |
+| `rotate_reset` share of `feed` | 68–69% | 55–58% |
+
+- Aggregate throughput did not change measurably (97–102 vs 84–108 MB/s). That
+  fixture is bound by the PTY and Holder path.
+- System time rose from 0.95–1.05 s to 1.06–1.11 s, and voluntary context
+  switches from 48–54k to 55–59k. This is consistent with faster pumps waiting
+  on the PTY more often; it was not investigated further.
+
+**`terminal_throughput`** (whole-binary counters, three runs): instructions
+32.3 → 25.0 G (−23%), cycles 4.27–4.38 → 3.11–3.25 G (−26%). Its wall-clock
+scrolling budget (150 µs) failed on both revisions under this load: base
+196–269 µs, branch 137–186 µs, against 36 µs recorded unloaded.
+
+**`terminal_parity`**, 10,000 lines per 80×24 core: feed p50 34.1/46.9 ms →
+7.4/8.6 ms (two loaded runs each; one line per read, so skipping the
+per-settle block walk and moved-row hashing both apply).
+
+- Retained heap per core: 259,699 → 260,427 bytes.
+- Peak heap per core: 324,211 → 324,939 bytes.
+
+**`terminal_fleet`** gates pass. For 20 cores, fresh heap is 2,120,620 →
+2,125,620 bytes and full history is 6,388,780 → 6,397,780 bytes; those are the
+new per-row source and fingerprint vectors. Other results:
+
+- Widened: 16.21 → 16.22 MiB.
+- After churn: 11.46 → 11.47 MiB.
+- Warmed cursor updates allocate nothing, and nothing leaks.
+
+`scripts/terminal-perf-gate.sh`:
+
+- `terminal_fleet`, the `vte` tests and the Holder latency, attach and
+  output-compat tests pass.
+- The `terminal_throughput` scroll budget and the `diri-term` renderer fling
+  budget (8 ms; frames of 239–278 ms under load) fail on base and branch
+  alike on this loaded machine.
+
+### Equivalence
+
+- `transcript_digest` prints the same final digest on base and branch
+  (`96018b6b3bdda84f`), with identical checkpoints. Retained history rows are
+  unchanged because accounting is unchanged.
+- `fingerprints_after_scrolling_match_the_cells` runs 20,000 random multi-piece
+  reads with and without moved-fingerprint reuse, then compares fingerprints,
+  fill counts and `content_seq` after every read. Four injected bugs fail it:
+  no cursor-line mark on scroll, no cursor marks on full damage, no
+  leading-spacer mark, and no stale-row carry.
+- `scrolling_moves_content_sources` checks line sources through LF, SU/SD,
+  IL/DL and regions.
+- Vendored storage tests check that recipe-bit rows and spare rows reset to
+  template cells for every background.
+- The randomized storage test now includes recycling and byte bounds. Debug
+  builds assert the kept payload equals a recomputation, and a broken pop fails
+  three tests.
+- `streaming_full_history_recycles_without_decoding` fails if recycling decodes
+  or stops reusing sealed rows.
+
+Not claimed: GUI rendering, latency, SSH, or any installed-app CPU change. The
+Remote Helper Build ID changes because it hashes vendored parser sources.
+
+```sh
+cargo build --release -p diri-engine --example feedbench
+/usr/bin/time -l target/release/examples/feedbench <payload> 160 50 4k   # or 16k, 64k, whole, engine4k, engine64k
+cargo bench -p diri-terminal-state --bench terminal_parity
+cargo test --release -p diri-terminal-state --test transcript_digest -- --ignored --nocapture
+```
+
 ## Sidebar rows re-render only when they change (2026-09-28)
 
 **Where the time went.** A live sample of the installed app showed the main
