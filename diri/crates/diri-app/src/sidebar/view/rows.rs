@@ -54,6 +54,13 @@ pub(in crate::sidebar) struct SessionRowView {
     props: SessionRowProps,
 }
 
+#[cfg(test)]
+impl SessionRowView {
+    pub(super) fn held_hint_for_test(&self) -> f32 {
+        self.props.held_hint
+    }
+}
+
 impl Render for SessionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let props = self.props.clone();

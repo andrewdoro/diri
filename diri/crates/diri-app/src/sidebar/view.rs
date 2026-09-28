@@ -9697,6 +9697,73 @@ mod tests {
         }
     }
 
+    /// Held-⌘ hints fade in and out on cached session rows: the fade reaches
+    /// rows through their props, and a settled hint reuses the rows again.
+    #[gpui::test]
+    fn held_command_hints_fade_through_cached_rows(cx: &mut TestAppContext) {
+        use crate::held_hints::{FADE_IN, FADE_OUT, HOLD_DELAY, HeldHintsState, HintEffect};
+        let (sidebar, _, cx) = drag_harness(cx);
+        cx.run_until_parked();
+        let hint = "held-hint:session:preview-codex";
+        let row_hint = |cx: &mut VisualTestContext| {
+            sidebar.read_with(cx, |sidebar, cx| {
+                sidebar.session_row_views[&SessionId::new("preview-codex")]
+                    .read(cx)
+                    .held_hint_for_test()
+            })
+        };
+        assert!(cx.debug_bounds(hint).is_none());
+        let t0 = Instant::now();
+        let command = Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        };
+        let mut hints = crate::held_hints::HeldHints::default();
+        let HintEffect::Arm(generation) = hints.modifiers_changed(command, t0) else {
+            panic!("⌘ alone arms the hold");
+        };
+        let shown = t0 + HOLD_DELAY;
+        hints.delay_elapsed(generation, shown);
+        let window_id = cx.update(|window, _| window.window_handle().window_id());
+        let at = |now: Instant, hints, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                HeldHintsState::publish(window_id, hints, cx);
+                HeldHintsState::freeze_clock(Some(now), cx);
+            });
+            cx.run_until_parked();
+        };
+
+        at(shown + FADE_IN / 2, hints, cx);
+        let midway = row_hint(cx);
+        assert!(midway > 0.0 && midway < 1.0, "{midway}");
+        assert!(
+            cx.debug_bounds(hint).is_some(),
+            "the hint is painted mid-fade"
+        );
+
+        at(shown + FADE_IN, hints, cx);
+        assert_eq!(row_hint(cx), 1.0);
+        assert!(cx.debug_bounds(hint).is_some());
+        // Settled: an unrelated publication reuses every row, hint included.
+        render_probe::take();
+        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+        cx.run_until_parked();
+        assert_eq!(render_probe::take().0, 0);
+        assert!(
+            cx.debug_bounds(hint).is_some(),
+            "a reused row keeps its hint"
+        );
+
+        let release = shown + Duration::from_secs(1);
+        hints.modifiers_changed(Modifiers::default(), release);
+        at(release + FADE_OUT / 2, hints, cx);
+        let leaving = row_hint(cx);
+        assert!(leaving > 0.0 && leaving < 1.0, "{leaving}");
+        at(release + FADE_OUT, hints, cx);
+        assert_eq!(row_hint(cx), 0.0);
+        assert!(cx.debug_bounds(hint).is_none(), "the hint is gone");
+    }
+
     /// A store publication that changes nothing a row shows reuses every row.
     #[gpui::test]
     fn unchanged_store_publication_reuses_every_row(cx: &mut TestAppContext) {
