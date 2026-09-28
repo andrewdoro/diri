@@ -5417,6 +5417,100 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Rows reused across activity ticks, no-op store publications and
+    /// root-only frames paint exactly what a full re-render paints: after the
+    /// ticks, a `window.refresh()` that rebuilds everything at the same mark
+    /// frame must match pixel for pixel. Eleven ticks leave the marks mid-cycle,
+    /// so a mark that failed to advance would differ too.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal pixel comparison; run explicitly on macOS"]
+    fn reused_sidebar_rows_paint_like_a_full_render() {
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        let services = test_services();
+        services
+            .store
+            .store
+            .write()
+            .unwrap()
+            .hydrate(SidebarPreviewFixture::bench_fleet(51, 4).list);
+        services
+            .store
+            .store
+            .write()
+            .unwrap()
+            .update_preferences(|prefs| prefs.sidebar_visible = true)
+            .unwrap();
+        let window = cx
+            .open_window(size(px(1600.0), px(1000.0)), |window, cx| {
+                cx.new(|cx| RootView::new(services, false, PreviewScenario::Empty, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let root = cx
+            .update_window(window.into(), |root, _, _| {
+                root.downcast::<RootView>().unwrap()
+            })
+            .unwrap();
+        let sidebar = cx.update(|cx| root.read(cx).sidebar.clone());
+        cx.capture_screenshot(window.into()).unwrap();
+        for tick in 0..11 {
+            cx.update(|cx| {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.advance_activity_frame_for_test(cx)
+                })
+            });
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            let step = if tick % 2 == 0 {
+                |sidebar: &mut crate::sidebar::Sidebar,
+                 cx: &mut Context<crate::sidebar::Sidebar>| {
+                    sidebar.store_changed(cx)
+                }
+            } else {
+                |_: &mut crate::sidebar::Sidebar, cx: &mut Context<crate::sidebar::Sidebar>| {
+                    cx.notify()
+                }
+            };
+            cx.update(|cx| sidebar.update(cx, step));
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            cx.update(|cx| root.update(cx, |_, cx| cx.notify()));
+            cx.run_until_parked();
+        }
+        let reused = cx.capture_screenshot(window.into()).unwrap();
+        cx.update_window(window.into(), |_, window, _| window.refresh())
+            .unwrap();
+        cx.run_until_parked();
+        let fresh = cx.capture_screenshot(window.into()).unwrap();
+        if let Ok(dir) = std::env::var("DIRI_VISUAL_OUTPUT_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            reused.save(dir.join("sidebar-reused.png")).unwrap();
+            fresh.save(dir.join("sidebar-fresh.png")).unwrap();
+        }
+        assert_eq!(reused.dimensions(), fresh.dimensions());
+        let differing = reused
+            .pixels()
+            .zip(fresh.pixels())
+            .filter(|(left, right)| left != right)
+            .count();
+        assert_eq!(differing, 0, "reused rows painted differently");
+        drop(root);
+        drop(sidebar);
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     /// Render cost of the sidebar under a busy fleet: 51 sessions over five
     /// projects, four of them working, mounted in the real RootView and
     /// painted by headless Metal. Measures one activity-mark tick and one

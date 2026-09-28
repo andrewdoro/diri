@@ -5,6 +5,7 @@ mod filter;
 mod hue_tests;
 mod lineage;
 mod project_picker;
+mod rows;
 mod tabs;
 mod titles;
 mod workspaces;
@@ -621,6 +622,21 @@ pub struct Sidebar {
     /// panel paints it elsewhere.
     main_viewport: Size<Pixels>,
     working_row_rendered: bool,
+    /// Cached views of the session rows, by session (see `rows.rs`).
+    session_row_views: HashMap<SessionId, Entity<rows::SessionRowView>>,
+    /// Rows whose activity mark animates, from the latest render.
+    animated_rows: Vec<WeakEntity<rows::SessionRowView>>,
+    /// Session rows were mounted by the latest sidebar render.
+    rows_mounted: bool,
+    /// Every row renders on the next sidebar render.
+    rows_stale: bool,
+    /// The pending notify cannot change rows beyond their props.
+    notify_keeps_rows: bool,
+    /// This render's held-⌘ hint opacity, handed to rows through their props.
+    row_held_hint: f32,
+    /// Sessions whose rows this render mounted.
+    mounted_row_ids: HashSet<SessionId>,
+    _self_observer: Option<gpui::Subscription>,
     /// Project hues for the list being rendered.
     hues: crate::project_hue::ProjectHues,
     /// Rebuilt once per projection render. Looking up ⌘1…⌘9 inside every row
@@ -800,6 +816,14 @@ impl Sidebar {
             activity_activation: None,
             main_viewport: Size::default(),
             working_row_rendered: false,
+            session_row_views: HashMap::new(),
+            animated_rows: Vec::new(),
+            rows_mounted: false,
+            rows_stale: true,
+            notify_keeps_rows: false,
+            row_held_hint: 0.0,
+            mounted_row_ids: HashSet::new(),
+            _self_observer: None,
             hues: Default::default(),
             shortcut_ranks: HashMap::new(),
             strip_held_hint: 0.0,
@@ -831,6 +855,7 @@ impl Sidebar {
             row_motion: Default::default(),
         };
         sidebar.ui.preview_account = preview;
+        sidebar._self_observer = Some(cx.observe_self(|sidebar, _| sidebar.note_self_notified()));
         // Opens a popover at launch: headless screenshots verify its layout,
         // and a dev build shows its blurred panel without anyone clicking.
         match std::env::var("DIRIJOR_SIDEBAR_POPOVER").as_deref() {
@@ -2910,12 +2935,13 @@ impl Sidebar {
                     _ => None,
                 };
                 let working = self.working_row_rendered;
-                let rendered = self.session_row(
+                let rendered = self.mount_session_row(
                     row,
                     shortcut,
                     drop,
                     group.host.is_some(),
                     colors,
+                    presence != super::row_motion::Presence::FULL || ghost,
                     window,
                     cx,
                 );
@@ -3104,7 +3130,10 @@ impl Sidebar {
                     .then(|| self.row_drop_feedback(row, window, cx))
                     .flatten();
                 let working = self.working_row_rendered;
-                let rendered = self.session_row(row, shortcut, drop, false, colors, window, cx);
+                let moving = presence != super::row_motion::Presence::FULL || ghost;
+                let rendered = self.mount_session_row(
+                    row, shortcut, drop, false, colors, moving, window, cx,
+                );
                 self.working_row_rendered &= !ghost || working;
                 // Buckets interleave every project and the row names none of
                 // them, so here the row wears its project's hue.
@@ -3299,7 +3328,8 @@ impl Sidebar {
     fn refresh_on_next_frame(weak: &WeakEntity<Self>, window: &mut Window) {
         let weak = weak.clone();
         window.on_next_frame(move |_, cx| {
-            let _ = weak.update(cx, |_, cx| cx.notify());
+            // Edge fades wrap rows from outside; their contents are unchanged.
+            let _ = weak.update(cx, |this, cx| this.notify_without_staling_rows(cx));
         });
     }
 
@@ -3426,39 +3456,45 @@ impl Sidebar {
     /// the remote mark, so this row does not repeat it. Rows without a header
     /// (recency grouping) show their own.
     #[allow(clippy::too_many_arguments)]
+    /// Builds one session row from `props` alone, so a row whose props are
+    /// unchanged renders identically and its cached view can be reused (see
+    /// `rows.rs`). The only other reads are the title settle, which forces a
+    /// render while it runs, and the status glyph derived from the props.
     fn session_row(
         &mut self,
-        row: &crate::store::SidebarRow,
-        shortcut: Option<usize>,
-        drop: Option<RowDrop>,
-        host_marked_above: bool,
-        colors: SemanticColors,
+        props: &rows::SessionRowProps,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         #[cfg(test)]
         render_probe::row_built();
+        let rows::SessionRowProps {
+            ref row,
+            shortcut,
+            ref drop,
+            host_marked_above,
+            colors,
+            selected,
+            multi,
+            ref drag_selection,
+            migrating,
+            activity_state,
+            activity_frame,
+            marked,
+            hovered,
+            focused,
+            lineage,
+            dimmed,
+            width,
+            ref filter,
+            renaming,
+            held_hint,
+            ..
+        } = *props;
+        let drop = drop.clone();
+        let drag_selection = drag_selection.clone();
         let session = &row.session;
         let id = session.id.clone();
-        let (selected, multi, drag_selection, migrating, unread) = {
-            let mut store = self.store.write().expect("session store lock poisoned");
-            (
-                store.selected_session_id() == Some(&id),
-                store.sidebar_selection().contains(&id),
-                (store.sidebar_selection().len() > 1).then(|| store.sidebar_selection_ordered()),
-                store.migrating().contains(&id),
-                store.notifications().session_unread(&id),
-            )
-        };
-        let activity_state = sidebar_activity_state(status_state(session, migrating), unread);
-        self.working_row_rendered |= activity_state == StatusState::Working;
-        let marked = self.ui.delegation_mark.as_ref() == Some(&id);
-        let hovered = self.ui.hovered_session.as_ref() == Some(&id);
-        let focused = self.focus_handle.is_focused(window)
-            && self.ui.renaming.is_none()
-            && self.ui.focus_cursor.as_ref() == Some(&id);
-        let lineage = self.lineage_roles.get(&id).copied();
-        let held_hint = crate::held_hints::opacity(window, cx);
         let archived = session.is_archived();
         let hibernated = session.hibernation.is_some();
         let loading = is_loading(session, migrating);
@@ -3471,7 +3507,7 @@ impl Sidebar {
         // Read before the title moves into the marquee below.
         let ended_chip = ended && title != ENDED_TITLE;
         let title_available_width = (session_title_available_width(
-            self.ui.width,
+            width,
             row.depth,
             migrating,
             non_persistent,
@@ -3505,7 +3541,7 @@ impl Sidebar {
         };
         let fill_color = fill.color(colors);
 
-        if self.ui.renaming.as_ref() == Some(&id) {
+        if renaming {
             return div()
                 .id(format!("rename:{}", id.0))
                 .pl(px(Space::ROW_H))
@@ -3551,7 +3587,7 @@ impl Sidebar {
                     }
                 }))
                 .children(indent_rails(row, colors))
-                .child(activity_mark(activity_state, self.activity_frame, colors))
+                .child(activity_mark(activity_state, activity_frame, colors))
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -3746,9 +3782,9 @@ impl Sidebar {
             // Activity shares the project's icon column. Leaf rows reserve
             // no empty disclosure column; only parents get a trailing fold.
             // Hover keeps activity visible and swaps identity for the close action.
-            .child(activity_mark(activity_state, self.activity_frame, colors))
+            .child(activity_mark(activity_state, activity_frame, colors))
             .child(
-                if let Some(range) = super::filter::label_match(&title, self.filter_query.text()) {
+                if let Some(range) = super::filter::label_match(&title, filter) {
                     div()
                         .w(px(title_available_width))
                         .overflow_hidden()
@@ -4381,7 +4417,8 @@ impl Sidebar {
                     .await;
                 let done = this
                     .update(cx, |this, cx| {
-                        cx.notify();
+                        // Footer numbers only: no row reads them.
+                        this.notify_without_staling_rows(cx);
                         !this.number_flows.running()
                     })
                     .unwrap_or(true);
@@ -6523,7 +6560,7 @@ impl Sidebar {
                         && !cx.reduce_motion()
                     {
                         this.activity_frame = (this.activity_frame + 1) % 8;
-                        cx.notify();
+                        this.notify_activity_frame(cx);
                     }
                 });
             }));
@@ -6534,13 +6571,14 @@ impl Sidebar {
     #[cfg(test)]
     pub(crate) fn advance_activity_frame_for_test(&mut self, cx: &mut Context<Self>) {
         self.activity_frame = (self.activity_frame + 1) % 8;
-        cx.notify();
+        self.notify_activity_frame(cx);
     }
 
     /// One publication from the shared store.
     pub(crate) fn store_changed(&mut self, cx: &mut Context<Self>) {
         self.store.write().expect("store").reconcile();
-        cx.notify();
+        // Rows read the store only through their props.
+        self.notify_without_staling_rows(cx);
     }
 
     /// Where a working mark can currently be seen: the sidebar panel, its
@@ -7823,6 +7861,10 @@ impl Sidebar {
         self.reconcile_workspace_navigation(cx);
         self.fade_glass = self.colors().material() == diri_ui::Material::Glass;
         self.working_row_rendered = false;
+        self.animated_rows.clear();
+        // Requests the next frame on the sidebar while a fade moves, so the
+        // rows receive each step through their props.
+        self.row_held_hint = crate::held_hints::opacity(window, cx);
         self.disclosure_animating = false;
         self.observe_titles(cx);
         self.observe_rows(cx);
@@ -8018,6 +8060,12 @@ impl Sidebar {
         });
         self.row_motion.end_layout();
         self.disclosure_animating |= self.row_motion.is_animating(self.title_now);
+        self.rows_mounted = list.is_some();
+        self.rows_stale = false;
+        self.notify_keeps_rows = false;
+        // Rows mounted this pass (leaving ghosts included) keep their views.
+        let mounted = std::mem::take(&mut self.mounted_row_ids);
+        self.session_row_views.retain(|id, _| mounted.contains(id));
 
         if !self.disclosure_animating {
             self.disclosure_tick = None;
@@ -8031,7 +8079,8 @@ impl Sidebar {
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     this.disclosure_tick = None;
-                    cx.notify();
+                    // The disclosure moves and fades rows from outside them.
+                    this.notify_without_staling_rows(cx);
                 });
             }));
         }
@@ -9627,11 +9676,14 @@ mod tests {
         let (sidebar, _, cx) = drag_harness(cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        let paints = Rc::new(std::cell::Cell::new(0));
-        let observed = Rc::clone(&paints);
-        let _subscription =
-            cx.update(|_, cx| cx.observe(&sidebar, move |_, _| observed.set(observed.get() + 1)));
-        // No mouse movement or store events: the working mark must advance itself.
+        let (working, listed) = sidebar.read_with(cx, |sidebar, _| {
+            (sidebar.animated_rows.len(), sidebar.session_row_views.len())
+        });
+        assert!(working > 0, "the fixture must show a working row");
+        assert!(working < listed, "the fixture must show an idle row");
+        render_probe::take();
+        // No mouse movement or store events: the working mark must advance
+        // itself, re-rendering the working rows and reusing every other row.
         for _ in 0..3 {
             let frame = sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame);
             cx.executor().advance_clock(Duration::from_millis(125));
@@ -9640,11 +9692,45 @@ mod tests {
                 sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame),
                 (frame + 1) % 8,
             );
+            let (rows, renders, _) = render_probe::take();
+            assert_eq!(renders, 1, "working animation froze without pointer input");
+            assert_eq!(rows, working, "a tick re-renders exactly the working rows");
         }
-        assert!(
-            paints.get() > 0,
-            "working animation froze without pointer input"
-        );
+    }
+
+    /// A store publication that changes nothing a row shows reuses every row.
+    #[gpui::test]
+    fn unchanged_store_publication_reuses_every_row(cx: &mut TestAppContext) {
+        let (sidebar, _, cx) = drag_harness(cx);
+        cx.run_until_parked();
+        render_probe::take();
+        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+        cx.run_until_parked();
+        let (rows, renders, _) = render_probe::take();
+        assert_eq!(renders, 1);
+        assert_eq!(rows, 0);
+        // A real change re-renders that row alone.
+        sidebar.update(cx, |sidebar, cx| {
+            let mut store = sidebar.store.write().unwrap();
+            let mut session = (**store
+                .sessions()
+                .get(&SessionId::new("preview-shell"))
+                .unwrap())
+            .clone();
+            session.title = "Renamed by the agent".into();
+            store.upsert_session(session);
+            drop(store);
+            sidebar.store_changed(cx);
+        });
+        cx.run_until_parked();
+        let (rows, _, _) = render_probe::take();
+        assert!(rows >= 1, "the changed row re-renders");
+        // Any other sidebar notify re-renders every row once, as a safety net.
+        let listed = sidebar.read_with(cx, |sidebar, _| sidebar.session_row_views.len());
+        sidebar.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let (rows, _, _) = render_probe::take();
+        assert_eq!(rows, listed);
     }
 
     #[gpui::test]

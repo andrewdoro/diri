@@ -240,6 +240,8 @@ pub struct ViewElement<V: View> {
     view: Option<V>,
     entity_id: Option<EntityId>,
     cached_style: Option<StyleRefinement>,
+    /// DIRI PATCH: skip cache reuse for this frame, as if the view were dirty.
+    force_render: bool,
     #[cfg(debug_assertions)]
     source: &'static core::panic::Location<'static>,
 }
@@ -252,6 +254,7 @@ impl<V: View> ViewElement<V> {
         ViewElement {
             entity_id,
             cached_style: None,
+            force_render: false,
             view: Some(view),
             #[cfg(debug_assertions)]
             source: core::panic::Location::caller(),
@@ -269,6 +272,15 @@ impl<V: View> ViewElement<V> {
     /// entity-backed by construction.
     pub(crate) fn cached(mut self, style: StyleRefinement) -> Self {
         self.cached_style = Some(style);
+        self
+    }
+
+    /// DIRI PATCH: re-render this cached view in this frame even though it was
+    /// not notified, for a parent that passes its view new inputs while
+    /// rendering. Notifying during a draw is too late for the current frame.
+    /// The view keeps its cache state, so later frames can reuse it again.
+    pub fn force_render_if(mut self, force: bool) -> Self {
+        self.force_render |= force;
         self
     }
 }
@@ -418,6 +430,7 @@ impl<V: View> Element for ViewElement<V> {
                             && element_state.cache_key.content_mask == content_mask
                             && element_state.cache_key.text_style == text_style
                             && element_state.cache_key.opacity == opacity
+                            && !self.force_render
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
                         {

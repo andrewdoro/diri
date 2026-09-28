@@ -94,6 +94,14 @@ lost the `debug_selector` bounds of any reused cached view.
 - It still re-renders on its own notify, on an opacity change above it, and on
   `window.refresh()`.
 
+## 2. `ViewElement::force_render_if`
+
+A parent that passes a cached child view new inputs while it renders cannot
+notify the child: a notify during a draw only takes effect in the next frame.
+`entity.cached(style).force_render_if(changed)` skips reuse for this frame, as
+if the child were dirty, and keeps its cache state for later frames. The sidebar
+uses it for rows whose props changed (`crates/diri-app/src/sidebar/view/rows.rs`).
+
 ## Re-applying on a GPUI bump
 
 1. Replace `src/` (and `build.rs`, `README.md`, `resources/`) with the new
@@ -103,6 +111,7 @@ lost the `debug_selector` bounds of any reused cached view.
    with `gpui`/`gpui_macos`/`gpui_platform` in `diri/Cargo.toml`. Check that
    `git diff Cargo.lock` only drops gpui's `source` line.
 3. Re-apply every `DIRI PATCH` hunk: `view.rs` (`ViewElement` prepaint/paint,
+   `force_render_if`,
    `ViewElementState`, `ViewElementCacheKey`), `window.rs` (index
    `relative_to`/`rebased_on`, `CachedViewBase*`, base stacks, deferred-draw
    bases, `insert_debug_bounds`, `debug_bounds_history` replay),

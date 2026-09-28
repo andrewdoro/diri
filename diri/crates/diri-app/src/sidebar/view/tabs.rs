@@ -630,6 +630,9 @@ impl Sidebar {
         // working marks' 8 Hz tick alive only while one is on screen.
         self.reconcile_workspace_navigation(cx);
         self.working_row_rendered = false;
+        // The strip stands in for the panel; its marks advance through a
+        // sidebar notify, not through session rows.
+        self.rows_mounted = false;
         self.observe_titles(cx);
         if cx.reduce_motion() {
             self.activity_frame = 0;

@@ -40,7 +40,8 @@ impl Sidebar {
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     this.title_tick = None;
-                    cx.notify();
+                    // A settling row forces its own render; others are unchanged.
+                    this.notify_without_staling_rows(cx);
                 });
             }));
         }

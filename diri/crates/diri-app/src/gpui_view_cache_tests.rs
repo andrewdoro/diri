@@ -75,6 +75,7 @@ struct Middle {
     leaf: Entity<Leaf>,
     shifters: usize,
     leaf_opacity: f32,
+    force_leaf: bool,
 }
 
 impl Render for Middle {
@@ -96,7 +97,8 @@ impl Render for Middle {
                     .child(
                         self.leaf
                             .clone()
-                            .cached(StyleRefinement::default().size_full()),
+                            .cached(StyleRefinement::default().size_full())
+                            .force_render_if(self.force_leaf),
                     ),
             )
     }
@@ -151,6 +153,7 @@ fn harness(
                 leaf,
                 shifters: 0,
                 leaf_opacity: 1.0,
+                force_leaf: false,
             });
             Top {
                 middle,
@@ -273,6 +276,22 @@ fn nested_cached_view_still_rerenders_when_it_must(cx: &mut TestAppContext) {
     middle.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     assert_eq!(counters.leaf_renders.get(), renders + 2);
+
+    // A parent that hands the leaf new inputs while drawing forces it for
+    // that frame only.
+    middle.update(cx, |middle, cx| {
+        middle.force_leaf = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(counters.leaf_renders.get(), renders + 3);
+    middle.update(cx, |middle, cx| {
+        middle.force_leaf = false;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(counters.leaf_renders.get(), renders + 3);
+    let renders = renders + 1;
 
     // `window.refresh()` still re-renders everything.
     cx.update(|window, _| window.refresh());
