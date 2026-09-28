@@ -684,9 +684,11 @@ impl AttachHub {
         #[allow(clippy::collapsible_match)]
         match frame.frame_type {
             FrameType::Input => {
+                trace_hop!(InputDecoded);
                 if session.write_input(&frame.payload).is_err() {
                     return false;
                 }
+                trace_hop!(InputHandled);
             }
             FrameType::Mouse => {
                 if session.write_mouse(&frame.payload).is_err() {
@@ -1055,6 +1057,7 @@ impl AttachHub {
                     enhanced_modes.as_ref(),
                     requires_enhanced,
                 );
+                trace_hop!(FrameEnqueued);
             }
 
             {

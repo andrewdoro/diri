@@ -1418,3 +1418,42 @@ cargo build --release -p diri-engine --example previewbench
 ./target/release/examples/previewbench 16 60 3 diagnose
 ./target/release/examples/previewbench 16 60 3 diagnose mux
 ```
+
+## Keystroke echo in held sessions — 2026-09-28
+
+Every local session is Holder-backed, and every keystroke's echo waited out
+the Session pump's 8 ms output batch before it was published. The pump reads
+the Holder's output stream and treats only an empty poll as proof that a burst
+has ended, so a lone echo sat until `OUTPUT_BATCH_CEILING` expired (plus the
+PTY-fact `stat` round trip that runs between reads). The Direct-PTY path never
+had this; the existing input-to-grid test only covered that path.
+
+The pump now publishes output that answers input written in the last 100 ms
+(`ECHO_WINDOW`) as soon as it is parsed, unless the screen lost cells doing it,
+which is the half-erased repaint batching exists to hide. An editing key
+(DEL, BS, ^W, ^U) may clear up to one row. Streaming output and repaints keep
+the existing batching; each keystroke buys at most one immediate publication.
+
+Measured with `tests/keystroke_latency.rs` (debug build, `cat` echo through a
+real Holder, 300 keys paced 40 ms apart, loaded machine):
+
+| hop | before p50 | after p50 |
+| --- | ---: | ---: |
+| client send → input frame decoded | 0.04 ms | 0.04 ms |
+| decoded → Holder acknowledged the write | 0.06 ms | 0.05 ms |
+| decoded → echo received from Holder | 0.12 ms | 0.13 ms |
+| echo received → grid published | **9.09 ms** | **0.09 ms** |
+| published → frame queued to client | 0.07 ms | 0.07 ms |
+| queued → client decoded | 0.03 ms | 0.02 ms |
+| **end to end (send → grid decoded)** | **9.33 ms** | **0.29–0.36 ms** |
+
+Reproduce from `diri/` (`DIRI_KEY_LATENCY_CHILD=zsh` for a real line editor):
+
+```sh
+cargo test -p diri-engine --features latency-trace --test keystroke_latency \
+    -- --ignored --nocapture
+```
+
+`attach::a_held_session_publishes_an_echo_without_waiting_out_the_batch`
+guards the regression (median 9.3 ms before, sub-millisecond after, asserts
+≤ 5 ms).

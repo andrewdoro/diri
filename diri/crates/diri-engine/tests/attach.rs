@@ -308,6 +308,128 @@ fn an_attach_is_seeded_then_streams_diffs_and_answers_input() {
     });
 }
 
+/// A keystroke into a Holder-backed session, the only kind the daemon runs,
+/// must not wait out the output batch. The Holder cannot say a lone echo is
+/// the whole burst, so before the Engine learned to publish output answering
+/// recent input, every echo sat out the 8 ms batch ceiling (median ~9 ms here).
+#[test]
+fn a_held_session_publishes_an_echo_without_waiting_out_the_batch() {
+    // Short root: Holder sockets live under it and must fit SUN_LEN.
+    let root = std::path::PathBuf::from(format!("/tmp/diri-echo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("root");
+    let registry = Arc::new(Mutex::new(Registry::new(engine(), root.join("state.json"))));
+    let server = Arc::new(
+        ControlServer::new(Arc::clone(&registry), root.join("daemon.sock"))
+            .with_logs_dir(root.join("logs"))
+            .with_holder(diri_engine::session::HolderConfig {
+                holders_dir: root.join("holders"),
+                executable: env!("CARGO_BIN_EXE_diri-holder").into(),
+            }),
+    );
+    let listener = server.bind().expect("bind");
+    {
+        let server = Arc::clone(&server);
+        std::thread::spawn(move || {
+            while let Ok((stream, _)) = listener.accept() {
+                let server = Arc::clone(&server);
+                std::thread::spawn(move || {
+                    let _ = server.serve(stream);
+                });
+            }
+        });
+    }
+    let control = UnixStream::connect(server.socket_path()).expect("connect control");
+    let send = |message: &ControlMessage| {
+        let mut bytes = serde_json::to_vec(message).expect("encode");
+        bytes.push(b'\n');
+        (&control).write_all(&bytes).expect("write");
+    };
+    send(&ControlMessage::Request {
+        id: 1,
+        method: "session.spawn".into(),
+        params: Some(json!({
+            "kind": { "shell": {} },
+            "cwd": "/tmp",
+            "argv": ["/bin/sh", "-c", "printf 'ready\\n'; exec cat"],
+        })),
+    });
+    let id = {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(control.try_clone().expect("clone"));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("spawn reply");
+        match serde_json::from_str(&line).expect("decode") {
+            ControlMessage::Response {
+                result: Ok(result), ..
+            } => result["id"].as_str().expect("id").to_string(),
+            other => panic!("spawn failed: {other:?}"),
+        }
+    };
+    std::thread::sleep(Duration::from_millis(400));
+    let mut data = UnixStream::connect(server.socket_path()).expect("connect data");
+    let mut attach = serde_json::to_vec(&json!({ "attach": id })).expect("encode");
+    attach.push(b'\n');
+    data.write_all(&attach).expect("attach");
+    // Let the attach pump settle its baseline, then start from a quiet
+    // channel so every grid read below answers the key just sent.
+    let mut frames = FrameReader::new(data.try_clone().expect("clone data"));
+    frames.until("the seed grid", |frame| frame.frame_type == FrameType::Grid);
+    for _ in 0..3 {
+        data.write_all(&FrameCodec::encode(&Frame::input(b"w".to_vec())).unwrap())
+            .expect("warm-up key");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    data.set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("drain timeout");
+    let mut codec = FrameCodec::new();
+    let mut column = None;
+    let mut chunk = [0u8; 64 << 10];
+    while let Ok(count) = data.read(&mut chunk) {
+        assert!(count > 0, "data channel closed");
+        for frame in codec.feed(&chunk[..count]).expect("valid frames") {
+            if let Ok(Some(update)) = frame.grid_payload() {
+                column = Some(update.cursor_col);
+            }
+        }
+    }
+    data.set_read_timeout(None).expect("clear timeout");
+    let start = column.expect("warm-up echoes");
+    let mut frames = FrameReader::new(data.try_clone().expect("clone data"));
+
+    // Paced like typing, so each key is a lone echo rather than a stream.
+    let mut latencies = Vec::new();
+    for column in start..start + 31 {
+        let sent = Instant::now();
+        data.write_all(&FrameCodec::encode(&Frame::input(vec![b'a' + column as u8 % 26])).unwrap())
+            .expect("send key");
+        frames.until("the echo", |frame| {
+            frame.frame_type == FrameType::Grid
+                && frame
+                    .grid_payload()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|update| update.cursor_col == column + 1)
+        });
+        latencies.push(sent.elapsed());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    latencies.sort_unstable();
+    let median = latencies[latencies.len() / 2];
+    eprintln!("held input-to-grid median: {}us", median.as_micros());
+    send(&ControlMessage::Request {
+        id: 2,
+        method: "session.kill".into(),
+        params: Some(json!({ "sessionID": id })),
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        median <= Duration::from_millis(5),
+        "held input-to-grid median was {median:?}; an echo must not wait out the 8 ms batch"
+    );
+}
+
 #[test]
 fn a_slow_reader_does_not_delay_an_active_reader() {
     use std::io::BufRead;
