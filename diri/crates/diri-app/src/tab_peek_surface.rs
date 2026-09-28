@@ -140,10 +140,6 @@ impl SessionSurfaces {
         }
     }
 
-    pub(crate) fn tab_peek_position(&mut self, now: std::time::Instant) -> f32 {
-        self.peek.advance_motion(now);
-        self.peek.position()
-    }
     pub(crate) fn tab_peek_visible(&self) -> bool {
         self.peek.visible()
     }
@@ -637,7 +633,7 @@ impl SessionSurfaces {
                         div()
                             .id("tab-peek-expand")
                             .cursor_pointer()
-                            .child(if blend > 0.5 { "Collapse" } else { "Show all" })
+                            .child("Show all")
                             .when(self.peek.visible(), |element| {
                                 element.on_mouse_down(MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation()
@@ -647,11 +643,16 @@ impl SessionSurfaces {
                                 if !this.peek.visible() {
                                     return;
                                 }
-                                this.peek.animate_to(
-                                    if blend > 0.5 { 140.0 } else { 380.0 },
-                                    cx.background_executor().now(),
-                                    cx.reduce_motion(),
-                                );
+                                // There is one grid of sessions: the overview
+                                // (⇧⌘O). The peek hands over to it, and the
+                                // overview zooms in from the page as usual.
+                                this.cancel_tab_peek_immediately(cx);
+                                let mut store =
+                                    this.store.write().expect("session store lock poisoned");
+                                if !store.overview_state().is_visible() {
+                                    store.toggle_overview();
+                                }
+                                drop(store);
                                 cx.notify();
                                 cx.stop_propagation();
                             })),

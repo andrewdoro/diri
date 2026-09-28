@@ -70,8 +70,8 @@ use crate::session_surfaces::switcher_key;
 use crate::store::StoreRuntime;
 use crate::surface_shell::UtilitySurfaces;
 
-const GRID_HORIZONTAL_PADDING: f32 = 24.0;
-const GRID_VERTICAL_PADDING: f32 = 12.0;
+pub(crate) const GRID_HORIZONTAL_PADDING: f32 = 24.0;
+pub(crate) const GRID_VERTICAL_PADDING: f32 = 12.0;
 // The outer terminal card has a one-pixel border on both sides and the pane
 // adds its own left divider. These pixels are outside TerminalElement's actual
 // paint bounds and therefore cannot be offered to the PTY as a text column.
@@ -1322,6 +1322,13 @@ impl TerminalPane {
         } else {
             Metrics::TITLE_BAR
         }
+    }
+
+    /// Where the pane sat last frame and the chrome above its grid, which is
+    /// where the overview zoom picks the page up and puts it back down.
+    pub(crate) fn page_geometry(&self) -> Option<(TerminalViewport, f32)> {
+        self.viewport
+            .map(|viewport| (viewport, self.header_height()))
     }
 
     pub fn is_focused(&self, window: &Window) -> bool {

@@ -42,6 +42,7 @@ pub mod notifications;
 mod number_flow;
 #[cfg(test)]
 mod overview_fixture;
+mod overview_zoom;
 pub mod palette;
 mod palette_chrome;
 mod palette_workspace;

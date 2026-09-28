@@ -16,13 +16,15 @@ use diri_ui::{
     StatusState,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, Context, Entity, FocusHandle,
-    FontWeight, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, ScrollHandle,
-    SharedString, Task, Window, div, ease_out_quint, point, prelude::*, px, rgba,
+    AnyElement, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
+    KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, ScrollHandle, SharedString, Task,
+    Window, div, point, prelude::*, px, rgba,
 };
 
 #[path = "overview_calm.rs"]
 mod overview_calm;
+#[path = "overview_zoom_surface.rs"]
+mod overview_zoom_surface;
 #[path = "tab_peek_surface.rs"]
 mod tab_peek_surface;
 #[path = "workspace_peek_surface.rs"]
@@ -74,8 +76,9 @@ pub struct SessionSurfaces {
     screen_grids: HashMap<SessionId, TerminalElement>,
     screen_requests: HashMap<SessionId, ScreenRequest>,
     overview_was_visible: bool,
-    overview_generation: usize,
     overview_list_scroll: ScrollHandle,
+    /// Safari-style zoom between the page and its overview card.
+    zoom: overview_zoom_surface::ZoomPresentation,
     /// Phase-1 design exploration: which overview layout renders.
     pub(crate) overview_variant: OverviewVariant,
     /// This view is `.cached()` in RootView, so ambient window redraws no
@@ -191,8 +194,8 @@ impl SessionSurfaces {
             screen_grids: HashMap::new(),
             screen_requests: HashMap::new(),
             overview_was_visible: false,
-            overview_generation: 0,
             overview_list_scroll: ScrollHandle::new(),
+            zoom: Default::default(),
             // Prototype switch while the design is chosen: DIRI_OVERVIEW_VARIANT
             // = a (Safari) | b (gallery) | c (mini windows, default) | current.
             overview_variant: OverviewVariant::from_env(
@@ -258,6 +261,8 @@ impl SessionSurfaces {
         store.cancel_switcher();
         store.dismiss_overview();
         drop(store);
+        self.reset_overview_zoom(cx);
+        self.overview_was_visible = false;
         cx.notify();
     }
 }
@@ -291,14 +296,24 @@ impl Render for SessionSurfaces {
                 store.switcher_state().is_visible(),
             )
         };
-        if !overview_visible && self.overview_was_visible {
+        if switcher_visible || self.peek.paint_visible() {
+            // Another surface took over; never fly the overview underneath it.
+            self.reset_overview_zoom(cx);
+        } else if overview_visible != self.overview_was_visible {
+            self.follow_overview_visibility(overview_visible, window, cx);
+        }
+        self.advance_zoom(window, cx);
+        if !overview_visible && !self.zoom.zoom.is_active() {
+            // Previews refresh on every open; drop them once nothing shows them.
             self.screen_requests.clear();
             self.screens.clear();
             self.screen_grids.clear();
+            self.zoom.forget_cards();
         }
         if overview_visible && !self.overview_was_visible {
-            self.overview_generation = self.overview_generation.wrapping_add(1);
-            self.overview_grid_scroll.scroll_to_item(0);
+            if self.overview_variant == OverviewVariant::Current {
+                self.overview_grid_scroll.scroll_to_item(0);
+            }
             self.overview_list_scroll.scroll_to_item(0);
         }
         self.overview_was_visible = overview_visible;
@@ -324,6 +339,8 @@ impl Render for SessionSurfaces {
             .on_modifiers_changed(cx.listener(Self::handle_modifiers_changed));
         if self.peek.paint_visible() {
             root.inset_0().child(self.render_tab_peek(window, cx))
+        } else if self.zoom_painting() {
+            root.inset_0().child(self.render_overview_zoom(window, cx))
         } else if overview_visible {
             root.inset_0().child(self.render_overview(window, cx))
         } else if switcher_visible {
@@ -376,7 +393,10 @@ impl SessionSurfaces {
             return;
         }
 
-        store.set_overview_columns(overview_columns(f32::from(window.viewport_size().width)));
+        if self.overview_variant == OverviewVariant::Current {
+            // The calm overview sets its own column count as it lays out.
+            store.set_overview_columns(overview_columns(f32::from(window.viewport_size().width)));
+        }
         let handled = match event.keystroke.key.as_str() {
             "escape" => store.overview_escape(),
             "backspace" | "delete" => store.overview_backspace(),
@@ -413,6 +433,19 @@ impl SessionSurfaces {
     }
 
     fn reveal_overview_focus(&self, window: &Window) {
+        if self.overview_variant != OverviewVariant::Current {
+            let focused = self
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .overview_state()
+                .focused()
+                .cloned();
+            if let Some(id) = focused {
+                self.reveal_calm_card(&id, window, false);
+            }
+            return;
+        }
         let mut store = self.store.write().expect("session store lock poisoned");
         let sessions = store.ordered_sessions();
         let state = store.overview_state();
@@ -913,18 +946,9 @@ impl SessionSurfaces {
                 content.child(self.bulk_close_bar(state.selection().len(), visible_count, cx))
             });
 
-        let content = if cx.reduce_motion() {
-            content.into_any_element()
-        } else {
-            content
-                .with_animation(
-                    ("overview-entry", self.overview_generation),
-                    Animation::new(std::time::Duration::from_millis(120))
-                        .with_easing(ease_out_quint()),
-                    |view, value| view.opacity(value),
-                )
-                .into_any_element()
-        };
+        // The entrance is the zoom from the page (overview_zoom_surface), so
+        // the grid itself no longer fades in on its own.
+        let content = content.into_any_element();
 
         div()
             .id("overview-scrim")
@@ -1611,8 +1635,14 @@ impl SessionSurfaces {
             .into_any_element()
     }
 
+    /// Screens are fetched while the grid is up, and from the first touch of
+    /// a pinch so the page's card is ready before it is visible.
+    fn overview_wants_screens(&self) -> bool {
+        self.store.read().unwrap().overview_state().is_visible() || self.zoom.zoom.is_active()
+    }
+
     fn request_screen(&mut self, id: SessionId, cx: &mut Context<Self>) {
-        if !self.store.read().unwrap().overview_state().is_visible()
+        if !self.overview_wants_screens()
             || self.screens.contains_key(&id)
             || self.screen_requests.contains_key(&id)
             || self.screen_requests.len() >= 4
@@ -1641,7 +1671,7 @@ impl SessionSurfaces {
                 (screen, grid)
             })
             .await
-            .map(|(screen, grid)| (screen.map(|screen| (screen, grid))))
+            .map(|(screen, grid)| screen.map(|screen| (screen, grid)))
         });
         let abort = request.abort_handle();
         let task_id = id.clone();
@@ -1687,7 +1717,7 @@ impl SessionSurfaces {
             };
             let _ = this.update(cx, |this, cx| {
                 this.screen_requests.remove(&task_id);
-                if this.store.read().unwrap().overview_state().is_visible() {
+                if this.overview_wants_screens() {
                     if let Some(grid) = grid {
                         this.screen_grids.insert(task_id.clone(), grid);
                     }
@@ -1969,7 +1999,9 @@ mod tests {
         let probe = Arc::clone(&background_scrolls);
         let (view, cx) = cx.add_window_view(move |_, cx| OverviewHarness {
             surfaces: cx.new(|cx| {
-                let surfaces = SessionSurfaces::new(runtime, None, cx);
+                let mut surfaces = SessionSurfaces::new(runtime, None, cx);
+                // This covers the original gallery, not the calm prototypes.
+                surfaces.overview_variant = OverviewVariant::Current;
                 surfaces.store.write().unwrap().toggle_overview();
                 surfaces
             }),
@@ -1977,6 +2009,11 @@ mod tests {
         });
         cx.simulate_resize(size(px(1100.0), px(700.0)));
         let surfaces = view.read_with(cx, |h, _| h.surfaces.clone());
+        // Let the opening cross-fade land; the grid takes input once it rests.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        surfaces.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
         let bounds = cx.debug_bounds("OVERVIEW_GALLERY").unwrap();
         assert_eq!(
             cx.debug_bounds("OVERVIEW_CONTENT").unwrap().size,
@@ -2586,6 +2623,241 @@ mod tests {
             .unwrap()
             .save(output)
             .unwrap();
+    }
+
+    fn calm_fleet(count: usize) -> SessionListResult {
+        SessionListResult {
+            sessions: (0..count)
+                .map(|i| {
+                    let mut s = session(i);
+                    s.project_id = ProjectId::new(if i < 5 { "diri" } else { "anara" });
+                    s
+                })
+                .collect(),
+            projects: ["diri", "anara"]
+                .into_iter()
+                .map(|name| diri_proto::Project {
+                    id: ProjectId::new(name),
+                    root: format!("/work/{name}"),
+                    name: name.into(),
+                    pinned_order: None,
+                    host: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// The zoom's first frame flies toward the layout's estimate of a card;
+    /// every later frame toward where the card painted. The two must agree,
+    /// and revealing a card must scroll it on screen.
+    #[gpui::test]
+    fn calm_card_estimates_match_painted_cards_and_reveal_scrolls(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let runtime = Arc::new(StoreRuntime::inert());
+        runtime.store.write().unwrap().hydrate(calm_fleet(14));
+        let (view, cx) = cx.add_window_view(move |_, cx| OverviewHarness {
+            surfaces: cx.new(|cx| {
+                let mut surfaces = SessionSurfaces::new(runtime, None, cx);
+                surfaces.overview_variant = OverviewVariant::Windows;
+                surfaces.store.write().unwrap().toggle_overview();
+                surfaces
+            }),
+            background_scrolls: Arc::new(AtomicUsize::new(0)),
+        });
+        cx.simulate_resize(size(px(1300.0), px(800.0)));
+        let surfaces = view.read_with(cx, |h, _| h.surfaces.clone());
+        let check = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let surfaces = surfaces.read(cx);
+                let painted = surfaces.zoom.cards.borrow().clone();
+                assert_eq!(painted.len(), 14);
+                for (id, card) in painted {
+                    let estimate = surfaces.calm_card_estimate(&id, window).unwrap();
+                    for (a, b) in [
+                        (card.x, estimate.x),
+                        (card.y, estimate.y),
+                        (card.width, estimate.width),
+                        (card.height, estimate.height),
+                    ] {
+                        assert!(
+                            (a - b).abs() < 0.51,
+                            "{id:?}: painted {card:?}, estimate {estimate:?}"
+                        );
+                    }
+                }
+            });
+        };
+        check(cx);
+        let last = session(13).id;
+        cx.update(|window, cx| surfaces.read(cx).reveal_calm_card(&last, window, true));
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        check(cx);
+        cx.update(|window, cx| {
+            let card = surfaces.read(cx).zoom.cards.borrow()[&last];
+            let height = f32::from(window.viewport_size().height);
+            assert!(card.y >= 42.0 && card.y + card.height <= height, "{card:?}");
+        });
+    }
+
+    /// The zoom's landing is the card itself: the flying page at progress 1
+    /// paints the calm overview pixel for pixel, so the flight ends without a
+    /// swap. Set `DIRI_VISUAL_OUTPUT_DIR` to keep both frames.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal pixel comparison; run explicitly on macOS"]
+    fn calm_zoom_lands_as_the_card_pixel_for_pixel() {
+        use crate::overview_fixture as fx;
+        use crate::overview_zoom::Landing;
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        let screens = [
+            fx::codex_done(),
+            fx::htop(),
+            fx::git_graph(),
+            fx::vim_review(),
+        ];
+        let window = cx
+            .open_window(size(px(1440.0), px(900.0)), |_, cx| {
+                let runtime = Arc::new(StoreRuntime::inert());
+                let mut fleet = calm_fleet(screens.len());
+                for record in &mut fleet.sessions {
+                    record.status = SessionStatus::Idle;
+                    record.last_turn_completed_at = Some(DateMillis(1.0));
+                    record.last_seen_at = Some(DateMillis(2.0));
+                }
+                runtime.store.write().unwrap().hydrate(fleet);
+                let surfaces = cx.new(|cx| {
+                    let mut view = SessionSurfaces::new(runtime, None, cx);
+                    view.overview_variant = OverviewVariant::Windows;
+                    for (i, screen) in screens.iter().enumerate() {
+                        view.set_resident_buffer(
+                            session(i).id,
+                            Arc::new(RwLock::new(fx::screen(screen))),
+                        );
+                    }
+                    view.set_page_region(
+                        crate::terminal_pane::TerminalViewport {
+                            x: 240.0,
+                            y: 0.0,
+                            width: 1200.0,
+                            height: 900.0,
+                        },
+                        42.0,
+                    );
+                    {
+                        let mut store = view.store.write().unwrap();
+                        store.select(session(1).id);
+                        store.toggle_overview();
+                    }
+                    view
+                });
+                cx.new(|_| OverviewHarness {
+                    surfaces,
+                    background_scrolls: Arc::new(AtomicUsize::new(0)),
+                })
+            })
+            .unwrap();
+        let surfaces = cx
+            .update_window(window.into(), |root, _, cx| {
+                root.downcast::<OverviewHarness>()
+                    .unwrap()
+                    .read(cx)
+                    .surfaces
+                    .clone()
+            })
+            .unwrap();
+        // Land the opening zoom, then take the resting grid.
+        cx.run_until_parked();
+        cx.update(|cx| {
+            surfaces.update(cx, |view, cx| {
+                assert!(view.zoom.zoom.is_flying(), "⇧⌘O zooms the page in");
+                view.zoom.zoom.reset(Landing::Overview);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.capture_screenshot(window.into()).unwrap();
+        let resting = cx.capture_screenshot(window.into()).unwrap();
+        cx.update(|cx| {
+            surfaces.update(cx, |view, cx| {
+                assert!(!view.zoom.zoom.is_active(), "the opening zoom must land");
+                assert!(view.zoom.cards.borrow().contains_key(&session(1).id));
+                // Hold the flight exactly at the card: tracking at progress 1
+                // paints the transition layer with the page as the card.
+                let now = cx.background_executor().now();
+                view.zoom.session = Some(session(1).id);
+                view.zoom.crossfade = false;
+                view.zoom.grip = None;
+                view.zoom.zoom.reset(Landing::Overview);
+                view.zoom.zoom.begin(Landing::Overview, now);
+                assert!(view.zoom_painting());
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let card = cx.update(|cx| surfaces.read(cx).zoom.cards.borrow()[&session(1).id]);
+        let landed = cx.capture_screenshot(window.into()).unwrap();
+        if let Ok(dir) = std::env::var("DIRI_VISUAL_OUTPUT_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            resting.save(dir.join("calm-zoom-resting.png")).unwrap();
+            landed.save(dir.join("calm-zoom-landed.png")).unwrap();
+        }
+        assert_eq!(resting.dimensions(), landed.dimensions());
+        let scale = resting.width() as f32 / 1440.0;
+        let inside = |x: u32, y: u32| {
+            let (x, y) = (x as f32 / scale, y as f32 / scale);
+            x >= card.x && x < card.x + card.width && y >= card.y && y < card.y + card.height
+        };
+        let mut card_pixels = 0;
+        for (x, y, a) in resting.enumerate_pixels() {
+            let b = landed.get_pixel(x, y);
+            if inside(x, y) {
+                card_pixels += 1;
+                assert_eq!(a, b, "the landed card differs at ({x}, {y})");
+            } else {
+                // The card's soft shadow overlaps its neighbour's; above the
+                // grid it blends in the other order, a level at most apart.
+                let apart =
+                    a.0.iter()
+                        .zip(b.0.iter())
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max();
+                assert!(
+                    apart <= Some(1),
+                    "the landed zoom moved pixels at ({x}, {y})"
+                );
+            }
+        }
+        assert!(card_pixels > 10_000, "the card was measured: {card:?}");
+        // Frames along the way, for looking at rather than asserting.
+        if let Ok(dir) = std::env::var("DIRI_VISUAL_OUTPUT_DIR") {
+            for (name, progress) in [("quarter", 0.25), ("half", 0.5), ("late", 0.8)] {
+                cx.update(|cx| {
+                    surfaces.update(cx, |view, cx| {
+                        let now = cx.background_executor().now();
+                        view.zoom.zoom.reset(Landing::Page);
+                        view.zoom.zoom.begin(Landing::Page, now);
+                        let scale = 1.0 - progress * (1.0 - card.width / 1200.0);
+                        view.zoom
+                            .zoom
+                            .pinch(scale - 1.0, now + std::time::Duration::from_millis(16));
+                        cx.notify();
+                    })
+                });
+                cx.run_until_parked();
+                cx.capture_screenshot(window.into())
+                    .unwrap()
+                    .save(std::path::Path::new(&dir).join(format!("calm-zoom-{name}.png")))
+                    .unwrap();
+            }
+        }
     }
 
     /// Phase-1 design exploration. `DIRI_VISUAL_VARIANT` = current | a | b | c.
