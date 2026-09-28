@@ -102,10 +102,6 @@ impl OverviewZoom {
         }
     }
 
-    pub(crate) fn slot_scale(&self) -> f32 {
-        self.slot_scale
-    }
-
     /// Grab the presentation where it is, including mid-flight, so a second
     /// pinch never jumps. `at_rest` is where the surface sits when idle.
     pub(crate) fn begin(&mut self, at_rest: Landing, now: Instant) {
@@ -408,6 +404,14 @@ pub(crate) fn grid_alpha(progress: f32) -> f32 {
     Motion::SETTLE.settle((progress * 1.25).clamp(0.0, 1.0))
 }
 
+/// The live terminal only carries the first moment of a pinch, while the
+/// page is still nearly full size; by a third of the way it has handed over
+/// entirely to the overview card preview, which is what shrinks and lands.
+pub(crate) fn live_page_alpha(progress: f32) -> f32 {
+    let t = (progress / 0.3).clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,6 +679,14 @@ mod tests {
         assert!(first.x > 24.0 && third.x + third.width < 1100.0 - 24.0);
         assert_eq!(fourth.x, first.x);
         assert!(fourth.y > first.y + first.height);
+    }
+
+    #[test]
+    fn the_live_terminal_hands_over_to_the_card_early() {
+        assert_eq!(live_page_alpha(0.0), 1.0);
+        assert_eq!(live_page_alpha(0.3), 0.0);
+        assert_eq!(live_page_alpha(1.0), 0.0, "only the card ever lands");
+        assert!(live_page_alpha(0.15) > 0.0 && live_page_alpha(0.15) < 1.0);
     }
 
     #[test]

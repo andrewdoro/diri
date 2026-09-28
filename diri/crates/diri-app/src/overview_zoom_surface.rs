@@ -3,7 +3,7 @@
 //! only maps it onto the store and onto elements.
 use super::*;
 use crate::overview_zoom::{
-    Grip, Landing, OverviewZoom, ZoomRect, estimated_slot, grid_alpha, page_frame,
+    Grip, Landing, OverviewZoom, ZoomRect, estimated_slot, grid_alpha, live_page_alpha, page_frame,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -170,6 +170,9 @@ impl SessionSurfaces {
             self.zoom.crossfade = reduced || !self.overview_mode_is_grid();
             self.zoom.zoom.reset(Landing::Page);
             self.zoom.zoom.animate_to(Landing::Overview, now, reduced);
+            if let Some(id) = self.zoom.session.clone() {
+                self.request_screen(id, cx);
+            }
         } else {
             // Leaving lands on whatever is now selected: the card that was
             // activated, or the page you came from after Esc.
@@ -300,6 +303,9 @@ impl SessionSurfaces {
         };
         self.zoom.grip = Some(Grip::take(on_screen, fingers));
         self.zoom.zoom.begin(at_rest, now);
+        // Fetch the page's card preview now, while the live terminal still
+        // covers it, so the hand-over never shows a loading card.
+        self.request_screen(session, cx);
         cx.notify();
         true
     }
@@ -380,9 +386,9 @@ impl SessionSurfaces {
         }
     }
 
-    /// The page as a miniature of the workbench: the live read-only terminal
-    /// at `scale` of the terminal font, inset like the real grid so the text
-    /// sits where it sat on the page.
+    /// The live read-only terminal at `scale` of the terminal font, inset like
+    /// the real grid so the text sits where it sat on the page. It only covers
+    /// the first moment of a pinch, fading into the card preview underneath.
     pub(super) fn page_miniature(
         &self,
         session: &SessionRecord,
@@ -441,11 +447,9 @@ impl SessionSurfaces {
         .inset_0()
     }
 
-    /// Whether this card's thumbnail is the page itself (a live miniature),
-    /// and whether it is currently in flight above the grid (paint nothing).
-    pub(super) fn zoom_card_role(&self, id: &SessionId) -> Option<bool> {
-        (self.zoom.session.as_ref() == Some(id))
-            .then(|| self.zoom_painting() && !self.zoom.crossfade)
+    /// This card is in flight above the grid, so its slot paints nothing.
+    pub(super) fn zoom_card_in_flight(&self, id: &SessionId) -> bool {
+        self.zoom.session.as_ref() == Some(id) && self.zoom_painting() && !self.zoom.crossfade
     }
 
     pub(super) fn render_overview_zoom(
@@ -498,8 +502,45 @@ impl SessionSurfaces {
         };
         let page = self.zoom.page;
         let frame = self.zoom_frame(slot);
-        let scale = frame.width / page.width.max(1.0);
+        let page_scale = frame.width / page.width.max(1.0);
+        let card_scale = frame.width / slot.width.max(1.0);
         let p = progress.clamp(0.0, 1.0);
+        let live = live_page_alpha(progress);
+        // The flying page *is* the grid card: the same preview ⇧⌘O paints,
+        // at the size it is flying at, so landing is the card exactly. Only
+        // the first moments show the live terminal, fading into that card.
+        let card = self.overview_preview(&session, card_scale, colors, cx);
+        let mut flying_page = div()
+            .absolute()
+            .left(px(frame.x))
+            .top(px(frame.y))
+            .w(px(frame.width))
+            .h(px(frame.height))
+            .rounded(px(Radius::ROW * p))
+            .overflow_hidden()
+            .bg(colors.background)
+            .border_1()
+            .border_color(colors.primary.alpha(0.075 * p))
+            .when(session.hibernation.is_some(), |page| {
+                page.opacity(1.0 - 0.32 * p)
+            })
+            .shadow(vec![BoxShadow {
+                color: gpui::black().opacity(0.18 * p),
+                offset: point(px(0.0), px(6.0 * p)),
+                blur_radius: px(18.0 * p),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
+            .child(card);
+        if live > 0.0 {
+            flying_page = flying_page.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .opacity(live)
+                    .child(self.page_miniature(&session, page_scale, colors)),
+            );
+        }
         layer = layer
             // The workbench under the shrinking page is revealed as grid
             // background, never as a second copy of the terminal.
@@ -520,24 +561,7 @@ impl SessionSurfaces {
                     .opacity(grid_alpha(progress))
                     .child(grid),
             )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(frame.x))
-                    .top(px(frame.y))
-                    .w(px(frame.width))
-                    .h(px(frame.height))
-                    .rounded(px(Radius::ROW * p))
-                    .overflow_hidden()
-                    .shadow(vec![BoxShadow {
-                        color: gpui::black().opacity(0.18 * p),
-                        offset: point(px(0.0), px(6.0 * p)),
-                        blur_radius: px(18.0 * p),
-                        spread_radius: px(0.0),
-                        inset: false,
-                    }])
-                    .child(self.page_miniature(&session, scale, colors)),
-            );
+            .child(flying_page);
         // The grid is a picture until the flight lands; clicks mid-flight
         // would act on cards that are still moving.
         layer

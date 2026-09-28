@@ -291,7 +291,7 @@ impl Render for SessionSurfaces {
         }
         self.advance_zoom(window, cx);
         if !overview_visible
-            && !self.zoom_painting()
+            && !self.zoom.zoom.is_active()
             && !(self.screens.is_empty() && self.screen_requests.is_empty())
         {
             // Previews refresh on every open; drop them once nothing shows them.
@@ -1191,10 +1191,10 @@ impl SessionSurfaces {
         let status = self.status_glyph(session, 14.0, colors, window, cx);
         // The page you pinched away from stays a live miniature so it lands
         // in its slot without a swap; while it is in flight the slot is empty.
-        let preview = match self.zoom_card_role(&session.id) {
-            Some(true) => div().size_full().into_any_element(),
-            Some(false) => self.page_miniature(session, self.zoom.zoom.slot_scale(), colors),
-            None => self.overview_preview(session, colors, cx),
+        let preview = if self.zoom_card_in_flight(&session.id) {
+            div().size_full().into_any_element()
+        } else {
+            self.overview_preview(session, 1.0, colors, cx)
         };
         let probe = self.slot_probe(session.id.clone());
 
@@ -1446,7 +1446,7 @@ impl SessionSurfaces {
                     .rounded(px(Radius::BADGE))
                     .overflow_hidden()
                     .bg(colors.background)
-                    .child(self.overview_preview(session, colors, cx)),
+                    .child(self.overview_preview(session, 1.0, colors, cx)),
             )
             .child(status)
             .child(
@@ -1613,7 +1613,7 @@ impl SessionSurfaces {
     }
 
     fn request_screen(&mut self, id: SessionId, cx: &mut Context<Self>) {
-        if !self.store.read().unwrap().overview_state().is_visible()
+        if !self.overview_wants_screens()
             || self.screens.contains_key(&id)
             || self.screen_requests.contains_key(&id)
             || self.screen_requests.len() >= 4
@@ -1648,7 +1648,7 @@ impl SessionSurfaces {
             };
             let _ = this.update(cx, |this, cx| {
                 this.screen_requests.remove(&task_id);
-                if this.store.read().unwrap().overview_state().is_visible() {
+                if this.overview_wants_screens() {
                     this.screens.insert(task_id, preview);
                 }
                 cx.notify();
@@ -1658,12 +1658,23 @@ impl SessionSurfaces {
             .insert(id, ScreenRequest { _task: task, abort });
     }
 
-    fn overview_preview(
+    /// Screen previews are fetched while the grid is up, and from the first
+    /// touch of a pinch so the page's card is ready before it is visible.
+    fn overview_wants_screens(&self) -> bool {
+        self.store.read().unwrap().overview_state().is_visible() || self.zoom.zoom.is_active()
+    }
+
+    /// The one card preview, used by every grid card and by the page while it
+    /// flies between the workbench and its slot. `scale` is the rendered size
+    /// over the card's resting size, so at 1 it is the card exactly.
+    pub(super) fn overview_preview(
         &self,
         session: &SessionRecord,
+        scale: f32,
         colors: SemanticColors,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let scale = scale.max(0.1);
         let weak = cx.entity().downgrade();
         let id = session.id.clone();
         let mut preview = div()
@@ -1674,9 +1685,9 @@ impl SessionSurfaces {
         if let Some(ScreenPreview::Ready(lines)) = self.screens.get(&id) {
             preview = preview.child(
                 div()
-                    .p(px(12.0))
-                    .text_size(px(10.0))
-                    .line_height(px(12.5))
+                    .p(px(12.0 * scale))
+                    .text_size(px(10.0 * scale))
+                    .line_height(px(12.5 * scale))
                     .font_family(crate::fonts::mono_family())
                     .text_color(colors.secondary)
                     .whitespace_nowrap()
@@ -1695,14 +1706,18 @@ impl SessionSurfaces {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(10.0))
+                    .gap(px(10.0 * scale))
                     .child(
-                        AgentLogo::new(ui_agent_kind(session.effective_kind()), 28.0, colors)
-                            .badged(false),
+                        AgentLogo::new(
+                            ui_agent_kind(session.effective_kind()),
+                            28.0 * scale,
+                            colors,
+                        )
+                        .badged(false),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(11.0 * scale))
                             .text_color(colors.tertiary)
                             .child(label),
                     ),
