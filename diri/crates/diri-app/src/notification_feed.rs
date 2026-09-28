@@ -370,6 +370,7 @@ impl NotificationFeed {
                     thread_identifier: Some(entry.session_id.0.clone()),
                     action_data: None,
                     use_system_sound: false,
+                    reply: false,
                     guard: self
                         .guards
                         .get(&id)

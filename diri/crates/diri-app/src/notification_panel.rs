@@ -741,7 +741,7 @@ impl RootView {
                     guard: None,
                         identifier: "diri-notification-test".into(), title: "Diri notifications are ready".into(),
                         body: "You'll find agent updates in Notifications, even when Mac alerts are silenced.".into(),
-                        thread_identifier: None, action_data: None, use_system_sound: false,
+                        thread_identifier: None, action_data: None, use_system_sound: false, reply: false,
                     });
                     #[cfg(not(target_os = "macos"))]
                     { this.notification_health = "System alerts are available on macOS. Your inbox works here.".into(); }

@@ -1693,6 +1693,7 @@ impl SessionStore {
                                     thread_identifier: Some(event.session_id.0),
                                     action_data: None,
                                     use_system_sound: false,
+                                    reply: false,
                                 }),
                             }));
                         }
@@ -1889,7 +1890,55 @@ impl SessionStore {
                     .as_ref()
                     .is_some_and(|request| self.should_deliver_notification(request))
             })
+            .map(|mut effect| {
+                if let Some(request) = effect.notification.as_mut() {
+                    request.reply = request.thread_identifier.as_ref().is_some_and(|id| {
+                        self.sessions
+                            .get(&SessionId::new(id.clone()))
+                            .is_some_and(|session| crate::notifications::accepts_reply(session))
+                    });
+                }
+                effect
+            })
             .collect()
+    }
+
+    /// A reply typed into a needs-input banner. Returns the command to type
+    /// it, or `None` after posting a notice when the session moved on; the
+    /// text itself never leaves this call except inside the command.
+    #[cfg(target_os = "macos")]
+    pub fn take_notification_reply(
+        &mut self,
+        notification_id: &str,
+        session_id: &SessionId,
+        text: String,
+    ) -> Option<SendTextCommand> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        let session = self.sessions.get(session_id).cloned();
+        let entry = self
+            .notification_feed
+            .entries()
+            .iter()
+            .find(|entry| entry.id == notification_id);
+        if let Some(refusal) =
+            crate::notifications::reply_refusal(entry, session_id, session.as_deref())
+        {
+            self.emit(StoreEffect::StatusTransition(
+                crate::notifications::reply_refused_transition(
+                    session.as_deref().map(|session| session.title.as_str()),
+                    refusal,
+                ),
+            ));
+            return None;
+        }
+        self.set_notification_read(notification_id, true);
+        Some(SendTextCommand {
+            session_id: session_id.clone(),
+            text,
+            submit: true,
+        })
     }
 
     pub fn remove_session_record(&mut self, id: &SessionId) {

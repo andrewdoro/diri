@@ -179,6 +179,27 @@ pub(crate) fn route(
                 root.open_notification(session, Some(notification), window, cx)
             });
         }
+        NativeNotificationEvent::Reply {
+            session_id,
+            notification_id,
+            text,
+        } => {
+            let command = services
+                .store
+                .store
+                .write()
+                .expect("store")
+                .take_notification_reply(
+                    &notification_id,
+                    &diri_proto::SessionId::new(session_id),
+                    text.0,
+                );
+            // The same `session.send_text` the app's own prompts use: the
+            // Engine frames it as a bracketed paste and submits it.
+            if let Some(command) = command {
+                let _ = services.store.notification_action_sender().send(command);
+            }
+        }
         NativeNotificationEvent::Read(id) => services
             .store
             .store

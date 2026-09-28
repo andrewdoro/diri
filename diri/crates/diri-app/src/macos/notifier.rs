@@ -16,12 +16,19 @@ use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
     UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
     UNNotificationDismissActionIdentifier, UNNotificationPresentationOptions,
-    UNNotificationRequest, UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
+    UNNotificationRequest, UNNotificationResponse, UNNotificationSound,
+    UNTextInputNotificationAction, UNTextInputNotificationResponse, UNUserNotificationCenter,
     UNUserNotificationCenterDelegate,
 };
 use tokio::sync::mpsc;
 
-use crate::notifications::{NotificationRequest as DiriNotification, OPEN_ACTION_ID};
+use crate::notifications::{
+    NotificationRequest as DiriNotification, OPEN_ACTION_ID, REPLY_ACTION_ID,
+};
+
+const SESSION_CATEGORY: &str = "diri-session";
+/// Same as `SESSION_CATEGORY` plus the inline Reply field.
+const REPLY_CATEGORY: &str = "diri-session-reply";
 
 #[derive(Clone, Debug)]
 pub enum NativeNotificationEvent {
@@ -29,8 +36,23 @@ pub enum NativeNotificationEvent {
         session_id: String,
         notification_id: String,
     },
+    /// Text typed into a needs-input banner, for the banner's own session.
+    Reply {
+        session_id: String,
+        notification_id: String,
+        text: ReplyText,
+    },
     Read(String),
     Health(String),
+}
+
+/// A reply is a prompt: keep it out of any `{:?}` that reaches a log.
+#[derive(Clone)]
+pub struct ReplyText(pub String);
+impl std::fmt::Debug for ReplyText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ReplyText({} bytes)", self.0.len())
+    }
 }
 
 pub struct NativeNotifier {
@@ -56,14 +78,30 @@ impl NativeNotifier {
                 &NSString::from_str("Open session"),
                 UNNotificationActionOptions::Foreground,
             );
-            let category =
+            // No Foreground option: answering from the banner is the point,
+            // so the app stays where it is. AuthenticationRequired keeps a
+            // locked Mac from typing into an agent.
+            let reply: Retained<UNNotificationAction> =
+                UNTextInputNotificationAction::actionWithIdentifier_title_options_textInputButtonTitle_textInputPlaceholder(
+                    &NSString::from_str(REPLY_ACTION_ID),
+                    &NSString::from_str("Reply"),
+                    UNNotificationActionOptions::AuthenticationRequired,
+                    &NSString::from_str("Send"),
+                    &NSString::from_str("Reply to the agent"),
+                )
+                .into_super();
+            let category = |identifier: &str, actions: &[Retained<UNNotificationAction>]| {
                 UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
-                    &NSString::from_str("diri-session"),
-                    &NSArray::from_retained_slice(&[open]),
+                    &NSString::from_str(identifier),
+                    &NSArray::from_slice(&actions.iter().map(|action| &**action).collect::<Vec<_>>()),
                     &NSArray::new(),
                     UNNotificationCategoryOptions::CustomDismissAction,
-                );
-            center.setNotificationCategories(&NSSet::from_retained_slice(&[category]));
+                )
+            };
+            center.setNotificationCategories(&NSSet::from_retained_slice(&[
+                category(SESSION_CATEGORY, &[open.clone()]),
+                category(REPLY_CATEGORY, &[reply, open]),
+            ]));
             NativeNotifierInner {
                 center,
                 _delegate: delegate,
@@ -172,7 +210,11 @@ impl NativeNotifier {
         content.setBody(&NSString::from_str(&notification.body));
         if let Some(session) = &notification.thread_identifier {
             content.setThreadIdentifier(&NSString::from_str(session));
-            content.setCategoryIdentifier(&NSString::from_str("diri-session"));
+            content.setCategoryIdentifier(&NSString::from_str(if notification.reply {
+                REPLY_CATEGORY
+            } else {
+                SESSION_CATEGORY
+            }));
         }
         if notification.use_system_sound {
             content.setSound(Some(&UNNotificationSound::defaultSound()));
@@ -253,10 +295,20 @@ define_class!(
         ) {
             let request = response.notification().request();
             let id = request.identifier().to_string();
-            let event = if &*response.actionIdentifier()
-                == unsafe { UNNotificationDismissActionIdentifier }
-            {
+            let action = response.actionIdentifier();
+            let event = if &*action == unsafe { UNNotificationDismissActionIdentifier } {
                 NativeNotificationEvent::Read(id)
+            } else if action.to_string() == REPLY_ACTION_ID {
+                // Never falls through to Open: the reply is answered in place.
+                let text = response
+                    .downcast_ref::<UNTextInputNotificationResponse>()
+                    .map(|response| response.userText().to_string())
+                    .unwrap_or_default();
+                NativeNotificationEvent::Reply {
+                    session_id: request.content().threadIdentifier().to_string(),
+                    notification_id: id,
+                    text: ReplyText(text),
+                }
             } else {
                 // Also covers old Approve/Deny banners delivered by a previous
                 // app version. They open the session and never send input.
