@@ -32,6 +32,16 @@ pub struct PersistedState {
     pub sessions: Vec<SessionRecord>,
 }
 
+/// What `load` reads: each session stays raw until it is decoded on its own,
+/// so one record this build cannot read never takes the rest down with it.
+#[derive(Deserialize)]
+struct LoadedState {
+    #[serde(default)]
+    projects: Vec<serde_json::Value>,
+    #[serde(default)]
+    sessions: Vec<serde_json::Value>,
+}
+
 impl PersistedState {
     const VERSION: i64 = 1;
 
@@ -55,11 +65,15 @@ impl Serialize for PersistedRecords<'_> {
         let registry = self.0;
         let mut ids: Vec<&String> = registry.records.keys().collect();
         ids.sort();
-        let mut sequence = serializer.serialize_seq(Some(ids.len()))?;
+        let mut sequence =
+            serializer.serialize_seq(Some(ids.len() + registry.unreadable_records.len()))?;
         for id in ids {
             let mut record = registry.records[id].clone();
             registry.fold_live(&mut record);
             sequence.serialize_element(&record)?;
+        }
+        for record in &registry.unreadable_records {
+            sequence.serialize_element(record)?;
         }
         sequence.end()
     }
@@ -109,6 +123,11 @@ pub struct Registry {
     /// Orders prepared snapshots so one committed after releasing the
     /// Registry lock can never replace a newer one on disk.
     persist_sequence: u64,
+    /// Session records this build could not decode (typically written by a
+    /// newer one). They are kept verbatim and written back on every persist,
+    /// so a downgrade or an older build running side by side can never
+    /// delete them; the build that understands them picks them up again.
+    unreadable_records: Vec<serde_json::Value>,
     cursor_title_refresh_at: Option<std::time::Instant>,
     native_title_refresh_at: Option<std::time::Instant>,
 }
@@ -218,6 +237,7 @@ impl Registry {
             dirty: false,
             last_persist: None,
             persist_sequence: 0,
+            unreadable_records: Vec::new(),
             cursor_title_refresh_at: None,
             native_title_refresh_at: None,
         }
@@ -238,8 +258,7 @@ impl Registry {
             Ok(Some(document)) => document,
             Ok(None) => return Ok(0),
             Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                let quarantine = self.state_file.path().with_extension("json.corrupt");
-                let _ = std::fs::rename(self.state_file.path(), &quarantine);
+                let quarantine = self.quarantine_state_file();
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
@@ -250,8 +269,22 @@ impl Registry {
             }
             Err(error) => return Err(error),
         };
-        match serde_json::from_value::<PersistedState>(serde_json::Value::Object(document)) {
+        match serde_json::from_value::<LoadedState>(serde_json::Value::Object(document)) {
             Ok(state) => {
+                let mut sessions = Vec::with_capacity(state.sessions.len());
+                self.unreadable_records.clear();
+                for raw in state.sessions {
+                    match serde_json::from_value::<SessionRecord>(raw.clone()) {
+                        Ok(record) => sessions.push(record),
+                        Err(error) => {
+                            let id = raw.get("id").and_then(|id| id.as_str()).unwrap_or("?");
+                            eprintln!(
+                                "diri-engine: keeping unreadable session record {id} verbatim: {error}"
+                            );
+                            self.unreadable_records.push(raw);
+                        }
+                    }
+                }
                 self.projects = state.projects;
                 let project_roots = self
                     .projects
@@ -263,9 +296,9 @@ impl Registry {
                         ))
                     })
                     .collect::<HashMap<_, _>>();
-                let mut locations = Vec::with_capacity(state.sessions.len());
+                let mut locations = Vec::with_capacity(sessions.len());
                 let mut repaired = Vec::new();
-                for mut record in state.sessions {
+                for mut record in sessions {
                     if let Some(home) = home
                         && repair_codex_conversation(&mut record, home)
                     {
@@ -297,8 +330,7 @@ impl Registry {
                 Ok(self.records.len())
             }
             Err(error) => {
-                let quarantine = self.state_file.path().with_extension("json.corrupt");
-                let _ = std::fs::rename(self.state_file.path(), &quarantine);
+                let quarantine = self.quarantine_state_file();
                 Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
@@ -308,6 +340,23 @@ impl Registry {
                 ))
             }
         }
+    }
+
+    /// Moves an unreadable state file aside without replacing an earlier
+    /// quarantine: each one may be the only copy of a whole fleet.
+    fn quarantine_state_file(&self) -> PathBuf {
+        let path = self.state_file.path();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis());
+        let mut quarantine = path.with_extension("json.corrupt");
+        let mut attempt = 0;
+        while quarantine.exists() {
+            attempt += 1;
+            quarantine = path.with_extension(format!("json.corrupt.{stamp}.{attempt}"));
+        }
+        let _ = std::fs::rename(path, &quarantine);
+        quarantine
     }
 
     /// Persists the current state — immediately when the last write is older
@@ -414,6 +463,14 @@ impl Registry {
                     .iter()
                     .map(|record| record.id.0.clone()),
             )
+            // A record this build cannot read still owns its holder, logs and
+            // recovery capsule; sweeping them would lose it after all.
+            .chain(self.unreadable_records.iter().filter_map(|record| {
+                record
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_owned)
+            }))
             .collect()
     }
 
@@ -3287,6 +3344,72 @@ mod tests {
             temp.path().join("state.json.corrupt").exists(),
             "the unreadable file should still be recoverable by hand"
         );
+    }
+
+    #[test]
+    fn a_record_from_a_newer_build_never_takes_the_fleet_down() {
+        // 2026-09-15: an older daemon met one titleSource value it did not
+        // know and quarantined all 86 sessions. One unreadable record must
+        // cost nothing: the rest load, and it is written back untouched for
+        // the build that can read it.
+        let temp = tempfile::tempdir().expect("temp");
+        let state_file = temp.path().join("state.json");
+        let readable = serde_json::to_value(record("s_readable")).expect("encode");
+        let mut future = serde_json::to_value(record("s_future")).expect("encode");
+        future["titleSource"] = serde_json::json!("fromTheFuture");
+        future["newField"] = serde_json::json!({ "kept": true });
+        std::fs::write(
+            &state_file,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "projects": [],
+                "sessions": [readable, future.clone()],
+            }))
+            .expect("encode state"),
+        )
+        .expect("write");
+
+        let mut registry = Registry::new(engine(), &state_file);
+        assert_eq!(
+            registry.load().expect("one bad record is not a bad file"),
+            1
+        );
+        assert!(registry.record("s_readable").is_some());
+        assert!(!temp.path().join("state.json.corrupt").exists());
+        assert!(
+            registry.referenced_session_ids().contains("s_future"),
+            "the orphan sweep must not delete an unreadable session's files"
+        );
+
+        registry.insert_record(record("s_new"));
+        registry.persist_now().expect("persist");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).expect("read")).expect("json");
+        let sessions = written["sessions"].as_array().expect("sessions");
+        assert_eq!(sessions.len(), 3);
+        assert!(
+            sessions.contains(&future),
+            "the unreadable record must survive the write verbatim"
+        );
+    }
+
+    #[test]
+    fn quarantines_never_replace_an_earlier_one() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state_file = temp.path().join("state.json");
+        for body in [&b"{ first"[..], &b"{ second"[..]] {
+            std::fs::write(&state_file, body).expect("write");
+            let mut registry = Registry::new(engine(), &state_file);
+            registry.load().expect_err("corrupt state must be an error");
+        }
+        let mut kept: Vec<Vec<u8>> = std::fs::read_dir(temp.path())
+            .expect("dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt"))
+            .map(|entry| std::fs::read(entry.path()).expect("read"))
+            .collect();
+        kept.sort();
+        assert_eq!(kept, vec![b"{ first".to_vec(), b"{ second".to_vec()]);
     }
 
     #[test]
