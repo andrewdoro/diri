@@ -1,4 +1,5 @@
 mod accounts;
+mod arrivals;
 mod filter;
 #[cfg(test)]
 mod hue_tests;
@@ -673,6 +674,9 @@ pub struct Sidebar {
     /// The instant every title in this pass is sampled at.
     title_now: Instant,
     title_tick: Option<Task<()>>,
+    /// Sessions that arrive grow into the list and ones that leave collapse
+    /// out of it, sampled on the title clock.
+    row_motion: super::row_motion::RowMotion<SessionId, crate::store::SidebarRow>,
 }
 
 /// The sidebar state that asked for a native folder pick, captured when the
@@ -830,6 +834,7 @@ impl Sidebar {
             title_clock: Instant::now,
             title_now: Instant::now(),
             title_tick: None,
+            row_motion: Default::default(),
         };
         sidebar.ui.preview_account = preview;
         // Opens a popover at launch: headless screenshots verify its layout,
@@ -2854,7 +2859,7 @@ impl Sidebar {
         // Keep the last visible rows only for the close animation. The Store
         // remains authoritative for keyboard navigation and selection.
         let now = Instant::now();
-        let (motion, retained) = self
+        let (_, retained) = self
             .project_disclosures
             .entry(id.clone())
             .or_insert_with(|| {
@@ -2873,23 +2878,35 @@ impl Sidebar {
             // A session removed while closing must not survive in the visual tail.
             retained.retain(|row| group.active.iter().any(|session| session.id == *row.id()));
         }
+        let rows = retained.clone();
+        // Arrivals and departures, while the folder is open; a folding
+        // project already moves by its own disclosure.
+        let slots = if collapsed {
+            None
+        } else {
+            self.arrange_rows(&id.0, &rows)
+        };
+        let count = slots.as_ref().map_or(rows.len(), Vec::len);
+        let (motion, retained) = self
+            .project_disclosures
+            .get_mut(&id)
+            .expect("inserted above");
         let frame = motion.update(
             !collapsed,
-            retained.len() + usize::from(!group.archived.is_empty()),
+            count + usize::from(!group.archived.is_empty()),
             now,
             cx.reduce_motion(),
         );
         self.disclosure_animating |= frame.animating;
-        let rows = retained.clone();
         if collapsed && !frame.animating {
             retained.clear();
         }
         if frame.reveal > 0.0 {
             let mut children = Vec::new();
-            for row in &rows {
-                let shortcut = self.shortcut_for(row.id());
+            for (row, presence, ghost) in super::row_motion::paint_order(&rows, &slots) {
+                let shortcut = (!ghost).then(|| self.shortcut_for(row.id())).flatten();
                 let id = row.id().clone();
-                let drop = if collapsed {
+                let drop = if collapsed || ghost {
                     None
                 } else {
                     self.row_drop_feedback(row, window, cx)
@@ -2898,6 +2915,7 @@ impl Sidebar {
                     Some(RowDrop::Insert(zone)) => Some((zone, row.depth)),
                     _ => None,
                 };
+                let working = self.working_row_rendered;
                 let rendered = self.session_row(
                     row,
                     shortcut,
@@ -2907,16 +2925,23 @@ impl Sidebar {
                     window,
                     cx,
                 );
-                let rendered = if collapsed {
+                // A leaving row does not keep the activity tick alive.
+                self.working_row_rendered &= !ghost || working;
+                let rendered = Self::row_slot(rendered, presence, ghost);
+                let rendered = if collapsed || ghost {
                     rendered
                 } else {
                     self.track_row_bounds(id, rendered, marker)
                 };
-                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT));
+                children.push((
+                    rendered,
+                    SIDEBAR_NAV_ROW_HEIGHT * presence.height,
+                    presence.height,
+                ));
             }
             if !group.archived.is_empty() {
                 let (bucket, height) = self.archived_bucket(group, !collapsed, colors, window, cx);
-                children.push((bucket, height));
+                children.push((bucket, height, 1.0));
             }
             section = section.child(disclosure_body(children, &frame, !collapsed));
         }
@@ -3065,7 +3090,7 @@ impl Sidebar {
             if bucket_rows.is_empty() {
                 continue;
             }
-            let mut section = div().flex().flex_col().gap(px(2.0)).child(
+            let mut section = div().flex().flex_col().child(
                 div()
                     .px(px(Space::ROW_H))
                     .h(px(24.0))
@@ -3076,11 +3101,17 @@ impl Sidebar {
                     .text_color(colors.tertiary)
                     .child(bucket.label()),
             );
-            for row in bucket_rows {
-                let shortcut = self.shortcut_for(row.id());
+            let bucket_rows: Vec<_> = bucket_rows.into_iter().cloned().collect();
+            let slots = self.arrange_rows(bucket.label(), &bucket_rows);
+            for (row, presence, ghost) in super::row_motion::paint_order(&bucket_rows, &slots) {
+                let shortcut = (!ghost).then(|| self.shortcut_for(row.id())).flatten();
                 let id = row.id().clone();
-                let drop = self.row_drop_feedback(row, window, cx);
+                let drop = (!ghost)
+                    .then(|| self.row_drop_feedback(row, window, cx))
+                    .flatten();
+                let working = self.working_row_rendered;
                 let rendered = self.session_row(row, shortcut, drop, false, colors, window, cx);
+                self.working_row_rendered &= !ghost || working;
                 // Buckets interleave every project and the row names none of
                 // them, so here the row wears its project's hue.
                 let rendered = match self.hues.color(&row.session.project_id, colors) {
@@ -3097,7 +3128,19 @@ impl Sidebar {
                         .into_any_element(),
                     None => rendered,
                 };
-                section = section.child(self.track_row_bounds(id, rendered, None));
+                let rendered = Self::row_slot(rendered, presence, ghost);
+                let rendered = if ghost {
+                    rendered
+                } else {
+                    self.track_row_bounds(id, rendered, None)
+                };
+                // The 2 px above each row closes with its slot.
+                section = section.child(
+                    div()
+                        .flex_none()
+                        .mt(px(2.0 * presence.height))
+                        .child(rendered),
+                );
             }
             sections.push(section.into_any_element());
         }
@@ -3191,7 +3234,7 @@ impl Sidebar {
                 } else {
                     rendered
                 };
-                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT));
+                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT, 1.0));
             }
             section = section.child(disclosure_body(children, &frame, expanded));
         }
@@ -4042,7 +4085,7 @@ impl Sidebar {
                 } else {
                     rendered
                 };
-                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT));
+                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT, 1.0));
             }
             bucket = bucket.child(disclosure_body(children, &frame, expanded && interactive));
         }
@@ -7726,6 +7769,7 @@ impl Render for Sidebar {
         self.working_row_rendered = false;
         self.disclosure_animating = false;
         self.observe_titles(cx);
+        self.observe_rows(cx);
         if cx.reduce_motion() {
             self.activity_frame = 0;
         }
@@ -7882,6 +7926,7 @@ impl Render for Sidebar {
         self.end_lift_if_released(cx);
         // The session list is the sidebar's most expensive frame work,
         // and settings has no use for it.
+        self.row_motion.begin_layout(self.title_now);
         let list = self.settings_nav.is_none().then(|| {
             let mut list = div()
                 .id("sidebar-list")
@@ -7915,6 +7960,8 @@ impl Render for Sidebar {
             list = list.child(self.empty_space_drop_target(colors, cx));
             list
         });
+        self.row_motion.end_layout();
+        self.disclosure_animating |= self.row_motion.is_animating(self.title_now);
 
         if !self.disclosure_animating {
             self.disclosure_tick = None;
@@ -8097,20 +8144,22 @@ impl Render for Sidebar {
 }
 
 /// Clip a naturally laid out list; moving the clip never compresses text.
+/// Each row is `(element, height, gap)`: `gap` scales the 2 px above it, so
+/// a row growing in or collapsing out takes its spacing with it.
 fn disclosure_body(
-    rows: Vec<(AnyElement, f32)>,
+    rows: Vec<(AnyElement, f32, f32)>,
     frame: &DisclosureFrame,
     interactive: bool,
 ) -> AnyElement {
-    let height: f32 = rows.iter().map(|(_, height)| height + 2.0).sum();
+    let height: f32 = rows.iter().map(|(_, height, gap)| height + 2.0 * gap).sum();
     let mut contents = div().absolute().top_0().left_0().w_full().flex().flex_col();
-    for (index, (row, height)) in rows.into_iter().enumerate() {
+    for (index, (row, height, gap)) in rows.into_iter().enumerate() {
         let progress = frame.rows.get(index).copied().unwrap_or(frame.reveal);
         contents = contents.child(
             div()
                 .relative()
                 .flex_none()
-                .mt(px(2.0))
+                .mt(px(2.0 * gap))
                 .h(px(height))
                 .top(px(-6.0 * (1.0 - progress)))
                 .opacity(progress)
