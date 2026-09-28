@@ -18,6 +18,14 @@
 //!   it can be built and tested while the existing daemon keeps serving live
 //!   sessions.
 
+/// Marks a keystroke-latency hop; compiles to nothing without `latency-trace`.
+macro_rules! trace_hop {
+    ($hop:ident) => {
+        #[cfg(feature = "latency-trace")]
+        $crate::latency_trace::mark($crate::latency_trace::Hop::$hop);
+    };
+}
+
 pub mod accounts;
 pub mod activity;
 pub mod agent;
@@ -41,6 +49,8 @@ pub mod holder;
 pub mod hooks;
 pub mod hosts;
 pub mod inject;
+#[cfg(feature = "latency-trace")]
+pub mod latency_trace;
 mod lifecycle;
 pub mod limits;
 pub mod local_path;
@@ -56,6 +66,7 @@ pub mod session;
 pub mod session_files;
 mod state_file;
 pub mod status;
+pub mod telemetry;
 pub mod workspace;
 mod worktree_health;
 mod worktree_scan;

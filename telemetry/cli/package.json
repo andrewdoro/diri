@@ -1,0 +1,12 @@
+{
+  "name": "diri-debug",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Investigate a diri user's bug from telemetry (admin API or a local spool). Zero dependencies.",
+  "type": "module",
+  "bin": { "diri-debug": "bin/diri-debug.mjs" },
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}

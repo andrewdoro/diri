@@ -85,6 +85,8 @@ struct SinkOutput {
     queued_bytes: usize,
     last_progress: Instant,
     closed: bool,
+    /// Why this sink was closed from the publishing side, for telemetry.
+    close_reason: Option<&'static str>,
 }
 
 impl SinkOutput {
@@ -99,6 +101,7 @@ impl SinkOutput {
             queued_bytes: 0,
             last_progress: Instant::now(),
             closed: false,
+            close_reason: None,
         })
     }
 
@@ -115,6 +118,9 @@ impl SinkOutput {
             || self.frames.len() >= SINK_BACKLOG_FRAMES
             || self.queued_bytes.saturating_add(bytes.len()) > limit
         {
+            if !self.closed {
+                self.close_reason = Some("backlog");
+            }
             self.close();
             return false;
         }
@@ -158,6 +164,7 @@ impl SinkOutput {
             }
         }
         if !self.frames.is_empty() && self.last_progress.elapsed() >= STALLED_SINK_TIMEOUT {
+            self.close_reason.get_or_insert("stalled");
             self.close();
         }
         !self.closed
@@ -388,6 +395,8 @@ impl AttachHub {
             self.serve_completed(handle, output, reader, buffered, session_id, preview);
             return;
         }
+        let attach_started = Instant::now();
+        let seed_bytes;
         // Snapshot, seed queueing and registration share the publisher's
         // Registry sequencing boundary. No update can slip between a new
         // sink's snapshot and admission, and no socket write holds this lock.
@@ -443,6 +452,7 @@ impl AttachHub {
             } else {
                 grid
             };
+            seed_bytes = grid.len();
             output.enqueue(Arc::from(grid));
             let Ok(modes) = encoded(
                 &Frame::modes_with_keyboard_capability(
@@ -471,6 +481,15 @@ impl AttachHub {
             (sink_id, output, wake)
         };
         wake.notify();
+        let seeded = attach_started.elapsed();
+        diri_telemetry::observe("attach.seed", seeded);
+        diri_telemetry::debug_event!(
+            "attach.open",
+            session = diri_telemetry::id(session_id),
+            preview = preview,
+            seed_bytes = seed_bytes,
+            ms = seeded,
+        );
 
         // The read loop is this connection's thread. A feed error means a
         // corrupt stream; a false from handle_frame means the peer's write
@@ -511,6 +530,25 @@ impl AttachHub {
             }
         }
         self.deregister(session_id, sink_id);
+        let reason = output.lock().ok().and_then(|output| output.close_reason);
+        if let Some(reason) = reason {
+            // The client reattaches and is reseeded with a full grid.
+            diri_telemetry::count("attach.reseeds", 1);
+            diri_telemetry::warn_event!(
+                "attach.sink_dropped",
+                session = diri_telemetry::id(session_id),
+                reason = reason,
+                preview = preview,
+                attached_s = attach_started.elapsed().as_secs(),
+            );
+        } else {
+            diri_telemetry::debug_event!(
+                "attach.close",
+                session = diri_telemetry::id(session_id),
+                preview = preview,
+                attached_s = attach_started.elapsed().as_secs(),
+            );
+        }
     }
 
     /// Seeds one connection from a retained terminal and then holds it open:
@@ -641,11 +679,16 @@ impl AttachHub {
         let Some(session) = guard.get(session_id) else {
             return true; // session ended; swallow input quietly, as Swift does
         };
+        // Guards would move the failed-write check into the patterns; the
+        // explicit form keeps every input arm reading the same way.
+        #[allow(clippy::collapsible_match)]
         match frame.frame_type {
             FrameType::Input => {
+                trace_hop!(InputDecoded);
                 if session.write_input(&frame.payload).is_err() {
                     return false;
                 }
+                trace_hop!(InputHandled);
             }
             FrameType::Mouse => {
                 if session.write_mouse(&frame.payload).is_err() {
@@ -704,6 +747,20 @@ impl AttachHub {
             .expect("attach hub")
             .get(session_id)
             .is_some_and(|entry| entry.sinks.iter().any(|sink| !sink.preview))
+    }
+
+    /// Attached terminal (non-preview) connections across every session.
+    pub fn sink_count(&self) -> usize {
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .flat_map(|entry| &entry.sinks)
+                    .filter(|sink| !sink.preview)
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     fn deregister(&self, session_id: &str, sink_id: u64) {
@@ -1000,6 +1057,7 @@ impl AttachHub {
                     enhanced_modes.as_ref(),
                     requires_enhanced,
                 );
+                trace_hop!(FrameEnqueued);
             }
 
             {

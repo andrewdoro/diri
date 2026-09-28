@@ -162,6 +162,19 @@ impl ClientCore {
         timeout: Option<Duration>,
         connection: Option<u64>,
     ) -> Result<JsonValue, ClientError> {
+        let started = std::time::Instant::now();
+        let result = self.send_request(method, params, timeout, connection).await;
+        crate::telemetry::rpc_finished(method, started, result.as_ref().err());
+        result
+    }
+
+    async fn send_request<P: Serialize + ?Sized>(
+        &self,
+        method: &str,
+        params: Option<&P>,
+        timeout: Option<Duration>,
+        connection: Option<u64>,
+    ) -> Result<JsonValue, ClientError> {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
         let params = params
             .map(serde_json::to_value)
@@ -252,6 +265,12 @@ impl ClientCore {
             || invalid_instance
             || (cursor.verified && cursor.engine_instance_id != hello.engine_instance_id)
         {
+            crate::telemetry::identity_rejected(
+                cursor.rejected,
+                hello.engine_kind.as_deref(),
+                invalid_instance,
+                &hello,
+            );
             cursor.rejected = true;
             cursor.verified = false;
             cursor.subscribed = false;
@@ -1185,9 +1204,11 @@ async fn run_lifecycle(core: Arc<ClientCore>) {
     let mut backoff = INITIAL_BACKOFF;
     let mut shutdown = core.shutdown_tx.subscribe();
     let mut retries = core.retry_tx.subscribe();
+    let mut recorder = crate::telemetry::ConnectionRecorder::default();
     while !*shutdown.borrow() {
         core.set_state(ConnectionState::Connecting);
-        let outcome = run_once(Arc::clone(&core), &mut shutdown).await;
+        let outcome = run_once(Arc::clone(&core), &mut shutdown, &mut recorder).await;
+        recorder.attempt_ended(&outcome.error, outcome.established, *shutdown.borrow());
         {
             let mut cursor = core.event_cursor.lock().expect("event cursor");
             cursor.connection = cursor.connection.wrapping_add(1);
@@ -1220,7 +1241,12 @@ async fn run_lifecycle(core: Arc<ClientCore>) {
     }
 }
 
-async fn run_once(core: Arc<ClientCore>, shutdown: &mut watch::Receiver<bool>) -> AttemptOutcome {
+async fn run_once(
+    core: Arc<ClientCore>,
+    shutdown: &mut watch::Receiver<bool>,
+    recorder: &mut crate::telemetry::ConnectionRecorder,
+) -> AttemptOutcome {
+    recorder.attempt_started();
     let generation = {
         let mut cursor = core.event_cursor.lock().expect("event cursor");
         cursor.connection = cursor.connection.wrapping_add(1);
@@ -1244,6 +1270,7 @@ async fn run_once(core: Arc<ClientCore>, shutdown: &mut watch::Receiver<bool>) -
         connection: generation,
         sender: connection.sender(),
     });
+    recorder.socket_opened();
 
     let hello = tokio::select! {
         result = core.hello(Some(HEARTBEAT_TIMEOUT)) => result,
@@ -1283,6 +1310,7 @@ async fn run_once(core: Arc<ClientCore>, shutdown: &mut watch::Receiver<bool>) -
             };
         }
     }
+    recorder.connected(&hello);
     core.set_state(ConnectionState::Connected(hello));
 
     loop {

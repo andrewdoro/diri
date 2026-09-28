@@ -47,6 +47,10 @@ struct SessionController {
     hold: Option<ReflowHold>,
     _events: Option<Task<()>>,
     shutdown: Option<oneshot::Sender<()>>,
+    /// When the oldest input not yet followed by a screen change was sent;
+    /// see [`crate::telemetry::EchoProbe`].
+    echo: Arc<crate::telemetry::EchoProbe>,
+    _live: crate::telemetry::Live,
 }
 
 struct ControlState {
@@ -60,6 +64,10 @@ struct ControlState {
     /// lease can tell whether another view left the PTY at a different size.
     requested_size: Option<(u16, u16)>,
     resize_wake: Arc<Notify>,
+    /// Flip-flopping PTY sizes (A→B→A…), the signature of a layout loop.
+    resize_storm: crate::telemetry::ResizeStorm,
+    /// Last `pane.input_rejected` event, to keep one per burst.
+    rejection_recorded: Option<Instant>,
     #[cfg(test)]
     resize_sends: u64,
 }
@@ -73,6 +81,14 @@ pub(super) enum InputRejection {
 }
 
 impl InputRejection {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::PassiveView => "passive_view",
+            Self::Disconnected => "disconnected",
+            Self::Overloaded => "overloaded",
+        }
+    }
+
     fn message(self) -> &'static str {
         match self {
             Self::PassiveView => "This terminal is active in another view. Focus it to type here.",
@@ -88,6 +104,7 @@ pub(super) struct AttachmentControl {
     view: u64,
     events: PaneEventSender,
     id: SessionId,
+    echo: Arc<crate::telemetry::EchoProbe>,
     #[cfg(test)]
     pub(super) input_observer: Option<(SessionId, InputObserver)>,
 }
@@ -164,6 +181,7 @@ impl AttachmentControl {
         }
         if let AttachmentCommand::Resize(cols, rows) = command {
             let size = (cols, rows);
+            state.resize_storm.note(&self.id, size);
             state.requested_size = Some(size);
             let result = match &state.writer {
                 Some(writer) => writer.resize(cols, rows),
@@ -205,8 +223,9 @@ impl AttachmentControl {
         })
     }
 
-    fn report(&self, result: Result<(), InputRejection>) {
+    fn report(&self, what: &'static str, result: Result<(), InputRejection>) {
         if let Err(error) = result {
+            self.record_rejection(what, error);
             let _ = self.events.send(PaneEvent::InputFeedback(
                 self.id.clone(),
                 error.message().into(),
@@ -224,7 +243,11 @@ impl AttachmentControl {
         {
             let _ = observer.send((id.clone(), bytes.clone()));
         }
-        self.report(self.submit(AttachmentCommand::Input(bytes)));
+        let result = self.submit(AttachmentCommand::Input(bytes));
+        if result.is_ok() {
+            self.echo.sent();
+        }
+        self.report("input", result);
     }
 
     pub(super) fn resize(&self, cols: u16, rows: u16) {
@@ -234,7 +257,7 @@ impl AttachmentControl {
 
     pub(super) fn mouse(&self, bytes: Vec<u8>) {
         if !bytes.is_empty() {
-            self.report(self.submit(AttachmentCommand::Mouse(bytes)));
+            self.report("mouse", self.submit(AttachmentCommand::Mouse(bytes)));
         }
     }
 
@@ -250,17 +273,42 @@ impl AttachmentControl {
         }
         match self.submit(AttachmentCommand::Mouse(bytes)) {
             Err(InputRejection::PassiveView) => {}
-            result => self.report(result),
+            result => self.report("mouse_motion", result),
         }
     }
 
     pub(super) fn scroll(&self, direction: u8, lines: u16, col: u16, row: u16) {
-        self.report(self.submit(AttachmentCommand::Scroll {
-            direction,
-            lines,
-            col,
-            row,
-        }));
+        self.report(
+            "scroll",
+            self.submit(AttachmentCommand::Scroll {
+                direction,
+                lines,
+                col,
+                row,
+            }),
+        );
+    }
+
+    /// Records why input did not reach the session (the lease is elsewhere,
+    /// the transport is down, or its queue is full), once per burst.
+    fn record_rejection(&self, what: &'static str, error: InputRejection) {
+        diri_telemetry::count("pane.input_rejected", 1);
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        if state
+            .rejection_recorded
+            .is_some_and(|at| now.duration_since(at) < Duration::from_secs(5))
+        {
+            return;
+        }
+        state.rejection_recorded = Some(now);
+        drop(state);
+        diri_telemetry::warn_event!(
+            "pane.input_rejected",
+            session = diri_telemetry::id(&self.id.0),
+            input = what,
+            reason = error.kind()
+        );
     }
 }
 
@@ -299,6 +347,8 @@ impl ControllerLease {
                 pending_resize: None,
                 requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                resize_storm: crate::telemetry::ResizeStorm::default(),
+                rejection_recorded: None,
                 #[cfg(test)]
                 resize_sends: 0,
             }));
@@ -313,6 +363,8 @@ impl ControllerLease {
                 hold: None,
                 _events: None,
                 shutdown: Some(shutdown),
+                echo: Arc::default(),
+                _live: crate::telemetry::Live::attached_session(),
             }));
             let weak = Rc::downgrade(&session);
             session.borrow_mut()._events = Some(cx.spawn(async move |cx| {
@@ -365,6 +417,7 @@ impl ControllerLease {
             view,
             events: events.clone(),
             id: id.clone(),
+            echo: core.echo.clone(),
             #[cfg(test)]
             input_observer: None,
         };
@@ -532,6 +585,9 @@ impl SessionController {
             }
         }
         let changed = self.buffer.write().unwrap().apply(update).changed;
+        if changed {
+            self.echo.screen_changed();
+        }
         for view in self.views.values() {
             let _ = view.events.send(PaneEvent::ControllerDamage(
                 self.id.clone(),
@@ -568,12 +624,19 @@ fn spawn_transport(
             // drain barrier. Otherwise A→B→C could let C attach ahead of A.
             if cancelled { return; }
         }
+        let mut trace = crate::telemetry::TransportTrace::new(&id);
         loop {
+            trace.connecting();
             let connect = SessionAttachment::connect(&socket, id.clone());
             let connected = tokio::select! {
                 _ = &mut shutdown => return,
                 result = tokio::time::timeout(Duration::from_secs(2), connect) => result,
             };
+            match &connected {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => trace.connect_failed("error", Some(&error.to_string())),
+                Err(_) => trace.connect_failed("timeout", None),
+            }
             if let Ok(Ok(mut attachment)) = connected {
                 let writer = attachment.handle();
                 let resize_wake = {
@@ -585,6 +648,7 @@ fn spawn_transport(
                     state.writer = Some(writer.clone());
                     state.resize_wake.clone()
                 };
+                trace.live();
                 let _ = events.send(PaneEvent::AttachmentState(id.clone(), 0, AttachmentState::Live));
                 let mut resize_wait = None;
                 let stopping = loop {
@@ -618,7 +682,10 @@ fn spawn_transport(
                         }
                         _ = &mut shutdown => break true,
                         chunk = attachment.chunks.recv() => match chunk {
-                            Some(chunk) => { let _ = events.send(PaneEvent::Chunk(id.clone(), 0, chunk)); }
+                            Some(chunk) => {
+                                trace.chunk(&chunk);
+                                let _ = events.send(PaneEvent::Chunk(id.clone(), 0, chunk));
+                            }
                             None => break false,
                         }
                     }
@@ -631,8 +698,10 @@ fn spawn_transport(
                     // Payload-free diagnostic also covers EOF/write failure
                     // during last-view close, when no view remains to notify.
                     eprintln!("diri: terminal attachment drain interrupted; queued input may not have reached the session");
+                    trace.drain_interrupted();
                 }
                 if stopping { return; }
+                trace.detached();
                 let _ = events.send(PaneEvent::InputFeedback(id.clone(),
                     "Terminal connection interrupted. Recent input may not have reached the session; it will not be replayed.".into()));
             }
@@ -797,6 +866,8 @@ mod tests {
                 pending_resize: None,
                 requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                resize_storm: crate::telemetry::ResizeStorm::default(),
+                rejection_recorded: None,
                 #[cfg(test)]
                 resize_sends: 0,
             }))
@@ -858,12 +929,15 @@ mod tests {
                 pending_resize: None,
                 requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                resize_storm: crate::telemetry::ResizeStorm::default(),
+                rejection_recorded: None,
                 #[cfg(test)]
                 resize_sends: 0,
             })),
             view: 1,
             events,
             id: SessionId("benchmark".into()),
+            echo: Arc::default(),
             input_observer: None,
         };
         let mut samples = Vec::new();

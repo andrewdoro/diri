@@ -102,6 +102,33 @@ notify the child: a notify during a draw only takes effect in the next frame.
 if the child were dirty, and keeps its cache state for later frames. The sidebar
 uses it for rows whose props changed (`crates/diri-app/src/sidebar/view/rows.rs`).
 
+## 3. Floating panels are not throttled as inactive windows
+
+**Upstream behavior.** `Window::new` wires `on_request_frame` so that, while a
+frame is actually wanted (forced render, presentation, or a pending
+`on_next_frame` callback), a window that is not active draws at most one frame
+per 33.3 ms, "to save energy". On macOS "active" means the key window.
+
+Diri's menus, popovers, the command palette and picture-in-picture are
+`WindowKind::PopUp` panels that deliberately never become key
+(`becomesKeyOnlyIfNeeded`, see `crates/diri-app/src/floating.rs`). So every
+animation inside them, including their own appear fade, ran through that
+throttle: replaying real 120 Hz display-link ticks through the rule measured
+26.3 fps, because jitter often stretches the gap from four vsyncs to five
+(PR #540 has the measurement).
+
+**Patch.** `Window::new` records whether the window is a `PopUp`,
+`AnchoredPopup` or `Floating` window, and the inactive-window cap skips those.
+Normal windows keep upstream's behavior, and the thermal-pressure cap still
+applies to every window. A panel only asks for frames while something in it
+is moving, so this spends no energy at rest.
+
+A narrower alternative, reporting these panels as active from `gpui_macos`,
+was rejected: GPUI treats an active window as hovered and sets the app-wide
+cursor from it, so a panel and the window under it would fight over the
+cursor (an arrow against an I-beam while a terminal streams beneath the
+palette).
+
 ## Re-applying on a GPUI bump
 
 1. Replace `src/` (and `build.rs`, `README.md`, `resources/`) with the new
@@ -114,7 +141,8 @@ uses it for rows whose props changed (`crates/diri-app/src/sidebar/view/rows.rs`
    `force_render_if`,
    `ViewElementState`, `ViewElementCacheKey`), `window.rs` (index
    `relative_to`/`rebased_on`, `CachedViewBase*`, base stacks, deferred-draw
-   bases, `insert_debug_bounds`, `debug_bounds_history` replay),
+   bases, `insert_debug_bounds`, `debug_bounds_history` replay, and the
+   `exempt_from_inactive_throttle` frame-rate exemption),
    `text_system/line_layout.rs` (`LineLayoutIndex` arithmetic) and
    `elements/div.rs` (prepaint opacity, `insert_debug_bounds`).
 4. If upstream added a new per-frame collection to `PrepaintStateIndex` or
@@ -122,3 +150,15 @@ uses it for rows whose props changed (`crates/diri-app/src/sidebar/view/rows.rs`
    copies element for element.
 5. Run `cargo test -p diri-app --bin diri gpui_view_cache` and the sidebar
    tests.
+
+## Scene storage released after sustained sparse frames
+
+`Scene::clear` kept every primitive vector at its high-water capacity, so one
+very large frame (the session overview, a huge paste) pinned tens of MB for the
+life of the window (≈36 MB measured on the installed app). `clear` now counts
+consecutive frames that used under a quarter of the reserved bytes (with at
+least 1 MiB reserved) and, after 120 of them, shrinks each vector to twice the
+latest frame's length. Steady frames never reallocate. Files: `src/scene.rs`.
+Test: `a_scene_gives_back_capacity_a_single_large_frame_left_behind` in
+`crates/diri-app/src/gpui_view_cache_tests.rs`. Re-apply on a GPUI bump by
+re-adding `release_idle_capacity` and its call at the top of `Scene::clear`.

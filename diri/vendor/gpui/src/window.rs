@@ -1412,6 +1412,15 @@ impl Window {
             .as_ref()
             .and_then(|titlebar| titlebar.title.clone());
 
+        // DIRI PATCH (3): popups and floating panels are never the key window
+        // by design, so the inactive-window throttle below would hold every
+        // animation inside them to ~26 fps. See DIRI_PATCHES.md.
+        let exempt_from_inactive_throttle = matches!(
+            kind,
+            crate::WindowKind::PopUp
+                | crate::WindowKind::AnchoredPopup(_)
+                | crate::WindowKind::Floating
+        );
         let window_bounds = window_bounds.unwrap_or_else(|| default_bounds(display_id, cx));
         let mut platform_window = cx.platform.open_window(
             handle,
@@ -1581,7 +1590,7 @@ impl Window {
                     && next_frame_callbacks.borrow().is_empty()
                 {
                     None
-                } else if !active.get() {
+                } else if !active.get() && !exempt_from_inactive_throttle {
                     Some(Duration::from_micros(33333))
                 } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
                     Some(Duration::from_micros(16667))

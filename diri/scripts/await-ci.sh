@@ -56,9 +56,19 @@ await_gates() {
         [ -n "$run" ] || sleep_or_timeout "no CI push run for $sha yet"
     done
     log "CI run $run for $sha"
+    local reran=0
     while :; do
         read -r status conclusion < <(gh run view "$run" -R "$GH_REPO" \
             --json status,conclusion --jq '"\(.status) \(.conclusion)"')
+        # A run superseded by a later push never reached a verdict. Ask for
+        # one, once; a second cancellation is reported like any failure.
+        if [ "$status" = "completed" ] && [ "$conclusion" = "cancelled" ] && [ "$reran" = 0 ]; then
+            log "CI run $run was cancelled before finishing; re-running it"
+            gh run rerun "$run" -R "$GH_REPO"
+            reran=1
+            sleep_or_timeout "CI run $run re-run"
+            continue
+        fi
         if [ "$status" = "completed" ]; then
             break
         fi

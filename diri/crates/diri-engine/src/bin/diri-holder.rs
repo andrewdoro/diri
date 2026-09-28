@@ -65,6 +65,17 @@ fn main() {
     }
 
     let result = if let Some(directory) = value_after(&arguments, "--manager") {
+        // Only a recording Engine names a spool; a manager launched without
+        // one (tests, manual recovery) records nothing.
+        if let Some(state_dir) =
+            value_after(&arguments, diri_engine::telemetry::HOLDER_TELEMETRY_FLAG)
+            && diri_telemetry::init(
+                diri_telemetry::Process::Holder,
+                std::path::Path::new(&state_dir),
+            )
+        {
+            diri_telemetry::install_panic_hook();
+        }
         // The manager holds a PTY, socket and exit watcher per session; at a
         // launchd 256-descriptor soft limit it runs out long before the fleet
         // does. Raise it the way the daemon does.
@@ -101,8 +112,14 @@ fn main() {
 
     if let Err(error) = result {
         eprintln!("diri-holder: {error}");
+        diri_telemetry::incident!(
+            "holder.manager_failed",
+            error = diri_telemetry::text(error.to_string()),
+        );
+        diri_telemetry::flush(Duration::from_secs(1));
         std::process::exit(1);
     }
+    diri_telemetry::flush(Duration::from_secs(1));
 }
 
 fn value_after(arguments: &[String], flag: &str) -> Option<String> {

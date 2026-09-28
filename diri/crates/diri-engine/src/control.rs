@@ -268,7 +268,13 @@ impl ControlServer {
                 let Some(manager) = manager else {
                     return;
                 };
+                let started = Instant::now();
                 let adopted = server.restore_remote_bindings(&manager);
+                diri_telemetry::event!(
+                    "engine.remote_restore",
+                    adopted = adopted.len(),
+                    ms = started.elapsed(),
+                );
                 if !adopted.is_empty() {
                     eprintln!(
                         "diri-engine: adopted {} remote Holder session(s): {adopted:?}",
@@ -346,6 +352,12 @@ impl ControlServer {
                     .ok()
             });
             let Some(helper) = helper.clone() else {
+                diri_telemetry::warn_event!(
+                    "remote.restore_skipped",
+                    session = diri_telemetry::id(&binding.session_id),
+                    host = diri_telemetry::id(&binding.host_id),
+                    reason = "helper_unavailable",
+                );
                 continue;
             };
             let selector = diri_proto::remote_pty::SessionSelector {
@@ -353,8 +365,18 @@ impl ControlServer {
                 session_token: binding.session_token.clone(),
                 expected_incarnation: Some(binding.session_incarnation.clone()),
             };
-            let Ok(inspection) = manager.inspect(&helper, &selector) else {
-                continue;
+            let inspection = match manager.inspect(&helper, &selector) {
+                Ok(inspection) => inspection,
+                Err(error) => {
+                    diri_telemetry::warn_event!(
+                        "remote.restore_skipped",
+                        session = diri_telemetry::id(&binding.session_id),
+                        host = diri_telemetry::id(&binding.host_id),
+                        reason = "inspect_failed",
+                        io = diri_telemetry::io_error(&error),
+                    );
+                    continue;
+                }
             };
             if matches!(record.status, diri_proto::SessionStatus::Exited(_))
                 || matches!(
@@ -450,6 +472,7 @@ impl ControlServer {
     /// does.
     pub fn serve(self: &Arc<Self>, stream: UnixStream) -> std::io::Result<()> {
         let _connection = ActiveConnectionGuard::new(Arc::clone(&self.active_connections));
+        diri_telemetry::count("engine.connections", 1);
         let mut reader = BufReader::new(stream.try_clone()?);
         let writer = Arc::new(Mutex::new(stream));
         let mut subscription: Option<SubscriptionHandle> = None;
@@ -757,6 +780,30 @@ impl ControlServer {
     }
 
     fn dispatch(&self, method: &str, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        if !diri_telemetry::is_enabled() {
+            return self.dispatch_method(method, params);
+        }
+        let session = crate::telemetry::request_session(params.as_ref());
+        let started = Instant::now();
+        let result = self.dispatch_method(method, params);
+        let elapsed = started.elapsed();
+        crate::telemetry::record_rpc(method, elapsed, result.as_ref().err(), session.as_deref());
+        if result.is_ok() && crate::telemetry::is_lifecycle_method(method) {
+            diri_telemetry::event!(
+                "rpc.op",
+                method = diri_telemetry::id(method),
+                session = session.as_deref().map(diri_telemetry::id),
+                ms = elapsed,
+            );
+        }
+        result
+    }
+
+    fn dispatch_method(
+        &self,
+        method: &str,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
         // Bulk switching excludes concurrent launches/catalog edits without blocking input,
         // output, snapshots, or unrelated read-only requests.
         let _account_switch = if matches!(
@@ -893,6 +940,16 @@ impl ControlServer {
             .and_then(|value| value.get("proto"))
             .and_then(Value::as_u64)
             .unwrap_or(WIRE_VERSION as u64);
+        diri_telemetry::event!(
+            "client.hello",
+            proto = proto,
+            build = params
+                .as_ref()
+                .and_then(|value| value.get("build"))
+                .and_then(Value::as_str)
+                .map(diri_telemetry::text),
+            ok = proto == WIRE_VERSION as u64,
+        );
         if proto != WIRE_VERSION as u64 {
             return Err(ControlError::version_mismatch(format!(
                 "client speaks protocol {proto}, this engine speaks {WIRE_VERSION}"
@@ -1158,9 +1215,13 @@ impl ControlServer {
             registry.insert_record(record.clone());
             registry.persist_for_shutdown().map_err(io_control_error)?;
         }
+        let spawn_started = Instant::now();
         registry
             .spawn(spec, record)
             .map_err(|error| ControlError::internal(error.to_string()))?;
+        if let Some(record) = registry.record(&id) {
+            crate::telemetry::record_session_spawn(&record, "fresh", spawn_started.elapsed());
+        }
         if tracked {
             registry.persist_for_shutdown().map_err(io_control_error)?;
         } else {
@@ -1415,8 +1476,12 @@ impl ControlServer {
             }),
             defer_launch: false,
         };
+        let spawn_started = Instant::now();
         self.spawn_session_with_intent(spec, Some(record), tracked)?;
         let mut registry = self.registry.lock().map_err(poisoned)?;
+        if let Some(record) = registry.record(&id) {
+            crate::telemetry::record_session_spawn(&record, "fresh", spawn_started.elapsed());
+        }
         self.ensure_published_project(&mut registry, &captured.cwd, Some(&host.id));
         if tracked {
             registry.persist_for_shutdown().map_err(io_control_error)?;
@@ -1712,6 +1777,15 @@ impl ControlServer {
         let revived = self.session_resume(Some(json!({ "sessionID": id })))?;
         let session: diri_proto::SessionRecord = serde_json::from_value(revived)
             .map_err(|error| ControlError::internal(error.to_string()))?;
+        diri_telemetry::event!(
+            "session.migrate",
+            session = diri_telemetry::id(&id),
+            agent = diri_telemetry::id(session.kind.id()),
+            from_host = record.host.as_deref().map(diri_telemetry::id),
+            to_host = session.host.as_deref().map(diri_telemetry::id),
+            transcript_migrated = shuttle.migrated,
+            warnings = warnings.len(),
+        );
         encode(&diri_proto::SessionMigrateResult {
             session,
             transcript_migrated: shuttle.migrated,
@@ -1999,7 +2073,7 @@ impl ControlServer {
         if registry.get(&p.session_id.0).is_none() {
             return Err(ControlError::not_found(p.session_id.0.clone()));
         }
-        message_delivery::deliver(
+        let receipt = message_delivery::deliver(
             &self
                 .socket_path
                 .with_file_name("message-receipts-v1.sqlite"),
@@ -2015,7 +2089,24 @@ impl ControlServer {
                     .send_text(&p.text, p.submit)
                     .map_err(io_control_error)
             },
-        )
+        );
+        if let Ok(receipt) = &receipt {
+            diri_telemetry::event!(
+                "message.deliver",
+                session = diri_telemetry::id(&p.session_id.0),
+                delivery = match receipt.get("delivery").and_then(Value::as_str) {
+                    Some("sent") => "sent",
+                    _ => "unknown",
+                },
+                duplicate = receipt
+                    .get("duplicate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                submit = p.submit,
+                chars = p.text.chars().count(),
+            );
+        }
+        receipt
     }
 
     fn session_send_key(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
@@ -2500,10 +2591,21 @@ impl ControlServer {
             "codex-notify" => crate::hooks::parse_codex_notify(&p.payload),
             _ => None,
         };
+        diri_telemetry::debug_event!(
+            "hook.report",
+            session = diri_telemetry::id(&session_id.0),
+            kind = diri_telemetry::id(&p.kind),
+            event = p.event.as_deref().map(diri_telemetry::id),
+            parsed = parsed.is_some(),
+        );
         let Some((signal, meta)) = parsed else {
             return Ok(json!({}));
         };
+        let session_end = p.kind == "claude-hook" && p.event.as_deref() == Some("SessionEnd");
         let mut registry = self.registry.lock().map_err(poisoned)?;
+        if session_end && let Some(session) = registry.get(&session_id.0) {
+            session.note_agent_ended();
+        }
         let changed = registry.apply_hook_report(&session_id.0, signal, &meta);
         if changed {
             let _ = registry.persist();
@@ -2653,11 +2755,13 @@ impl ControlServer {
                 && !matches!(record.status, diri_proto::SessionStatus::Exited(_))
             {
                 // Genuinely live: resuming is a no-op, not an error.
+                crate::telemetry::record_resume(&record, "already_live", None);
                 return self.restored_resume_result(&mut registry, &p.session_id.0);
             }
             record
         };
         let mut spec = if record.host.is_some() {
+            crate::telemetry::record_resume(&record, "remote", record.agent_session_id.as_deref());
             self.remote_resume_spec(&record)?
         } else {
             let registry = self.registry.lock().map_err(poisoned)?;
@@ -2665,23 +2769,42 @@ impl ControlServer {
                 // Claude has no transcript for this tab: `--resume` would only
                 // print "No conversation found" and leave a bare shell, so
                 // start the tab's own id afresh instead.
-                Some(None) => self.fresh_spec(
-                    &registry,
-                    &record.id.0,
-                    record.kind.id(),
-                    &record.cwd,
-                    record.agent_session_id.as_deref(),
-                )?,
-                target => self.resume_spec(
-                    &registry,
-                    &record.id.0,
-                    record.kind.id(),
-                    &record.cwd,
-                    target
+                Some(None) => {
+                    crate::telemetry::record_resume(
+                        &record,
+                        "fresh_unwritten",
+                        record.agent_session_id.as_deref(),
+                    );
+                    self.fresh_spec(
+                        &registry,
+                        &record.id.0,
+                        record.kind.id(),
+                        &record.cwd,
+                        record.agent_session_id.as_deref(),
+                    )?
+                }
+                target => {
+                    let conversation = target
+                        .clone()
                         .flatten()
-                        .as_deref()
-                        .or(record.agent_session_id.as_deref()),
-                )?,
+                        .or_else(|| record.agent_session_id.clone());
+                    crate::telemetry::record_resume(
+                        &record,
+                        match (&target, &conversation) {
+                            (Some(Some(_)), _) => "resume_verified",
+                            (_, Some(_)) => "resume",
+                            (_, None) => "no_conversation",
+                        },
+                        conversation.as_deref(),
+                    );
+                    self.resume_spec(
+                        &registry,
+                        &record.id.0,
+                        record.kind.id(),
+                        &record.cwd,
+                        conversation.as_deref(),
+                    )?
+                }
             }
         };
         if record.host.is_none()
@@ -3003,9 +3126,13 @@ impl ControlServer {
         }
         let spec = self.resume_spec(&registry, &id, &kind, &p.entry.cwd, Some(&p.entry.id))?;
         self.ensure_published_project(&mut registry, &p.entry.cwd, None);
+        let spawn_started = Instant::now();
         registry
             .spawn(spec, record)
             .map_err(|error| ControlError::internal(error.to_string()))?;
+        if let Some(record) = registry.record(&id) {
+            crate::telemetry::record_session_spawn(&record, "history", spawn_started.elapsed());
+        }
         let _ = registry.persist();
         self.publish_updated(&registry, &id);
         let record = registry
@@ -3675,6 +3802,8 @@ impl ControlServer {
                 browser.shutdown();
             }
             let _ = std::fs::remove_file(socket_path);
+            diri_telemetry::event!("engine.exit", reason = "shutdown");
+            diri_telemetry::flush(Duration::from_secs(1));
             std::process::exit(0);
         });
         Ok(json!({}))
@@ -3755,6 +3884,11 @@ impl ControlServer {
             None,
         );
         Ok(json!({}))
+    }
+
+    /// Open control and data connections.
+    pub fn connection_count(&self) -> usize {
+        self.active_connections.load(Ordering::SeqCst)
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -3989,6 +4123,8 @@ fn release_idle_engine(
         browser.shutdown();
     }
     let _ = std::fs::remove_file(socket_path);
+    diri_telemetry::event!("engine.exit", reason = "idle");
+    diri_telemetry::flush(Duration::from_secs(1));
     std::process::exit(0);
 }
 
@@ -4254,6 +4390,10 @@ fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &s
             return;
         }
         if is_claude_workspace_trust_screen(&screen) {
+            diri_telemetry::event!(
+                "prompt.workspace_trust_accepted",
+                session = diri_telemetry::id(session_id),
+            );
             let _ = with_session(registry, session_id, |session| session.send_text("1", true));
             // Let Claude persist trust and replace the picker before a caller's
             // initial prompt starts its own readiness/verification loop.
@@ -4287,6 +4427,40 @@ fn inject_initial_prompt(
     session_id: &str,
     prompt: &str,
 ) -> Result<(), InitialPromptFailure> {
+    let started = Instant::now();
+    let mut delivery = "echo_verified";
+    let result = deliver_initial_prompt(registry, session_id, prompt, &mut delivery);
+    match result {
+        Ok(()) => diri_telemetry::event!(
+            "prompt.delivered",
+            session = diri_telemetry::id(session_id),
+            delivery = delivery,
+            chars = prompt.chars().count(),
+            ms = started.elapsed(),
+        ),
+        Err(failure) => diri_telemetry::error_event!(
+            "prompt.delivery_failed",
+            session = diri_telemetry::id(session_id),
+            delivery = delivery,
+            reason = match failure {
+                InitialPromptFailure::SessionEnded => "session_ended",
+                InitialPromptFailure::SubmissionUnconfirmed => "submission_unconfirmed",
+                InitialPromptFailure::InputFailed => "input_failed",
+            },
+            chars = prompt.chars().count(),
+            ms = started.elapsed(),
+        ),
+    }
+    result
+}
+
+/// [`inject_initial_prompt`]'s steps; `delivery` names the path taken.
+fn deliver_initial_prompt(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+    prompt: &str,
+    delivery: &mut &'static str,
+) -> Result<(), InitialPromptFailure> {
     if !wait_until_ready(registry, session_id) {
         return Err(InitialPromptFailure::SessionEnded);
     }
@@ -4300,7 +4474,7 @@ fn inject_initial_prompt(
         EchoOutcome::Visible => {
             return submit_typed_prompt(registry, session_id, probe.as_deref());
         }
-        EchoOutcome::Missing => {}
+        EchoOutcome::Missing => *delivery = "blind_enter",
     }
     // A line-mode reader may not display anything until Enter. Send it once;
     // a missing response leaves an unknown outcome, never permission to retry.
