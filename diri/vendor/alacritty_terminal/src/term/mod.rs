@@ -1192,6 +1192,61 @@ impl<T> Dimensions for Term<T> {
 }
 
 impl<T: EventListener> Handler for Term<T> {
+    /// Printable ASCII, written a row segment at a time.
+    ///
+    /// Equivalent to `input` for each character: every character is one
+    /// column wide, so a segment that neither wraps, inserts, nor touches a
+    /// wide character or spacer is exactly the per-character writes followed
+    /// by the per-character cursor advance. Every other case takes `input`.
+    #[inline(never)]
+    fn input_ascii(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            let point = self.grid.cursor.point;
+            let columns = self.columns();
+            if self.grid.cursor.input_needs_wrap || self.mode.contains(TermMode::INSERT) {
+                self.input(char::from(bytes[index]));
+                index += 1;
+                continue;
+            }
+            let count = (columns - point.column.0).min(bytes.len() - index);
+            // Overwriting a wide character or spacer also clears its partner
+            // cells; stop the segment there and let `input` do that.
+            let count = self.grid[point.line][point.column..point.column + count]
+                .iter()
+                .position(|cell| {
+                    cell.flags
+                        .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+                })
+                .unwrap_or(count);
+            if count == 0 {
+                self.input(char::from(bytes[index]));
+                index += 1;
+                continue;
+            }
+            let end = point.column + count;
+            let charset = self.grid.cursor.charsets[self.active_charset];
+            let template = self.grid.cursor.template.clone();
+            // Range indexing raises occupancy to `end`, as per-cell writes do.
+            let cells = &mut self.grid[point.line][point.column..end];
+            for (cell, &byte) in cells.iter_mut().zip(&bytes[index..index + count]) {
+                cell.c = charset.map(char::from(byte));
+                cell.fg = template.fg;
+                cell.bg = template.bg;
+                cell.flags = template.flags | (cell.flags & Flags::PROMPT_START);
+                cell.extra = template.extra.clone();
+            }
+            index += count;
+            if end.0 < columns {
+                self.grid.cursor.point.column = end;
+            } else {
+                self.grid.cursor.point.column = Column(columns - 1);
+                self.grid.cursor.input_needs_wrap = true;
+            }
+        }
+    }
+
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
@@ -3866,5 +3921,135 @@ mod tests {
         assert_eq!(version_number("0.1.2-dev"), 1_02);
         assert_eq!(version_number("1.2.3-dev"), 1_02_03);
         assert_eq!(version_number("999.99.99"), 9_99_99_99);
+    }
+}
+
+#[cfg(test)]
+mod ascii_run_tests {
+    use super::*;
+    use crate::event::VoidListener;
+    use crate::term::test::TermSize;
+    use crate::vte::ansi::{Handler, Processor};
+
+    fn assert_same(bulk: &Term<VoidListener>, single: &Term<VoidListener>, step: usize) {
+        let (a, b) = (bulk.grid(), single.grid());
+        assert_eq!(a.cursor, b.cursor, "cursor after step {step}");
+        assert_eq!(
+            a.saved_cursor, b.saved_cursor,
+            "saved cursor after step {step}"
+        );
+        assert_eq!(
+            a.history_size(),
+            b.history_size(),
+            "history after step {step}"
+        );
+        assert_eq!(bulk.mode(), single.mode(), "mode after step {step}");
+        for line in -(b.history_size() as i32)..b.screen_lines() as i32 {
+            let line = Line(line);
+            assert_eq!(a[line], b[line], "line {line} after step {step}");
+            assert_eq!(
+                a[line].occ, b[line].occ,
+                "occupancy of {line} after step {step}"
+            );
+        }
+    }
+
+    /// `input_ascii` must equal `input` per character across wrapping,
+    /// insert mode, charsets, wide characters, hyperlinks, prompt marks,
+    /// scroll regions and the alternate screen.
+    #[test]
+    fn ascii_runs_match_per_character_input() {
+        for (compact, columns, lines) in [(false, 13, 5), (true, 17, 7), (false, 2, 3)] {
+            let size = TermSize::new(columns, lines);
+            let config = Config {
+                scrolling_history: 40,
+                ..Config::default()
+            };
+            let mut bulk = Term::new(config.clone(), &size, VoidListener);
+            let mut single = Term::new(config, &size, VoidListener);
+            #[cfg(feature = "compact-history")]
+            if compact {
+                bulk.grid_mut().enable_compact_history();
+                single.grid_mut().enable_compact_history();
+            }
+            #[cfg(not(feature = "compact-history"))]
+            let _ = compact;
+            let mut bulk_parser: Processor = Processor::new();
+            let mut single_parser: Processor = Processor::new();
+            let sequences: &[&str] = &[
+                "\r\n",
+                "\r",
+                "\n",
+                "\t",
+                "\x08",
+                "\x1b[4h",
+                "\x1b[4l",
+                "\x1b[?7l",
+                "\x1b[?7h",
+                "\x1b(0",
+                "\x1b(B",
+                "\x1b)0\x0e",
+                "\x0f",
+                "\x1b[31;1m",
+                "\x1b[38;2;1;2;3;48;5;17m",
+                "\x1b[0m",
+                "\x1b[4:3m\x1b[58;5;9m",
+                "\x1b]8;id=x;https://example.invalid\x07",
+                "\x1b]8;;\x07",
+                "\x1b]133;A\x07",
+                "界",
+                "界界",
+                "\u{301}",
+                "é",
+                "\x1b[2K",
+                "\x1b[3@",
+                "\x1b[2P",
+                "\x1b[3X",
+                "\x1b[H",
+                "\x1b[3;4H",
+                "\x1b[99;99H",
+                "\x1b[1;1H\x1b[2;3r",
+                "\x1b[r",
+                "\x1b[2S",
+                "\x1b[1T",
+                "\x1b7",
+                "\x1b8",
+                "\x1b[?1049h",
+                "\x1b[?1049l",
+                "\x1b[?6h",
+                "\x1b[?6l",
+                "\x1b#8",
+                "\x1bc",
+            ];
+            let mut seed = 0x2545_f491_4f6c_dd1du64;
+            for step in 0..6000 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                if seed % 3 == 0 {
+                    let sequence = sequences[(seed >> 8) as usize % sequences.len()];
+                    bulk_parser.advance(&mut bulk, sequence.as_bytes());
+                    single_parser.advance(&mut single, sequence.as_bytes());
+                } else {
+                    let length = 1 + (seed >> 12) as usize % (3 * columns);
+                    let text: String = (0..length)
+                        .map(|index| {
+                            let value = (seed >> (index % 40)) as u8 ^ index as u8;
+                            char::from(0x20 + value % 95)
+                        })
+                        .collect();
+                    bulk.input_ascii(&text);
+                    for c in text.chars() {
+                        single.input(c);
+                    }
+                }
+                assert_same(&bulk, &single, step);
+                #[cfg(feature = "compact-history")]
+                {
+                    bulk.grid_mut().release_history_read_cache();
+                    single.grid_mut().release_history_read_cache();
+                }
+            }
+        }
     }
 }

@@ -10,21 +10,45 @@
 use diri_engine::screen::HeadlessScreen;
 use std::time::Instant;
 
-fn bench(label: &str, data: &[u8], chunk: usize, cols: usize, rows: usize) -> f64 {
-    let mut screen = HeadlessScreen::new(cols, rows);
+fn bench(label: &str, data: &[u8], chunk: usize, cols: usize, rows: usize, engine: bool) -> f64 {
+    // The local Engine also scans for OSC notifications; the Remote Helper
+    // does not.
+    let mut screen = if engine {
+        HeadlessScreen::new(cols, rows).with_notifications()
+    } else {
+        HeadlessScreen::new(cols, rows)
+    };
+    let cpu_start = process_cpu_seconds();
     let start = Instant::now();
     for piece in data.chunks(chunk) {
         screen.feed(piece);
     }
     let elapsed = start.elapsed().as_secs_f64();
+    let cpu = process_cpu_seconds() - cpu_start;
     let mb = data.len() as f64 / (1 << 20) as f64;
+    // Process CPU time is reported beside wall time: on a busy machine the
+    // scheduler inflates wall time, while CPU time tracks the work itself.
     println!(
-        "{label:<30} {mb:6.1} MB in {:8.1} ms = {:8.1} MB/s   (filled {})",
+        "{label:<22} {mb:6.1} MB in {:8.1} ms wall = {:7.1} MB/s, {:8.1} ms CPU = {:7.1} MB/s   (filled {})",
         elapsed * 1000.0,
         mb / elapsed,
+        cpu * 1000.0,
+        mb / cpu,
         screen.filled_cells()
     );
-    mb / elapsed
+    mb / cpu
+}
+
+fn process_cpu_seconds() -> f64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: getrusage fills the provided struct; RUSAGE_SELF covers this
+    // single-threaded benchmark process.
+    let usage = unsafe {
+        libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr());
+        usage.assume_init()
+    };
+    let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
+    seconds(usage.ru_utime) + seconds(usage.ru_stime)
 }
 
 fn main() {
@@ -46,9 +70,20 @@ fn main() {
             chunk,
             cols,
             rows,
+            false,
         );
     }
     // One giant chunk is the ceiling the batching could reach if per-chunk
     // overhead were free.
-    bench("feed whole payload", &data, data.len(), cols, rows);
+    bench("feed whole payload", &data, data.len(), cols, rows, false);
+    for chunk in [4 << 10, 64 << 10] {
+        bench(
+            &format!("engine chunk {:>3}K", chunk >> 10),
+            &data,
+            chunk,
+            cols,
+            rows,
+            true,
+        );
+    }
 }

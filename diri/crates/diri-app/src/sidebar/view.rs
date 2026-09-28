@@ -9698,6 +9698,8 @@ mod tests {
 
     /// Held-⌘ hints fade in and out on cached session rows: the fade reaches
     /// rows through their props, and a settled hint reuses the rows again.
+    // Pins the hint clock through a macOS-only capture helper.
+    #[cfg(target_os = "macos")]
     #[gpui::test]
     fn held_command_hints_fade_through_cached_rows(cx: &mut TestAppContext) {
         use crate::held_hints::{FADE_IN, FADE_OUT, HOLD_DELAY, HeldHintsState, HintEffect};

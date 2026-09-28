@@ -310,8 +310,14 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 self.raw.swap(i, i + positions);
             }
 
-            // Rotate the entire line buffer upward.
-            self.raw.rotate(-(positions as isize));
+            // Rotate the entire line buffer upward. When the region holds all
+            // rotated rows they are all reset below, so storage may recycle
+            // them in that state; resetting them again is a no-op.
+            if positions <= region.end.0 as usize {
+                self.raw.rotate_reset(positions, &self.cursor.template);
+            } else {
+                self.raw.rotate(-(positions as isize));
+            }
 
             // Swap the fixed lines at the bottom back into position.
             let screen_lines = self.screen_lines() as i32;

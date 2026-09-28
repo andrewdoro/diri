@@ -67,6 +67,114 @@ working mark stops advancing.
 - GPU or present cost;
 - the horizontal strip. It is rendered inline by RootView and still rebuilds
   every tab.
+## Terminal feed path, 4.1–4.7× faster per core (2026-09-28)
+
+Every local session's Engine and every remote session's Helper parse all PTY
+output through `HeadlessScreen::feed`: VTE, the alacritty grid, compact
+scrollback and per-row change fingerprints. At `main`, a 64 MiB colored build
+log parsed at about 25 MB/s on one core. A stack sample showed the escape parser
+itself was a minor cost. Most time went to scrollback: each 32-row history block
+was serialized as JSON and DEFLATE-compressed. Once history was full, the oldest
+block was also decoded again to recycle its rows.
+
+Changes, with no protocol, checkpoint or wire change:
+
+- History blocks use a binary row encoding (style table, text, style runs,
+  implied default suffix) and a small in-tree LZ77 block codec instead of
+  `serde_json` + `flate2`. No dependency is added.
+- With full history, recycled rows are built in their reset state directly
+  from the encoded row. Evicting history never decodes a block.
+- VTE hands printable ASCII runs to the terminal, which writes a row segment at
+  a time. The result is identical to per-character input (wide cells, wrap,
+  insert mode, charsets, prompt marks and links fall back or match).
+- Row fingerprints hash the same wire projection in four multiply lanes. They
+  derive the wire style only when a cell's raw style changes.
+- Notification and progress scans use `memchr`, which VTE already links.
+  Visible-row indexing has an inlined fast path.
+
+Details and tests are in `vendor/alacritty_terminal/DIRI-PATCH.md` and
+`vendor/vte/DIRI-PATCH.md`.
+
+### Measurements
+
+Apple M4 Max (Mac16,5), macOS 27.0, Rust 1.97.1 release builds. The base is
+`daa570e` with the same `feedbench` source. The machine was shared with other
+work (load average 7–25), so `feedbench` now also reports process CPU time.
+The table gives CPU-time medians of three alternating base/branch runs at
+160×50 (MB = MiB).
+
+| Payload, read size | Base | Branch | Speedup |
+| --- | ---: | ---: | ---: |
+| Colored build log (64 MiB), 4 KiB | 21.7 MB/s | 88.8 MB/s | 4.1× |
+| same, 16 KiB | 24.7 MB/s | 110.6 MB/s | 4.5× |
+| same, 64 KiB | 26.0 MB/s | 117.5 MB/s | 4.5× |
+| same, one call | 26.9 MB/s | 120.1 MB/s | 4.5× |
+| same, Engine config (notifications), 4 KiB | 21.5 MB/s | 87.5 MB/s | 4.1× |
+| same, Engine config, 64 KiB | 25.9 MB/s | 115.3 MB/s | 4.5× |
+| `git log -p --color` (32 MiB), 4 KiB | 13.5 MB/s | 58.4 MB/s | 4.3× |
+| same, 64 KiB | 15.1 MB/s | 70.8 MB/s | 4.7× |
+
+At 4 KiB reads, row fingerprints of the fully damaged screen are now the
+largest single cost. The remaining time is split between the parser and
+history encoding.
+
+`terminal_throughput` (160×50 per-operation, base → branch): typing
+1,773 → 1,023 ns, scrolling 63,335 → 36,330 ns, cursor-only 1,313 → 784 ns.
+`terminal_parity`, 10,000 lines per 80×24 core: feed time p50 87.4 → 34.5 ms
+per core. Retained heap is 246,403 → 259,699 bytes and peak heap is
+635,191 → 324,211 bytes; the base's peak included JSON/DEFLATE buffers.
+
+`terminal_fleet` gates pass (base → branch): fresh 2.02 → 2.02 MiB, full
+history 6.25 → 6.09 MiB, widened 16.37 → 16.21 MiB, after churn
+11.62 → 11.46 MiB, zero warmed cursor allocations and zero leaked bytes.
+Compressed history stored 10,000 rows of 160 columns in 54.5 bytes/row
+(base 53.0) for `git log -p` and 41.8 bytes/row (base 35.4) for the synthetic
+log. The 4 MiB history budget and its accounting are unchanged, except that a
+partially recycled oldest block counts compressed bytes plus one index instead
+of fully decoded rows. **Output limited by the byte budget, not the
+10,000-row limit, can retain fewer rows than before.**
+
+`fleetbench` (20 sessions × 16 MiB, three alternating runs) kept aggregate
+throughput at 91–98 MB/s (base) versus 95–105 MB/s (branch). That fixture is
+bound by the PTY, Holder and log path, not parsing. For the same 320 MiB, the
+benchmark process's CPU time fell from 17.8–18.2 to 9.0–9.4 seconds
+(user + sys). System time rose from about 1.1 to 2.4 seconds; that was not
+investigated. No desktop was attached.
+
+### Equivalence
+
+- `crates/diri-terminal-state/tests/transcript_digest.rs` (opt-in) drives
+  60,000 steps through random read splits: styles, wide/combining text, links,
+  prompts, scroll regions, erase, insert mode, charsets, alternate screen,
+  synchronized output, resizes and full 10,000-row history. It hashes every
+  diff, snapshot, history, scrollback, `content_seq`, `filled_cells`, cursor,
+  title and progress. Both revisions print identical digests at every
+  checkpoint. Deliberately broken fingerprints and recycled rows change the
+  digest.
+- Randomized vendored-crate tests compare `input_ascii` with per-character
+  `input` and full-history recycling with dense storage. Other tests check
+  recycled rows against decode-then-`Row::reset` and codec/LZ round trips.
+  Each test was confirmed to fail on an injected bug.
+- While testing, dense and compact storage were found to diverge after
+  resizing a *full* history. The base revision diverges the same way. This
+  change does not address it.
+
+Not claimed: GUI rendering, input-to-photon latency, SSH or WAN behavior, or a
+whole-application CPU reduction of any particular size.
+
+```sh
+cargo build --release -p diri-engine --example feedbench
+target/release/examples/feedbench <payload> 160 50
+cargo bench -p diri-terminal-state --bench terminal_throughput
+cargo bench -p diri-terminal-state --bench terminal_fleet
+cargo bench -p diri-terminal-state --bench terminal_parity
+cargo test --release -p diri-terminal-state --test transcript_digest -- --ignored --nocapture
+```
+
+The 64 MiB log has lines like
+`ESC[3Nm[0000000123] building crate_N v0.N.0ESC[0m  Compiling module xxxx…\r\n`.
+The Remote Helper Build ID changes because it hashes vendored parser sources.
+Live Helpers keep their binaries.
 ## Desktop memory attribution (2026-09-28)
 
 The installed 0.8.7 app (30 sessions, one window, 1.5 days up) measured a
