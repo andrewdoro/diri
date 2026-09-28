@@ -32,10 +32,6 @@ pub(super) const RAMP_PX: f32 = 300.0;
 /// not turn into one leap of many rows when it resumes.
 pub(super) const MAX_TICK: Duration = Duration::from_millis(50);
 
-/// Tick period: one display frame at 60 Hz. The fractional position repaints
-/// every tick, so this is the motion's frame rate.
-pub(super) const TICK: Duration = Duration::from_millis(16);
-
 /// Rows per second for a pointer `distance_px` past the grid edge.
 ///
 /// Zero inside the dead zone, then `MIN + (MAX - MIN) * t²` with `t` the
@@ -88,6 +84,29 @@ impl Accumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 16 ms frame. Travel integrates elapsed time, so the display rate
+    /// only changes how finely a second is sliced, not how far it goes.
+    const TICK: Duration = Duration::from_millis(16);
+
+    #[test]
+    fn travel_does_not_depend_on_the_display_rate() {
+        for whole_rows in [false, true] {
+            let travel = |hz: u32| {
+                let mut acc = Accumulator::default();
+                let frame = Duration::from_secs(1) / hz;
+                (0..hz)
+                    .map(|_| acc.advance(24.0, frame, whole_rows))
+                    .sum::<f64>()
+            };
+            // Whole rows may leave the last one in the carry.
+            let slack = if whole_rows { 1.0 } else { 1e-6 };
+            for hz in [60, 120] {
+                let rows = travel(hz);
+                assert!((rows - 24.0).abs() <= slack, "{hz} Hz: {rows}");
+            }
+        }
+    }
 
     #[test]
     fn dead_zone_holds_still() {

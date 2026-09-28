@@ -363,7 +363,8 @@ pub struct UtilitySurfaces {
     usage_series_menu_close: Option<Task<()>>,
     usage_chart_window: usage_chart::ChartWindow,
     usage_scrub: Option<(f32, f32, f32)>,
-    usage_chart_tick: Option<Task<()>>,
+    /// A display-link frame is already requested for the chart motion.
+    usage_chart_frame_pending: bool,
     usage_numbers: crate::number_flow::Bank,
     release_notes: ReleaseNotesState,
     settings_scroll: ScrollHandle,
@@ -556,7 +557,7 @@ impl UtilitySurfaces {
             usage_series_menu_close: None,
             usage_chart_window: usage_chart::ChartWindow::new(30.0),
             usage_scrub: None,
-            usage_chart_tick: None,
+            usage_chart_frame_pending: false,
             usage_numbers: crate::number_flow::Bank::default(),
             release_notes: ReleaseNotesState::default(),
             settings_scroll: ScrollHandle::new(),

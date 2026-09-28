@@ -3602,7 +3602,7 @@ impl RootView {
                 });
             let strip = self.sidebar.update(cx, |sidebar, cx| {
                 sidebar.strip_held_hint = held_hint;
-                sidebar.render_horizontal_tabs(card_width, trailing, cx)
+                sidebar.render_horizontal_tabs(card_width, trailing, window, cx)
             });
             card = card.child(
                 div()

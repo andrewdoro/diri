@@ -784,6 +784,7 @@ impl Sidebar {
         &mut self,
         available_width: f32,
         trailing: Option<AnyElement>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // While horizontal tabs hide the panel this strip is the sidebar's
@@ -802,7 +803,12 @@ impl Sidebar {
         }
         let strip = self.horizontal_strip(available_width, trailing, cx);
         self.schedule_activity_tick(cx);
-        self.schedule_title_tick(cx);
+        self.schedule_title_tick();
+        if self.title_tick {
+            // Notifies the sidebar, not the caller: `RootView` read it to
+            // paint the strip, so the strip repaints on the display link.
+            self.request_motion_frame(window, cx);
+        }
         strip
     }
 
@@ -967,11 +973,11 @@ mod tests {
         sidebar: Entity<Sidebar>,
     }
     impl Render for StripOnly {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
                 .child(self.sidebar.update(cx, |sidebar, cx| {
-                    sidebar.render_horizontal_tabs(900.0, None, cx)
+                    sidebar.render_horizontal_tabs(900.0, None, window, cx)
                 }))
         }
     }

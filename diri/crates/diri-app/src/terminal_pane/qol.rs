@@ -25,7 +25,8 @@ pub(super) struct QolState {
     /// Selection drag held past an edge: cell under the pointer and signed
     /// pixels past the edge, positive above the top.
     pub drag: Option<(SessionId, usize, usize, f32)>,
-    pub autoscroll: Option<Task<()>>,
+    pub autoscroll: Option<Autoscroll>,
+    autoscroll_generation: u64,
     export_files: Vec<tempfile::NamedTempFile>,
     busy: bool,
 }
@@ -40,6 +41,16 @@ impl QolState {
     pub fn hover_key_clear(&mut self) {
         self.hover_key = None;
     }
+}
+
+/// A selection autoscroll in flight. It advances once per display-link
+/// frame, integrating the time since the last one, so it moves at 120 Hz on
+/// ProMotion rather than at a 16 ms timer's ~53 uneven frames a second.
+pub(super) struct Autoscroll {
+    accumulator: autoscroll::Accumulator,
+    last: Instant,
+    /// Tells a frame callback left over from a cancelled run to stop.
+    generation: u64,
 }
 
 pub(super) struct PendingPaste {
@@ -429,66 +440,92 @@ impl TerminalPane {
         if self.qol.autoscroll.is_some() {
             return;
         }
-        self.qol.autoscroll = Some(cx.spawn_in(window, async move |this, cx| {
-            let mut accumulator = autoscroll::Accumulator::default();
-            let mut last = Instant::now();
-            loop {
-                cx.background_executor().timer(autoscroll::TICK).await;
-                let now = Instant::now();
-                let elapsed = now.saturating_duration_since(last);
-                last = now;
-                let keep = crate::floating::update_in_owner(&this, cx, |this, window, cx| {
-                    let Some((id, col, row, past)) = this.qol.drag.clone() else {
-                        return false;
-                    };
-                    if this.selected_id().as_ref() != Some(&id) || !this.focus.is_focused(window) {
-                        this.qol.drag = None;
-                        return false;
-                    }
-                    let Some(resident) = this.residents.get(&id) else {
-                        return false;
-                    };
-                    if resident.pointer_owner
-                        != Some((MouseButton::Left, PointerOwner::LocalSelection))
-                    {
-                        return false;
-                    }
-                    let velocity = autoscroll::lines_per_second(past.abs()).copysign(past);
-                    // Autoscroll is function, not decoration: reduced motion
-                    // still scrolls, but in whole rows with no sub-row glide.
-                    let whole_rows = cx.reduce_motion();
-                    let travel = accumulator.advance(velocity, elapsed, whole_rows);
-                    if travel == 0.0 {
-                        return true;
-                    }
-                    let rows = usize::from(resident.last_size.1);
-                    let mut before = resident.element.scroll_position();
-                    if whole_rows {
-                        // Settle a trackpad's leftover fraction onto the row
-                        // grid so every step lands on a whole row.
-                        before = before.round();
-                    }
-                    let moved = resident.element.set_scroll_position(before + travel, rows);
-                    if !moved {
-                        // Oldest retained row or the live edge: nothing more
-                        // to reveal until the pointer moves again.
-                        this.qol.drag = None;
-                        return false;
-                    }
-                    resident.element.drag_selection(col, row);
-                    this.pump_scrollback_fetch(&id, rows);
-                    cx.notify();
-                    true
-                })
-                .unwrap_or(false);
-                if !keep {
-                    break;
+        self.qol.autoscroll_generation += 1;
+        let generation = self.qol.autoscroll_generation;
+        self.qol.autoscroll = Some(Autoscroll {
+            accumulator: autoscroll::Accumulator::default(),
+            last: Instant::now(),
+            generation,
+        });
+        self.request_autoscroll_frame(generation, window, cx);
+    }
+
+    fn request_autoscroll_frame(
+        &mut self,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            let _ = this.update(cx, |this, cx| {
+                let current = this
+                    .qol
+                    .autoscroll
+                    .as_ref()
+                    .is_some_and(|run| run.generation == generation);
+                if !current {
+                    return;
                 }
-            }
-            let _ = crate::floating::update_in_owner(&this, cx, |this, _, _| {
-                this.qol.autoscroll = None;
+                if this.autoscroll_frame(window, cx) {
+                    this.request_autoscroll_frame(generation, window, cx);
+                } else {
+                    this.qol.autoscroll = None;
+                }
             });
-        }));
+        });
+    }
+
+    /// Scrolls by the travel owed since the last frame. False ends the run.
+    fn autoscroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let now = Instant::now();
+        let Some(run) = self.qol.autoscroll.as_mut() else {
+            return false;
+        };
+        let elapsed = now.saturating_duration_since(run.last);
+        run.last = now;
+        let Some((id, col, row, past)) = self.qol.drag.clone() else {
+            return false;
+        };
+        if self.selected_id().as_ref() != Some(&id) || !self.focus.is_focused(window) {
+            self.qol.drag = None;
+            return false;
+        }
+        let velocity = autoscroll::lines_per_second(past.abs()).copysign(past);
+        // Autoscroll is function, not decoration: reduced motion still
+        // scrolls, but in whole rows with no sub-row glide.
+        let whole_rows = cx.reduce_motion();
+        let Some(run) = self.qol.autoscroll.as_mut() else {
+            return false;
+        };
+        let travel = run.accumulator.advance(velocity, elapsed, whole_rows);
+        let Some(resident) = self.residents.get(&id) else {
+            return false;
+        };
+        if resident.pointer_owner != Some((MouseButton::Left, PointerOwner::LocalSelection)) {
+            return false;
+        }
+        if travel == 0.0 {
+            return true;
+        }
+        let rows = usize::from(resident.last_size.1);
+        let mut before = resident.element.scroll_position();
+        if whole_rows {
+            // Settle a trackpad's leftover fraction onto the row grid so
+            // every step lands on a whole row.
+            before = before.round();
+        }
+        let moved = resident.element.set_scroll_position(before + travel, rows);
+        if !moved {
+            // Oldest retained row or the live edge: nothing more to reveal
+            // until the pointer moves again.
+            self.qol.drag = None;
+            return false;
+        }
+        resident.element.drag_selection(col, row);
+        self.pump_scrollback_fetch(&id, rows);
+        cx.notify();
+        true
     }
 
     pub(super) fn enter_copy_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {

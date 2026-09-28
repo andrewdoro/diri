@@ -1,5 +1,35 @@
 # diri performance record
 
+## Animations at the display rate (2026-09-28)
+
+GPUI paces windows with one `CVDisplayLink` per display. On this MacBook Pro
+(built-in ProMotion panel, `maximumFramesPerSecond` 120) a link created the
+way `gpui_macos` creates it ticked 239 times in 2 s. GPUI does not cap an
+active window. It does cap two other cases whenever a frame callback is
+pending: a window that is not key, at one frame per 33.3 ms, and thermal
+pressure, at one per 16.7 ms. Replaying 5 s of real link ticks (hopped to the
+main queue as GPUI does) through those rules gave 120.1 fps uncapped,
+26.3 fps not key (a tick's jitter often pushes the gap from four vsyncs to
+five), and 46.1 fps under thermal pressure.
+
+Some motion was driven by 16 ms timers instead of frame requests. Measured
+against the same link, a one-shot 16 ms timer re-armed by each frame it causes
+landed 3 vsyncs apart: 40 fps. A free-running 16 ms loop drew 53 fps with 2/3
+vsync judder. `request_animation_frame` drew 119.8 fps, 97% of gaps one vsync.
+The sidebar's row, disclosure, title and number motion, the usage chart and
+selection autoscroll now request display-link frames. The cursor blink's fades
+do too, while its holds still sleep on one wake (see the cursor paragraph
+below). Every one of them is sampled from elapsed time, stops requesting frames
+when it lands, and schedules nothing when idle. Harness test counts at 120 Hz:
+a 180 ms title settle paints 22 frames (12 before), a row arrival 25 (10–14).
+
+Not fixed: Diri's floating panels are non-activating and never key, so GPUI
+treats every menu, popover and the palette as inactive and caps its animations
+at the 26 fps above. The cap is in `gpui`'s frame callback, not in the vendored
+`gpui_macos`. Reporting such panels as active from `gpui_macos` lifts it, but
+GPUI also sets the app-wide cursor from any active window, so the panel and
+the window behind it would take turns setting it. That needs its own change.
+
 ## GPUI scenes give back a large frame's storage (2026-09-28)
 
 `vmmap`/`heap` on the installed app attributed about 36 MB of live heap to GPUI
@@ -1210,10 +1240,12 @@ still repaint immediately.
 The terminal cursor is the one bounded exception (`diri-term/src/cursor_motion.rs`).
 It is solid while in use, and only a focused, visible cursor that has been idle
 for 500 ms blinks: ten eased 1.2 s cycles, then it rests solid and schedules
-nothing, so a terminal left alone still paints zero frames. Fades repaint in
-33 ms steps from a one-shot wake instead of the display link: 12 frames per
-cycle, 121 frames in total over the 12 s after the last activity (measured
-headlessly against the element's `RendererStats`; the static cursor painted 1).
+nothing, so a terminal left alone still paints zero frames. Each hold sleeps
+on one one-shot wake aimed at the fade that follows it; the fades themselves
+ride the display link (since 2026-09-28; they were 33 ms steps before, about
+24 fps once a 120 Hz vsync rounded them). At 120 Hz that is 52 frames per cycle,
+521 in total over the 12 s after the last activity, against 121 for the
+stepped fades (`an_idle_cursor_paints_a_bounded_number_of_frames_then_none`).
 A glide is 80 ms of display-rate frames after a keystroke that was going to
 repaint the row anyway. Neither invalidates the row cache: the cursor is
 sampled after rows are prepared and painted last. Under Reduce Motion the

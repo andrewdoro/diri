@@ -25,26 +25,11 @@ impl Sidebar {
         }
     }
 
-    /// Wakes the painted surface for the next frame of a fade, and lets the
-    /// wake lapse the moment the last title lands.
-    pub(super) fn schedule_title_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.title_settles.is_settling(self.title_now) {
-            self.title_tick = None;
-        } else if self.title_tick.is_none() {
-            // A timer rather than an animation frame, like the disclosure:
-            // the strip is painted by `RootView`, and a covered window can
-            // stop delivering display-link callbacks.
-            self.title_tick = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.title_tick = None;
-                    // A settling row forces its own render; others are unchanged.
-                    this.notify_without_staling_rows(cx);
-                });
-            }));
-        }
+    /// Notes whether a title is still settling, so the painting surface asks
+    /// the display link for its next frame, and lets the request lapse the
+    /// moment the last title lands.
+    pub(super) fn schedule_title_tick(&mut self) {
+        self.title_tick = self.title_settles.is_settling(self.title_now);
     }
 
     /// The layered label for `id` while its title settles; `None` at rest,
@@ -105,9 +90,9 @@ mod tests {
     /// Only the strip paints, as while horizontal tabs hide the panel.
     struct StripOnly(Entity<Sidebar>);
     impl Render for StripOnly {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div().size_full().child(self.0.update(cx, |sidebar, cx| {
-                sidebar.render_horizontal_tabs(900.0, None, cx)
+                sidebar.render_horizontal_tabs(900.0, None, window, cx)
             }))
         }
     }
@@ -167,11 +152,13 @@ mod tests {
     /// and a repaint that still owes a frame arms the next wake.
     fn run_out(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) -> usize {
         let mut wakes = 0;
-        while sidebar.read_with(cx, |sidebar, _| sidebar.title_tick.is_some()) {
+        while sidebar.read_with(cx, |sidebar, _| sidebar.title_tick) {
             wakes += 1;
             assert!(wakes < 100, "a finite fade must stop asking for frames");
-            advance(Duration::from_millis(16));
-            cx.executor().advance_clock(Duration::from_millis(16));
+            // One 120 Hz display-link tick: the request made by the last
+            // paint is delivered and repaints the sidebar.
+            advance(Duration::from_nanos(8_333_333));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
             cx.run_until_parked();
         }
         wakes
@@ -182,7 +169,7 @@ mod tests {
         let (sidebar, cx) = panel(cx);
         cx.run_until_parked();
         sidebar.read_with(cx, |sidebar, _| {
-            assert!(sidebar.title_tick.is_none(), "first paint is at rest");
+            assert!(!sidebar.title_tick, "first paint is at rest");
         });
 
         retitle(
@@ -193,15 +180,16 @@ mod tests {
         );
         assert!(settling(&sidebar, cx));
         let wakes = run_out(&sidebar, cx);
-        // 180 ms of 16 ms wakes, and not one more.
-        assert_eq!(wakes, 12);
+        // 180 ms of 120 Hz frames, and not one more (a 16 ms timer managed
+        // 12, and landed them about 25 ms apart).
+        assert_eq!(wakes, 22);
         assert!(!settling(&sidebar, cx));
 
         // Nothing is left to wake an idle sidebar.
         advance(Duration::from_secs(1));
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
-        sidebar.read_with(cx, |sidebar, _| assert!(sidebar.title_tick.is_none()));
+        sidebar.read_with(cx, |sidebar, _| assert!(!sidebar.title_tick));
     }
 
     #[gpui::test]
@@ -210,7 +198,7 @@ mod tests {
         cx.run_until_parked();
         sidebar.read_with(cx, |sidebar, _| {
             assert!(!sidebar.is_visible());
-            assert!(sidebar.title_tick.is_none());
+            assert!(!sidebar.title_tick);
         });
         retitle(
             &sidebar,
@@ -219,7 +207,7 @@ mod tests {
             cx,
         );
         assert!(settling(&sidebar, cx));
-        assert_eq!(run_out(&sidebar, cx), 12);
+        assert_eq!(run_out(&sidebar, cx), 22);
         assert!(!settling(&sidebar, cx));
     }
 
@@ -237,7 +225,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(!settling(&sidebar, cx));
-        sidebar.read_with(cx, |sidebar, _| assert!(sidebar.title_tick.is_none()));
+        sidebar.read_with(cx, |sidebar, _| assert!(!sidebar.title_tick));
     }
 
     #[gpui::test]
@@ -252,7 +240,7 @@ mod tests {
             cx,
         );
         assert!(!settling(&sidebar, cx));
-        sidebar.read_with(cx, |sidebar, _| assert!(sidebar.title_tick.is_none()));
+        sidebar.read_with(cx, |sidebar, _| assert!(!sidebar.title_tick));
 
         cx.update(|_, cx| cx.set_reduce_motion(false));
         sidebar.update(cx, |sidebar, cx| {
@@ -266,7 +254,7 @@ mod tests {
         });
         cx.run_until_parked();
         sidebar.read_with(cx, |sidebar, _| {
-            assert!(sidebar.title_tick.is_none());
+            assert!(!sidebar.title_tick);
             assert_eq!(
                 sidebar.title_settles.len(),
                 sidebar.store.read().unwrap().sessions().len()

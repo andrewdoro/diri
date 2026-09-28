@@ -86,6 +86,10 @@ const SECTION_SHIFT_TIME: Duration = Duration::from_millis(220);
 /// Vertical gap between project sections in the list, mirrored here because
 /// the slide animation reconstructs slot positions from section heights.
 const SECTION_GAP: f32 = 8.0;
+/// Backstop for a motion whose display-link frames stop arriving (a covered
+/// window, or a floating panel that closed while it painted the sidebar): two
+/// 60 Hz frames, so the motion never stalls for longer than a hitch.
+const MOTION_BACKSTOP: Duration = Duration::from_millis(33);
 /// Width of the trailing identity column shared by every row: a session's
 /// agent mark, and the ✕ that stands on that column when a session or
 /// project row is hovered. One width keeps them on a single vertical line.
@@ -653,7 +657,6 @@ pub struct Sidebar {
     hover_keystrokes: Option<gpui::Subscription>,
     usage: Option<UsageSnapshot>,
     number_flows: crate::number_flow::Bank,
-    number_tick: Option<Task<()>>,
     accounts: accounts::MenuAccounts,
     update: UpdateState,
     /// When visibility last flipped, so a held ⌘B cannot outrun the slide.
@@ -684,14 +687,21 @@ pub struct Sidebar {
     archive_disclosures: HashMap<ProjectId, Disclosure>,
     recency_disclosure: Option<Disclosure>,
     disclosure_animating: bool,
-    disclosure_tick: Option<Task<()>>,
+    /// The last paint asked the display link for another frame of a row or
+    /// disclosure motion.
+    disclosure_tick: bool,
+    /// Keeps a finite sidebar motion moving if its display-link frames stop
+    /// arriving; see `request_motion_frame`.
+    motion_backstop: Option<Task<()>>,
     /// Titles an agent changed crossfade instead of snapping. Shared by the
     /// rows and the horizontal strip, which show the same sessions.
     title_settles: TitleSettles,
     title_clock: fn() -> Instant,
     /// The instant every title in this pass is sampled at.
     title_now: Instant,
-    title_tick: Option<Task<()>>,
+    /// The last paint asked the display link for another frame of a title
+    /// settle.
+    title_tick: bool,
     /// Sessions that arrive grow into the list and ones that leave collapse
     /// out of it, sampled on the title clock.
     row_motion: super::row_motion::RowMotion<SessionId, crate::store::SidebarRow>,
@@ -836,7 +846,6 @@ impl Sidebar {
             hover_keystrokes: None,
             usage: None,
             number_flows: crate::number_flow::Bank::default(),
-            number_tick: None,
             accounts: accounts::MenuAccounts::new(preview),
             update: UpdateState::default(),
             last_toggle: None,
@@ -850,11 +859,12 @@ impl Sidebar {
             archive_disclosures: HashMap::new(),
             recency_disclosure: None,
             disclosure_animating: false,
-            disclosure_tick: None,
+            disclosure_tick: false,
+            motion_backstop: None,
             title_settles: TitleSettles::default(),
             title_clock: Instant::now,
             title_now: Instant::now(),
-            title_tick: None,
+            title_tick: false,
             row_motion: Default::default(),
         };
         sidebar.ui.preview_account = preview;
@@ -3325,6 +3335,32 @@ impl Sidebar {
         top_alpha.min(bottom_alpha)
     }
 
+    /// Asks for the next frame of a finite motion (rows, disclosures, title
+    /// settles, number flows). Each is sampled from elapsed time, so the
+    /// display link paces it: 120 Hz on ProMotion, where the 16 ms timers
+    /// this replaces beat against vsync and landed at 40 to 53 fps.
+    ///
+    /// The frame request belongs to the window that painted the sidebar,
+    /// which can be a floating panel that closes mid-motion, and a covered
+    /// window gets no display-link callbacks. So a slow one-shot timer also
+    /// notifies the entity, which reaches every window showing it, while the
+    /// motion still runs. When frames are flowing its notify lands in a frame
+    /// that was coming anyway, and it lapses with the motion.
+    fn request_motion_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        Self::refresh_on_next_frame(&self.weak_self, window);
+        if self.motion_backstop.is_none() {
+            self.motion_backstop = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(MOTION_BACKSTOP).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.motion_backstop = None;
+                    if this.disclosure_tick || this.title_tick || this.number_flows.running() {
+                        this.notify_without_staling_rows(cx);
+                    }
+                });
+            }));
+        }
+    }
+
     /// Row opacities come from the previous frame's bounds, so a frame whose
     /// prepaint moved a row schedules one more render to settle them.
     fn refresh_on_next_frame(weak: &WeakEntity<Self>, window: &mut Window) {
@@ -4404,31 +4440,6 @@ impl Sidebar {
             ));
         }
         Some(pill.into_any_element())
-    }
-
-    /// Window-free for the same reason as `schedule_activity_tick`.
-    fn ensure_number_flow_tick(&mut self, cx: &mut Context<Self>) {
-        if self.number_tick.is_some() {
-            return;
-        }
-        self.number_tick = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let done = this
-                    .update(cx, |this, cx| {
-                        // Footer numbers only: no row reads them.
-                        this.notify_without_staling_rows(cx);
-                        !this.number_flows.running()
-                    })
-                    .unwrap_or(true);
-                if done {
-                    let _ = this.update(cx, |this, _| this.number_tick = None);
-                    break;
-                }
-            }
-        }));
     }
 
     fn account_footer(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
@@ -8068,25 +8079,13 @@ impl Sidebar {
         let mounted = std::mem::take(&mut self.mounted_row_ids);
         self.session_row_views.retain(|id, _| mounted.contains(id));
 
-        if !self.disclosure_animating {
-            self.disclosure_tick = None;
-        } else if self.disclosure_tick.is_none() {
-            // A covered native window can stop delivering display-link
-            // callbacks. Like the activity mark, explicitly invalidate the
-            // cached sidebar; this one-shot ends with the finite disclosure.
-            self.disclosure_tick = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.disclosure_tick = None;
-                    // The disclosure moves and fades rows from outside them.
-                    this.notify_without_staling_rows(cx);
-                });
-            }));
-        }
+        // Row, disclosure and title motion ask the display link for frames.
+        self.disclosure_tick = self.disclosure_animating;
         self.schedule_activity_tick(cx);
-        self.schedule_title_tick(cx);
+        self.schedule_title_tick();
+        if self.disclosure_tick || self.title_tick {
+            self.request_motion_frame(window, cx);
+        }
 
         let mut root = div()
             .id("sidebar")
@@ -8211,7 +8210,7 @@ impl Sidebar {
         }
         root = root.child(self.account_footer(colors, cx));
         if self.number_flows.running() {
-            self.ensure_number_flow_tick(cx);
+            self.request_motion_frame(window, cx);
         }
         // Paint the edge without reducing the shared sidebar content width.
         root = root.when(!self.surface_in_parent, |root| {
@@ -12279,7 +12278,8 @@ mod tests {
             cx.update(|_, cx| cx.observe(&sidebar, move |_, _| observed.set(observed.get() + 1)));
         // Native display-link delivery may pause while a window is covered.
         // The finite disclosure must still invalidate its cached view.
-        cx.executor().advance_clock(Duration::from_millis(17));
+        cx.executor()
+            .advance_clock(MOTION_BACKSTOP + Duration::from_millis(1));
         cx.run_until_parked();
         assert!(paints.get() > 0, "disclosure froze after its first frame");
     }
@@ -12342,7 +12342,7 @@ mod tests {
                     .contains_key(&SessionId::new("preview-claude"))
             );
             assert!(
-                sidebar.disclosure_tick.is_none(),
+                !sidebar.disclosure_tick,
                 "settled disclosures must not schedule idle work"
             );
         });

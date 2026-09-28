@@ -114,11 +114,13 @@ mod tests {
     /// Runs the motion out the way the app does and counts the wakes.
     fn run_out(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) -> usize {
         let mut wakes = 0;
-        while sidebar.read_with(cx, |sidebar, _| sidebar.disclosure_tick.is_some()) {
+        while sidebar.read_with(cx, |sidebar, _| sidebar.disclosure_tick) {
             wakes += 1;
             assert!(wakes < 100, "a finite motion must stop asking for frames");
-            advance(Duration::from_millis(16));
-            cx.executor().advance_clock(Duration::from_millis(16));
+            // One 120 Hz display-link tick: the request made by the last
+            // paint is delivered and repaints the sidebar.
+            advance(Duration::from_nanos(8_333_333));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
             cx.run_until_parked();
         }
         wakes
@@ -129,7 +131,7 @@ mod tests {
         let (sidebar, cx) = panel(cx);
         cx.run_until_parked();
         assert!(!animating(&sidebar, cx), "first paint is at rest");
-        sidebar.read_with(cx, |sidebar, _| assert!(sidebar.disclosure_tick.is_none()));
+        sidebar.read_with(cx, |sidebar, _| assert!(!sidebar.disclosure_tick));
 
         spawn(&sidebar, ARRIVAL, cx);
         assert!(animating(&sidebar, cx));
@@ -140,7 +142,8 @@ mod tests {
         let early = row_height(&sidebar, ARRIVAL, cx).unwrap();
         assert!(early < SIDEBAR_NAV_ROW_HEIGHT, "{early}");
         let wakes = run_out(&sidebar, cx);
-        assert!((10..=14).contains(&wakes), "{wakes}");
+        // Every 120 Hz frame of the motion (a 16 ms timer managed 10 to 14).
+        assert!((20..=28).contains(&wakes), "{wakes}");
         assert!(!animating(&sidebar, cx));
         assert_eq!(
             row_height(&sidebar, ARRIVAL, cx),
@@ -151,7 +154,7 @@ mod tests {
         advance(Duration::from_secs(1));
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
-        sidebar.read_with(cx, |sidebar, _| assert!(sidebar.disclosure_tick.is_none()));
+        sidebar.read_with(cx, |sidebar, _| assert!(!sidebar.disclosure_tick));
     }
 
     fn row_renders(sidebar: &Entity<Sidebar>, id: &str, cx: &VisualTestContext) -> usize {
@@ -257,7 +260,7 @@ mod tests {
         cx.run_until_parked();
         spawn(&sidebar, ARRIVAL, cx);
         assert!(!animating(&sidebar, cx));
-        sidebar.read_with(cx, |sidebar, _| assert!(sidebar.disclosure_tick.is_none()));
+        sidebar.read_with(cx, |sidebar, _| assert!(!sidebar.disclosure_tick));
 
         cx.update(|_, cx| cx.set_reduce_motion(false));
         // Closed while the panel is hidden: `RootView` observes it, and the

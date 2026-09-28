@@ -27,10 +27,9 @@ pub const BLINK_FLOOR: f32 = 0.28;
 /// cycles the cursor rests solid and the terminal stops painting (GTK does
 /// the same with `gtk-cursor-blink-timeout`, 10 s by default).
 pub const BLINK_CYCLES: u32 = 10;
-/// A fade is opacity on a cell-sized block, so it is repainted at this step
-/// instead of the display rate: six paints per fade rather than 24 at 120 Hz,
-/// about ten frames a second while blinking.
-pub const BLINK_STEP: Duration = Duration::from_millis(33);
+/// Shortest wake a hold arms. A timer that fires a hair before the fade it
+/// was aimed at re-arms for this long instead of spinning on a zero delay.
+const MIN_WAKE: Duration = Duration::from_millis(1);
 
 pub const GLIDE_DURATION: Duration = Duration::from_millis(80);
 /// Horizontal reach of a glide, in cells. Word motions and short edits stay
@@ -116,41 +115,34 @@ pub fn blink_opacity(idle: Duration) -> f32 {
     BLINK_FLOOR + (1.0 - BLINK_FLOOR) * covered
 }
 
-/// How long until the blink next changes what is on screen, or `None` once
-/// the cursor has come to rest. A hold wakes one step into the fade that
-/// follows it, because the fade's first instant still looks like the hold.
+/// When the blink next needs a frame. A fade rides the display link, so it
+/// is as smooth at 120 Hz as the glide; a hold looks the same for its whole
+/// length, so it sleeps on one wake aimed at the fade that follows it. Once
+/// the cursor has come to rest nothing is scheduled.
 #[must_use]
-pub fn blink_next_change(idle: Duration) -> Option<Duration> {
+pub fn blink_schedule(idle: Duration) -> CursorSchedule {
     let Some(blinking) = idle.checked_sub(BLINK_IDLE_DELAY) else {
-        return Some(BLINK_IDLE_DELAY - idle + BLINK_STEP);
+        return hold_for(BLINK_IDLE_DELAY - idle);
     };
     // The last cycle ends on its high hold, which already looks like rest.
     let end = BLINK_CYCLE * BLINK_CYCLES - BLINK_HIGH_HOLD;
     if blinking >= end {
-        return None;
+        return CursorSchedule::Rest;
     }
     let phase = Duration::from_nanos((blinking.as_nanos() % BLINK_CYCLE.as_nanos()) as u64);
     let fade_up_at = BLINK_FADE + BLINK_LOW_HOLD;
     let fade_up_end = fade_up_at + BLINK_FADE;
-    Some(if phase < BLINK_FADE {
-        fade_step(BLINK_FADE - phase)
+    if phase < BLINK_FADE || (fade_up_at..fade_up_end).contains(&phase) {
+        CursorSchedule::NextFrame
     } else if phase < fade_up_at {
-        fade_up_at - phase + BLINK_STEP
-    } else if phase < fade_up_end {
-        fade_step(fade_up_end - phase)
+        hold_for(fade_up_at - phase)
     } else {
-        BLINK_CYCLE - phase + BLINK_STEP
-    })
+        hold_for(BLINK_CYCLE - phase)
+    }
 }
 
-/// One step, or straight to the end of the fade when less than a step and a
-/// half is left, so a fade never ends on a sliver of a step.
-fn fade_step(remaining: Duration) -> Duration {
-    if remaining < BLINK_STEP * 3 / 2 {
-        remaining
-    } else {
-        BLINK_STEP
-    }
+fn hold_for(remaining: Duration) -> CursorSchedule {
+    CursorSchedule::After(remaining.max(MIN_WAKE))
 }
 
 /// Cubic ease-out: most of the distance is covered in the first third, so a
@@ -177,9 +169,10 @@ fn fraction(elapsed: Duration, total: Duration) -> f32 {
 pub enum CursorSchedule {
     /// Nothing is animating. No frame, no timer.
     Rest,
-    /// A glide is in flight: position needs the display rate.
+    /// A glide, a focus morph or a blink fade is in flight: every frame
+    /// the display link delivers.
     NextFrame,
-    /// One wake after this long: a blink step or the end of a hold.
+    /// One wake after this long: the end of a hold.
     After(Duration),
 }
 
@@ -337,7 +330,13 @@ impl CursorMotion {
         if blink_opacity(idle) != painted_opacity {
             return Wake::Paint;
         }
-        blink_next_change(idle).map_or(Wake::Stop, Wake::Sleep)
+        match blink_schedule(idle) {
+            // A fade is starting: paint, and the frame hands the rest of it
+            // to the display link.
+            CursorSchedule::NextFrame => Wake::Paint,
+            CursorSchedule::After(delay) => Wake::Sleep(delay),
+            CursorSchedule::Rest => Wake::Stop,
+        }
     }
 
     /// The cursor is not being painted this frame.
@@ -376,7 +375,7 @@ impl CursorMotion {
             opacity: blink_opacity(idle),
             offset_cols: 0.0,
             offset_rows: 0.0,
-            schedule: blink_next_change(idle).map_or(CursorSchedule::Rest, CursorSchedule::After),
+            schedule: blink_schedule(idle),
         }
     }
 }
@@ -503,8 +502,8 @@ impl CursorDriver {
     }
 }
 
-/// Asks for the frame `schedule` calls for. A glide rides the display link.
-/// A blink arms one wake that repaints the hosting view. The wake is re-armed
+/// Asks for the frame `schedule` calls for. A glide or a fade rides the
+/// display link. A hold arms one wake that repaints the hosting view. The wake is re-armed
 /// only by the frame it causes and `CursorSchedule::Rest` ends the chain, so
 /// there is no periodic timer and nothing to cancel. While the user is typing
 /// the wake keeps deferring itself instead of painting a cursor that has not
@@ -686,13 +685,40 @@ mod tests {
         let end = BLINK_IDLE_DELAY + BLINK_CYCLE * BLINK_CYCLES;
         assert_eq!(blink_opacity(end), 1.0);
         assert_eq!(blink_opacity(end + Duration::from_secs(3600)), 1.0);
-        assert_eq!(blink_next_change(end), None);
+        assert_eq!(blink_schedule(end), CursorSchedule::Rest);
         // Rest begins with the last high hold: nothing changes after the
         // final fade up, so nothing is scheduled.
         let last_fade_up_end = end - BLINK_HIGH_HOLD;
-        assert_eq!(blink_next_change(last_fade_up_end), None);
+        assert_eq!(blink_schedule(last_fade_up_end), CursorSchedule::Rest);
         assert_eq!(blink_opacity(last_fade_up_end), 1.0);
-        assert_eq!(blink_next_change(last_fade_up_end - ms(1)), Some(ms(1)));
+        assert_eq!(
+            blink_schedule(last_fade_up_end - ms(1)),
+            CursorSchedule::NextFrame
+        );
+    }
+
+    #[test]
+    fn fades_ride_the_display_link_and_holds_sleep_until_the_next_fade() {
+        let at = |phase: Duration| blink_schedule(BLINK_IDLE_DELAY + phase);
+        // Solid after activity: one wake, aimed at the first fade.
+        assert_eq!(
+            blink_schedule(ms(120)),
+            CursorSchedule::After(BLINK_IDLE_DELAY - ms(120))
+        );
+        assert_eq!(at(Duration::ZERO), CursorSchedule::NextFrame);
+        assert_eq!(at(BLINK_FADE - ms(1)), CursorSchedule::NextFrame);
+        assert_eq!(at(BLINK_FADE), CursorSchedule::After(BLINK_LOW_HOLD));
+        let fade_up_at = BLINK_FADE + BLINK_LOW_HOLD;
+        assert_eq!(at(fade_up_at), CursorSchedule::NextFrame);
+        assert_eq!(
+            at(fade_up_at + BLINK_FADE),
+            CursorSchedule::After(BLINK_HIGH_HOLD)
+        );
+        // A timer that lands a hair early re-arms briefly rather than at zero.
+        assert_eq!(
+            at(fade_up_at - Duration::from_micros(10)),
+            CursorSchedule::After(MIN_WAKE)
+        );
     }
 
     /// Walks the schedule the way the element does, one wake per frame.
@@ -724,10 +750,13 @@ mod tests {
         let mut motion = CursorMotion::default();
         let frames = frames_until_rest(&mut motion, cell(0, 0), start);
         let total = BLINK_IDLE_DELAY + BLINK_CYCLE * BLINK_CYCLES - BLINK_HIGH_HOLD;
-        assert_eq!(*frames.last().unwrap(), total);
-        // Six paints per fade, two fades a cycle, plus the first paint: ten
-        // frames a second while blinking, against 120 at the display rate.
-        assert_eq!(frames.len() - 1, 12 * BLINK_CYCLES as usize);
+        // The last fade ends within a frame of the schedule's end.
+        let last = *frames.last().unwrap();
+        assert!(last >= total && last < total + Duration::from_micros(8_333));
+        // Both 200 ms fades at 120 Hz (the first paint of each is the hold's
+        // wake), nothing while a hold shows: 52 frames a cycle, about 45 a
+        // second while blinking, and none once it rests.
+        assert_eq!(frames.len() - 1, 52 * BLINK_CYCLES as usize);
         // At rest, every later sample is static and schedules nothing.
         let later = motion.sample(cell(0, 0), start + Duration::from_secs(60), false);
         assert_eq!(later, CursorFrame::REST);
@@ -799,7 +828,7 @@ mod tests {
         assert!(!focus.outlined());
         assert_eq!(
             frame.schedule,
-            CursorSchedule::After(BLINK_IDLE_DELAY - crate::cursor_focus::FOCUS_MORPH + BLINK_STEP)
+            CursorSchedule::After(BLINK_IDLE_DELAY - crate::cursor_focus::FOCUS_MORPH)
         );
     }
 
@@ -840,7 +869,7 @@ mod tests {
         // Solid after the move: the next wake is the idle delay, not a frame.
         assert_eq!(
             arrived.schedule,
-            CursorSchedule::After(BLINK_IDLE_DELAY - GLIDE_DURATION + BLINK_STEP)
+            CursorSchedule::After(BLINK_IDLE_DELAY - GLIDE_DURATION)
         );
     }
 
@@ -902,10 +931,7 @@ mod tests {
         motion.note_keystroke(now);
         let frame = motion.sample(cell(0, 0), now, false);
         assert_eq!(frame.opacity, 1.0);
-        assert_eq!(
-            frame.schedule,
-            CursorSchedule::After(BLINK_IDLE_DELAY + BLINK_STEP)
-        );
+        assert_eq!(frame.schedule, CursorSchedule::After(BLINK_IDLE_DELAY));
 
         // Output on the cursor row counts; output elsewhere does not.
         let quiet = CursorDamage {
@@ -916,7 +942,7 @@ mod tests {
         };
         motion.note_damage(quiet, now + ms(400));
         let frame = motion.sample(cell(0, 0), now + ms(400), false);
-        assert_eq!(frame.schedule, CursorSchedule::After(ms(100) + BLINK_STEP));
+        assert_eq!(frame.schedule, CursorSchedule::After(ms(100)));
         motion.note_damage(
             CursorDamage {
                 touches_cursor_row: true,
@@ -925,10 +951,7 @@ mod tests {
             now + ms(450),
         );
         let frame = motion.sample(cell(0, 0), now + ms(450), false);
-        assert_eq!(
-            frame.schedule,
-            CursorSchedule::After(BLINK_IDLE_DELAY + BLINK_STEP)
-        );
+        assert_eq!(frame.schedule, CursorSchedule::After(BLINK_IDLE_DELAY));
     }
 
     #[test]
@@ -946,7 +969,7 @@ mod tests {
         motion.note_keystroke(start + ms(400));
         assert_eq!(
             motion.wake(1.0, start + first),
-            Wake::Sleep(ms(400) + BLINK_IDLE_DELAY + BLINK_STEP - first)
+            Wake::Sleep(ms(400) + BLINK_IDLE_DELAY - first)
         );
         // Dimmed on screen and solid in the model is out of date too.
         assert_eq!(motion.wake(BLINK_FLOOR, start + first), Wake::Paint);
@@ -966,10 +989,7 @@ mod tests {
         let back = start + BLINK_IDLE_DELAY + BLINK_FADE;
         let frame = motion.sample(cell(0, 0), back, false);
         assert_eq!(frame.opacity, 1.0);
-        assert_eq!(
-            frame.schedule,
-            CursorSchedule::After(BLINK_IDLE_DELAY + BLINK_STEP)
-        );
+        assert_eq!(frame.schedule, CursorSchedule::After(BLINK_IDLE_DELAY));
     }
 
     #[test]
