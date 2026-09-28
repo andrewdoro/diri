@@ -748,13 +748,7 @@ impl Sidebar {
                 loop {
                     match changes.recv().await {
                         Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            if this
-                                .update(cx, |this, cx| {
-                                    this.store.write().expect("store").reconcile();
-                                    cx.notify();
-                                })
-                                .is_err()
-                            {
+                            if this.update(cx, |this, cx| this.store_changed(cx)).is_err() {
                                 return;
                             }
                         }
@@ -3442,6 +3436,8 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(test)]
+        render_probe::row_built();
         let session = &row.session;
         let id = session.id.clone();
         let (selected, multi, drag_selection, migrating, unread) = {
@@ -6534,6 +6530,19 @@ impl Sidebar {
         }
     }
 
+    /// Exactly what one activity-timer wake does, for render-cost benches.
+    #[cfg(test)]
+    pub(crate) fn advance_activity_frame_for_test(&mut self, cx: &mut Context<Self>) {
+        self.activity_frame = (self.activity_frame + 1) % 8;
+        cx.notify();
+    }
+
+    /// One publication from the shared store.
+    pub(crate) fn store_changed(&mut self, cx: &mut Context<Self>) {
+        self.store.write().expect("store").reconcile();
+        cx.notify();
+    }
+
     /// Where a working mark can currently be seen: the sidebar panel, its
     /// peek, or the horizontal strip that stands in for the hidden panel.
     fn activity_marks_painted(&self) -> bool {
@@ -7762,8 +7771,55 @@ impl Sidebar {
     }
 }
 
+/// Per-thread render counters for cost regressions and benchmarks: how many
+/// session rows were built and how long `Sidebar::render` itself took.
+#[cfg(test)]
+pub(crate) mod render_probe {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    thread_local! {
+        static ROWS: Cell<usize> = const { Cell::new(0) };
+        static RENDERS: Cell<usize> = const { Cell::new(0) };
+        static RENDER_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
+    pub(crate) fn row_built() {
+        ROWS.with(|rows| rows.set(rows.get() + 1));
+    }
+
+    pub(crate) fn render_finished(elapsed: Duration) {
+        RENDERS.with(|renders| renders.set(renders.get() + 1));
+        RENDER_TIME.with(|time| time.set(time.get() + elapsed));
+    }
+
+    /// (session rows built, sidebar renders, time inside `Sidebar::render`)
+    pub(crate) fn take() -> (usize, usize, Duration) {
+        (
+            ROWS.with(|rows| rows.replace(0)),
+            RENDERS.with(|renders| renders.replace(0)),
+            RENDER_TIME.with(|time| time.replace(Duration::ZERO)),
+        )
+    }
+}
+
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        let render_started = std::time::Instant::now();
+        let root = self.render_sidebar(window, cx);
+        #[cfg(test)]
+        render_probe::render_finished(render_started.elapsed());
+        root
+    }
+}
+
+impl Sidebar {
+    fn render_sidebar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         self.reconcile_workspace_navigation(cx);
         self.fade_glass = self.colors().material() == diri_ui::Material::Glass;
         self.working_row_rendered = false;

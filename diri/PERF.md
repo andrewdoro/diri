@@ -1,5 +1,60 @@
 # diri performance record
 
+## Sidebar render cost under a working fleet (2026-09-28)
+
+Measurement only; no production behavior changed. A live sample of the
+installed app with 51 sessions (about four working) put roughly 45% of a
+~20%-busy main thread in `Sidebar` render, layout, prepaint, and paint. The
+sidebar view is cached in RootView, but every 125 ms activity-mark tick
+notifies it, and a cached view that re-renders rebuilds every row.
+
+Store churn is not the driver. The app store already drops byte-identical
+`session.updated` events without publishing, and the Engine samples
+resources every 30 s. With agents working, the 8 Hz spinner is nearly all of
+the sidebar's re-renders.
+
+`sidebar_fleet_render_cost` mounts the real RootView with 51 sessions in five
+projects (four working) under headless Metal. It stands in cached blank
+rasters for brand marks, since production draws them as CoreGraphics images
+and AppKit needs the main thread. Each step is one notify followed by the
+frame it causes. Release build, medians of 1,000 steps, three runs on a
+heavily loaded machine (load average ~56), so the p90 values are noise:
+
+| Step | Rows built | `Sidebar::render` | Step median |
+| --- | ---: | ---: | ---: |
+| Activity tick | 51 | 0.20–0.69 ms | 1.69–1.74 ms |
+| Store publication (nothing changed) | 51 | 0.20–0.46 ms | 1.74–1.79 ms |
+| Root-only frame (sidebar reused) | 0 | — | 0.42 ms |
+
+The sidebar share of a tick is about 1.3 ms, or roughly 10 ms of main-thread
+time per second at 8 Hz. It scales with row count: about 25–30 µs per row,
+over a fixed ~0.15 ms. A sample of the bench attributes most of the
+re-render to element prepaint and taffy layout, with row construction itself
+under 10%. A reused sidebar is not free either: the root-only frame grows
+from 0.25 ms with 1 session to 0.52 ms with 100, because replaying cached
+ranges is linear in painted primitives.
+
+`nested_cached_views_rerender_with_their_cached_parent` pins the GPUI rule
+behind this (zed `dc2a339`, `ViewElement::prepaint`). A cached view that
+re-renders sets `window.refreshing` for its whole subtree. Any cached view
+nested inside it is therefore rebuilt, even when it is not dirty. A notify
+marks every ancestor view dirty. So caching each row inside the cached
+Sidebar cannot make a tick cost scale with the animated rows. The spinner
+row's notify re-renders the Sidebar, and that rebuilds every row. Nested reuse
+works only when every ancestor renders uncached.
+
+Not claimed: any installed-app CPU change, GPU/present cost, or behavior of
+the horizontal strip's own activity tick.
+
+Reproduce from `diri/`:
+
+```sh
+cargo test --release -p diri-app --bin diri sidebar_fleet_render_cost -- --ignored --nocapture
+cargo test -p diri-app --bin diri nested_cached_views_rerender_with_their_cached_parent
+```
+
+`DIRI_BENCH_SESSIONS` and `DIRI_BENCH_ITERATIONS` scale the fixture.
+
 ## Workspace terminal redraw isolation (2026-09-16)
 
 A live sample of installed Diri 0.7.4 reproduced 23–31% app CPU, with

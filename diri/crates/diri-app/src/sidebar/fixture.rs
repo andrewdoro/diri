@@ -443,6 +443,63 @@ tokio::spawn(async move { clone_repository(request).await });
     }
 }
 
+/// A fleet shaped like a busy installed app for render-cost benchmarks:
+/// `total` sessions spread over five projects, the first `working` of them
+/// working and the rest idle, with titles of varied length.
+#[cfg(test)]
+impl SidebarPreviewFixture {
+    pub(crate) fn bench_fleet(total: usize, working: usize) -> Self {
+        let now = 1_750_000_000_000.0;
+        let projects: Vec<Project> = ["dirijor", "anara", "settings-kit", "infra", "notes"]
+            .iter()
+            .map(|name| {
+                project(
+                    &format!("bench-{name}"),
+                    &format!("/Users/preview/Projects/{name}"),
+                    name,
+                )
+            })
+            .collect();
+        let titles = [
+            "Polish the left sidebar hierarchy",
+            "Fix flaky reconnect test",
+            "Investigate why the terminal repaints after resize on external displays",
+            "Review PR",
+            "Port the usage store",
+            "Tune governor thresholds for quiescence",
+        ];
+        let kinds = [AgentKind::CODEX, AgentKind::CLAUDE_CODE, AgentKind::CURSOR];
+        let sessions: Vec<SessionRecord> = (0..total)
+            .map(|index| {
+                let status = if index < working {
+                    SessionStatus::Working
+                } else {
+                    SessionStatus::Idle
+                };
+                session(
+                    &format!("bench-{index}"),
+                    kinds[index % kinds.len()].clone(),
+                    &projects[index % projects.len()],
+                    &format!("{} #{index}", titles[index % titles.len()]),
+                    status,
+                    (index % 4 == 0).then_some("feature-branch"),
+                    now - minutes(index as f64 * 7.0),
+                )
+                .seen(now)
+                .into()
+            })
+            .collect();
+        Self {
+            selected_session_id: sessions.get(working).map(|session| session.id.clone()),
+            prefs: Prefs {
+                sidebar_session_order: sessions.iter().map(|session| session.id.clone()).collect(),
+                ..Prefs::default()
+            },
+            list: SessionListResult { sessions, projects },
+        }
+    }
+}
+
 fn project(id: &str, root: &str, name: &str) -> Project {
     Project {
         id: ProjectId::new(id),

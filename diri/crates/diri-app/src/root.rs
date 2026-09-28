@@ -5417,6 +5417,225 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Pins the GPUI caching rule that decides how the sidebar can be split:
+    /// a cached view that re-renders re-renders every cached view inside it,
+    /// because it lays its subtree out with `window.refreshing` set. Only a
+    /// cached view whose ancestors all render uncached is reused on its own.
+    #[gpui::test]
+    fn nested_cached_views_rerender_with_their_cached_parent(cx: &mut gpui::TestAppContext) {
+        struct Leaf(std::rc::Rc<std::cell::Cell<usize>>);
+        impl Render for Leaf {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.set(self.0.get() + 1);
+                div().size_full()
+            }
+        }
+        struct Middle(Entity<Leaf>);
+        impl Render for Middle {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    self.0
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                )
+            }
+        }
+        struct Top {
+            middle: Entity<Middle>,
+            cached: bool,
+        }
+        impl Render for Top {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let middle = self.middle.clone();
+                div().size_full().map(|top| {
+                    if self.cached {
+                        top.child(middle.cached(StyleRefinement::default().size_full()))
+                    } else {
+                        top.child(middle)
+                    }
+                })
+            }
+        }
+        for cached in [true, false] {
+            let renders = std::rc::Rc::new(std::cell::Cell::new(0));
+            let counter = std::rc::Rc::clone(&renders);
+            let (top, cx) = cx.add_window_view(move |_, cx| {
+                let leaf = cx.new(|_| Leaf(counter));
+                let middle = cx.new(|_| Middle(leaf));
+                Top { middle, cached }
+            });
+            cx.run_until_parked();
+            let middle = top.read_with(cx, |top, _| top.middle.clone());
+            let before = renders.get();
+            middle.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            assert_eq!(
+                renders.get() - before,
+                usize::from(cached),
+                "cached={cached}: an undirtied leaf is reused only under an uncached parent"
+            );
+        }
+    }
+
+    /// Render cost of the sidebar under a busy fleet: 51 sessions over five
+    /// projects, four of them working, mounted in the real RootView and
+    /// painted by headless Metal. Measures one activity-mark tick and one
+    /// store publication that changes nothing the sidebar shows.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal render-cost bench; run explicitly on macOS"]
+    fn sidebar_fleet_render_cost() {
+        use crate::sidebar::render_probe;
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        // Production draws solid brand marks as cached CoreGraphics rasters
+        // (an `img` per row), not tessellated paths. AppKit drawing needs the
+        // main thread, which a test does not own, so stand in with a cached
+        // blank raster of the same size to keep the element shape identical.
+        fn stand_in_raster(
+            _: diri_ui::BrandMarkKind,
+            size: f32,
+            _: f32,
+            _: gpui::Rgba,
+        ) -> Option<AnyElement> {
+            use std::sync::{LazyLock, Mutex};
+            static CACHE: LazyLock<Mutex<std::collections::HashMap<u32, Arc<gpui::RenderImage>>>> =
+                LazyLock::new(Default::default);
+            let image = CACHE
+                .lock()
+                .unwrap()
+                .entry(size.to_bits())
+                .or_insert_with(|| {
+                    let pixels = (size * 2.0).ceil() as u32;
+                    Arc::new(gpui::RenderImage::new(smallvec::smallvec![
+                        image::Frame::new(image::RgbaImage::new(pixels, pixels))
+                    ]))
+                })
+                .clone();
+            Some(
+                gpui::img(image)
+                    .flex_none()
+                    .size(px(size))
+                    .into_any_element(),
+            )
+        }
+        diri_ui::set_mark_rasterizer(stand_in_raster);
+        let services = test_services();
+        services.store.store.write().unwrap().hydrate(
+            SidebarPreviewFixture::bench_fleet(
+                std::env::var("DIRI_BENCH_SESSIONS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(51),
+                4,
+            )
+            .list,
+        );
+        services
+            .store
+            .store
+            .write()
+            .unwrap()
+            .update_preferences(|prefs| prefs.sidebar_visible = true)
+            .unwrap();
+        let window = cx
+            .open_window(size(px(1600.0), px(1000.0)), |window, cx| {
+                cx.new(|cx| RootView::new(services, false, PreviewScenario::Empty, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let sidebar = cx
+            .update_window(window.into(), |root, _, cx| {
+                root.downcast::<RootView>()
+                    .unwrap()
+                    .read(cx)
+                    .sidebar
+                    .clone()
+            })
+            .unwrap();
+        cx.capture_screenshot(window.into()).unwrap();
+        fn cpu_seconds() -> f64 {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+                0
+            );
+            let usage = unsafe { usage.assume_init() };
+            usage.ru_utime.tv_sec as f64
+                + usage.ru_utime.tv_usec as f64 / 1e6
+                + usage.ru_stime.tv_sec as f64
+                + usage.ru_stime.tv_usec as f64 / 1e6
+        }
+        let iterations: usize = std::env::var("DIRI_BENCH_ITERATIONS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300);
+        let root = cx
+            .update_window(window.into(), |root, _, _| {
+                root.downcast::<RootView>().unwrap()
+            })
+            .unwrap();
+        let cases: [&str; 3] = ["activity-tick", "noop-store-change", "root-only-frame"];
+        for name in cases {
+            let step = |cx: &mut HeadlessAppContext| {
+                let start = Instant::now();
+                cx.update(|cx| match name {
+                    "activity-tick" => sidebar.update(cx, |sidebar, cx| {
+                        sidebar.advance_activity_frame_for_test(cx)
+                    }),
+                    "noop-store-change" => {
+                        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx))
+                    }
+                    _ => root.update(cx, |_, cx| cx.notify()),
+                });
+                cx.run_until_parked();
+                cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+                start.elapsed()
+            };
+            for _ in 0..20 {
+                step(&mut cx);
+            }
+            render_probe::take();
+            let mut draws = Vec::with_capacity(iterations);
+            let start_cpu = cpu_seconds();
+            for _ in 0..iterations {
+                draws.push(step(&mut cx));
+            }
+            let cpu = cpu_seconds() - start_cpu;
+            let (rows, renders, render_time) = render_probe::take();
+            draws.sort();
+            let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
+            eprintln!(
+                "sidebar-fleet {name}: steps={iterations} sidebar_renders={renders} \
+                 rows_built_per_step={:.1} sidebar_render_fn_ms={:.3} \
+                 step_ms_median={:.3} step_ms_p90={:.3} cpu_ms_per_step={:.3}",
+                rows as f64 / iterations as f64,
+                ms(render_time) / iterations as f64,
+                ms(draws[iterations / 2]),
+                ms(draws[iterations * 9 / 10]),
+                cpu * 1000.0 / iterations as f64,
+            );
+        }
+        drop(root);
+        drop(sidebar);
+        if let Ok(output) = std::env::var("DIRI_SIDEBAR_BENCH_SCREENSHOT") {
+            cx.capture_screenshot(window.into())
+                .unwrap()
+                .save(output)
+                .unwrap();
+        }
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     fn shortcut_spawn_hands_focus_to_the_active_terminal(cx: &mut gpui::TestAppContext) {
         let services = test_services();

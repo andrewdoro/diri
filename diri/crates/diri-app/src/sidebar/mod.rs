@@ -17,5 +17,7 @@ pub(crate) use view::DraggedSidebarItem;
 pub use view::Sidebar;
 pub(crate) use view::SidebarEvent;
 // Only the macOS frame fixture drives the title clock from outside the view.
+#[cfg(test)]
+pub(crate) use view::render_probe;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use view::title_clock_for_test;
