@@ -1046,6 +1046,20 @@ impl DaemonClient {
         self.no_params(Method::DAEMON_SHUTDOWN_IF_IDLE).await
     }
 
+    /// Uploads recorded diagnostics now (even with sharing off: the user
+    /// asked). The Engine waits up to 45 s for the upload.
+    pub async fn telemetry_upload_now(
+        &self,
+    ) -> Result<diri_proto::TelemetryUploadNowResult, ClientError> {
+        self.core
+            .request_typed::<EmptyParams, diri_proto::TelemetryUploadNowResult>(
+                Method::TELEMETRY_UPLOAD_NOW,
+                None,
+                Some(Duration::from_secs(60)),
+            )
+            .await
+    }
+
     pub async fn account_profiles(&self) -> Result<diri_proto::AgentAccountCatalog, ClientError> {
         self.no_params(Method::ACCOUNT_PROFILES_LIST).await
     }

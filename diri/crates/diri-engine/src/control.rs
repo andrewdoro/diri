@@ -626,6 +626,7 @@ impl ControlServer {
                         | Method::SESSION_MIGRATE
                         | Method::WORKTREE_OVERVIEW
                         | Method::WORKTREE_CLEANUP
+                        | Method::TELEMETRY_UPLOAD_NOW
                 ) || ((method == Method::AGENT_READINESS
                     || method == Method::AGENT_CONFIGURE)
                     && params
@@ -935,6 +936,7 @@ impl ControlServer {
             Method::DAEMON_PREPARE_SHUTDOWN => self.daemon_prepare_shutdown(),
             Method::DAEMON_SHUTDOWN_IF_IDLE => self.daemon_shutdown_if_idle(),
             Method::DAEMON_SHUTDOWN => self.daemon_shutdown(),
+            Method::TELEMETRY_UPLOAD_NOW => telemetry_upload_now(),
             Method::GOVERNOR_CONFIGURE => self.governor_configure(params),
             Method::CLIENT_SET_ACTIVE => self.client_set_active(params),
             other => Err(ControlError::not_found(format!(
@@ -4161,6 +4163,40 @@ impl OrphanWatch {
     }
 }
 
+/// Uploads the telemetry spool now at the user's request (Settings, Report a
+/// Problem). Runs as a background request: the upload can take seconds.
+fn telemetry_upload_now() -> Result<JsonValue, ControlError> {
+    use diri_telemetry::upload::UploadNow;
+    let result = match diri_telemetry::upload::upload_now(Duration::from_secs(45)) {
+        UploadNow::Unavailable => diri_proto::TelemetryUploadNowResult {
+            status: "unavailable".into(),
+            ..Default::default()
+        },
+        UploadNow::TimedOut => diri_proto::TelemetryUploadNowResult {
+            status: "timeout".into(),
+            ..Default::default()
+        },
+        UploadNow::Done(report) => diri_proto::TelemetryUploadNowResult {
+            status: if report.failed {
+                "failed"
+            } else if report.batches == 0 {
+                "up_to_date"
+            } else {
+                "sent"
+            }
+            .into(),
+            batches: u32::try_from(report.batches).unwrap_or(u32::MAX),
+            records: report.lines as u64,
+        },
+    };
+    diri_telemetry::event!(
+        "telemetry.upload_now",
+        status = diri_telemetry::id(&result.status),
+        batches = result.batches,
+    );
+    encode(&result)
+}
+
 fn idle_shutdown_refusal(live_sessions: usize, connections: usize) -> Option<&'static str> {
     if live_sessions != 0 {
         Some("live sessions still require the Engine")
@@ -4764,6 +4800,15 @@ mod tests {
     mod find_capture_tests;
     mod reconnect_tests;
     mod send_key_tests;
+
+    #[test]
+    fn telemetry_upload_now_reports_unavailable_without_an_uploader() {
+        // Debug builds and tests never start the uploader.
+        let value = telemetry_upload_now().unwrap();
+        let result: diri_proto::TelemetryUploadNowResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.status, "unavailable");
+        assert_eq!(result.batches, 0);
+    }
 
     #[test]
     fn a_shared_event_frame_is_the_line_control_message_writes() {

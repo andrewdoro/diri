@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::sync::mpsc::{RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
@@ -18,9 +20,11 @@ use serde::Serialize;
 use crate::identity::{Config, Identity};
 use crate::spool::{self, SpoolName};
 
-/// Set after the Worker is deployed; `DIRI_TELEMETRY_ENDPOINT` at build time
-/// overrides it, at run time overrides both (`off` disables uploading).
-pub const DEFAULT_ENDPOINT: Option<&str> = None;
+/// The deployed Worker (telemetry/worker). `DIRI_TELEMETRY_ENDPOINT` at build
+/// time overrides it, at run time overrides both (`off` disables uploading).
+/// 0.8.9 shipped with this unset and uploaded nothing; the test below keeps a
+/// release from doing that again.
+pub const DEFAULT_ENDPOINT: Option<&str> = Some("https://telemetry.diri.sh");
 /// Kept small so one batch fits the Worker's CPU budget on the free plan.
 pub const BATCH_RAW_BYTES: usize = 1024 * 1024;
 /// Routine uploads are hourly: each batch costs the Worker a request, an R2
@@ -112,16 +116,36 @@ impl Uploader {
     /// Runs forever on a background thread: every minute it checks for an
     /// urgent marker (an incident was recorded), and otherwise uploads every
     /// hour.
-    pub fn spawn(mut self) -> std::io::Result<std::thread::JoinHandle<()>> {
+    pub fn spawn(mut self) -> std::io::Result<UploadHandle> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<SyncSender<CycleReport>>(4);
         std::thread::Builder::new()
             .name("diri-telemetry-upload".into())
             .spawn(move || {
                 let urgent = spool::spool_dir(&self.state_dir).join(spool::URGENT_MARKER);
                 // Upload what previous runs left behind shortly after start.
                 let mut last = Instant::now() - ROUTINE_INTERVAL + Duration::from_secs(30);
+                let mut requests = Some(rx);
                 loop {
-                    std::thread::sleep(POLL_INTERVAL);
-                    if urgent.exists() || last.elapsed() >= ROUTINE_INTERVAL {
+                    let request = match requests.as_ref().map(|rx| rx.recv_timeout(POLL_INTERVAL)) {
+                        Some(Ok(reply)) => Some(reply),
+                        Some(Err(RecvTimeoutError::Timeout)) => None,
+                        Some(Err(RecvTimeoutError::Disconnected)) | None => {
+                            requests = None;
+                            std::thread::sleep(POLL_INTERVAL);
+                            None
+                        }
+                    };
+                    if let Some(reply) = request {
+                        // Asked for by the user: send now, even with sharing
+                        // off, including what this process recorded just now.
+                        crate::flush(Duration::from_secs(1));
+                        let _ = std::fs::remove_file(&urgent);
+                        let report = self.run_cycle_with(true);
+                        if !report.failed {
+                            last = Instant::now();
+                        }
+                        let _ = reply.send(report);
+                    } else if urgent.exists() || last.elapsed() >= ROUTINE_INTERVAL {
                         let _ = std::fs::remove_file(&urgent);
                         let report = self.run_cycle();
                         if !report.failed {
@@ -129,15 +153,22 @@ impl Uploader {
                         }
                     }
                 }
-            })
+            })?;
+        Ok(UploadHandle { tx })
     }
 
-    /// One pass over the spool. Returns what was sent.
+    /// One routine pass over the spool. Returns what was sent.
     pub fn run_cycle(&mut self) -> CycleReport {
+        self.run_cycle_with(false)
+    }
+
+    /// One pass over the spool; `forced` (an explicit user request) sends
+    /// even when sharing is turned off.
+    pub fn run_cycle_with(&mut self, forced: bool) -> CycleReport {
         let dir = spool::spool_dir(&self.state_dir);
         let mut report = CycleReport::default();
         let config = Config::load(&self.state_dir);
-        if !config.upload {
+        if !config.upload && !forced {
             spool::prune(&dir, spool::SPOOL_CAP_BYTES);
             return report;
         }
@@ -309,6 +340,51 @@ fn upload_records(body: &[u8]) -> Vec<u8> {
         output.extend_from_slice(b"}\n");
     }
     output
+}
+
+/// Asks a running [`Uploader`] to upload immediately.
+#[derive(Clone)]
+pub struct UploadHandle {
+    tx: SyncSender<SyncSender<CycleReport>>,
+}
+
+/// The outcome of [`upload_now`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadNow {
+    /// No uploader runs in this process (not configured in this build).
+    Unavailable,
+    /// The uploader was busy or the network slow; it will keep trying.
+    TimedOut,
+    Done(CycleReport),
+}
+
+impl UploadHandle {
+    /// Requests an upload and waits up to `timeout` for its report.
+    #[must_use]
+    pub fn upload_now(&self, timeout: Duration) -> UploadNow {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        if self.tx.try_send(reply_tx).is_err() {
+            return UploadNow::TimedOut;
+        }
+        reply_rx
+            .recv_timeout(timeout)
+            .map_or(UploadNow::TimedOut, UploadNow::Done)
+    }
+
+    /// Makes this handle the one [`upload_now`] uses.
+    pub fn install(self) {
+        let _ = GLOBAL_HANDLE.set(self);
+    }
+}
+
+static GLOBAL_HANDLE: OnceLock<UploadHandle> = OnceLock::new();
+
+/// Uploads through the handle installed in this process, if any.
+#[must_use]
+pub fn upload_now(timeout: Duration) -> UploadNow {
+    GLOBAL_HANDLE
+        .get()
+        .map_or(UploadNow::Unavailable, |handle| handle.upload_now(timeout))
 }
 
 fn list_spool(dir: &Path) -> Vec<(String, PathBuf, SpoolName)> {
@@ -600,6 +676,46 @@ mod tests {
             CycleReport::default()
         );
         assert!(bodies.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn upload_now_sends_immediately_even_with_sharing_off() {
+        let state = tempfile::tempdir().unwrap();
+        let dir = spool::spool_dir(state.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app-1-0-0000.jsonl"), "{}\n").unwrap();
+        Config {
+            upload: false,
+            name: None,
+        }
+        .save(state.path())
+        .unwrap();
+        let (transport, bodies) = capture(202);
+        let handle = uploader(state.path(), transport).spawn().unwrap();
+        match handle.upload_now(Duration::from_secs(10)) {
+            UploadNow::Done(report) => assert_eq!((report.batches, report.lines), (1, 1)),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(bodies.lock().unwrap().len(), 1);
+        match handle.upload_now(Duration::from_secs(10)) {
+            UploadNow::Done(report) => assert_eq!(report.batches, 0, "nothing new"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn release_builds_have_an_upload_endpoint() {
+        let endpoint = option_env!("DIRI_TELEMETRY_ENDPOINT").or(DEFAULT_ENDPOINT);
+        let endpoint = endpoint.expect("a release without an endpoint records but never uploads");
+        assert!(endpoint.starts_with("https://"), "{endpoint}");
+    }
+
+    #[test]
+    fn upload_now_without_an_uploader_is_unavailable() {
+        assert_eq!(
+            upload_now(Duration::from_millis(10)),
+            UploadNow::Unavailable
+        );
     }
 
     #[test]

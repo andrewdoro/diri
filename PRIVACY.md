@@ -35,13 +35,16 @@ name unless you change or clear it). They are kept for 30 days and then
 deleted; only the maintainers can read them.
 
 **Your controls:** Settings › General › Privacy has the switch (*Share
-diagnostics to help fix bugs*), the name, your Support ID and a button that
-shows the local folder. Turning sharing off stops uploads at the next cycle;
-recording stays local. Missing, unreadable or malformed settings disable uploads.
-A settings change only appears saved after it has been written successfully.
-Setting `DIRI_TELEMETRY=off` in Diri's environment
-turns recording off entirely. Help › Report a Problem… marks the moment in the
-log, copies your Support ID and opens a GitHub issue with it filled in.
+diagnostics to help fix bugs*), the name, your Support ID, *Send now* and a
+button that shows the local folder. Turning sharing off stops uploads at the
+next cycle; recording stays local. Missing, unreadable or malformed settings
+disable uploads. A settings change only appears saved after it has been
+written successfully. *Send now* uploads what has been recorded so far
+immediately, even with sharing off: clicking it is a one-time choice to send.
+Setting `DIRI_TELEMETRY=off` in Diri's environment turns recording off
+entirely. Help › Report a Problem… marks the moment in the log, sends it right
+away the same way, copies your Support ID and opens a GitHub issue with it
+filled in.
 
 ## Data stored on your Mac
 
