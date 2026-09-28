@@ -7,6 +7,8 @@
 //!   cargo test -p diri-app --bin diri -- --ignored render_row_motion_frames
 //! ```
 //!
+//! `DIRI_ROWS_CACHED=1` draws each frame without a window refresh, so cached
+//! rows are reused as in the app; its frames must match a refreshed run.
 //! `DIRI_ROWS_RECENCY=1` groups the sidebar by recency instead of project,
 //! `DIRI_ROWS_HORIZONTAL=1` renders the tab strip instead of the sidebar.
 
@@ -132,8 +134,14 @@ fn render_row_motion_frames() {
             }
         }
         root!(|root, window, cx| {
-            root.sidebar.update(cx, |_, cx| cx.notify());
-            window.refresh();
+            if std::env::var_os("DIRI_ROWS_CACHED").is_some() {
+                // Drive frames the way the app does, so cached rows are
+                // reused wherever GPUI allows: compare against a refreshed run.
+                root.sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+            } else {
+                root.sidebar.update(cx, |_, cx| cx.notify());
+                window.refresh();
+            }
         });
         cx.run_until_parked();
         cx.capture_screenshot(window.into())

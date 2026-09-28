@@ -14,6 +14,10 @@
 //!   one of its own animation ticks (`rows_stale`, a safety net for inputs the
 //!   props might miss).
 //!
+//! GPUI's cache key still re-renders a row whose bounds, clip or opacity
+//! changed, such as rows below one that grows in, or rows under a clip that
+//! resizes.
+//!
 //! Every other row is reused by the vendored GPUI's nested view cache (see
 //! `vendor/gpui/DIRI_PATCHES.md`), including the opacity the list wraps
 //! around it.
@@ -52,6 +56,8 @@ pub(in crate::sidebar) struct SessionRowProps {
 pub(in crate::sidebar) struct SessionRowView {
     sidebar: WeakEntity<Sidebar>,
     props: SessionRowProps,
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) renders: usize,
 }
 
 #[cfg(test)]
@@ -63,6 +69,10 @@ impl SessionRowView {
 
 impl Render for SessionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(all(test, target_os = "macos"))]
+        {
+            self.renders += 1;
+        }
         let props = self.props.clone();
         let row = self
             .sidebar
@@ -159,6 +169,8 @@ impl Sidebar {
                 cx.new(|_| SessionRowView {
                     sidebar,
                     props: props.clone(),
+                    #[cfg(all(test, target_os = "macos"))]
+                    renders: 0,
                 })
             })
             .clone();

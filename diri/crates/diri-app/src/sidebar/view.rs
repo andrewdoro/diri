@@ -3131,9 +3131,8 @@ impl Sidebar {
                     .flatten();
                 let working = self.working_row_rendered;
                 let moving = presence != super::row_motion::Presence::FULL || ghost;
-                let rendered = self.mount_session_row(
-                    row, shortcut, drop, false, colors, moving, window, cx,
-                );
+                let rendered =
+                    self.mount_session_row(row, shortcut, drop, false, colors, moving, window, cx);
                 self.working_row_rendered &= !ghost || working;
                 // Buckets interleave every project and the row names none of
                 // them, so here the row wears its project's hue.

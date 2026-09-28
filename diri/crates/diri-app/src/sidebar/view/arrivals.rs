@@ -154,6 +154,75 @@ mod tests {
         sidebar.read_with(cx, |sidebar, _| assert!(sidebar.disclosure_tick.is_none()));
     }
 
+    fn row_renders(sidebar: &Entity<Sidebar>, id: &str, cx: &VisualTestContext) -> usize {
+        sidebar.read_with(cx, |sidebar, cx| {
+            sidebar
+                .session_row_views
+                .get(&SessionId::new(id))
+                .map_or(0, |view| view.read(cx).renders)
+        })
+    }
+
+    /// Rows are cached views, but one growing in or collapsing out renders
+    /// on every frame of its motion. (Its section's other rows re-render too:
+    /// the section clip grows with it, and a changed clip misses the cache.)
+    #[gpui::test]
+    fn moving_rows_render_every_frame_under_caching(cx: &mut TestAppContext) {
+        let (sidebar, cx) = panel(cx);
+        cx.run_until_parked();
+
+        spawn(&sidebar, ARRIVAL, cx);
+        let mut heights = Vec::new();
+        let mut renders = row_renders(&sidebar, ARRIVAL, cx);
+        while animating(&sidebar, cx) {
+            advance(Duration::from_millis(16));
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            let now = row_renders(&sidebar, ARRIVAL, cx);
+            assert!(now > renders, "the arriving row rendered this frame");
+            renders = now;
+            heights.push(row_height(&sidebar, ARRIVAL, cx).unwrap());
+            assert!(heights.len() < 100);
+        }
+        assert!(heights.len() >= 10, "{heights:?}");
+        assert!(
+            heights.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{heights:?}"
+        );
+        assert!(heights[0] < SIDEBAR_NAV_ROW_HEIGHT);
+        assert_eq!(heights.last().copied(), Some(SIDEBAR_NAV_ROW_HEIGHT));
+
+        // At rest again, the arrival is reused like any other row.
+        let settled = row_renders(&sidebar, ARRIVAL, cx);
+        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+        cx.run_until_parked();
+        assert_eq!(row_renders(&sidebar, ARRIVAL, cx), settled);
+
+        // Leaving: the ghost renders every frame until its slot closes.
+        close(&sidebar, ARRIVAL, cx);
+        let mut frames = 0;
+        let mut renders = row_renders(&sidebar, ARRIVAL, cx);
+        while animating(&sidebar, cx) {
+            advance(Duration::from_millis(16));
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            if animating(&sidebar, cx) {
+                let now = row_renders(&sidebar, ARRIVAL, cx);
+                assert!(now > renders, "the leaving row rendered this frame");
+                renders = now;
+            }
+            frames += 1;
+            assert!(frames < 100);
+        }
+        assert!(frames >= 10, "{frames}");
+        assert!(
+            sidebar.read_with(cx, |sidebar, _| !sidebar
+                .session_row_views
+                .contains_key(&SessionId::new(ARRIVAL))),
+            "a departed row drops its view once it is gone"
+        );
+    }
+
     #[gpui::test]
     fn a_closed_row_leaves_a_ghost_that_takes_no_clicks(cx: &mut TestAppContext) {
         let (sidebar, cx) = panel(cx);
