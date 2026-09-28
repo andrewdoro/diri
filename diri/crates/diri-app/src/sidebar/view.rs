@@ -6567,7 +6567,7 @@ impl Sidebar {
     }
 
     /// Exactly what one activity-timer wake does, for render-cost benches.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn advance_activity_frame_for_test(&mut self, cx: &mut Context<Self>) {
         self.activity_frame = (self.activity_frame + 1) % 8;
         self.notify_activity_frame(cx);

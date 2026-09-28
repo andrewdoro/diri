@@ -446,7 +446,7 @@ tokio::spawn(async move { clone_repository(request).await });
 /// A fleet shaped like a busy installed app for render-cost benchmarks:
 /// `total` sessions spread over five projects, the first `working` of them
 /// working and the rest idle, with titles of varied length.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 impl SidebarPreviewFixture {
     pub(crate) fn bench_fleet(total: usize, working: usize) -> Self {
         let now = 1_750_000_000_000.0;
