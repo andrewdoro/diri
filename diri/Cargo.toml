@@ -70,6 +70,11 @@ zeroize = { version = "1", features = ["derive"] }
 # path/MSAA targets on every resize. Keep our renderer patch local and pinned to
 # the exact Zed revision used by `gpui`.
 gpui_macos = { path = "vendor/gpui_macos" }
+# A cached view whose own cache missed no longer forces the cached views nested
+# inside it to re-render; only `window.refresh()` does. This lets a sidebar
+# spinner tick re-render one row instead of the whole list. See
+# vendor/gpui/DIRI_PATCHES.md.
+gpui = { path = "vendor/gpui" }
 # GPUI's sum_tree currently imports Zed's GPL-licensed profiling shim even
 # though profiling is disabled and the attribute is a no-op in normal builds.
 # Keep the same tiny, no-op API in an Apache-licensed compatibility crate so an
