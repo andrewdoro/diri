@@ -758,7 +758,7 @@ impl TerminalPane {
             let _ = crate::floating::update_in_owner(&this, cx, |this, window, cx| {
                 if this.selected_id().as_ref() != Some(&id) { return; }
                 this.qol.busy = false;
-                if !this.residents.get(&id).is_some_and(|resident| resident.attachment_generation == generation) {
+                if this.residents.get(&id).is_none_or(|resident| resident.attachment_generation != generation) {
                     this.show_terminal_feedback("Terminal changed. Try again.", window, cx);
                     return;
                 }

@@ -141,9 +141,9 @@ impl Feed {
             .filter(|(release, _)| {
                 !release.url.is_empty()
                     && release.has_bounded_integrity_metadata()
-                    && !release
+                    && release
                         .minimum_system()
-                        .is_some_and(|minimum| minimum > system)
+                        .is_none_or(|minimum| minimum <= system)
             })
             .collect();
         releases.sort_by_key(|(_, version)| std::cmp::Reverse(*version));

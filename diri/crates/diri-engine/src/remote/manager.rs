@@ -213,10 +213,16 @@ impl RemoteManager {
     /// warm host needs one multiplexed `probe` round trip; a version change or
     /// failed probe falls through to the full platform-select/install path.
     pub fn ensure_helper(&self, host: &HostEntry) -> io::Result<InstalledHelper> {
-        if let Some(helper) = self.verify_cached_current(host)? {
-            return Ok(helper);
-        }
-        self.bootstrap_helper(host, false)
+        let started = Instant::now();
+        let result = match self.verify_cached_current(host) {
+            Ok(Some(helper)) => Ok((helper, "cached")),
+            Ok(None) => self
+                .bootstrap_helper(host, false)
+                .map(|helper| (helper, "bootstrap")),
+            Err(error) => Err(error),
+        };
+        record_helper_outcome(host, &result, started.elapsed(), false);
+        result.map(|(helper, _)| helper)
     }
 
     /// Forces the packaged bytes through upload, temporary verification and
@@ -231,7 +237,12 @@ impl RemoteManager {
             .lock()
             .expect("persistence cache")
             .remove(&persistence_key(host));
-        self.bootstrap_helper(host, true)
+        let started = Instant::now();
+        let result = self
+            .bootstrap_helper(host, true)
+            .map(|helper| (helper, "reinstall"));
+        record_helper_outcome(host, &result, started.elapsed(), true);
+        result.map(|(helper, _)| helper)
     }
 
     /// Closes finite-lived OpenSSH multiplexers after the owning Engine has
@@ -403,6 +414,8 @@ impl RemoteManager {
         let layout =
             RemoteInstallLayout::new(&artifact.build_id, nonce).map_err(io::Error::other)?;
         let upload = fs::read(&artifact.path)?;
+        let upload_started = Instant::now();
+        let upload_bytes = upload.len();
         let install: io::Result<HelperProbe> = (|| {
             self.executor
                 .run(
@@ -455,6 +468,14 @@ impl RemoteManager {
             }
             Ok(final_probe)
         })();
+        diri_telemetry::event!(
+            "remote.helper_upload",
+            host = diri_telemetry::id(&host.id),
+            target = platform.target.artifact_name(),
+            bytes = upload_bytes,
+            ok = install.is_ok(),
+            ms = upload_started.elapsed(),
+        );
         if install.is_err() {
             let _ = self.executor.run(
                 transport.cleanup_upload(&layout),
@@ -662,6 +683,11 @@ impl RemoteManager {
             self.probe_persistence_mode(helper, PersistenceProbeAction::BeginSupervisor)?
         };
         let capability = classify_persistence(native, supervised);
+        diri_telemetry::event!(
+            "remote.persistence",
+            host = diri_telemetry::id(&host.id),
+            capability = crate::telemetry::persistence_name(capability),
+        );
         self.persistence
             .lock()
             .expect("persistence cache")
@@ -941,6 +967,55 @@ impl RemoteManager {
     }
 }
 
+/// `remote.helper_ready` / `remote.helper_failed`: how a host's Helper was
+/// made ready (a cached build re-probed, a bootstrap, a forced reinstall).
+fn record_helper_outcome(
+    host: &HostEntry,
+    result: &io::Result<(InstalledHelper, &'static str)>,
+    elapsed: Duration,
+    forced: bool,
+) {
+    match result {
+        Ok((helper, path)) => diri_telemetry::event!(
+            "remote.helper_ready",
+            host = diri_telemetry::id(&host.id),
+            path = *path,
+            target = helper.target.artifact_name(),
+            protocol = helper.protocol.major,
+            ms = elapsed,
+        ),
+        Err(error) => diri_telemetry::incident!(
+            "remote.helper_failed",
+            host = diri_telemetry::id(&host.id),
+            forced = forced,
+            io = diri_telemetry::io_error(error),
+            error = diri_telemetry::text(without_remote_output(&error.to_string())),
+            ms = elapsed,
+        ),
+    }
+}
+
+/// `require_success` appends the remote stderr after the exit status; that
+/// is remote shell output (rc-file noise, banners) and stays out of
+/// telemetry.
+fn without_remote_output(message: &str) -> &str {
+    const MARKER: &str = " failed with ";
+    let Some(start) = message.find(MARKER) else {
+        return message;
+    };
+    // The status prints as `exit status: 255` or `signal: 9 (SIGKILL)`; the
+    // separator after it starts the remote output.
+    let status = start + MARKER.len();
+    let Some(inner) = message[status..].find(": ") else {
+        return message;
+    };
+    let after = status + inner + 2;
+    match message[after..].find(": ") {
+        Some(end) => &message[..after + end],
+        None => message,
+    }
+}
+
 fn validate_stop_inspection(
     build: &str,
     selector: &SessionSelector,
@@ -1135,6 +1210,18 @@ mod tests {
     use super::*;
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
+
+    #[test]
+    fn helper_failures_keep_the_phase_and_status_but_not_remote_output() {
+        assert_eq!(
+            without_remote_output("remote Helper upload failed with exit status: 255: motd"),
+            "remote Helper upload failed with exit status: 255"
+        );
+        assert_eq!(
+            without_remote_output("packaged Helper exceeds 64 MiB"),
+            "packaged Helper exceeds 64 MiB"
+        );
+    }
 
     #[test]
     fn json_line_parser_ignores_bounded_shell_noise() {

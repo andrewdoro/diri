@@ -54,7 +54,8 @@ fn main() {
     // PTY holder, one ssh child, and one client each cost several, so a
     // working fleet blows through that within a few dozen sessions and every
     // attach after that fails before its first frame.
-    match diri_engine::limits::raise_fd_limit() {
+    let fd_limit = diri_engine::limits::raise_fd_limit();
+    match &fd_limit {
         Some(limit) => eprintln!(
             "dirijord-rs: file descriptor limit soft={} hard={}",
             limit.soft,
@@ -70,7 +71,9 @@ fn main() {
     let user_shell = login_shell();
     // SAFETY: single-threaded startup, before any spawn.
     unsafe { std::env::set_var("SHELL", &user_shell) };
+    let capture_started = std::time::Instant::now();
     let captured_path = login_path(&user_shell);
+    let capture_elapsed = capture_started.elapsed();
     let path = diri_engine::local_path::search_path(captured_path.as_deref(), std::env::vars());
     // SAFETY: single-threaded startup, before any spawn.
     unsafe { std::env::set_var("PATH", &path) };
@@ -102,6 +105,30 @@ fn main() {
         }
     }
 
+    // Recording starts after the environment is final: `set_var` above must
+    // run before any thread exists, and the recorder starts one.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    start_telemetry(&home, &state_dir, &exe_dir);
+    diri_telemetry::event!(
+        "engine.start",
+        build = diri_telemetry::id(diri_engine::telemetry::build_id()),
+        fd_soft = fd_limit.as_ref().map(|limit| limit.soft),
+        exit_when_orphaned = std::env::args().any(|arg| arg == EXIT_WHEN_ORPHANED_FLAG),
+    );
+    diri_telemetry::event!(
+        "engine.login_path",
+        ok = captured_path.is_some(),
+        ms = capture_elapsed,
+        shell = Path::new(&user_shell)
+            .file_name()
+            .map(|name| diri_telemetry::id(name.to_string_lossy())),
+        entries = path.split(':').count(),
+    );
+
     // Singleton guard: hold an exclusive lock for our lifetime so a second
     // daemon (a relaunching app whose probe raced) exits instead of stealing
     // the live daemon's socket and orphaning its PTYs. The fd leaks on
@@ -120,15 +147,11 @@ fn main() {
     // SAFETY: flock on an owned fd; non-blocking probe.
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         eprintln!("dirijord-rs: another daemon owns the lock — exiting");
+        diri_telemetry::debug_event!("engine.duplicate_exit");
+        diri_telemetry::flush(std::time::Duration::from_millis(200));
         std::process::exit(0);
     }
     std::mem::forget(lock);
-
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.canonicalize().ok())
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."));
 
     let manifest_overrides = DirijorPaths::manifest_overrides_dir(&home);
     let (engine, failed) = load_manifests(&exe_dir, &manifest_overrides);
@@ -139,10 +162,17 @@ fn main() {
         );
     }
     let engine = Arc::new(engine);
+    diri_telemetry::event!(
+        "engine.catalog",
+        manifests = engine.ids().len(),
+        failed = failed.len(),
+    );
     if engine.ids().is_empty() {
         // An empty catalog fails silently downstream: every agent would spawn
         // as a bare shell. Refuse loudly instead.
         eprintln!("dirijord-rs: no agent manifests found — refusing to start");
+        diri_telemetry::incident!("engine.no_manifests", failed = failed.len());
+        diri_telemetry::flush(std::time::Duration::from_secs(1));
         std::process::exit(1);
     }
 
@@ -152,15 +182,25 @@ fn main() {
     };
 
     let mut registry = Registry::new(Arc::clone(&engine), DirijorPaths::state_file(&home));
+    let load_started = std::time::Instant::now();
     let state_loaded = match load_state(&mut registry) {
         Ok(count) => {
             eprintln!("dirijord-rs: loaded {count} session record(s)");
+            diri_telemetry::event!(
+                "engine.state_loaded",
+                records = count,
+                ms = load_started.elapsed(),
+            );
             true
         }
         // Quarantined: the records are safe in the `.corrupt` copy, so serving
         // from an empty table cannot overwrite them.
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
             eprintln!("dirijord-rs: state load: {error}");
+            diri_telemetry::incident!(
+                "engine.state_quarantined",
+                error = diri_telemetry::text(error.to_string()),
+            );
             false
         }
         // The file is still there but unreadable (EACCES, EIO, EMFILE...).
@@ -169,15 +209,29 @@ fn main() {
         // app reconnects and relaunches once the cause clears.
         Err(error) => {
             eprintln!("dirijord-rs: state load: {error}; refusing to start over unread state");
+            diri_telemetry::incident!(
+                "engine.state_unreadable",
+                io = diri_telemetry::io_error(&error),
+            );
+            diri_telemetry::flush(std::time::Duration::from_secs(1));
             std::process::exit(1);
         }
     };
+    let restore_started = std::time::Instant::now();
     let adopted = registry.restore(&holder, &logs_dir);
+    diri_telemetry::event!(
+        "engine.restore",
+        adopted = adopted.len(),
+        records = registry.record_count(),
+        live = registry.live_count(),
+        ms = restore_started.elapsed(),
+    );
     eprintln!(
         "dirijord-rs: adopted {} live holder session(s): {adopted:?}",
         adopted.len()
     );
     let registry = Arc::new(Mutex::new(registry));
+    register_gauges(&registry);
 
     // Stable CLI path under App Support (same contract as Swift dirijord):
     // hooks, Codex notify, and dirijor-mcp all reference this absolute path.
@@ -195,10 +249,29 @@ fn main() {
         server = server.with_remote(remote);
     }
     let server = Arc::new(server);
+    {
+        let server = Arc::clone(&server);
+        diri_telemetry::register_gauge("clients", move || {
+            diri_telemetry::Value::from(server.connection_count())
+        });
+    }
+    {
+        let attach = server.attach_hub();
+        diri_telemetry::register_gauge("attached", move || {
+            diri_telemetry::Value::from(attach.sink_count())
+        });
+    }
     let listener = match server.bind() {
         Ok(listener) => listener,
         Err(error) => {
             eprintln!("dirijord-rs: bind: {error}");
+            if error.kind() != std::io::ErrorKind::AddrInUse {
+                diri_telemetry::incident!(
+                    "engine.bind_failed",
+                    io = diri_telemetry::io_error(&error),
+                );
+                diri_telemetry::flush(std::time::Duration::from_secs(1));
+            }
             // A live socket means a daemon is already serving; that is the
             // singleton working, not a failure.
             std::process::exit(if error.kind() == std::io::ErrorKind::AddrInUse {
@@ -301,9 +374,77 @@ fn main() {
             Err(error) => {
                 let delay = diri_engine::limits::accept_retry_delay(&error);
                 eprintln!("dirijord-rs: accept: {error}; retrying in {delay:?}");
+                record_accept_error(&error);
                 std::thread::sleep(delay);
             }
         }
+    }
+}
+
+/// Starts the flight recorder, the uploader, and the crash-report watcher.
+/// Holders this Engine launches record into the same spool.
+#[cfg(unix)]
+fn start_telemetry(home: &Path, state_dir: &Path, exe_dir: &Path) {
+    if !diri_telemetry::init(diri_telemetry::Process::Engine, state_dir) {
+        return;
+    }
+    diri_telemetry::install_panic_hook();
+    diri_telemetry::start_health_sampler(std::time::Duration::from_secs(60));
+    diri_engine::telemetry::set_holder_state_dir(state_dir);
+    if let Some(endpoint) = diri_telemetry::upload::endpoint() {
+        let meta = diri_engine::telemetry::upload_meta(exe_dir);
+        if let Err(error) =
+            diri_telemetry::upload::Uploader::new(state_dir.to_path_buf(), endpoint, meta).spawn()
+        {
+            eprintln!("dirijord-rs: telemetry uploader did not start: {error}");
+        }
+    }
+    diri_engine::telemetry::crash_reports::spawn_watcher(
+        home.to_path_buf(),
+        state_dir.to_path_buf(),
+    );
+}
+
+/// Session counts for every `health` event. `try_lock`: a sampler that waits
+/// behind a wedged Registry would stop reporting exactly when it matters.
+#[cfg(unix)]
+fn register_gauges(registry: &Arc<Mutex<Registry>>) {
+    let registry = Arc::clone(registry);
+    diri_telemetry::register_gauge("sessions", move || match registry.try_lock() {
+        Ok(registry) => {
+            let counts = registry.telemetry_counts();
+            diri_telemetry::Value::Obj(vec![
+                ("records", counts.records.into()),
+                ("live", counts.live.into()),
+                ("held", counts.held.into()),
+                ("remote", counts.remote.into()),
+                ("hibernated", counts.hibernated.into()),
+                ("working", counts.working.into()),
+                ("needs_input", counts.needs_input.into()),
+            ])
+        }
+        Err(_) => diri_telemetry::Value::from("busy"),
+    });
+}
+
+/// Accept failures are retried forever; descriptor exhaustion is the one
+/// that strands every attached terminal, so it is an incident, once per
+/// burst rather than once per retry.
+#[cfg(unix)]
+fn record_accept_error(error: &std::io::Error) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_MS: AtomicU64 = AtomicU64::new(0);
+    diri_telemetry::count("engine.accept_errors", 1);
+    let now = diri_telemetry::now_ms();
+    if now.saturating_sub(LAST_MS.load(Ordering::Relaxed)) < 60_000 {
+        return;
+    }
+    LAST_MS.store(now, Ordering::Relaxed);
+    let exhausted = matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE));
+    if exhausted {
+        diri_telemetry::incident!("engine.accept_failed", io = diri_telemetry::io_error(error));
+    } else {
+        diri_telemetry::error_event!("engine.accept_failed", io = diri_telemetry::io_error(error));
     }
 }
 

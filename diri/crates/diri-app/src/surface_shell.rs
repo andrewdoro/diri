@@ -21,6 +21,7 @@ use crate::quick_open;
 use crate::settings::{HostDraft, SettingsNav, SettingsTab, theme};
 mod account_settings;
 mod import_settings;
+mod privacy_settings;
 use crate::sidebar::DraggedSidebarItem;
 use crate::store::{Prefs, SessionStore, StoreRuntime, WindowMaterial};
 use crate::updates::{UpdateCommand, UpdateHandle, UpdatePhase};
@@ -403,6 +404,7 @@ pub struct UtilitySurfaces {
     show_version_picker: bool,
     activity: String,
     diagnostics_report: Option<String>,
+    privacy: privacy_settings::PrivacyState,
     _update_changes: Task<()>,
     _store_changes: Task<()>,
 }
@@ -593,6 +595,7 @@ impl UtilitySurfaces {
             show_version_picker: false,
             activity: "Connected client · shared daemon remains untouched".to_owned(),
             diagnostics_report,
+            privacy: Default::default(),
             _update_changes: update_changes,
             _store_changes: store_changes,
         }
@@ -1565,6 +1568,7 @@ impl UtilitySurfaces {
         self.shortcut_editor = None;
         self.reload_include_editor();
         self.reload_roots_editor();
+        self.reload_privacy();
         if self.settings_tab == SettingsTab::Skills {
             self.refresh_skills(cx);
         }
@@ -1966,6 +1970,7 @@ impl UtilitySurfaces {
             return;
         }
         if self.handle_account_key(event, cx)
+            || self.handle_privacy_name_key(event, cx)
             || self.handle_include_key(event, cx)
             || self.handle_roots_key(event, cx)
             || self.handle_agent_path_key(event, cx)
@@ -2980,6 +2985,7 @@ impl UtilitySurfaces {
                                     MouseButton::Left,
                                     cx.listener(|this, _, window, cx| {
                                         this.roots_editor_active = true;
+                                        this.deactivate_privacy_name();
                                         this.include_editor_active = false;
                                         this.settings_search_active = false;
                                         this.focus.focus(window, cx);
@@ -3115,6 +3121,7 @@ impl UtilitySurfaces {
                                     MouseButton::Left,
                                     cx.listener(|this, _, window, cx| {
                                         this.include_editor_active = true;
+                                        this.deactivate_privacy_name();
                                         this.roots_editor_active = false;
                                         this.settings_search_active = false;
                                         this.focus.focus(window, cx);
@@ -3157,7 +3164,8 @@ impl UtilitySurfaces {
                                 )),
                         ),
                     colors,
-                )),
+                ))
+                .child(self.privacy_settings(cx)),
             colors,
         )
     }
@@ -6391,7 +6399,7 @@ fn settings_tab_matches(tab: SettingsTab, query: &str) -> bool {
     }
     let searchable = match tab {
         SettingsTab::General => {
-            "general default startup login sessions close confirmation sounds chimes support diagnostics quick open search roots choose folder finder picker updates diri-include include gitignore worktrees hidden folders import herdr migrate move tmux"
+            "general default startup login sessions close confirmation sounds chimes support diagnostics privacy telemetry share report name support id quick open search roots choose folder finder picker updates diri-include include gitignore worktrees hidden folders import herdr migrate move tmux"
         }
         SettingsTab::WhatsNew => {
             "what's new whats new release notes latest version changes features improvements"
@@ -7366,6 +7374,44 @@ mod tests {
         cx.update_window(window.into(), |_, window, _| window.refresh())
             .expect("refresh settings window");
         cx.run_until_parked();
+        // `DIRI_VISUAL_PRIVACY=on|off` seeds Settings > General > Privacy
+        // (a fixed Support ID and name, never the real files) and scrolls to
+        // it at the bottom of the page.
+        if let Ok(privacy) = std::env::var("DIRI_VISUAL_PRIVACY") {
+            cx.update_window(window.into(), |root, _, cx| {
+                let harness = root
+                    .downcast::<SettingsWorkbenchHarness>()
+                    .expect("harness");
+                let surfaces = harness.read(cx).surfaces.clone();
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_privacy_settings(crate::telemetry::PrivacySettings {
+                        config: diri_telemetry::Config {
+                            upload: privacy != "off",
+                            name: Some("alex".into()),
+                        },
+                        support_id: Some("D-7K3MQ9XA".into()),
+                        login_name: Some("alex".into()),
+                        folder: None,
+                    });
+                    cx.notify();
+                });
+            })
+            .expect("seed privacy settings");
+            cx.run_until_parked();
+            cx.update_window(window.into(), |root, window, cx| {
+                let harness = root
+                    .downcast::<SettingsWorkbenchHarness>()
+                    .expect("harness");
+                let surfaces = harness.read(cx).surfaces.clone();
+                surfaces.update(cx, |surfaces, _| {
+                    let bottom = surfaces.settings_scroll.max_offset().y;
+                    surfaces.settings_scroll.set_offset(point(px(0.0), -bottom));
+                });
+                window.refresh();
+            })
+            .expect("scroll to privacy settings");
+            cx.run_until_parked();
+        }
         let screenshot = cx
             .capture_screenshot(window.into())
             .expect("capture settings screenshot");

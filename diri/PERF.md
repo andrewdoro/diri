@@ -98,6 +98,27 @@ Wall times are dominated by GitHub and the loaded machine. A batch moves
 more bytes per request than one `gh pr view`, since bodies are included.
 PRs whose refresh phases differ, such as after a forced refresh of one
 session, go out as separate batches rather than being pulled forward.
+## Busy shells stop blocking on Holder facts (2026-09-28)
+
+`fleetbench` with four sessions draining colored logs showed the aggregate
+throughput of four sessions no higher than one (≈73 vs ≈79 MB/s). A 5 s stack
+sample of the Engine put 30% of every session pump's time inside
+`sample_held_pty_facts` → `HolderClient::stat`: after every output frame from a
+shell session, the pump made a synchronous round trip to the Holder manager,
+which every local session shares, to read the foreground process and the
+termios secret-input state.
+
+While output streams, the pump now samples at most every 100 ms. The settle
+path after output stops is unchanged and still samples at once, which is when
+a password prompt or a new foreground program becomes visible. Agent sessions
+already skipped most samples; plain terminals running builds or `cat` paid
+them all.
+
+After the change the same sample shows 0% of pump time in Holder stats. Wall
+throughput could not be compared reliably: the machine was shared with
+unrelated Rust builds (load average 34–77), and alternating runs swung more
+than the effect. Engine CPU per 4 × 32 MiB run went from 2.07–2.42 s to
+1.99–2.20 s. No throughput number is claimed.
 
 ## Sidebar rows re-render only when they change (2026-09-28)
 

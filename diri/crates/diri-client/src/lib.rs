@@ -6,6 +6,7 @@ pub mod connection;
 pub mod node_client;
 pub mod preview_set;
 pub mod state;
+mod telemetry;
 
 pub use attachment::{
     AttachmentChunks, AttachmentClosed, AttachmentError, SessionAttachment,
