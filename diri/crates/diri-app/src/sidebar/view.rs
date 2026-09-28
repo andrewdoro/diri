@@ -629,9 +629,6 @@ pub struct Sidebar {
     /// session, or of the keyboard cursor while the sidebar is focused and
     /// nothing is hovered.
     lineage_roles: HashMap<SessionId, LineageRole>,
-    /// The session whose relatives are marked, set only while it has any.
-    /// Every other session row dims so the family stands out.
-    lineage_focus: Option<SessionId>,
     focus_handle: FocusHandle,
     hover_task: Option<Task<()>>,
     hover_keystrokes: Option<gpui::Subscription>,
@@ -803,7 +800,6 @@ impl Sidebar {
             hues: Default::default(),
             shortcut_ranks: HashMap::new(),
             lineage_roles: HashMap::new(),
-            lineage_focus: None,
             focus_handle: cx.focus_handle(),
             hover_task: None,
             hover_keystrokes: None,
@@ -3434,7 +3430,6 @@ impl Sidebar {
             RowFill::Clear
         };
         let fill_color = fill.color(colors);
-        let dimmed = self.lineage_dims(&id);
 
         if self.ui.renaming.as_ref() == Some(&id) {
             return div()
@@ -3546,7 +3541,6 @@ impl Sidebar {
                 colors.primary.alpha(0.0)
             })
             .when(selected, |row| row.shadow(Glass::shadows(colors)))
-            .when(dimmed, |row| row.opacity(LINEAGE_DIM_OPACITY))
             .cursor_pointer()
             // This row lives inside the sidebar's tracked focus target. Keep a
             // plain pointer press from entering keyboard-navigation mode; the
@@ -4033,7 +4027,6 @@ impl Sidebar {
             .expect("session store lock poisoned")
             .selected_session_id()
             == Some(&id);
-        let dimmed = self.lineage_dims(&id);
         let fill_color = if selected {
             RowFill::Selected.color(colors)
         } else if hovered || focused {
@@ -4058,7 +4051,6 @@ impl Sidebar {
             .gap(px(8.0))
             .rounded(px(SIDEBAR_ROW_RADIUS))
             .bg(fill_color)
-            .when(dimmed, |row| row.opacity(LINEAGE_DIM_OPACITY))
             .border_1()
             .border_color(colors.primary.alpha(0.0))
             .cursor_pointer()
@@ -7664,13 +7656,6 @@ fn reveal_tracked_row(
 }
 
 impl Sidebar {
-    /// Whether a session row sits outside the marked family and fades back.
-    fn lineage_dims(&self, id: &SessionId) -> bool {
-        self.lineage_focus
-            .as_ref()
-            .is_some_and(|focus| focus != id && !self.lineage_roles.contains_key(id))
-    }
-
     /// The session whose direct parent and children are marked. The pointer
     /// wins while it rests on a row. A gap in the session list marks nothing,
     /// so leaving a row cannot fall through to the selected session. The
@@ -7848,7 +7833,6 @@ impl Render for Sidebar {
                 lineage_marks(&listed, target)
             })
             .unwrap_or_default();
-        self.lineage_focus = lineage_target.filter(|_| !lineage_roles.is_empty());
         self.lineage_roles = lineage_roles;
         retain_live_glyphs(&mut self.glyphs, &projection.display_order);
         self.end_lift_if_released(cx);
@@ -9063,9 +9047,6 @@ fn agent_picker_shortcut(
         fallback.to_owned()
     }
 }
-
-/// Opacity of session rows outside the marked family.
-const LINEAGE_DIM_OPACITY: f32 = 0.4;
 
 /// A quiet ↰ on the parent or ↳ on a child of the marked session.
 fn lineage_glyph(id: &SessionId, role: LineageRole, colors: SemanticColors) -> AnyElement {
@@ -11794,15 +11775,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn hovering_a_session_marks_its_family_and_dims_the_rest(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| {
+    fn hovering_a_session_marks_its_family(cx: &mut TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, cx| {
             let sidebar = cx.new(|cx| Sidebar::new(None, true, PreviewScenario::Typical, cx));
             SidebarPopoverHarness { sidebar }
         });
-        let sidebar = view.read_with(cx, |harness, _| harness.sidebar.clone());
-        let dims = |sidebar: &Entity<Sidebar>, id: &str, cx: &mut VisualTestContext| {
-            sidebar.read_with(cx, |sidebar, _| sidebar.lineage_dims(&SessionId::new(id)))
-        };
 
         // Typical tree: codex → cursor → spawned-deep.
         let cursor = cx
@@ -11825,26 +11802,14 @@ mod tests {
             cx.debug_bounds("session-lineage-parent:preview-cursor")
                 .is_none()
         );
-        assert!(
-            !dims(&sidebar, "preview-cursor", cx),
-            "the hovered row stays bright"
-        );
-        assert!(!dims(&sidebar, "preview-codex", cx));
-        assert!(!dims(&sidebar, "preview-spawned-deep", cx));
-        assert!(
-            dims(&sidebar, "preview-shell", cx),
-            "an unrelated row fades"
-        );
 
-        // A session with no relatives marks nothing and dims nothing.
+        // A session with no relatives marks nothing.
         let shell = cx.debug_bounds("SESSION_preview-shell").expect("shell row");
         cx.simulate_mouse_move(shell.center(), None, Modifiers::default());
         assert!(
             cx.debug_bounds("session-lineage-parent:preview-codex")
                 .is_none()
         );
-        assert!(!dims(&sidebar, "preview-codex", cx));
-        assert!(!dims(&sidebar, "preview-cursor", cx));
     }
 
     #[gpui::test]
