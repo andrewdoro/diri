@@ -578,6 +578,9 @@ struct RowRenderContext {
 
 pub struct TerminalPrepaintState {
     started_at: Option<Instant>,
+    /// This element's own prepaint cost, for the flight recorder; the frame
+    /// time in `RendererStats` also spans every element painted in between.
+    prepaint_time: Duration,
     background_quads: Vec<PaintQuad>,
     decoration_quads: Vec<PaintQuad>,
     sprite_shapes: Vec<AntialiasedShape>,
@@ -1887,6 +1890,7 @@ impl Element for TerminalElement {
             *mutex_lock(&self.shared.render_context) = None;
             return TerminalPrepaintState {
                 started_at: None,
+                prepaint_time: Duration::ZERO,
                 background_quads: Vec::new(),
                 decoration_quads: Vec::new(),
                 sprite_shapes: Vec::new(),
@@ -1912,6 +1916,7 @@ impl Element for TerminalElement {
             mutex_lock(&self.shared.find_highlights).current_bounds = None;
             return TerminalPrepaintState {
                 started_at: None,
+                prepaint_time: Duration::ZERO,
                 background_quads: Vec::new(),
                 decoration_quads: Vec::new(),
                 sprite_shapes: Vec::new(),
@@ -2335,6 +2340,7 @@ impl Element for TerminalElement {
 
         TerminalPrepaintState {
             started_at: Some(started_at),
+            prepaint_time: started_at.elapsed(),
             background_quads,
             decoration_quads,
             sprite_shapes,
@@ -2360,6 +2366,7 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let paint_started = Instant::now();
         if let (Some(focus_handle), Some(text_input)) = (&self.focus_handle, &self.text_input) {
             let (cursor_bounds, cell_width) = match (prepaint.metrics, prepaint.cursor.as_ref()) {
                 (Some(metrics), Some(cursor)) => (
@@ -2615,7 +2622,36 @@ impl Element for TerminalElement {
             stats.shape_cache_misses = stats
                 .shape_cache_misses
                 .saturating_add(prepaint.cache_misses);
+            drop(stats);
+            record_paint(
+                prepaint.prepaint_time + paint_started.elapsed(),
+                prepaint.cache_misses,
+                || {
+                    let buffer = read_lock(&self.buffer);
+                    (buffer.cols, buffer.rows)
+                },
+            );
         }
+    }
+}
+
+/// One terminal paint (prepaint + paint of this element) for the flight
+/// recorder: a histogram always, an event when it alone would blow a frame.
+fn record_paint(cost: Duration, cache_misses: u64, grid: impl FnOnce() -> (u16, u16)) {
+    const SLOW_PAINT: Duration = Duration::from_millis(50);
+    if !diri_telemetry::is_enabled() {
+        return;
+    }
+    diri_telemetry::observe("term.paint", cost);
+    if cost >= SLOW_PAINT {
+        let (cols, rows) = grid();
+        diri_telemetry::warn_event!(
+            "term.slow_paint",
+            ms = cost,
+            cols = cols,
+            rows = rows,
+            shape_misses = cache_misses
+        );
     }
 }
 
