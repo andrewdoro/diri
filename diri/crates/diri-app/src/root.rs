@@ -4,6 +4,8 @@ mod peek_profile;
 #[cfg(all(test, target_os = "macos"))]
 mod project_agent_tests;
 #[cfg(all(test, target_os = "macos"))]
+mod row_motion_frames;
+#[cfg(all(test, target_os = "macos"))]
 mod theme_fade_frames;
 #[cfg(all(test, target_os = "macos"))]
 mod title_settle_frames;
@@ -4414,9 +4416,12 @@ impl Render for RootView {
         // Before anything reads a color: this frame's sample of a theme fade.
         crate::app_theme::follow(&self.window_store.read().expect("store"), window, cx);
         // Also while the sidebar and strip are both hidden, so a title that
-        // changed out of sight does not crossfade when they come back.
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.observe_titles(cx));
+        // changed out of sight does not crossfade when they come back, and a
+        // session that came or went does not grow in or collapse out.
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.observe_titles(cx);
+            sidebar.observe_rows(cx);
+        });
         let colors = self.colors();
         self.sync_window_material(window);
         let launcher_open = self.launcher.read(cx).is_open();
