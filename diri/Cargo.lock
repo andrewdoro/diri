@@ -1666,6 +1666,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "diri-telemetry"
+version = "0.1.0"
+dependencies = [
+ "diri-proto",
+ "getrandom 0.4.3",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+]
+
+[[package]]
 name = "diri-term"
 version = "0.1.0"
 dependencies = [
