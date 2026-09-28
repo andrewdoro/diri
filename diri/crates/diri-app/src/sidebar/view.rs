@@ -5183,6 +5183,7 @@ impl Sidebar {
                                 },
                             );
                         this.ui.popover = None;
+                        cx.emit(SidebarEvent::FocusTerminal);
                         cx.notify();
                     }))
             })
@@ -6626,6 +6627,7 @@ impl Sidebar {
                                         },
                                     );
                                 this.ui.delegation_notice = None;
+                                cx.emit(SidebarEvent::FocusTerminal);
                                 cx.notify();
                             }))
                             .child("Create sibling"),

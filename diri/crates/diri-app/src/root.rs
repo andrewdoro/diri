@@ -667,12 +667,7 @@ impl RootView {
                 }
             }
             if matches!(event, SidebarEvent::FocusTerminal) {
-                if let Some(terminal) = this.active_terminal(cx) {
-                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
-                    this.sync_auxiliary_terminal(window, cx);
-                } else {
-                    window.focus(&this.focus, cx);
-                }
+                this.focus_active_terminal(window, cx);
             }
             if let SidebarEvent::Update(command) = event {
                 this.services.updates.send(command.clone());
@@ -2094,15 +2089,21 @@ impl RootView {
             // unavailability is visible and another Agent is one keystroke
             // away, instead of a shortcut that silently does nothing.
             CommandId::NewDefaultSession => {
-                if !self.spawn_default() {
+                if self.spawn_default() {
+                    self.focus_spawned_session(window, cx);
+                } else {
                     self.open_launcher(&OpenLauncher, window, cx);
                 }
             }
             CommandId::NewTerminal => {
-                self.spawn(None);
+                if self.spawn(None) {
+                    self.focus_spawned_session(window, cx);
+                }
             }
             CommandId::NewCodexSession => {
-                if !self.spawn(Some(AgentKind::CODEX)) {
+                if self.spawn(Some(AgentKind::CODEX)) {
+                    self.focus_spawned_session(window, cx);
+                } else {
                     self.open_launcher(&OpenLauncher, window, cx);
                 }
             }
@@ -2342,6 +2343,28 @@ impl RootView {
             }),
         }
         true
+    }
+
+    fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.active_terminal(cx) {
+            terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+            self.sync_auxiliary_terminal(window, cx);
+        } else {
+            window.focus(&self.focus, cx);
+        }
+    }
+
+    /// A session the user just spawned owns the keyboard. The pane also
+    /// refocuses when the spawn reply selects the new id, but until then
+    /// whatever held focus (sidebar, ⌘J pane, inspector) kept swallowing
+    /// keys, and an open launcher kept covering the pane.
+    fn focus_spawned_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.launcher.read(cx).is_open() {
+            self.launcher
+                .update(cx, |launcher, cx| launcher.dismiss(cx));
+        }
+        self.focus_active_terminal(window, cx);
+        cx.notify();
     }
 
     fn spawn_default(&self) -> bool {
@@ -5313,6 +5336,29 @@ mod tests {
         cx.update_window(window.into(), |_, window, _| window.remove_window())
             .unwrap();
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn shortcut_spawn_hands_focus_to_the_active_terminal(cx: &mut gpui::TestAppContext) {
+        let services = test_services();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            RootView::new(services, false, PreviewScenario::Empty, window, cx)
+        });
+        cx.simulate_resize(size(px(1_000.0), px(700.0)));
+        cx.run_until_parked();
+
+        root.update_in(cx, |root, window, cx| {
+            root.sidebar
+                .update(cx, |sidebar, cx| sidebar.focus(window, cx));
+            let terminal = root.active_terminal(cx).expect("active terminal");
+            assert!(!terminal.read(cx).is_focused(window));
+
+            root.run_command(CommandId::NewTerminal, window, cx);
+            assert!(
+                terminal.read(cx).is_focused(window),
+                "a new session must own the keyboard without waiting for the spawn reply"
+            );
+        });
     }
 
     #[gpui::test]
