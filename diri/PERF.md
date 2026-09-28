@@ -32,14 +32,14 @@ under headless Metal with five projects and four working sessions. It stands
 in cached blank rasters for brand marks, which production draws as CoreGraphics
 images on the main thread. One step is one notify plus the frame it causes.
 The numbers are release-build medians of 1,000 steps. Before and after ran as
-alternating binaries three times each, with load average ~20 from other
+alternating binaries three times each, with load average ~15–20 from other
 agents:
 
 | 51 sessions | Rows built, before → after | Step median, before → after |
 | --- | ---: | ---: |
-| Activity tick | 51 → 4 | 1.51–1.59 → 1.05–1.08 ms |
-| Store publication (nothing changed) | 51 → 0 | 1.52–1.59 → 0.99–1.00 ms |
-| Root-only frame (sidebar reused) | 0 → 0 | 0.39–0.40 → 0.42 ms |
+| Activity tick | 51 → 4 | 1.53–1.61 → 1.05–1.06 ms |
+| Store publication (nothing changed) | 51 → 0 | 1.53–1.56 → 0.99–1.01 ms |
+| Root-only frame (sidebar reused) | 0 → 0 | 0.39–0.40 → 0.41–0.42 ms |
 
 Subtracting the root-only frame, a tick's sidebar share falls from about
 1.15 ms to 0.65 ms. Per-row growth falls from about 20 µs to about 6 µs:
