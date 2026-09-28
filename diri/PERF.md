@@ -108,6 +108,78 @@ The 64 MiB log has lines like
 `ESC[3Nm[0000000123] building crate_N v0.N.0ESC[0m  Compiling module xxxx…\r\n`.
 The Remote Helper Build ID changes because it hashes vendored parser sources.
 Live Helpers keep their binaries.
+## Desktop memory attribution (2026-09-28)
+
+The installed 0.8.7 app (30 sessions, one window, 1.5 days up) measured a
+516 MB physical footprint, 942 MB peak. `footprint`/`vmmap` (read-only, the
+installed app was not restarted) split it as: owned unmapped (graphics)
+207 MB, Malloc Small 115 MB, IOSurface 83 MB, IOAccelerator (graphics) 60 MB,
+Malloc Large 25 MB. A new retained switch, `DIRI_GPU_DIAG=1`, prints the
+renderer's Metal allocation, instance-buffer pool, atlas pages, path targets,
+drawable pixels and frames every five seconds to stderr; its counters are
+relaxed atomics and no thread starts when it is off.
+
+What each part is:
+
+- **~194 MB owned unmapped (graphics) is the Metal driver, not diri.** A
+  standalone 45-line Swift Metal app on the same machine (macOS 27, M4 Max)
+  carries 193–202 MB whenever it has submitted a command buffer in the last
+  ~2 s: at 60, 8, 2 and 0.5 fps, with a 64×64 drawable, rendering offscreen
+  without presenting, and with `maxCommandBufferCount` 1. Two seconds after
+  the last submission the same memory is reported reclaimable. The only lever
+  is not submitting frames while nothing changes; in the dev app an idle
+  window drew 0–2 frames per 5 s and the pool became reclaimable. The
+  sidebar's 8 Hz Working tick is handled separately.
+- **IOSurface is the two window drawables** (2 × 41.7 MB at 4112×2580).
+  `MAXIMUM_DRAWABLE_COUNT` is already 2. Inherent to the window size.
+- **IOAccelerator held six 8 MiB instance buffers, five swapped out.** The
+  shared instance-buffer pool kept every buffer that had ever been in flight
+  at once, and its size only doubled. Fixed below.
+- **Heap.** A MallocStackLogging (lite) attribution of a dev app after a
+  30-session scenario found 44 MB live: GPUI scene vectors 12 MB, the usage
+  ledger 8.5 MB, text shaping 2.3 MB, then small items. The installed app's
+  scene vectors are 36 MB (two scenes at 65,536 sprites); that is the known
+  `Scene::clear` high-water in upstream GPUI (not vendored) and is not
+  changed here. `malloc_zone_pressure_relief` released 0 bytes, so no
+  allocator trimming was added. Atlas pages (one 1 MiB monochrome page) and
+  path targets (lazy, 0 in the scenario) were not factors, and the renderer
+  count returned to one after floating panels closed (no #425 regression).
+- **The 942 MB peak is the usage scan.** Each transcript tail was read into
+  one `Vec`; this machine has a 757 MB Codex rollout and lines up to 24 MB.
+
+Changes:
+
+- The instance-buffer pool keeps at most three idle buffers, halves a grown
+  size after 10 s in which every frame fit in a quarter of it (leaving 2×
+  headroom), and drops idle buffers and refits the size when a window stops
+  drawing (occlusion). Growth is unchanged: an overflowing scene is
+  re-encoded once with a doubled buffer.
+- Transcripts are streamed one complete line at a time. A partial trailing
+  line is neither consumed nor counted, as before. A read error after some
+  lines stops at the last complete line instead of discarding the file's
+  progress. A borrowed probe of the `type`/`payload.type` tags skips lines
+  that only mention a usage tag (compacted history) without building a
+  `serde_json::Value` of the whole line; anything the probe does not model
+  falls through to the unchanged full parse.
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Cold usage scan of this machine, 12.1 GB / 2,529 transcripts, peak RSS | 996–1,196 MiB | 209–222 MiB |
+| Same scan, wall time | 15.8–15.9 s | 12.4–12.6 s |
+| Dev app cold start + 30-session scripted scenario, peak footprint (one run each) | 1.5 GB | 643 MB |
+| Instance-pool probe after dense frames in four windows, IOAccelerator (graphics) | 26 MB (3 × 8 MiB kept) | 1.8 MB (none kept) |
+
+The scan comparison ran the old and new parser on the same APFS clone of
+`~/.claude/projects` and `~/.codex/sessions`; the written ledgers were
+byte-identical and the snapshots differed only in clock-derived fields. The
+dev-app scenario (fresh support dir, 26 idle sessions with 3,000 lines of
+history, 4 streaming, 60 session switches, palette/quick-open/history
+toggles, overview/peek, zoom) used a local, uncommitted harness; with a warm
+usage ledger its idle footprint was 186–203 MB on both builds, so no
+steady-state change is claimed for that scenario. The installed app's
+instance-buffer saving (up to five idle 8 MiB buffers) is inferred from its
+`vmmap`, not re-measured on a new install. No change reduces the driver pool
+or drawables.
 ## Hibernated agents outliving their sessions (2026-09-28)
 
 A `ps` of the author's Mac found 33 stopped processes parented to launchd,
@@ -316,6 +388,17 @@ all sessions (~1 ms here). Per-record serialization caching was not added.
 Reproduce from `diri/`:
 
 ```sh
+cargo test -p gpui_macos --lib instance_buffer_pool
+cargo test -p diri-usage --test scan_peak_memory
+cargo run --release -p diri-usage --example usage_scan_bench
+```
+
+`usage_scan_bench` reads the transcripts read-only into a private temporary
+ledger; point `HOME` at an APFS clone to compare builds on identical bytes.
+The pool row came from a local, uncommitted GPUI probe (60,000 2 px glyphs
+in a main window and three popups, then 25 s of near-empty frames, `vmmap`
+of IOAccelerator regions). It opens real windows, so it was not added to
+the repository; the unit tests pin the pool policy instead.
 cargo test -p diri-engine --test session_files
 cargo run --release -p diri-engine --example logsweep -- dry-run \
     "$HOME/Library/Application Support/Dirijor"
