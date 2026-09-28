@@ -24,7 +24,7 @@ export function header(install: string, extra: Record<string, unknown> = {}): Re
     type: "batch",
     install,
     support_id: supportId(install),
-    name: "julia",
+    name: "alex",
     app_version: "0.9.0",
     build: "abc123",
     channel: "stable",
