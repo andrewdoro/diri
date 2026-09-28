@@ -567,7 +567,9 @@ mod deadline_tests {
             )
         };
         assert_eq!(result, 0);
-        assert!(size as usize >= socket::OUTPUT_SOCKET_BUFFER, "{size}");
+        // Linux clamps to `rmem_max` (and reports double); either way it is
+        // far above the default the stream used to crawl through.
+        assert!(size as usize >= 64 << 10, "{size}");
         let mut run = Vec::new();
         let at = stream
             .next_run_into(Duration::from_secs(1), 1 << 20, &mut run)
