@@ -1674,6 +1674,14 @@ mod tests {
             session.git_branch = None;
             session.title = "Plan the autumn launch".into();
         }
+        // A JSON list of artifacts, as a daemon scan produced them, replaces
+        // the fixture's links, so two builds can render the same scan input.
+        if let Some(path) = std::env::var_os("DIRI_VISUAL_ARTIFACTS") {
+            session.artifacts =
+                Some(serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap());
+            session.pull_requests = None;
+            session.git_branch = Some("fix/email-serif".into());
+        }
         if std::env::var_os("DIRI_VISUAL_MERGED").is_some() {
             session.pull_requests.as_mut().unwrap()[0].state = "MERGED".into();
         }

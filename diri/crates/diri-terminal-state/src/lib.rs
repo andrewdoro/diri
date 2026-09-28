@@ -236,8 +236,9 @@ fn validate_grid(grid: &GridUpdate) -> Result<(), MirrorError> {
 pub struct LinkSource {
     /// Logical lines: soft-wrapped rows are joined without a newline.
     pub text: String,
-    /// OSC 8 targets in screen order, consecutive duplicates collapsed.
-    pub hyperlinks: Vec<String>,
+    /// OSC 8 targets in screen order, consecutive duplicates collapsed, each
+    /// with the byte offset in `text` where its link text starts.
+    pub hyperlinks: Vec<(usize, String)>,
     /// Terminal width, so the scanner can recognize a row an application
     /// filled and broke by hand.
     pub cols: usize,
@@ -1389,10 +1390,11 @@ impl HeadlessScreen {
                 }
                 if let Some(link) = cell.hyperlink() {
                     let uri = link.uri();
-                    if source.hyperlinks.last().is_none_or(|last| last != uri)
+                    if source.hyperlinks.last().is_none_or(|(_, last)| last != uri)
                         && uri.len() <= diri_proto::grid::MAX_LINK_URI_BYTES
                     {
-                        source.hyperlinks.push(uri.to_owned());
+                        let at = source.text.len() + row_text.len();
+                        source.hyperlinks.push((at, uri.to_owned()));
                     }
                 }
                 if cell
@@ -1998,7 +2000,10 @@ mod tests {
             source.text
         );
         assert!(source.text.contains("PR #9\n"));
-        assert_eq!(source.hyperlinks, ["https://github.com/o/r/pull/9"]);
+        assert_eq!(source.hyperlinks.len(), 1);
+        let (at, uri) = &source.hyperlinks[0];
+        assert_eq!(uri, "https://github.com/o/r/pull/9");
+        assert!(source.text[*at..].starts_with("PR #9"));
     }
 
     #[test]

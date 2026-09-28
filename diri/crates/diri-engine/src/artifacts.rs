@@ -58,11 +58,14 @@ pub fn scan(
     existing: &[SessionArtifact],
     now: DateMillis,
 ) -> Vec<SessionArtifact> {
-    let found = source
-        .hyperlinks
-        .iter()
-        .filter_map(|uri| classify(uri))
-        .chain(candidates(&source.text, source.cols).filter_map(|raw| classify(&raw)))
+    // Printed URLs and hyperlink targets interleave in screen order, which
+    // is the order the popover lists them in.
+    let mut found: Vec<(usize, String)> = candidates(&source.text, source.cols).collect();
+    found.extend(source.hyperlinks.iter().cloned());
+    found.sort_by_key(|(at, _)| *at);
+    let found = found
+        .into_iter()
+        .filter_map(|(_, raw)| classify(&raw))
         .map(|(kind, url)| SessionArtifact {
             kind,
             url,
@@ -152,7 +155,7 @@ fn url_char(c: char) -> bool {
 /// yet validated. `cols` (0 when unknown) lets a URL that fills a row to the
 /// terminal's edge continue on the next row, which is how applications that
 /// wrap text themselves break long URLs.
-fn candidates(text: &str, cols: usize) -> impl Iterator<Item = String> + '_ {
+fn candidates(text: &str, cols: usize) -> impl Iterator<Item = (usize, String)> + '_ {
     let lower = text.to_ascii_lowercase();
     let mut at = 0;
     std::iter::from_fn(move || {
@@ -161,7 +164,7 @@ fn candidates(text: &str, cols: usize) -> impl Iterator<Item = String> + '_ {
             let (raw, end) = extend(text, start, cols);
             at = end.max(start + 1);
             if let Some(url) = trim(&raw) {
-                return Some(url.to_owned());
+                return Some((start, url.to_owned()));
             }
         }
     })
@@ -416,7 +419,10 @@ mod tests {
         scan(
             &LinkSource {
                 text: text.to_owned(),
-                hyperlinks: hyperlinks.iter().map(|uri| (*uri).to_owned()).collect(),
+                hyperlinks: hyperlinks
+                    .iter()
+                    .map(|uri| (text.len(), (*uri).to_owned()))
+                    .collect(),
                 cols,
             },
             &[],
@@ -574,6 +580,32 @@ mod tests {
         );
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].kind, ArtifactKind::PullRequest);
+    }
+
+    #[test]
+    fn hyperlinks_and_printed_urls_keep_screen_order() {
+        let text = "first https://a.dev/1 then PR #9 then https://b.dev/2\n";
+        let found = scan(
+            &LinkSource {
+                text: text.to_owned(),
+                hyperlinks: vec![(
+                    text.find("PR #9").unwrap(),
+                    "https://github.com/o/r/pull/9".into(),
+                )],
+                cols: 80,
+            },
+            &[],
+            DateMillis(1.0),
+        );
+        let urls: Vec<_> = found.iter().map(|a| a.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "https://a.dev/1",
+                "https://github.com/o/r/pull/9",
+                "https://b.dev/2"
+            ]
+        );
     }
 
     #[test]
