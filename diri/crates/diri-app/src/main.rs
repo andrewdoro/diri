@@ -23,6 +23,7 @@ pub mod fuzzy;
 mod gesture_delivery;
 mod git_review;
 mod haptics;
+mod held_hints;
 mod herdr_import;
 pub mod history;
 mod icons;

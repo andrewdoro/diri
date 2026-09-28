@@ -642,6 +642,9 @@ pub struct Sidebar {
     update: UpdateState,
     /// When visibility last flipped, so a held ⌘B cannot outrun the slide.
     last_toggle: Option<Instant>,
+    /// Hold-⌘ hint opacity for the horizontal strip, which `RootView`
+    /// renders inline and so samples for it.
+    pub(crate) strip_held_hint: f32,
     preview: bool,
     /// Which face the New Agent menu shows. The remote directory listing
     /// itself lives in the Store so the daemon adapter can complete it
@@ -707,6 +710,8 @@ impl Sidebar {
         scenario: PreviewScenario,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.observe_global::<crate::held_hints::HeldHintsState>(|_, cx| cx.notify())
+            .detach();
         let (store, preview_effects) = if preview {
             let fixture = SidebarPreviewFixture::make(scenario);
             let (mut store, effects) = SessionStore::headless(fixture.prefs);
@@ -802,6 +807,7 @@ impl Sidebar {
             working_row_rendered: false,
             hues: Default::default(),
             shortcut_ranks: HashMap::new(),
+            strip_held_hint: 0.0,
             lineage_roles: HashMap::new(),
             lineage_focus: None,
             focus_handle: cx.focus_handle(),
@@ -1790,7 +1796,12 @@ impl Sidebar {
         .size_full()
     }
 
-    fn new_agent_row(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+    fn new_agent_row(
+        &self,
+        held_hint: f32,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let hovering = self.ui.hovered_control == Some("new-agent");
         let (agent_kind, host_label) = {
             let store = self.store.read().expect("session store lock poisoned");
@@ -1871,16 +1882,27 @@ impl Sidebar {
                                 .child(host),
                         )
                     })
-                    .child(
+                    .child(crate::held_hints::in_slot(
                         AgentLogo::new(agent_kind, 16.0, colors)
                             .badged(false)
-                            .inset(0.08),
-                    ),
+                            .inset(0.08)
+                            .into_any_element(),
+                        16.0,
+                        "held-hint:new-agent".to_owned(),
+                        crate::held_hints::label(CommandId::NewDefaultSession),
+                        held_hint,
+                        colors,
+                    )),
             )
             .into_any_element()
     }
 
-    fn top_bar(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+    fn top_bar(
+        &self,
+        held_hint: f32,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let in_settings = self.settings_nav.is_some();
         let primary_control = if in_settings { "settings" } else { "search" };
         let primary_hover = self.ui.hovered_control == Some(primary_control);
@@ -1906,20 +1928,26 @@ impl Sidebar {
                 }),
             )
         } else {
-            icon_button(
+            crate::held_hints::below(
+                icon_button(
+                    "sidebar-search",
+                    "Search sessions",
+                    "magnifyingglass",
+                    primary_hover,
+                    colors,
+                    cx.listener(|this, _, window, cx| {
+                        this.ui.popover = None;
+                        window.dispatch_action(Box::new(ToggleHistory), cx);
+                    }),
+                    cx.listener(|this, hovered: &bool, _, cx| {
+                        this.ui.hovered_control = hovered.then_some("search");
+                        cx.notify();
+                    }),
+                ),
                 "sidebar-search",
-                "Search sessions",
-                "magnifyingglass",
-                primary_hover,
+                crate::held_hints::label(CommandId::ToggleHistory),
+                held_hint,
                 colors,
-                cx.listener(|this, _, window, cx| {
-                    this.ui.popover = None;
-                    window.dispatch_action(Box::new(ToggleHistory), cx);
-                }),
-                cx.listener(|this, hovered: &bool, _, cx| {
-                    this.ui.hovered_control = hovered.then_some("search");
-                    cx.notify();
-                }),
             )
         };
         div()
@@ -1953,21 +1981,27 @@ impl Sidebar {
                 ))
             })
             .child(primary_button)
-            .child(icon_button(
+            .child(crate::held_hints::below(
+                icon_button(
+                    "sidebar-toggle",
+                    if self.peek_open {
+                        "Pin sidebar open"
+                    } else {
+                        "Hide sidebar"
+                    },
+                    "sidebar.left",
+                    toggle_hover,
+                    colors,
+                    cx.listener(|this, _, _, cx| this.toggle(cx)),
+                    cx.listener(|this, hovered: &bool, _, cx| {
+                        this.ui.hovered_control = hovered.then_some("sidebar-toggle");
+                        cx.notify();
+                    }),
+                ),
                 "sidebar-toggle",
-                if self.peek_open {
-                    "Pin sidebar open"
-                } else {
-                    "Hide sidebar"
-                },
-                "sidebar.left",
-                toggle_hover,
+                crate::held_hints::label(CommandId::ToggleSidebar),
+                held_hint,
                 colors,
-                cx.listener(|this, _, _, cx| this.toggle(cx)),
-                cx.listener(|this, hovered: &bool, _, cx| {
-                    this.ui.hovered_control = hovered.then_some("sidebar-toggle");
-                    cx.notify();
-                }),
             ))
             .into_any_element()
     }
@@ -3389,6 +3423,7 @@ impl Sidebar {
             && self.ui.renaming.is_none()
             && self.ui.focus_cursor.as_ref() == Some(&id);
         let lineage = self.lineage_roles.get(&id).copied();
+        let held_hint = crate::held_hints::opacity(window, cx);
         let archived = session.is_archived();
         let hibernated = session.hibernation.is_some();
         let loading = is_loading(session, migrating);
@@ -3797,7 +3832,9 @@ impl Sidebar {
             // The hint belongs to the keyboard cursor. Pointer selection keeps
             // the trailing edge quiet (or shows the hover-only close control).
             .when_some(
-                (!hovered && focused).then_some(shortcut).flatten(),
+                (!hovered && focused && held_hint == 0.0)
+                    .then_some(shortcut)
+                    .flatten(),
                 |element, index| {
                     element.child(
                         div()
@@ -3811,16 +3848,23 @@ impl Sidebar {
             );
 
         let row = row.when(!hovered, |row| {
-            row.child(
-                div()
-                    .debug_selector({
-                        let id = id.clone();
-                        move || format!("session-agent-logo:{}", id.0)
-                    })
-                    .size(px(16.0))
-                    .flex_none()
-                    .child(self.status_glyph(session, migrating, colors, window, cx)),
-            )
+            let logo = div()
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("session-agent-logo:{}", id.0)
+                })
+                .size(px(16.0))
+                .flex_none()
+                .child(self.status_glyph(session, migrating, colors, window, cx))
+                .into_any_element();
+            row.child(crate::held_hints::in_slot(
+                logo,
+                16.0,
+                format!("held-hint:session:{}", id.0),
+                shortcut.and_then(crate::held_hints::session_label),
+                held_hint,
+                colors,
+            ))
         });
 
         // A selection fill arrives on ROW_SELECT instead of switching between
@@ -7953,7 +7997,7 @@ impl Render for Sidebar {
                     cx.notify();
                 }
             }))
-            .child(self.top_bar(colors, cx));
+            .child(self.top_bar(crate::held_hints::opacity(window, cx), colors, cx));
         if let Some(nav) = self.settings_nav.clone() {
             root = root.child(self.settings_body(&nav, colors, cx));
         } else {
@@ -7963,7 +8007,7 @@ impl Render for Sidebar {
                 .min_h(px(0.0))
                 .flex()
                 .flex_col()
-                .child(self.new_agent_row(colors, cx));
+                .child(self.new_agent_row(crate::held_hints::opacity(window, cx), colors, cx));
             if projection.projects.is_empty() && !self.filter_query.text().trim().is_empty() {
                 body = body.child(
                     div()
