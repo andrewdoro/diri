@@ -2,7 +2,7 @@
 //!
 //! Every Diri process records typed, privacy-bounded events to a local
 //! spool; the Engine uploads the spool in batches to the telemetry Worker so
-//! a bug report ("look at julia") can be investigated from the timeline.
+//! a bug report ("look at alex") can be investigated from the timeline.
 //! See `diri/TELEMETRY.md` for the event catalog and wire contract.
 //!
 //! ```ignore
@@ -112,7 +112,10 @@ pub fn init(process: Process, state_dir: &Path) -> bool {
         "process.start",
         Severity::Info,
         vec![
-            ("version", Value::from(id(env!("CARGO_PKG_VERSION")))),
+            (
+                "recorder_version",
+                Value::from(id(env!("CARGO_PKG_VERSION"))),
+            ),
             ("os", Value::from(std::env::consts::OS)),
             ("arch", Value::from(std::env::consts::ARCH)),
             ("debug_build", Value::from(cfg!(debug_assertions))),

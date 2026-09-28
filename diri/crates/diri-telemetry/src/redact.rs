@@ -83,9 +83,9 @@ mod tests {
     #[test]
     fn scrubs_home_user_email_and_tokens() {
         let out = scrub_with(
-            "open /Users/julia/fun/app failed for julia (julia@example.com) key sk-ant-api03-AbCdEf1234567890XyZ\n",
-            Some("/Users/julia"),
-            Some("julia"),
+            "open /Users/alex/fun/app failed for alex (alex@example.com) key sk-ant-api03-AbCdEf1234567890XyZ\n",
+            Some("/Users/alex"),
+            Some("alex"),
         );
         assert_eq!(
             out,

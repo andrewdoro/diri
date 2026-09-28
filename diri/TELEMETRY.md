@@ -1,6 +1,6 @@
 # Telemetry
 
-Diri records what its processes do so a bug report ("julia's tab dropped to
+Diri records what its processes do so a bug report ("a teammate's tab dropped to
 zsh last night") can be investigated from a timeline instead of a
 reproduction. This file is the contract between the recorder
 (`crates/diri-telemetry`), the instrumentation in each process, the ingest
@@ -10,7 +10,7 @@ Worker (`telemetry/worker`) and the investigation CLI (`telemetry/cli`).
 
 - **Local first.** Every process records to a spool on disk. Uploading is a
   separate step the Engine performs, and the user can turn it off in
-  Settings > Privacy. Recording itself costs a channel send per event.
+  Settings > General > Privacy. Recording itself costs a channel send per event.
 - **No content, by type.** Fields are numbers, booleans, `&'static str`
   literals, `Id`s (`[A-Za-z0-9_.:-]{1,96}`) or scrubbed `Text`. There is no
   way to record terminal output, prompts, clipboard or pasted contents, file
@@ -43,7 +43,7 @@ Under the platform state dir (`~/Library/Application Support/Dirijor`):
 The spool is capped at 64 MiB; oldest sealed files go first.
 
 The **Support ID** (`D-XXXXXXXX`, Crockford base32 of the first 40 bits of
-the install UUID) is shown in Settings > Privacy and About. The **name**
+the install UUID) is shown in Settings > General > Privacy. The **name**
 defaults to the macOS login name; the user can edit or clear it.
 
 ## Record format
@@ -68,7 +68,7 @@ One JSON object per line:
 
 | kind | sev | fields |
 |---|---|---|
-| `process.start` | info | `version, os, arch, debug_build` |
+| `process.start` | info | `recorder_version, os, arch, debug_build` (the app/Engine version is on `app.launch` / `engine.start` and every batch header) |
 | `health` | info | `uptime_s, rss_mb, footprint_mb, cpu_pct, cpu_ms, threads, fds, fd_limit` + registered gauges |
 | `metrics` | info | `window_s, counters{name:n}, timings{name:{n,avg,p50,p90,p99,max}}` |
 | `panic` | incident | `message, location, thread, signature, frames[]` |
@@ -286,7 +286,7 @@ clipboard, paste, keystroke or terminal content is ever recorded.
 
 The Engine's uploader wakes once a minute. If `spool/urgent` exists, or ten
 minutes have passed, it uploads. It sends every spool file's new complete
-lines (across app, Engine and Holders) as gzip NDJSON, at most 4 MiB raw per
+lines (across app, Engine and Holders) as gzip NDJSON, at most 1 MiB raw per
 request:
 
 ```
@@ -299,7 +299,7 @@ X-Diri-Install: <install uuid>
 The first line is the batch header:
 
 ```json
-{"v":1,"type":"batch","install":"<uuid>","support_id":"D-7K3MQ9XA","name":"julia","app_version":"0.9.0","build":"<sha>","channel":"stable","os":"macos","os_version":"27.0","arch":"aarch64","sent_at":1790581979447,"lines":1234}
+{"v":1,"type":"batch","install":"<uuid>","support_id":"D-7K3MQ9XA","name":"alex","app_version":"0.9.0","build":"<sha>","channel":"stable","os":"macos","os_version":"27.0","arch":"aarch64","sent_at":1790581979447,"lines":1234}
 ```
 
 The rest are records as above. Responses: `2xx` accepted; `400/413/422`
@@ -322,6 +322,19 @@ Cloudflare Worker + R2 + D1.
   version, time) and group them; list batches in a time range; fetch a batch
   body; list sessions of an install or find the install that owns a session
   id or conversation UUID.
+
+  Routes:
+
+  | Route | Returns |
+  |---|---|
+  | `GET /v1/admin/installs?q=` | installs matching a name substring, Support ID (`D-…`, prefix ok) or install UUID prefix; no `q` lists the most recent |
+  | `GET /v1/admin/installs/<uuid>` | install row, batch totals, incident counts by severity, session count, versions seen |
+  | `GET /v1/admin/incidents?install=&kind=&sev=&version=&session=&conv=&signature=&since=&until=&limit=` | incident rows with the install's `name` and `support_id`, newest first; `kind` accepts `*`/`?` globs |
+  | `GET /v1/admin/incidents/summary?…same filters` | groups by signature: `count`, `installs` affected, `first_t`, `last_t`, `versions` |
+  | `GET /v1/admin/batches?install=&since=&until=` | batches whose record time range overlaps the window, oldest first |
+  | `GET /v1/admin/batch?key=<r2 key>` | the stored gzip body, streamed as `application/gzip` (the caller gunzips) |
+  | `GET /v1/admin/sessions?install=` | `(session, conv)` spans with agent, newest first |
+  | `GET /v1/admin/find?id=<session id or conversation uuid>` | matching spans joined with the owning install's name and Support ID |
 - **Retention**: R2 objects and D1 rows older than 30 days are deleted by a
   daily cron.
 
@@ -331,12 +344,12 @@ Cloudflare Worker + R2 + D1.
 reads a local spool with `--local` for the developer's own machine:
 
 ```
-diri-debug who julia                        # installs matching a name / support id
-diri-debug incidents [julia] --since 7d     # recent incidents
+diri-debug who alex                        # installs matching a name / support id
+diri-debug incidents [alex] --since 7d     # recent incidents
 diri-debug top --since 7d --version 0.9.0   # grouped incidents across installs
-diri-debug timeline julia --around "2026-09-27 23:40" --window 20m [--session s_…] [--kind 'session.*']
-diri-debug health julia --since 24h         # memory / fds / cpu / frame-time trends per process
-diri-debug sessions julia                   # sessions, agents, conversations
+diri-debug timeline alex --around "2026-09-27 23:40" --window 20m [--session s_…] [--kind 'session.*']
+diri-debug health alex --since 24h         # memory / fds / cpu / frame-time trends per process
+diri-debug sessions alex                   # sessions, agents, conversations
 diri-debug find <session id | conversation uuid>
 diri-debug local [--since 1h] [...]         # same views over ~/Library/Application Support/Dirijor/telemetry/spool
 ```

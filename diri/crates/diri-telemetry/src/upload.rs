@@ -2,7 +2,7 @@
 //!
 //! Only the Engine runs the uploader. It reads every process's spool files
 //! (app, Engine, Holders) from the byte offset it last acknowledged, sends
-//! complete lines as one gzip NDJSON request per ≤4 MiB, and deletes files
+//! complete lines as one gzip NDJSON request per ≤1 MiB, and deletes files
 //! once they are fully uploaded and no longer written. `gzip` and `curl` are
 //! the system binaries, as in `diri-updater`, so no HTTP or compression stack
 //! is linked in.
@@ -21,7 +21,8 @@ use crate::spool::{self, SpoolName};
 /// Set after the Worker is deployed; `DIRI_TELEMETRY_ENDPOINT` at build time
 /// overrides it, at run time overrides both (`off` disables uploading).
 pub const DEFAULT_ENDPOINT: Option<&str> = None;
-pub const BATCH_RAW_BYTES: usize = 4 * 1024 * 1024;
+/// Kept small so one batch fits the Worker's CPU budget on the free plan.
+pub const BATCH_RAW_BYTES: usize = 1024 * 1024;
 pub const ROUTINE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 pub const POLL_INTERVAL: Duration = Duration::from_secs(60);
 const OFFSETS_FILE: &str = "offsets.json";

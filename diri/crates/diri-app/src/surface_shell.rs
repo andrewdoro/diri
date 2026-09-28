@@ -7387,10 +7387,10 @@ mod tests {
                     surfaces.set_privacy_settings(crate::telemetry::PrivacySettings {
                         config: diri_telemetry::Config {
                             upload: privacy != "off",
-                            name: Some("julia".into()),
+                            name: Some("alex".into()),
                         },
                         support_id: Some("D-7K3MQ9XA".into()),
-                        login_name: Some("julia".into()),
+                        login_name: Some("alex".into()),
                         folder: None,
                     });
                     cx.notify();

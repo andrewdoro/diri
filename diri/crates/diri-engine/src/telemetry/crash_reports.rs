@@ -311,7 +311,7 @@ mod tests {
     const FIXTURE: &str = r#"{"app_name":"diri","timestamp":"2026-09-27 23:40:01.00 +0300","app_version":"0.8.8","slice_uuid":"b864fa4d-dd06-3137-a1af-4ff6634aa247","build_version":"1","bug_type":"309","os_version":"macOS 27.0 (26A428)","incident_id":"E9127141-B5BE-4A5C-883F-097585299623","name":"diri"}
 {
   "procName" : "diri",
-  "procPath" : "/Users/julia/Applications/diri.app/Contents/MacOS/diri",
+  "procPath" : "/Users/alex/Applications/diri.app/Contents/MacOS/diri",
   "pid" : 812,
   "exception" : {"codes":"0x1, 0x10","type":"EXC_BAD_ACCESS","signal":"SIGSEGV","subtype":"KERN_INVALID_ADDRESS at 0x0000000000000010"},
   "termination" : {"flags":0,"code":11,"namespace":"SIGNAL","indicator":"Segmentation fault: 11","byProc":"exc handler","byPid":812},
@@ -325,7 +325,7 @@ mod tests {
     ]}
   ],
   "usedImages" : [
-    {"name": "diri", "path": "/Users/julia/Applications/diri.app/Contents/MacOS/diri", "base": 4294967296},
+    {"name": "diri", "path": "/Users/alex/Applications/diri.app/Contents/MacOS/diri", "base": 4294967296},
     {"name": "libobjc.A.dylib", "path": "/usr/lib/libobjc.A.dylib", "base": 1}
   ]
 }"#;
@@ -358,7 +358,7 @@ mod tests {
         );
         let fields = serde_json::to_string(&Value::Obj(report.fields(1))).unwrap();
         assert!(
-            !fields.contains("julia"),
+            !fields.contains("alex"),
             "no paths leave the report: {fields}"
         );
     }

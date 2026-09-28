@@ -200,7 +200,7 @@ mod tests {
             "0a40e747-fa0c-4e9a-b755-c195ab079cda"
         );
         assert_eq!(id("session.spawn").as_str(), "session.spawn");
-        assert_eq!(id("/Users/julia/x").as_str(), "!invalid");
+        assert_eq!(id("/Users/alex/x").as_str(), "!invalid");
         assert_eq!(id("hello world").as_str(), "!invalid");
         assert_eq!(id("").as_str(), "!invalid");
         assert_eq!(id("a".repeat(97)).as_str(), "!invalid");
@@ -208,10 +208,10 @@ mod tests {
 
     #[test]
     fn path_hash_is_stable_and_opaque() {
-        let a = path_hash("/Users/julia/fun/anara");
-        assert_eq!(a, path_hash("/Users/julia/fun/anara"));
-        assert_ne!(a, path_hash("/Users/julia/fun/other"));
-        assert!(!a.as_str().contains("julia"));
+        let a = path_hash("/Users/alex/fun/anara");
+        assert_eq!(a, path_hash("/Users/alex/fun/anara"));
+        assert_ne!(a, path_hash("/Users/alex/fun/other"));
+        assert!(!a.as_str().contains("alex"));
     }
 
     #[test]

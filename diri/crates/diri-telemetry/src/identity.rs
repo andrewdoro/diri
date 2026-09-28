@@ -43,8 +43,16 @@ impl Identity {
             ),
             created_ms: crate::now_ms(),
         };
-        write_private(&path, &serde_json::to_vec_pretty(&identity)?)?;
-        Ok(identity)
+        // The app and the Engine may both get here first. Publish with an
+        // exclusive link so exactly one id wins, and adopt the winner's.
+        match publish_exclusive(&path, &serde_json::to_vec_pretty(&identity)?) {
+            Ok(()) => Ok(identity),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let bytes = std::fs::read(&path)?;
+                serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// The short code shown in Settings > About and quoted in bug reports:
@@ -161,7 +169,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let temp = dir.join(format!(
         ".{}.{}.tmp",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
-        std::process::id()
+        unique_suffix()
     ));
     {
         let mut options = std::fs::OpenOptions::new();
@@ -172,6 +180,23 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::io::Write::write_all(&mut file, bytes)?;
     }
     std::fs::rename(&temp, path)
+}
+
+/// Writes `bytes` to a private temp file and hard-links it to `path`,
+/// failing with `AlreadyExists` instead of replacing an existing file.
+fn publish_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temp = path.with_extension(format!("{}.new", unique_suffix()));
+    write_private(&temp, bytes)?;
+    let linked = std::fs::hard_link(&temp, path);
+    let _ = std::fs::remove_file(&temp);
+    linked
+}
+
+/// Unique across processes (pid) and threads (counter).
+fn unique_suffix() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{n}", std::process::id())
 }
 
 pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
@@ -195,6 +220,21 @@ mod tests {
         assert_eq!(first.install_id.len(), 36);
         assert!(first.support_id().starts_with("D-"));
         assert_eq!(first.support_id().len(), 10);
+    }
+
+    #[test]
+    fn concurrent_creators_agree_on_one_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids: Vec<String> = (0..8)
+            .map(|_| {
+                let path = dir.path().to_path_buf();
+                std::thread::spawn(move || Identity::load_or_create(&path).unwrap().install_id)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
     }
 
     #[test]

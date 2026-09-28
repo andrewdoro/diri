@@ -276,6 +276,6 @@ mod tests {
         assert_eq!(first, "rpc.session.send_text");
         assert!(std::ptr::eq(first, method_metric("session.send_text")));
         assert_eq!(method_metric("not a method"), "rpc.other");
-        assert_eq!(method_metric("/Users/julia"), "rpc.other");
+        assert_eq!(method_metric("/Users/alex"), "rpc.other");
     }
 }
