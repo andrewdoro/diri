@@ -1242,8 +1242,8 @@ It is solid while in use, and only a focused, visible cursor that has been idle
 for 500 ms blinks: ten eased 1.2 s cycles, then it rests solid and schedules
 nothing, so a terminal left alone still paints zero frames. Each hold sleeps
 on one one-shot wake aimed at the fade that follows it; the fades themselves
-ride the display link (since 2026-09-28; they were 33 ms steps before, about
-24 fps once a 120 Hz vsync rounded them). At 120 Hz that is 52 frames per cycle,
+ride the display link (since 2026-09-28; they were 33 ms steps before, an
+estimated 24–30 fps once vsync rounded them). At 120 Hz that is 52 frames per cycle,
 521 in total over the 12 s after the last activity, against 121 for the
 stepped fades (`an_idle_cursor_paints_a_bounded_number_of_frames_then_none`).
 A glide is 80 ms of display-rate frames after a keystroke that was going to
