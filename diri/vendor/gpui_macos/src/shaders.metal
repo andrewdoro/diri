@@ -28,6 +28,14 @@ float pick_corner_radius(float2 center_to_point, Corners_ScaledPixels corner_rad
 float quad_sdf(float2 point, Bounds_ScaledPixels bounds,
                Corners_ScaledPixels corner_radii);
 float quad_sdf_impl(float2 center_to_point, float corner_radius);
+struct ContinuousCorner {
+  float radius;
+  float extent;
+  float exponent;
+};
+ContinuousCorner continuous_corner(float corner_radius, float2 half_size);
+float continuous_corner_sdf(float2 corner_center_to_point, ContinuousCorner corner);
+float quarter_superellipse_sdf(float2 point, float2 radii, float exponent);
 float gaussian(float x, float sigma);
 float2 erf(float2 x);
 float blur_along_x(float x, float y, float sigma, float corner,
@@ -130,6 +138,11 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
   // Radius of the nearest corner
   float corner_radius = pick_corner_radius(center_to_point, quad.corner_radii);
 
+  // Diri: the corner is drawn as a continuous-curvature curve that starts
+  // `corner.extent` from the corner rather than `corner_radius` (see
+  // `continuous_corner`).
+  ContinuousCorner corner = continuous_corner(corner_radius, half_size);
+
   // Width of the nearest borders
   float2 border = float2(
     center_to_point.x < 0.0 ? quad.border_widths.left : quad.border_widths.right,
@@ -146,9 +159,10 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
   // the point into the bottom right quadrant. Both components are <= 0.
   float2 corner_to_point = fabs(center_to_point) - half_size;
 
-  // Vector from the point to the center of the rounded corner's circle, also
-  // mirrored into bottom right quadrant.
-  float2 corner_center_to_point = corner_to_point + corner_radius;
+  // Vector from the point to the center of the rounded corner's curve (the
+  // inner corner of the quad inset by the curve's extent), also mirrored into
+  // the bottom right quadrant.
+  float2 corner_center_to_point = corner_to_point + corner.extent;
 
   // Whether the nearest point on the border is rounded
   bool is_near_rounded_corner =
@@ -179,7 +193,7 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
   }
 
   // Signed distance of the point to the outside edge of the quad's border
-  float outer_sdf = quad_sdf_impl(corner_center_to_point, corner_radius);
+  float outer_sdf = continuous_corner_sdf(corner_center_to_point, corner);
 
   // Approximate signed distance of the point to the inside edge of the quad's
   // border. It is negative outside this edge (within the border), and
@@ -198,11 +212,18 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
     // Fast path for points that must be outside the inner edge
     inner_sdf = -1.0;
   } else if (reduced_border.x == reduced_border.y) {
-    // Fast path for circular inner edge.
+    // Fast path for a uniform border: the inner edge is the outer curve's
+    // parallel curve, like a stroked native path.
     inner_sdf = -(outer_sdf + reduced_border.x);
-  } else {
+  } else if (corner.extent <= corner.radius) {
     float2 ellipse_radii = max(float2(0.0), float2(corner_radius) - reduced_border);
     inner_sdf = quarter_ellipse_sdf(corner_center_to_point, ellipse_radii);
+  } else {
+    // Uneven borders: the inner edge is the same superellipse squashed to the
+    // remaining extent on each axis, as upstream squashes the circle.
+    float2 superellipse_radii = max(float2(0.0), float2(corner.extent) - reduced_border);
+    inner_sdf = quarter_superellipse_sdf(corner_center_to_point, superellipse_radii,
+                                         corner.exponent);
   }
 
   // Negative when inside the border
@@ -240,11 +261,19 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
       // Dividing this by the border width gives the dash velocity
       const float dv_numerator = 1.0 / dash_period_per_width;
 
+      // Dash positions keep upstream's circular-corner parametrisation; only
+      // the coverage (outer/inner SDF above) follows the continuous corner.
+      // Dashes still land on the curve, their spacing is just approximate.
+      float2 circular_center_to_point = corner_to_point + corner_radius;
+      bool is_near_circular_corner =
+        circular_center_to_point.x >= 0.0 &&
+        circular_center_to_point.y >= 0.0;
+
       if (unrounded) {
         // When corners aren't rounded, the dashes are separately laid
         // out on each straight line, rather than around the whole
         // perimeter. This way each line starts and ends with a dash.
-        bool is_horizontal = corner_center_to_point.x < corner_center_to_point.y;
+        bool is_horizontal = circular_center_to_point.x < circular_center_to_point.y;
 
         // Choosing the right border width for dashed borders.
         // TODO: A better solution exists taking a look at the whole file.
@@ -306,8 +335,8 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
         float upto_tl = upto_l + s_l;
         max_t = upto_tl + c_tl;
 
-        if (is_near_rounded_corner) {
-          float radians = atan2(corner_center_to_point.y, corner_center_to_point.x);
+        if (is_near_circular_corner) {
+          float radians = atan2(circular_center_to_point.y, circular_center_to_point.x);
           float corner_t = radians * corner_radius;
 
           if (center_to_point.x >= 0.0) {
@@ -340,7 +369,7 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
           }
         } else {
           // Straight borders
-          bool is_horizontal = corner_center_to_point.x < corner_center_to_point.y;
+          bool is_horizontal = circular_center_to_point.x < circular_center_to_point.y;
           if (is_horizontal) {
             if (center_to_point.y < 0.0) {
               dash_velocity = dv_t;
@@ -1066,9 +1095,10 @@ float quad_sdf(float2 point, Bounds_ScaledPixels bounds,
     float2 center = float2(bounds.origin.x, bounds.origin.y) + half_size;
     float2 center_to_point = point - center;
     float corner_radius = pick_corner_radius(center_to_point, corner_radii);
+    ContinuousCorner corner = continuous_corner(corner_radius, half_size);
     float2 corner_to_point = fabs(center_to_point) - half_size;
-    float2 corner_center_to_point = corner_to_point + corner_radius;
-    return quad_sdf_impl(corner_center_to_point, corner_radius);
+    float2 corner_center_to_point = corner_to_point + corner.extent;
+    return continuous_corner_sdf(corner_center_to_point, corner);
 }
 
 // Implementation of quad signed distance field
@@ -1087,6 +1117,90 @@ float quad_sdf_impl(float2 corner_center_to_point, float corner_radius) {
 
         return signed_distance_to_inset_quad - corner_radius;
     }
+}
+
+// Diri: continuous-curvature ("squircle") corners.
+//
+// Upstream draws each corner as a quarter circle of radius r. Its curvature
+// jumps from 0 on the straight edge to 1/r at the tangent point, which is the
+// visible "kink" next to AppKit's windows, menus and buttons: those use
+// continuous corners, whose curvature ramps up from 0 because the curve
+// leaves the straight edge earlier, about 1.528 r from the corner (the
+// extent of iOS/macOS `.continuous` corners).
+//
+// We approximate that with a quarter superellipse (Lame curve) centred at the
+// inner corner of the quad inset by the extent `e`:
+//
+//     (x / e)^n + (y / e)^n = 1,   x, y >= 0
+//
+// For n > 2 the curvature is 0 where the curve meets each edge, so it is
+// curvature-continuous with the straight sides. `n` is chosen so the curve
+// crosses the 45 degree diagonal exactly where the circle of radius r does,
+// keeping the corner's visual weight (how much it cuts off) unchanged:
+//
+//     circle:        diagonal inset = r (1 - 1/sqrt 2)
+//     superellipse:  diagonal inset = e (1 - 2^(-1/n))
+//     =>  n = -1 / log2(1 - r (1 - 1/sqrt 2) / e)
+//
+// With e = 1.528 r this gives n ~= 3.26. The extent is limited to the
+// quad's half size, so a corner that cannot grow is drawn with a smaller
+// extent and a lower exponent; at e = r the exponent is exactly 2 and the
+// shape is the upstream circle. Fully round pills (r >= half the height)
+// therefore stay capsules, and radius 0 keeps the sharp fast path.
+//
+// The superellipse's implicit function is turned into a distance with a
+// first-order correction (value / gradient length), which is accurate within
+// the few pixels around the edge that antialiasing and borders sample, so
+// the 1 px antialiasing ramp and uniform borders (the parallel curve) stay
+// as crisp as the circular ones.
+//
+// Set DIRI_CONTINUOUS_CORNER_EXTENT to 1.0 to restore upstream's circular
+// corners exactly (every corner then takes the `quad_sdf_impl` path).
+constant float DIRI_CONTINUOUS_CORNER_EXTENT = 1.528;
+
+ContinuousCorner continuous_corner(float corner_radius, float2 half_size) {
+  ContinuousCorner corner;
+  corner.radius = corner_radius;
+  float limit = min(half_size.x, half_size.y);
+  corner.extent = max(corner_radius,
+                      min(corner_radius * DIRI_CONTINUOUS_CORNER_EXTENT, limit));
+  corner.exponent = 2.0;
+  if (corner.extent > corner_radius) {
+    // 2^(-1/n), the superellipse's diagonal point in units of its extent.
+    float diagonal = 1.0 - corner_radius * (1.0 - M_SQRT1_2_F) / corner.extent;
+    corner.exponent = -1.0 / log2(diagonal);
+  }
+  return corner;
+}
+
+// Signed distance to the quad's edge near a continuous corner: positive
+// outside and negative inside, like `quad_sdf_impl`. `corner_center_to_point`
+// is relative to the curve's centre (the inset corner), mirrored into the
+// bottom right quadrant.
+float continuous_corner_sdf(float2 corner_center_to_point, ContinuousCorner corner) {
+  if (corner.extent <= corner.radius) {
+    return quad_sdf_impl(corner_center_to_point, corner.radius);
+  }
+  if (corner_center_to_point.x <= 0.0 || corner_center_to_point.y <= 0.0) {
+    // Beside the straight edges the distance is exact and Euclidean.
+    return max(corner_center_to_point.x, corner_center_to_point.y) - corner.extent;
+  }
+  float2 unit = corner_center_to_point / corner.extent;
+  float2 powered = pow(unit, corner.exponent);
+  float norm = pow(powered.x + powered.y, 1.0 / corner.exponent);
+  // Gradient of the norm, (unit / norm)^(n - 1); its length is in (0.8, 1].
+  float2 gradient = pow(unit / norm, corner.exponent - 1.0);
+  return corner.extent * (norm - 1.0) / length(gradient);
+}
+
+// `quarter_ellipse_sdf` for a superellipse with per-axis radii: negative
+// outside and positive inside. Components of `point` are expected positive.
+float quarter_superellipse_sdf(float2 point, float2 radii, float exponent) {
+  float2 unit = point / radii;
+  float2 powered = pow(unit, exponent);
+  float norm = pow(powered.x + powered.y, 1.0 / exponent);
+  float2 gradient = pow(unit / norm, exponent - 1.0);
+  return (norm - 1.0) / length(gradient) * (radii.x + radii.y) * -0.5;
 }
 
 // A standard gaussian function, used for weighting samples

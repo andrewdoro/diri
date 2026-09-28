@@ -23,9 +23,31 @@ for this patched crate, which is not a workspace member:
 cargo test -p diri-term -p gpui_macos compositing_tests
 ```
 
-`src/shaders.metallib` is the unchanged upstream shader source compiled from
-that pinned revision. Bundling it keeps ordinary Diri builds reproducible on
-machines where Xcode's separately downloaded Metal Toolchain is not installed.
+`src/shaders.metallib` is `src/shaders.metal` compiled with upstream's flags.
+Bundling it keeps ordinary Diri builds reproducible on machines where Xcode's
+separately downloaded Metal Toolchain is not installed. The shader source
+differs from upstream only by the continuous-corner patch below, so after
+editing `src/shaders.metal` regenerate the library (needs
+`xcodebuild -downloadComponent MetalToolchain` once). `scene.h` is the cbindgen
+header the `runtime_shaders` build script writes to its `OUT_DIR`, for example
+by `cargo check`ing a scratch crate that depends on this path with that feature:
+
+```sh
+xcrun -sdk macosx metal -gline-tables-only -mmacosx-version-min=10.15.7 -MO \
+  -c src/shaders.metal -include scene.h -o shaders.air
+xcrun -sdk macosx metallib shaders.air -o src/shaders.metallib
+```
+
+The continuous-corner patch replaces the quad shader's quarter-circle corner
+with a curvature-continuous quarter superellipse that starts 1.528x the radius
+from the corner and crosses the diagonal where the circle did, the way AppKit
+draws windows, menus and buttons. It applies to every rounded quad, border,
+rounded image sprite and unblurred shadow through `quad_sdf`; blurred shadows
+keep the analytic circular falloff, where the difference is invisible. Radius 0
+keeps the sharp fast path, and corners that have no room to grow (capsules,
+radius >= half the short side) stay exactly circular. The math is documented at
+`DIRI_CONTINUOUS_CORNER_EXTENT` in `src/shaders.metal`; setting it to `1.0`
+restores upstream's corners. Linux and other renderers keep circular corners.
 
 The native key-dispatch patch exposes read-only hardware key codes during the
 matching synchronous callback. A nested/unwind-safe scope restores prior state
