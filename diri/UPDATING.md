@@ -88,17 +88,23 @@ One-time setup is the Developer ID cert and notary profile described in
 [PACKAGING.md](PACKAGING.md). No Sparkle keys.
 
 First open and merge a normal pull request that updates the `diri-app` version
-and lockfile. Download the `linux-packages-<commit>` artifact from the
-successful CI run for that exact main commit. Then check out the clean,
-current `main` branch and run:
+and lockfile. Then check out the clean, current `main` branch and run:
 
 ```sh
-DIRI_LINUX_DIST=/path/to/linux-packages diri/scripts/release.sh 0.4.1
+diri/scripts/release.sh 0.4.1
 ```
 
+While the macOS build runs locally, two things wait on GitHub Actions in the
+background (`scripts/await-ci.sh`): CI's clippy/test run on that commit, which
+is the release gate, and the `linux-packages-<commit>` artifact from a Nightly
+run on it. If no Nightly run exists for the commit, the script dispatches one
+(about 40 minutes, overlapping the macOS build and notarization). Both are
+joined before anything is published. Builds use `diri/target/release-pipeline`,
+a cache nothing else writes to, so a release recompiles only what changed.
+
 The script refuses to release a version that does not match the manifest, a
-dirty checkout, or a commit other than the current `origin/main`. It runs
-clippy + tests, builds the universal Rust executables, signs them,
+dirty checkout, or a commit other than the current `origin/main`. It requires
+CI's clippy + tests to have passed, builds the universal Rust executables, signs them,
 **notarizes and staples the .app first**, then builds and notarizes the DMG
 from that stapled bundle, produces the update zip, rebuilds `appcast.json` from
 the currently published feed, generates `SHA256SUMS` and a reviewed dependency
@@ -192,7 +198,10 @@ latest release.
 - `GH_REPO` — repository to publish to (default `cristicretu/diri`).
 - `TAP_DIR` — clean Homebrew tap checkout (default `../../homebrew-diri`).
 - `SKIP_CASK=1` — explicitly publish without offering the release via Homebrew.
-- `SKIP_GATES=1` — skip clippy/tests when re-running a failed publish.
+- `SKIP_GATES=1` — skip the CI gate when re-running a failed publish.
+- `DIRI_LOCAL_GATES=1` — run clippy/tests locally instead of waiting on CI.
+- `DIRI_LINUX_DIST` — use an already-downloaded Linux artifact directory.
+- `DIRI_RELEASE_TARGET_DIR` — release build cache (default `diri/target/release-pipeline`).
 
 ## Verifying a release
 

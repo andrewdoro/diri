@@ -96,6 +96,8 @@ struct Shared {
     #[cfg(test)]
     pump_wakeups: std::sync::atomic::AtomicUsize,
     listen_fd: AtomicI32,
+    /// When the child was spawned, for its recorded runtime.
+    spawned_at: std::time::Instant,
     /// Weak handles let the exit path interrupt blocking input reads without
     /// making idle Holder streams wake on a timer.
     input_streams: Mutex<Vec<Weak<std::os::unix::net::UnixStream>>>,
@@ -173,8 +175,23 @@ impl HolderServer {
             cols: spec.cols.max(2),
             rows: spec.rows.max(2),
         };
-        let pty = Pty::spawn(&pty_spec).map_err(|error| HolderError::io("PTY spawn", error))?;
+        let spawned_at = std::time::Instant::now();
+        let pty = Pty::spawn(&pty_spec).map_err(|error| {
+            diri_telemetry::incident!(
+                "holder.spawn_failed",
+                session = diri_telemetry::id(&spec.session_id),
+                io = diri_telemetry::io_error(&error),
+            );
+            HolderError::io("PTY spawn", error)
+        })?;
         let child_pid = pty.pid() as i32;
+        diri_telemetry::event!(
+            "holder.spawn",
+            session = diri_telemetry::id(&spec.session_id),
+            cols = pty_spec.cols,
+            rows = pty_spec.rows,
+            ms = spawned_at.elapsed(),
+        );
         // Armed at once: registering after the child has exited fails on
         // macOS, which the exit path treats as "already exited".
         let exit_watcher = diri_pty::ExitWatcher::new(child_pid as u32).ok();
@@ -213,6 +230,7 @@ impl HolderServer {
             #[cfg(test)]
             pump_wakeups: std::sync::atomic::AtomicUsize::new(0),
             listen_fd: AtomicI32::new(listen_fd),
+            spawned_at,
             input_streams: Mutex::new(Vec::new()),
             output: Mutex::new(OutputFanout {
                 // Everything below this belongs to earlier incarnations.
@@ -525,6 +543,11 @@ fn broadcast_output(shared: &Shared, frame: &Arc<[u8]>) {
         if offer_frame(subscriber, offset, frame) {
             return true;
         }
+        diri_telemetry::warn_event!(
+            "holder.subscriber_dropped",
+            session = diri_telemetry::id(&shared.spec.session_id),
+            offset = offset,
+        );
         // Closing is what makes dropping visible. Letting the subscriber go
         // only releases this end of the queue; its writer would keep waiting
         // on the other, holding the socket open, and the daemon would wait for
@@ -691,6 +714,13 @@ fn watch_exit(
     if shared.finished.swap(true, Ordering::SeqCst) {
         return;
     }
+    diri_telemetry::event!(
+        "holder.exit",
+        session = diri_telemetry::id(&shared.spec.session_id),
+        code = exit.code,
+        signal = exit.signal,
+        runtime_s = shared.spawned_at.elapsed().as_secs(),
+    );
     // The pump waits with no deadline, so it has to be told.
     let _ = (&shared.pump_wake.1).write_all(&[1]);
     for stream in shared

@@ -159,9 +159,15 @@ fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<()> {
     use std::process::{Command, Stdio};
 
     let mut command = Command::new(executable_path);
+    command.arg("--manager").arg(directory);
+    // Only an Engine that records hands its Holders a spool; tests and
+    // embedders that never start the recorder launch quiet ones.
+    if let Some(state_dir) = crate::telemetry::holder_state_dir() {
+        command
+            .arg(crate::telemetry::HOLDER_TELEMETRY_FLAG)
+            .arg(state_dir);
+    }
     command
-        .arg("--manager")
-        .arg(directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -193,6 +199,13 @@ fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<()> {
             match child.wait() {
                 Ok(status) if !status.success() => {
                     eprintln!("diri-engine: holder manager {pid} exited unexpectedly: {status}");
+                    use std::os::unix::process::ExitStatusExt;
+                    diri_telemetry::incident!(
+                        "holder.manager_died",
+                        pid = pid,
+                        code = status.code(),
+                        signal = status.signal(),
+                    );
                 }
                 Err(error) => {
                     eprintln!("diri-engine: holder manager {pid} wait failed: {error}");

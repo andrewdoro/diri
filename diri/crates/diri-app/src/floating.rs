@@ -495,6 +495,7 @@ impl Panel {
                     crate::macos::floating_panel::prepare(window, frame.radius);
                     #[cfg(not(target_os = "macos"))]
                     let _ = window;
+                    let telemetry = crate::telemetry::WindowGuard::new("floating", window);
                     cx.new(|cx| {
                         cx.observe(&source, |_, _, cx| cx.notify()).detach();
                         PanelView {
@@ -503,6 +504,7 @@ impl Panel {
                             frames: 0,
                             settled_frames: 0,
                             revealed: false,
+                            _telemetry: telemetry,
                         }
                     })
                 },
@@ -550,6 +552,7 @@ struct PanelView {
     /// surface for occluded windows and never show.
     settled_frames: u32,
     revealed: bool,
+    _telemetry: crate::telemetry::WindowGuard,
 }
 
 /// On-screen frames painted before the panel is shown.

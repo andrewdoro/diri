@@ -252,7 +252,21 @@ impl UpdateHandle {
         let Some(ready) = ready else {
             return;
         };
-        if let Err(error) = ready.updater.install(&ready.staged, false) {
+        let started = std::time::Instant::now();
+        let installed = ready.updater.install(&ready.staged, false);
+        record_update(
+            "update.install",
+            if installed.is_ok() {
+                "started_on_quit"
+            } else {
+                "failed"
+            },
+            Some(ready.staged.release.version.as_str()),
+            installed.as_ref().err(),
+            started,
+            false,
+        );
+        if let Err(error) = installed {
             eprintln!("diri updater: {error}");
             *self.ready_install.lock().expect("ready update") = Some(ready);
         }
@@ -260,6 +274,57 @@ impl UpdateHandle {
 
     #[cfg(not(any(target_os = "macos", test)))]
     pub fn install_on_quit(&self) {}
+}
+
+#[cfg(any(target_os = "macos", test))]
+/// One updater step for the flight recorder. A failure carries the error's
+/// class and its scrubbed text (release URLs are public; home paths and user
+/// names are scrubbed).
+fn record_update(
+    kind: &'static str,
+    outcome: &'static str,
+    version: Option<&str>,
+    error: Option<&UpdateError>,
+    started: std::time::Instant,
+    user_initiated: bool,
+) {
+    let error_kind = error.map(|error| match error {
+        UpdateError::NotUpdatable(_) => "not_updatable",
+        UpdateError::Network(_) => "network",
+        UpdateError::Feed(_) => "feed",
+        UpdateError::UntrustedUrl(_) => "untrusted_url",
+        UpdateError::Integrity(_) => "integrity",
+        UpdateError::Signature(_) => "signature",
+        UpdateError::NotWritable(_) => "not_writable",
+        UpdateError::Io(_) => "io",
+        UpdateError::Tool { .. } => "tool",
+    });
+    let fields = vec![
+        ("outcome", diri_telemetry::Value::from(outcome)),
+        ("from", diri_telemetry::Value::from(CURRENT_VERSION)),
+        (
+            "to",
+            diri_telemetry::Value::from(version.map(diri_telemetry::id)),
+        ),
+        (
+            "user_initiated",
+            diri_telemetry::Value::from(user_initiated),
+        ),
+        ("ms", diri_telemetry::Value::from(started.elapsed())),
+        ("error_kind", diri_telemetry::Value::from(error_kind)),
+        (
+            "error",
+            diri_telemetry::Value::from(error.map(|error| diri_telemetry::text(error.to_string()))),
+        ),
+    ];
+    // An unsupported build (a `cargo run`) failing to update is expected.
+    let severity = match error {
+        None | Some(UpdateError::NotUpdatable(_)) => diri_telemetry::Severity::Info,
+        Some(_) => diri_telemetry::Severity::Error,
+    };
+    if diri_telemetry::is_enabled() {
+        diri_telemetry::record(kind, severity, fields);
+    }
 }
 
 /// Starts the update service on `runtime` and returns the UI handle.
@@ -540,9 +605,27 @@ impl Service {
 
         let updater = Arc::clone(&self.updater);
         let skipped = self.skipped.clone();
+        let started = std::time::Instant::now();
         let found = tokio::task::spawn_blocking(move || updater.check(skipped.as_deref())).await;
         self.busy = false;
         self.touch_last_checked();
+        record_update(
+            "update.check",
+            match &found {
+                Ok(Ok(Some(_))) => "available",
+                Ok(Ok(None)) => "up_to_date",
+                Ok(Err(_)) | Err(_) => "failed",
+            },
+            found
+                .as_ref()
+                .ok()
+                .and_then(|found| found.as_ref().ok())
+                .and_then(Option::as_ref)
+                .map(|release| release.version.as_str()),
+            found.as_ref().ok().and_then(|found| found.as_ref().err()),
+            started,
+            user_initiated,
+        );
 
         match found {
             Ok(Ok(Some(release))) => {
@@ -605,6 +688,7 @@ impl Service {
         });
         tokio::pin!(worker);
 
+        let started = std::time::Instant::now();
         let staged = loop {
             tokio::select! {
                 Some(fraction) = progress_rx.recv() => {
@@ -617,6 +701,20 @@ impl Service {
             }
         };
         self.busy = false;
+        record_update(
+            "update.download",
+            match &staged {
+                Ok(Ok(_)) => "staged",
+                Ok(Err(_)) | Err(_) => "failed",
+            },
+            Some(release.version.as_str()),
+            staged
+                .as_ref()
+                .ok()
+                .and_then(|staged| staged.as_ref().err()),
+            started,
+            user_initiated,
+        );
 
         match staged {
             Ok(Ok(staged)) => {
@@ -640,7 +738,21 @@ impl Service {
         let Some(ready) = ready else {
             return;
         };
-        match ready.updater.install(&ready.staged, relaunch) {
+        let started = std::time::Instant::now();
+        let installed = ready.updater.install(&ready.staged, relaunch);
+        record_update(
+            "update.install",
+            if installed.is_ok() {
+                "started"
+            } else {
+                "failed"
+            },
+            Some(ready.staged.release.version.as_str()),
+            installed.as_ref().err(),
+            started,
+            true,
+        );
+        match installed {
             // RootView watches for Installing and quits; the helper is already
             // waiting for this process to go away.
             Ok(()) => {

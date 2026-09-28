@@ -822,8 +822,16 @@ impl Registry {
         if orphaned.is_empty() {
             return;
         }
+        diri_telemetry::warn_event!("engine.holders_lost", count = orphaned.len());
         for id in &orphaned {
             if let Some(record) = self.records.get_mut(id) {
+                diri_telemetry::event!(
+                    "session.lost",
+                    session = diri_telemetry::id(id),
+                    agent = diri_telemetry::id(record.kind.id()),
+                    conv = record.agent_session_id.as_deref().map(diri_telemetry::id),
+                    status = crate::telemetry::status_name(&record.status),
+                );
                 record.status = SessionStatus::Exited(ExitInfo {
                     reason: ExitReason::DaemonRestart,
                     code: None,
@@ -869,6 +877,12 @@ impl Registry {
                 Ok(stat) => stat,
                 Err(error) => {
                     eprintln!("diri-engine: holder recovery {session_id}: stat failed: {error}");
+                    diri_telemetry::warn_event!(
+                        "holder.adopt_failed",
+                        session = diri_telemetry::id(&session_id),
+                        stage = "stat",
+                        error = diri_telemetry::text(error.to_string()),
+                    );
                     continue;
                 }
             };
@@ -952,11 +966,24 @@ impl Registry {
                             session.feed_identified_signal(signal, metadata.identity.clone());
                         }
                     }
+                    diri_telemetry::debug_event!(
+                        "session.adopted",
+                        session = diri_telemetry::id(&session_id),
+                        agent = diri_telemetry::id(&manifest_id),
+                        hibernated = was_hibernated,
+                        from_capsule = recovered_from_capsule,
+                    );
                     adopted.push(session_id);
                 }
                 Err(error) => {
                     eprintln!(
                         "diri-engine: holder recovery {session_id}: adoption failed: {error}"
+                    );
+                    diri_telemetry::error_event!(
+                        "holder.adopt_failed",
+                        session = diri_telemetry::id(&session_id),
+                        stage = "adopt",
+                        io = diri_telemetry::io_error(&error),
                     );
                     continue;
                 }
@@ -1480,6 +1507,19 @@ impl Registry {
             let _ = session.set_hibernated(false);
         }
         if known_hibernated {
+            let info = self
+                .records
+                .get(id)
+                .and_then(|record| record.hibernation.as_ref());
+            diri_telemetry::event!(
+                "session.wake",
+                session = diri_telemetry::id(id),
+                reason = info.map(|info| crate::telemetry::hibernation_reason_name(info.reason)),
+                frozen_s = info.map(|info| {
+                    let now = DateMillis::from(std::time::SystemTime::now()).0;
+                    ((now - info.since.0) / 1000.0).max(0.0) as u64
+                }),
+            );
             self.set_hibernation(id, None);
         }
         Ok(())
@@ -1626,6 +1666,14 @@ impl Registry {
         if let Some(agent_id) = &meta.agent_session_id
             && record.agent_session_id.as_ref() != Some(agent_id)
         {
+            diri_telemetry::event!(
+                "session.conversation",
+                session = diri_telemetry::id(id),
+                agent = diri_telemetry::id(record.kind.id()),
+                conv = diri_telemetry::id(agent_id),
+                previous = record.agent_session_id.as_deref().map(diri_telemetry::id),
+                source = "hook",
+            );
             record.agent_session_id = Some(agent_id.clone());
             record.resumability = diri_proto::Resumability::Live;
             changed = true;
@@ -1634,6 +1682,12 @@ impl Registry {
             transcript.map(|transcript| transcript.path().to_string_lossy().into_owned())
             && record.transcript_path.as_ref() != Some(&transcript)
         {
+            diri_telemetry::debug_event!(
+                "session.transcript",
+                session = diri_telemetry::id(id),
+                path = diri_telemetry::path_hash(&transcript),
+                moved = record.transcript_path.is_some(),
+            );
             record.transcript_path = Some(transcript);
             changed = true;
         }
@@ -1962,6 +2016,32 @@ impl Registry {
         self.records.len()
     }
 
+    /// Cheap fleet counts for the telemetry `health` gauge.
+    pub fn telemetry_counts(&self) -> TelemetryCounts {
+        let mut counts = TelemetryCounts {
+            records: self.records.len(),
+            live: self.sessions.len(),
+            ..TelemetryCounts::default()
+        };
+        for session in self.sessions.values() {
+            if session.is_held() {
+                counts.held += 1;
+            }
+            if session.remote_stop().is_some() {
+                counts.remote += 1;
+            }
+            if session.is_hibernated() {
+                counts.hibernated += 1;
+            }
+            match session.status() {
+                SessionStatus::Working => counts.working += 1,
+                SessionStatus::NeedsInput(_) => counts.needs_input += 1,
+                _ => {}
+            }
+        }
+        counts
+    }
+
     pub fn state_file(&self) -> &Path {
         self.state_file.path()
     }
@@ -1987,6 +2067,17 @@ impl Registry {
             .filter_map(|(_, record)| record.agent_session_id.clone())
             .collect()
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TelemetryCounts {
+    pub records: usize,
+    pub live: usize,
+    pub held: usize,
+    pub remote: usize,
+    pub hibernated: usize,
+    pub working: usize,
+    pub needs_input: usize,
 }
 
 fn user_home() -> Option<PathBuf> {
@@ -2092,6 +2183,14 @@ fn apply_cursor_conversation(
 ) -> bool {
     let mut changed = false;
     if record.agent_session_id.as_deref() != Some(conversation.id.as_str()) {
+        diri_telemetry::event!(
+            "session.conversation",
+            session = diri_telemetry::id(&record.id.0),
+            agent = diri_telemetry::id(record.kind.id()),
+            conv = diri_telemetry::id(&conversation.id),
+            previous = record.agent_session_id.as_deref().map(diri_telemetry::id),
+            source = "cursor_store",
+        );
         record.agent_session_id = Some(conversation.id);
         record.resumability = diri_proto::Resumability::Live;
         changed = true;
@@ -2238,6 +2337,16 @@ fn repair_codex_conversation(record: &mut SessionRecord, home: &Path) -> bool {
     ) else {
         return false;
     };
+    if record.agent_session_id.as_deref() != Some(root_id.as_str()) {
+        diri_telemetry::event!(
+            "session.conversation",
+            session = diri_telemetry::id(&record.id.0),
+            agent = diri_telemetry::id(record.kind.id()),
+            conv = diri_telemetry::id(&root_id),
+            previous = record.agent_session_id.as_deref().map(diri_telemetry::id),
+            source = "codex_repair",
+        );
+    }
     record.agent_session_id = Some(root_id);
     record.transcript_path = Some(transcript.path().to_string_lossy().into_owned());
     true

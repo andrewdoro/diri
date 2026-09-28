@@ -305,6 +305,8 @@ pub struct RootView {
     window_bounds_save: Option<Task<()>>,
     status_banner: Option<InAppBanner>,
     status_banner_generation: u64,
+    /// Records this window's open and close for the flight recorder.
+    _telemetry_window: crate::telemetry::WindowGuard,
     quote_target_picker: Option<QuoteTargetPicker>,
     notification_panel_open: bool,
     /// The system alert asking whether to close sessions, while it is up.
@@ -941,6 +943,21 @@ impl RootView {
             menu_bar.refresh();
         }
         crate::application_notifications::install(services.clone(), preview, preview_scenario, cx);
+        // Once, the first time a build that records runs: say so, and where
+        // to turn it off. The standard toast, held a little longer.
+        if !preview && crate::telemetry::take_first_run_notice() {
+            cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.show_banner(
+                        "diri shares diagnostics",
+                        "Crashes, hangs and errors help fix bugs; terminal contents never leave your Mac. Turn it off in Settings › General › Privacy.",
+                        Duration::from_secs(20),
+                        cx,
+                    );
+                });
+            })
+            .detach();
+        }
         #[cfg(target_os = "macos")]
         let notifier = crate::application_notifications::notifier(cx);
 
@@ -1364,6 +1381,7 @@ impl RootView {
             window_bounds_save: None,
             status_banner: None,
             status_banner_generation: 0,
+            _telemetry_window: crate::telemetry::WindowGuard::new("main", window),
             quote_target_picker: None,
             notification_panel_open: false,
             close_prompt: None,
@@ -1612,10 +1630,24 @@ impl RootView {
         self.applied_material = Some(material);
     }
 
+    /// The window's standard toast. `title` is always authored in code, so it
+    /// is what the flight recorder keeps; the body may carry runtime detail
+    /// and is never recorded.
     fn show_quote_feedback(
+        &mut self,
+        title: &'static str,
+        body: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        diri_telemetry::event!("ui.toast", title = title);
+        self.show_banner(title, body, Duration::from_secs(4), cx);
+    }
+
+    fn show_banner(
         &mut self,
         title: impl Into<String>,
         body: impl Into<String>,
+        visible_for: Duration,
         cx: &mut Context<Self>,
     ) {
         self.status_banner_generation = self.status_banner_generation.wrapping_add(1);
@@ -1626,7 +1658,7 @@ impl RootView {
         });
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(4)).await;
+            cx.background_executor().timer(visible_for).await;
             let _ = this.update(cx, |this, cx| {
                 if this.status_banner_generation == generation {
                     this.status_banner = None;
@@ -1635,6 +1667,30 @@ impl RootView {
             });
         })
         .detach();
+    }
+
+    fn frame_context(&self, cx: &App) -> crate::telemetry::FrameContext {
+        let surface = if self
+            .utility_surfaces
+            .as_ref()
+            .is_some_and(|surfaces| surfaces.read(cx).is_open())
+        {
+            "settings"
+        } else if self
+            .navigation
+            .as_ref()
+            .is_some_and(|navigation| navigation.read(cx).is_open())
+        {
+            "palette"
+        } else if self.launcher.read(cx).is_open() {
+            "launcher"
+        } else {
+            "workbench"
+        };
+        crate::telemetry::FrameContext {
+            surface,
+            workspace: self.active_workspace.is_some(),
+        }
     }
 
     fn preview_buffers(
@@ -4469,6 +4525,7 @@ impl RootView {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let frame_started = std::time::Instant::now();
         self.main_viewport = window.viewport_size();
         if self.pending_notification_open.is_some()
             && self
@@ -5169,7 +5226,10 @@ impl Render for RootView {
         if let Some(build) = &self.services.dev_build {
             root = root.child(dev_build_marker(build.marker_label(), colors, 10.0));
         }
-        root
+        root.child(crate::telemetry::frame_probe(
+            frame_started,
+            self.frame_context(cx),
+        ))
     }
 }
 

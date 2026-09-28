@@ -1546,6 +1546,7 @@ dependencies = [
  "diri-client",
  "diri-engine",
  "diri-proto",
+ "diri-telemetry",
  "diri-term",
  "diri-ui",
  "diri-updater",
@@ -1581,6 +1582,7 @@ name = "diri-client"
 version = "0.1.0"
 dependencies = [
  "diri-proto",
+ "diri-telemetry",
  "futures-core",
  "getrandom 0.4.3",
  "serde",
@@ -1597,6 +1599,7 @@ dependencies = [
  "base64 0.23.1",
  "diri-proto",
  "diri-pty",
+ "diri-telemetry",
  "diri-terminal-state",
  "getrandom 0.4.3",
  "libc",
@@ -1666,11 +1669,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "diri-telemetry"
+version = "0.1.0"
+dependencies = [
+ "diri-proto",
+ "getrandom 0.4.3",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+]
+
+[[package]]
 name = "diri-term"
 version = "0.1.0"
 dependencies = [
  "criterion",
  "diri-proto",
+ "diri-telemetry",
  "diri-terminal-state",
  "gpui",
  "gpui_platform",

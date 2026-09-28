@@ -38,10 +38,11 @@ drivers, multiple monitors, suspend/resume, or fractional scaling.
 
 `DIRI_DIST_DIR`, `CARGO_TARGET_DIR`, `DIRI_VERSION`, and
 `DIRI_LINUX_FORMATS=appimage,deb` can override the defaults. Linux release
-artifacts must come from the CI run for the exact release commit. Set
-`DIRI_LINUX_DIST` to that downloaded artifact directory when running the
-macOS release script; the release is then created once with both platforms'
-immutable assets.
+artifacts must come from the CI run for the exact release commit. The macOS
+release script fetches them from a Nightly run on that commit (dispatching one
+if needed), or takes `DIRI_LINUX_DIST` pointing at a downloaded artifact
+directory; the release is then created once with both platforms' immutable
+assets.
 
 ## macOS
 

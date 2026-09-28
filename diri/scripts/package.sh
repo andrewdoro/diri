@@ -62,15 +62,30 @@ verify_universal() {
 
 cd "${workspace_dir}"
 
-echo "==> Building diri for Apple silicon"
-cargo build --release --package diri-app --bin diri --target aarch64-apple-darwin
-cargo build --release --package dirijor-mcp --bin dirijor --bin dirijor-mcp \
-    --target aarch64-apple-darwin
+# The remote Helper catalog shares nothing with the macOS products, so it builds
+# alongside them in its own target dir (one target dir admits one cargo at a
+# time) and is copied into the bundle once cargo-packager has made it.
+remote_helpers_stage="${target_dir}/remote-helpers-stage"
+remote_helpers_log="${target_dir}/remote-helpers.log"
+rm -rf "${remote_helpers_stage}"
+mkdir -p "${target_dir}"
+echo "==> Building three-platform Rust remote Helper catalog (in the background)"
+CARGO_TARGET_DIR="${target_dir}/remote-helpers-build" \
+DIRI_SIGN_IDENTITY="${DIRI_SIGN_IDENTITY:-}" \
+    "${script_dir}/build-remote-helpers.sh" "${remote_helpers_stage}" \
+    > "${remote_helpers_log}" 2>&1 &
+remote_helpers_pid=$!
+trap 'kill "${remote_helpers_pid}" 2>/dev/null || true' EXIT
 
-echo "==> Building diri for Intel"
-cargo build --release --package diri-app --bin diri --target x86_64-apple-darwin
-cargo build --release --package dirijor-mcp --bin dirijor --bin dirijor-mcp \
-    --target x86_64-apple-darwin
+# One cargo call per package, each building both slices at once so cargo can
+# schedule them in parallel and share host build scripts and proc macros. The
+# packages stay in separate calls on purpose: a joint build unifies dependency
+# features across them, which would change the shipped Engine and CLI (serde_json
+# preserve_order, for one) relative to building each alone.
+mac_targets=(--target aarch64-apple-darwin --target x86_64-apple-darwin)
+echo "==> Building diri (Apple silicon + Intel)"
+cargo build --release --package diri-app --bin diri "${mac_targets[@]}"
+cargo build --release --package dirijor-mcp --bin dirijor --bin dirijor-mcp "${mac_targets[@]}"
 
 echo "==> Creating universal executable"
 mkdir -p "${universal_dir}" "${dist_dir}"
@@ -127,11 +142,7 @@ cp "${universal_mcp_binary}" "${app_bin_dir}/dirijor-mcp"
 # Helper catalog below is consumed by this executable directly.
 echo "==> Building the authoritative Rust Engine (universal)"
 cargo build --release --package diri-engine --bin dirijord-rs --bin diri-holder \
-    --bin diri-ssh-askpass \
-    --target aarch64-apple-darwin
-cargo build --release --package diri-engine --bin dirijord-rs --bin diri-holder \
-    --bin diri-ssh-askpass \
-    --target x86_64-apple-darwin
+    --bin diri-ssh-askpass "${mac_targets[@]}"
 lipo -create \
     "${target_dir}/aarch64-apple-darwin/release/dirijord-rs" \
     "${target_dir}/x86_64-apple-darwin/release/dirijord-rs" \
@@ -154,10 +165,18 @@ cp "${universal_askpass_binary}" "${app_bin_dir}/diri-ssh-askpass"
 # The default SSH transport bootstraps one exact Rust Helper artifact selected
 # by remote OS/architecture. This build is independent of all daemon products
 # above and emits a versioned manifest verified again before upload.
-echo "==> Building three-platform Rust remote Helper catalog"
+echo "==> Waiting for the remote Helper catalog"
+if ! wait "${remote_helpers_pid}"; then
+    echo "error: remote Helper build failed:" >&2
+    sed 's/^/    /' "${remote_helpers_log}" >&2
+    exit 1
+fi
+trap - EXIT
+tail -n 1 "${remote_helpers_log}"
 remote_helpers_dir="${app_bin_dir}/remote-helpers"
 rm -rf "${remote_helpers_dir}"
-DIRI_SIGN_IDENTITY="${DIRI_SIGN_IDENTITY:-}" "${script_dir}/build-remote-helpers.sh" "${remote_helpers_dir}"
+# -p keeps the owner-only 0700 modes the manifest was measured with.
+cp -Rp "${remote_helpers_stage}" "${remote_helpers_dir}"
 
 # Rust-owned Agent catalog used by local and remote session orchestration.
 rm -rf "${app_bin_dir}/manifests"
