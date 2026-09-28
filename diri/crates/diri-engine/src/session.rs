@@ -3035,6 +3035,21 @@ fn record_secret_input(shared: &Shared, reading_secret: bool) -> bool {
 /// Secret input rides the same samples and has the same shape: a password
 /// prompt is printed as echo goes off, and the newline that answers it is
 /// echoed just before echo comes back, which the settle then catches.
+/// While output streams, how often the pump asks the Holder for PTY facts.
+///
+/// Each sample is a synchronous round trip to the Holder manager, which every
+/// local session shares. Asked after every output frame, it cost a draining
+/// shell a quarter of its pump time and serialized sessions behind one
+/// another, so several busy terminals drained no faster than one. Nothing is
+/// lost by pacing it: the settle after output stops (see
+/// [`held_foreground_sample_due`]) still samples the final state, which is
+/// when a password prompt or a new foreground program becomes visible.
+const HELD_BUSY_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
+
+fn held_busy_sample_due(since_sample: Option<Duration>) -> bool {
+    since_sample.is_none_or(|since| since >= HELD_BUSY_SAMPLE_INTERVAL)
+}
+
 fn held_foreground_sample_due(
     since_activity: Option<Duration>,
     since_sample: Option<Duration>,
@@ -4536,8 +4551,10 @@ fn pump_held(
             drop(reducer);
             if !replaying {
                 last_activity = Some(Instant::now());
-                last_foreground_sample = Some(Instant::now());
-                sample_held_pty_facts(&shared, &client, &manifest_id);
+                if held_busy_sample_due(last_foreground_sample.map(|at| at.elapsed())) {
+                    last_foreground_sample = Some(Instant::now());
+                    sample_held_pty_facts(&shared, &client, &manifest_id);
+                }
             }
         }
     }
@@ -4999,6 +5016,25 @@ mod held_foreground_tests {
         ));
         // Never sampled yet: ask.
         assert!(held_foreground_sample_due(None, None));
+    }
+
+    #[test]
+    fn streaming_output_samples_holder_facts_at_a_bounded_rate() {
+        // A draining shell delivers a frame every few hundred microseconds;
+        // one second of it must cost ten Holder round trips, not thousands.
+        let frame = Duration::from_micros(250);
+        let mut since_sample: Option<Duration> = None;
+        let mut samples = 0;
+        for _ in 0..4_000 {
+            since_sample = since_sample.map(|since| since + frame);
+            if held_busy_sample_due(since_sample) {
+                samples += 1;
+                since_sample = Some(Duration::ZERO);
+            }
+        }
+        assert_eq!(samples, 10);
+        // The first frame of a burst is still sampled at once.
+        assert!(held_busy_sample_due(None));
     }
 }
 
