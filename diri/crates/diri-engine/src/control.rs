@@ -2661,13 +2661,28 @@ impl ControlServer {
             self.remote_resume_spec(&record)?
         } else {
             let registry = self.registry.lock().map_err(poisoned)?;
-            self.resume_spec(
-                &registry,
-                &record.id.0,
-                record.kind.id(),
-                &record.cwd,
-                record.agent_session_id.as_deref(),
-            )?
+            match claude_resume_target(&record) {
+                // Claude has no transcript for this tab: `--resume` would only
+                // print "No conversation found" and leave a bare shell, so
+                // start the tab's own id afresh instead.
+                Some(None) => self.fresh_spec(
+                    &registry,
+                    &record.id.0,
+                    record.kind.id(),
+                    &record.cwd,
+                    record.agent_session_id.as_deref(),
+                )?,
+                target => self.resume_spec(
+                    &registry,
+                    &record.id.0,
+                    record.kind.id(),
+                    &record.cwd,
+                    target
+                        .flatten()
+                        .as_deref()
+                        .or(record.agent_session_id.as_deref()),
+                )?,
+            }
         };
         if record.host.is_none()
             && let Some(mut profile) = record.account_profile.clone()
@@ -3752,6 +3767,42 @@ impl Drop for ControlServer {
         // Leaving the socket file behind would make the next start think a
         // daemon is already running.
         let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+/// Which Claude conversation relaunching this local tab should re-enter:
+/// `None` leaves the record's id untouched (not Claude, or nothing to check
+/// against), `Some(Some(id))` resumes a conversation whose transcript exists,
+/// and `Some(None)` means the tab's id was never written and must start fresh.
+fn claude_resume_target(record: &diri_proto::SessionRecord) -> Option<Option<String>> {
+    claude_resume_target_in(record, Path::new(&std::env::var_os("HOME")?))
+}
+
+fn claude_resume_target_in(
+    record: &diri_proto::SessionRecord,
+    home: &Path,
+) -> Option<Option<String>> {
+    if record.host.is_some() || record.kind.id() != diri_proto::AgentKind::CLAUDE_CODE_ID {
+        return None;
+    }
+    let shared = home.join(".claude/projects");
+    if !shared.is_dir() {
+        return None;
+    }
+    let mut roots = vec![shared];
+    if let Some(profile) = &record.account_profile
+        && Path::new(&profile.config_home).is_absolute()
+    {
+        roots.push(Path::new(&profile.config_home).join("projects"));
+    }
+    let agent_session_id = record.agent_session_id.as_deref();
+    match crate::history::claude_resumable_conversation(
+        &roots,
+        agent_session_id,
+        record.transcript_path.as_deref(),
+    ) {
+        Some(id) => Some(Some(id)),
+        None => agent_session_id.map(|_| None),
     }
 }
 
@@ -5417,6 +5468,61 @@ mod tests {
     #[test]
     fn revive_archived_session_clears_archive_durably() {
         check_resume_relaunches(true);
+    }
+
+    #[test]
+    fn claude_resume_never_targets_an_unwritten_conversation() {
+        let home = tempfile::tempdir().expect("temp");
+        let project = home.path().join(".claude/projects/-work-repo");
+        let elsewhere = home.path().join(".claude/projects/-work-repo--wt-x");
+        std::fs::create_dir_all(&project).expect("project dir");
+        std::fs::create_dir_all(&elsewhere).expect("worktree dir");
+        let old = project.join("old-conv.jsonl");
+        std::fs::write(&old, b"{}\n").expect("old transcript");
+        std::fs::write(project.join("empty-conv.jsonl"), b"").expect("empty");
+        std::fs::write(elsewhere.join("moved-conv.jsonl"), b"{}\n").expect("moved");
+
+        let mut record = test_record("s_claude");
+        record.kind = diri_proto::AgentKind::new("claude-code");
+        record.cwd = "/work/repo".into();
+        let target =
+            |id: Option<&str>, path: Option<&Path>, record: &mut diri_proto::SessionRecord| {
+                record.agent_session_id = id.map(str::to_owned);
+                record.transcript_path = path.map(|path| path.to_string_lossy().into_owned());
+                claude_resume_target_in(record, home.path())
+            };
+
+        // Hooks moved the tab to a newer id (`/clear`, a fresh `--resume` id)
+        // that Claude never wrote: resume the conversation that exists.
+        assert_eq!(
+            target(Some("new-conv"), Some(&old), &mut record),
+            Some(Some("old-conv".into()))
+        );
+        assert_eq!(
+            target(Some("empty-conv"), Some(&old), &mut record),
+            Some(Some("old-conv".into()))
+        );
+        // A written id wins, wherever Claude filed it.
+        assert_eq!(
+            target(Some("moved-conv"), Some(&old), &mut record),
+            Some(Some("moved-conv".into()))
+        );
+        // Nothing was ever written: start the tab's id fresh instead of
+        // `--resume` into "No conversation found".
+        assert_eq!(target(Some("new-conv"), None, &mut record), Some(None));
+        assert_eq!(
+            target(
+                Some("new-conv"),
+                Some(&project.join("gone.jsonl")),
+                &mut record
+            ),
+            Some(None)
+        );
+        // Without an id there is nothing to verify; keep the manifest's path.
+        assert_eq!(target(None, None, &mut record), None);
+
+        record.kind = diri_proto::AgentKind::new("codex");
+        assert_eq!(target(Some("new-conv"), None, &mut record), None);
     }
 
     #[test]
