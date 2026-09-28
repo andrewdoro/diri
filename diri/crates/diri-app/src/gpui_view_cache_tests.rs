@@ -299,3 +299,32 @@ fn nested_cached_view_still_rerenders_when_it_must(cx: &mut TestAppContext) {
     assert_eq!(counters.leaf_renders.get(), renders + 3);
     assert_leaf_live(cx, &counters, "after refresh");
 }
+
+/// Diri's vendored-GPUI scene patch: one huge frame must not pin its peak
+/// primitive storage forever, and steady frames must never reallocate.
+#[test]
+fn a_scene_gives_back_capacity_a_single_large_frame_left_behind() {
+    let quad = gpui::Quad::default();
+    let mut scene = gpui::Scene::default();
+    scene.quads.extend(std::iter::repeat_n(quad, 50_000));
+    scene.clear();
+    let peak = scene.quads.capacity();
+    assert!(peak >= 50_000);
+
+    // Steady large frames keep their storage.
+    for _ in 0..300 {
+        scene.quads.extend(std::iter::repeat_n(quad, 40_000));
+        scene.clear();
+    }
+    assert_eq!(scene.quads.capacity(), peak);
+
+    // A long run of small frames eventually releases it.
+    for _ in 0..119 {
+        scene.quads.extend(std::iter::repeat_n(quad, 10));
+        scene.clear();
+    }
+    assert_eq!(scene.quads.capacity(), peak, "not before two seconds of sparse frames");
+    scene.quads.extend(std::iter::repeat_n(quad, 10));
+    scene.clear();
+    assert!(scene.quads.capacity() <= 64, "shrunk to about twice the last frame");
+}

@@ -50,11 +50,21 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    /// Consecutive clears that found the vectors mostly empty; see
+    /// [`Scene::release_idle_capacity`].
+    sparse_clears: u32,
 }
+
+/// Below this much reserved primitive storage a scene keeps whatever it grew.
+const SCENE_RETAIN_BYTES: usize = 1 << 20;
+/// How many consecutive sparse frames (about two seconds at 60 Hz) must pass
+/// before a scene gives back capacity one large frame left behind.
+const SCENE_SHRINK_AFTER_CLEARS: u32 = 120;
 
 #[expect(missing_docs)]
 impl Scene {
     pub fn clear(&mut self) {
+        self.release_idle_capacity();
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
@@ -70,6 +80,55 @@ impl Scene {
 
     pub fn len(&self) -> usize {
         self.paint_operations.len()
+    }
+
+    /// Vectors are cleared, not freed, between frames, so one very large
+    /// frame (an overview of every session, a huge paste) used to pin its
+    /// peak size for the life of the window. Once frames have used under a
+    /// quarter of the reserved bytes for a sustained run, shrink each vector
+    /// to twice what the latest frame used. Steady frames never reallocate.
+    /// (Diri patch; see DIRI_PATCHES.md.)
+    fn release_idle_capacity(&mut self) {
+        fn bytes<T>(vec: &Vec<T>) -> (usize, usize) {
+            let size = std::mem::size_of::<T>();
+            (vec.len() * size, vec.capacity() * size)
+        }
+        let parts = [
+            bytes(&self.paint_operations),
+            bytes(&self.layer_stack),
+            bytes(&self.shadows),
+            bytes(&self.quads),
+            bytes(&self.paths),
+            bytes(&self.underlines),
+            bytes(&self.monochrome_sprites),
+            bytes(&self.subpixel_sprites),
+            bytes(&self.polychrome_sprites),
+            bytes(&self.surfaces),
+        ];
+        let used: usize = parts.iter().map(|part| part.0).sum();
+        let reserved: usize = parts.iter().map(|part| part.1).sum();
+        if reserved > SCENE_RETAIN_BYTES && used.saturating_mul(4) < reserved {
+            self.sparse_clears += 1;
+        } else {
+            self.sparse_clears = 0;
+        }
+        if self.sparse_clears < SCENE_SHRINK_AFTER_CLEARS {
+            return;
+        }
+        self.sparse_clears = 0;
+        fn shrink<T>(vec: &mut Vec<T>) {
+            vec.shrink_to(vec.len().saturating_mul(2));
+        }
+        shrink(&mut self.paint_operations);
+        shrink(&mut self.layer_stack);
+        shrink(&mut self.shadows);
+        shrink(&mut self.quads);
+        shrink(&mut self.paths);
+        shrink(&mut self.underlines);
+        shrink(&mut self.monochrome_sprites);
+        shrink(&mut self.subpixel_sprites);
+        shrink(&mut self.polychrome_sprites);
+        shrink(&mut self.surfaces);
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {

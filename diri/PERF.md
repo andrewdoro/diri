@@ -1,5 +1,18 @@
 # diri performance record
 
+## GPUI scenes give back a large frame's storage (2026-09-28)
+
+`vmmap`/`heap` on the installed app attributed about 36 MB of live heap to GPUI
+scene vectors held at their high-water capacity: `Scene::clear` empties the
+primitive vectors each frame but never frees them, so one very large frame
+pinned its peak for the life of the window. The vendored GPUI `Scene` now
+shrinks each vector to twice the latest frame's length after 120 consecutive
+frames that used under a quarter of at least 1 MiB of reserved storage. Steady
+frames never reallocate. Covered by
+`a_scene_gives_back_capacity_a_single_large_frame_left_behind`; no installed-app
+footprint change is claimed yet (it depends on how large a user's largest frame
+was).
+
 ## Sidebar rows re-render only when they change (2026-09-28)
 
 **Where the time went.** A live sample of the installed app showed the main

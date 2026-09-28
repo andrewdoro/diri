@@ -122,3 +122,15 @@ uses it for rows whose props changed (`crates/diri-app/src/sidebar/view/rows.rs`
    copies element for element.
 5. Run `cargo test -p diri-app --bin diri gpui_view_cache` and the sidebar
    tests.
+
+## Scene storage released after sustained sparse frames
+
+`Scene::clear` kept every primitive vector at its high-water capacity, so one
+very large frame (the session overview, a huge paste) pinned tens of MB for the
+life of the window (≈36 MB measured on the installed app). `clear` now counts
+consecutive frames that used under a quarter of the reserved bytes (with at
+least 1 MiB reserved) and, after 120 of them, shrinks each vector to twice the
+latest frame's length. Steady frames never reallocate. Files: `src/scene.rs`.
+Test: `a_scene_gives_back_capacity_a_single_large_frame_left_behind` in
+`crates/diri-app/src/gpui_view_cache_tests.rs`. Re-apply on a GPUI bump by
+re-adding `release_idle_capacity` and its call at the top of `Scene::clear`.
