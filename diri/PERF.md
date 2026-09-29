@@ -144,7 +144,6 @@ reflow is reported but not gated. `moved_pixels` requires the moved frame to
 match a fresh render pixel for pixel and to prepare no row again. The
 existing `paint_fixture` raw pixels (live, overlapping and reading) were
 byte-identical between base and branch.
-```
 
 ## Keystroke echo draws without waiting for the display link (2026-09-29)
 
