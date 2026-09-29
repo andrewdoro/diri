@@ -144,6 +144,105 @@ reflow is reported but not gated. `moved_pixels` requires the moved frame to
 match a fresh render pixel for pixel and to prepare no row again. The
 existing `paint_fixture` raw pixels (live, overlapping and reading) were
 byte-identical between base and branch.
+```
+
+## Keystroke echo draws without waiting for the display link (2026-09-29)
+
+**Where a keystroke's time goes.** `DIRI_LATENCY_TRACE=1` now stamps every
+hop of a keystroke in the desktop client, from GPUI delivering the key to the
+drawable reaching the screen (see `diri_client::latency_trace`; zero cost when
+unset). The headless harness drives the real `TerminalPane` key handler,
+the production client and transport, a private Engine with a real Holder
+running `cat`, and GPUI's real headless Metal renderer. Release build, 300
+paced keys (every third on a line a backspace), three runs, load average 7–9:
+
+| hop | p50 | p95 |
+| --- | ---: | ---: |
+| key down → input queued (encode, lease, `try_send`) | 0.009–0.010 ms | 0.013–0.014 ms |
+| input queued → socket written (attachment task) | 0.019 ms | 0.031–0.046 ms |
+| socket written → echo decoded (Engine, Holder, PTY) | 0.184–0.190 ms | 0.30–0.36 ms |
+| echo decoded → pane mailbox | 0.005 ms | 0.006–0.007 ms |
+| mailbox → grid applied (GPUI thread) ¹ | 0.005 ms | 0.008–0.011 ms |
+| grid applied → pane notified | 0.004 ms | 0.006 ms |
+| pane notified → draw start ² | 0.001 ms | 0.001 ms |
+| draw (pane-only window) | 0.216–0.232 ms | 0.29–0.31 ms |
+| draw end → Metal commit | 0.035–0.036 ms | 0.045–0.062 ms |
+| commit → GPU completed | 0.37–0.41 ms | 0.83–0.94 ms |
+| **key down → GPU completed** | **0.90–0.94 ms** | **1.97–3.26 ms** |
+
+¹ The harness pumps a test dispatcher in a busy loop, so this is not the main
+run loop's queueing. ² A headless window draws in the effect flush that dirtied
+it; the real app waits for the display link here (below).
+
+`workspace_terminal_echo_redraw_cpu` lands the same echo in a whole
+1600×1000 workspace window (sidebar, strip, workbench): 0.88 ms apply+draw
+p50, 1.0 ms CPU per echo. It is not a whole-window re-render: the sidebar and
+strip replay from cache, and a sample puts 56% of the loop in
+`TerminalElement::paint` shaping and placing every glyph of the 160×50 grid,
+which GPUI repaints in full each frame.
+
+So Diri's own path from key to a finished frame is about 1–2 ms. The rest is
+waiting: the echo is applied at a random moment and GPUI drew only on the next
+`CVDisplayLink` tick, then the compositor shows the frame.
+
+**What changed.** A keystroke's first screen change asks for its frame at
+once. `Window::request_immediate_frame` (vendored GPUI) merges one request
+into the window's display-link dispatch source, so the frame runs as soon as
+the main thread is free, through the same `step` path. macOS refuses it while
+the last present is less than two refresh intervals old: with two drawables
+that frame may still be queued, and a new one could block in `nextDrawable` or
+stack two frames into one refresh. `AttachmentControl::take_echo` grants one
+immediate frame per keystroke, within the 350 ms `KEYSTROKE_WINDOW`. Output
+nobody typed for, streams, and animations stay on the display link. A cursor
+glide in progress keeps frames flowing, so the request is refused then and the
+echo rides the next tick as before.
+
+**How it was measured.** `echo_frame_scheduling_against_the_display_link`
+(gpui_macos, no window) ticks a dispatch source from a real `CVDisplayLink` on
+this MacBook's 120 Hz panel (8.30 ms measured). A typist thread applies echoes
+60–240 ms apart, each followed by an 80 ms glide of frames. Six alternating
+runs of 150 keys:
+
+| echo applied → frame starts drawing | run p50 | run p95 | all p50 | all p95 |
+| --- | --- | --- | ---: | ---: |
+| display link (before) | 5.28 / 4.57 / 4.28 ms | 8.81 / 8.33 / 8.36 ms | 4.67 ms | 8.43 ms |
+| immediate (after) | 0.001 ms ×3 | 5.67 / 7.10 / 6.50 ms | 0.001 ms | 6.56 ms |
+
+387 of 450 echoes (86%) drew immediately. The others landed during the
+previous echo's glide. On a 60 Hz display the wait removed is twice as long.
+
+**What the display pipeline already does.** The layer keeps two drawables
+(`interactive_windows_keep_two_frames_in_flight`), presents without a
+transaction except while resizing, and keeps `displaySyncEnabled`; turning
+sync off would tear. `CVDisplayLink` ticks at the panel's 120 Hz with no
+frame-rate request. #540 covers animations that ran below it.
+
+**Not claimed.**
+
+- Time on screen. The frame starts about 4.7 ms sooner at the median. When
+  that lands it a refresh earlier depends on where WindowServer's compositing
+  deadline falls in the interval, which only an on-screen window can measure.
+  To measure it, run a dev build with `DIRI_LATENCY_TRACE=1` and type in a
+  visible window. The `presented` hop, from `addPresentedHandler`, is printed
+  every 100 keys. It was not run here: these agents may not open windows on
+  this Mac.
+- Main-thread queueing in the real app. The controller and the view each take
+  one main-queue hop. Both are microseconds when idle.
+- Any change to the Engine path or draw cost.
+
+Reproduce from `diri/`:
+
+```sh
+cargo test -p gpui_macos --release --lib echo_frame_scheduling -- --ignored --nocapture
+cargo build --release -p diri-engine --bin diri-holder
+DIRI_HOLDER_BIN=$PWD/target/release/diri-holder \
+  cargo test --release -p diri-app --bin diri keystroke_latency -- --ignored --nocapture
+cargo test --release -p diri-app --bin diri workspace_terminal_echo_redraw_cpu -- --ignored --nocapture
+```
+
+`only_a_keystroke_echo_asks_for_an_immediate_frame`,
+`a_keystroke_buys_one_echo_frame` and
+`immediate_frames_wait_until_the_last_present_is_on_screen` guard the policy.
 
 ## GPUI scenes give back a large frame's storage (2026-09-28)
 
