@@ -5484,6 +5484,83 @@ mod held_foreground_tests {
 }
 
 #[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    fn session(temp: &Path) -> Session {
+        let (engine, _) = ManifestEngine::load_dir(&crate::detect::bundled_manifest_dir()).unwrap();
+        let spec = SessionSpec {
+            id: "resize".into(),
+            pty: PtySpec::new(
+                vec!["/bin/sh".into(), "-c".into(), "exec cat".into()],
+                "/tmp",
+            )
+            .env("PATH", "/usr/bin:/bin")
+            .size(80, 24),
+            manifest_id: "shell".into(),
+            authority: Authority::ProcessOnly,
+            logs_dir: temp.to_path_buf(),
+            holder: None,
+            remote: None,
+            defer_launch: false,
+        };
+        Session::spawn(spec, Arc::new(engine)).expect("spawn")
+    }
+
+    #[test]
+    fn the_pty_half_of_a_resize_never_waits_for_the_emulator() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = session(temp.path());
+        // A long reflow in progress: the screen lock is held elsewhere.
+        let screen = Arc::clone(&session.shared);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _screen = screen.screen.lock().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().unwrap();
+        // Callers hold the Registry lock across this half; it must not block
+        // on the screen, or one terminal's reflow stalls every session.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let reflow = session.resize_pty(100, 30).expect("resize");
+                done_tx.send(reflow.is_some()).unwrap();
+            });
+            let owed = done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("resize_pty waited for the emulator");
+            assert!(owed, "a live session owes its emulator the reflow");
+            release_tx.send(()).unwrap();
+        });
+        holder.join().unwrap();
+        assert_eq!(session.screen_size(), (80, 24), "not reflowed yet");
+        let _ = session.terminate(Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_owed_reflow_applies_the_newest_pty_size_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = session(temp.path());
+        let first = session.resize_pty(100, 30).unwrap().expect("owed");
+        let second = session.resize_pty(120, 40).unwrap().expect("owed");
+        // The older reflow wins the lock race but must not leave the
+        // emulator at a size the PTY no longer has.
+        first.apply();
+        assert_eq!(session.screen_size(), (120, 40));
+        // The newer one finds nothing left to do.
+        session.shared.screen.lock().unwrap().resize(90, 20);
+        second.apply();
+        assert_eq!(session.screen_size(), (90, 20), "a spent reflow is a no-op");
+        session.resize(132, 42).unwrap();
+        assert_eq!(session.screen_size(), (132, 42));
+        let _ = session.terminate(Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
 mod prompt_title_tests {
     use super::*;
 
@@ -6343,82 +6420,5 @@ mod echo_request_tests {
         assert!(request.expired(late));
         assert!(!request.answered_by(late, 10, 11, 80));
         assert!(request.answered_by(at + ECHO_WINDOW, 10, 11, 80));
-    }
-}
-
-#[cfg(test)]
-mod resize_tests {
-    use super::*;
-
-    fn session(temp: &Path) -> Session {
-        let (engine, _) = ManifestEngine::load_dir(&crate::detect::bundled_manifest_dir()).unwrap();
-        let spec = SessionSpec {
-            id: "resize".into(),
-            pty: PtySpec::new(
-                vec!["/bin/sh".into(), "-c".into(), "exec cat".into()],
-                "/tmp",
-            )
-            .env("PATH", "/usr/bin:/bin")
-            .size(80, 24),
-            manifest_id: "shell".into(),
-            authority: Authority::ProcessOnly,
-            logs_dir: temp.to_path_buf(),
-            holder: None,
-            remote: None,
-            defer_launch: false,
-        };
-        Session::spawn(spec, Arc::new(engine)).expect("spawn")
-    }
-
-    #[test]
-    fn the_pty_half_of_a_resize_never_waits_for_the_emulator() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut session = session(temp.path());
-        // A long reflow in progress: the screen lock is held elsewhere.
-        let screen = Arc::clone(&session.shared);
-        let (held_tx, held_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let holder = std::thread::spawn(move || {
-            let _screen = screen.screen.lock().unwrap();
-            held_tx.send(()).unwrap();
-            let _ = release_rx.recv();
-        });
-        held_rx.recv().unwrap();
-        // Callers hold the Registry lock across this half; it must not block
-        // on the screen, or one terminal's reflow stalls every session.
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                let reflow = session.resize_pty(100, 30).expect("resize");
-                done_tx.send(reflow.is_some()).unwrap();
-            });
-            let owed = done_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("resize_pty waited for the emulator");
-            assert!(owed, "a live session owes its emulator the reflow");
-            release_tx.send(()).unwrap();
-        });
-        holder.join().unwrap();
-        assert_eq!(session.screen_size(), (80, 24), "not reflowed yet");
-        let _ = session.terminate(Duration::from_secs(2));
-    }
-
-    #[test]
-    fn an_owed_reflow_applies_the_newest_pty_size_once() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut session = session(temp.path());
-        let first = session.resize_pty(100, 30).unwrap().expect("owed");
-        let second = session.resize_pty(120, 40).unwrap().expect("owed");
-        // The older reflow wins the lock race but must not leave the
-        // emulator at a size the PTY no longer has.
-        first.apply();
-        assert_eq!(session.screen_size(), (120, 40));
-        // The newer one finds nothing left to do.
-        session.shared.screen.lock().unwrap().resize(90, 20);
-        second.apply();
-        assert_eq!(session.screen_size(), (90, 20), "a spent reflow is a no-op");
-        session.resize(132, 42).unwrap();
-        assert_eq!(session.screen_size(), (132, 42));
-        let _ = session.terminate(Duration::from_secs(2));
     }
 }
