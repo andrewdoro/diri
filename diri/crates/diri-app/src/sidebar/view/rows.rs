@@ -201,7 +201,8 @@ impl Sidebar {
     /// working rows are notified: the sidebar re-renders as their ancestor,
     /// hands them their next frame, and reuses every other row. The
     /// horizontal strip, painted by `RootView`, still needs the sidebar
-    /// notified.
+    /// notified; its tabs take the new frame through their props, so the
+    /// notify does not stale them.
     pub(super) fn notify_activity_frame(&mut self, cx: &mut Context<Self>) {
         let mut notified = false;
         if self.rows_mounted {
@@ -210,7 +211,7 @@ impl Sidebar {
             }
         }
         if !notified {
-            cx.notify();
+            self.notify_without_staling_rows(cx);
         }
     }
 
@@ -222,12 +223,13 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// Any other notify may have changed something a row reads outside its
-    /// props, so every row renders once more.
+    /// Any other notify may have changed something a row or strip tab reads
+    /// outside its props, so every row and tab renders once more.
     pub(super) fn note_self_notified(&mut self) {
         if std::mem::take(&mut self.notify_keeps_rows) {
             return;
         }
         self.rows_stale = true;
+        self.tabs_stale = true;
     }
 }

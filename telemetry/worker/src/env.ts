@@ -1,10 +1,16 @@
 export interface Env {
   DB: D1Database;
   BATCHES: R2Bucket;
+  INGEST_RATE_LIMITER: RateLimit;
+  GLOBAL_RATE_LIMIT_PER_HOUR?: string;
   /** Worker secret. Unset means the admin API refuses everything. */
   ADMIN_TOKEN?: string;
   RETENTION_DAYS?: string;
   RATE_LIMIT_PER_HOUR?: string;
+  /** Optional lower spend caps; see src/budget.ts (they can't be raised). */
+  BUDGET_MONTHLY_PUTS?: string;
+  BUDGET_MONTHLY_GETS?: string;
+  BUDGET_STORED_BYTES?: string;
 }
 
 export const DAY_MS = 24 * 60 * 60 * 1000;

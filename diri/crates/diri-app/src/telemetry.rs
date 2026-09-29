@@ -463,7 +463,7 @@ impl TransportTrace {
         self.attempt_at = Instant::now();
     }
 
-    pub(crate) fn connect_failed(&mut self, reason: &'static str, error: Option<&str>) {
+    pub(crate) fn connect_failed(&mut self, reason: &'static str) {
         self.failures += 1;
         diri_telemetry::count("pane.attach_retries", 1);
         if self.failures == ATTACH_FAILING_AFTER {
@@ -472,7 +472,6 @@ impl TransportTrace {
                 session = self.session.clone(),
                 attempts = self.failures,
                 reason = reason,
-                error = error.map(diri_telemetry::text),
                 since_mount_ms = self.mounted_at.elapsed()
             );
         }
@@ -601,16 +600,15 @@ impl PrivacySettings {
         }
     }
 
-    pub(crate) fn save(&self) {
-        if let Some(dir) = state_dir()
-            && let Err(error) = self.config.save(&dir)
-        {
-            eprintln!("diri: could not save diagnostics settings: {error}");
-            diri_telemetry::error_event!(
-                "settings.privacy_save_failed",
-                error = diri_telemetry::io_error(&error)
-            );
-        }
+    pub(crate) fn save_config(&mut self, config: Config) -> std::io::Result<()> {
+        let state = self
+            .folder
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| std::io::Error::other("diagnostics settings folder unavailable"))?;
+        config.save(state)?;
+        self.config = config;
+        Ok(())
     }
 }
 
@@ -628,18 +626,55 @@ pub(crate) fn take_first_run_notice() -> bool {
     if path.exists() {
         return false;
     }
-    if Config::load(&dir).save(&dir).is_err() {
+    if Config::default().save(&dir).is_err() {
         return false;
     }
     event!("privacy.notice_shown");
     true
 }
 
+/// Asks the Engine to upload everything recorded so far, now, even with
+/// sharing off (the user asked). Blocks up to a minute: call it off the main
+/// thread.
+pub(crate) fn upload_now_blocking() -> Result<diri_proto::TelemetryUploadNowResult, String> {
+    // Tests never reach the real Engine.
+    let home = std::env::var_os("HOME")
+        .filter(|_| !cfg!(test))
+        .ok_or_else(|| "no home directory".to_owned())?;
+    // What this process recorded a moment ago goes in the same upload.
+    diri_telemetry::flush(Duration::from_millis(200));
+    let socket = diri_proto::paths::DirijorPaths::socket(home);
+    let value = crate::daemon_launch::control_request_with_timeout(
+        &socket,
+        1,
+        diri_proto::Method::TELEMETRY_UPLOAD_NOW,
+        None,
+        Duration::from_secs(60),
+    )
+    .map_err(|error| error.to_string())?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+/// One line for the user about an [`upload_now_blocking`] outcome.
+pub(crate) fn upload_now_summary(
+    result: &Result<diri_proto::TelemetryUploadNowResult, String>,
+) -> &'static str {
+    match result.as_ref().map(|result| result.status.as_str()) {
+        Ok("sent") => "Sent. Thanks, this helps.",
+        Ok("up_to_date") => "Already sent. Nothing new since the last upload.",
+        Ok("failed") => "Couldn't reach the server. diri will try again.",
+        Ok("timeout") => "Still sending in the background.",
+        Ok("unavailable") => "Uploading isn't set up in this build.",
+        Ok(_) => "Sent.",
+        Err(_) => "The diri engine isn't running. Try again in a moment.",
+    }
+}
+
 pub(crate) const REPORT_ISSUE_URL: &str = "https://github.com/cristicretu/diri/issues/new";
 
-/// Help > Report a Problem: marks the moment in the timeline (an incident,
-/// so it uploads within a minute), copies the Support ID, and opens a new
-/// GitHub issue that already names this install and build.
+/// Help > Report a Problem: marks the moment in the timeline, uploads it
+/// right away (even with sharing off), copies the Support ID, and opens a
+/// new GitHub issue that already names this install and build.
 pub(crate) fn report_problem(cx: &mut App) {
     let support_id = state_dir()
         .and_then(|dir| Identity::load_or_create(&dir).ok())
@@ -654,6 +689,14 @@ pub(crate) fn report_problem(cx: &mut App) {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(support_id.clone()));
     }
     cx.open_url(&report_url(support_id.as_deref()));
+    // Reporting is explicit consent to send what led up to it, now.
+    if state_dir().is_some() {
+        let _ = std::thread::Builder::new()
+            .name("diri-report-upload".into())
+            .spawn(|| {
+                let _ = upload_now_blocking();
+            });
+    }
 }
 
 fn report_url(support_id: Option<&str>) -> String {
@@ -670,9 +713,57 @@ fn report_url(support_id: Option<&str>) -> String {
     format!("{REPORT_ISSUE_URL}?body={encoded}")
 }
 
+/// With `DIRI_LATENCY_TRACE=1`, follows each keystroke's echo through GPUI's
+/// draw, the Metal commit and the compositor as well as the transport; see
+/// [`diri_client::latency_trace`]. A no-op otherwise.
+pub(crate) fn install_latency_trace() {
+    if !diri_client::latency_trace::enabled() {
+        return;
+    }
+    gpui::set_frame_observer(|stage, at| {
+        use diri_client::latency_trace::{Hop, mark_at};
+        mark_at(
+            match stage {
+                gpui::FrameStage::DrawStart => Hop::DrawStart,
+                gpui::FrameStage::DrawEnd => Hop::DrawEnd,
+                gpui::FrameStage::Committed => Hop::Committed,
+                gpui::FrameStage::GpuCompleted => Hop::GpuCompleted,
+                gpui::FrameStage::Presented => Hop::Presented,
+            },
+            at,
+        );
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privacy_changes_are_committed_only_after_a_successful_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = PrivacySettings {
+            folder: Some(dir.path().join("telemetry")),
+            ..PrivacySettings::default()
+        };
+        Config::default().save(dir.path()).unwrap();
+        let disabled = Config {
+            upload: false,
+            name: Some(String::new()),
+        };
+        let config_path = dir.path().join("telemetry/config.json");
+        std::fs::remove_file(&config_path).unwrap();
+        std::fs::create_dir(&config_path).unwrap();
+        assert!(settings.save_config(disabled.clone()).is_err());
+        assert!(
+            settings.config.upload,
+            "UI must keep its last confirmed setting"
+        );
+        std::fs::remove_dir(&config_path).unwrap();
+        settings.save_config(disabled.clone()).unwrap();
+        assert_eq!(settings.config, disabled);
+        assert_eq!(Config::load(dir.path()), disabled);
+    }
 
     #[test]
     fn sizes_are_bucketed_not_recorded() {
@@ -689,6 +780,24 @@ mod tests {
         assert!(url.contains("D-7K3MQ9XA"));
         assert!(url.contains(crate::updates::CURRENT_VERSION));
         assert!(!url.contains(' '));
+    }
+
+    #[test]
+    fn upload_now_summaries_cover_every_status() {
+        let status = |status: &str| {
+            Ok(diri_proto::TelemetryUploadNowResult {
+                status: status.into(),
+                ..Default::default()
+            })
+        };
+        assert!(upload_now_summary(&status("sent")).starts_with("Sent"));
+        assert!(upload_now_summary(&status("failed")).contains("try again"));
+        assert!(upload_now_summary(&status("unavailable")).contains("isn't set up"));
+        assert!(upload_now_summary(&Err("refused".into())).contains("engine"));
+        assert!(
+            upload_now_blocking().is_err(),
+            "tests never reach the real Engine"
+        );
     }
 
     #[test]

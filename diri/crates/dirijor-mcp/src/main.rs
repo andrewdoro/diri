@@ -58,6 +58,11 @@ fn tool_content(result: Result<Value, String>) -> Value {
         || serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned()),
         str::to_owned,
     );
+    // Typed results for clients that read structuredContent (MCP 2025-06-18);
+    // the text block stays for every other client.
+    if value.is_object() && !is_error {
+        return json!({"content":[{"type":"text","text":text}],"structuredContent":value,"isError":false});
+    }
     json!({"content":[{"type":"text","text":text}],"isError":is_error})
 }
 
@@ -82,23 +87,32 @@ fn initialize(params: &Value) -> Value {
              open/start/spawn/close another agent, session, tab, or terminal (Claude Code, \
              Codex, Cursor, Gemini, or a shell), to check what other sessions are doing, to \
              talk to another session, or to parallelize work across git worktrees — no \
-             extra confirmation of intent needed.\n\nAgent vs terminal rule: when asked to spawn \
-             another agent, select that agent's native kind (for example `claude` or `codex`) \
-             and pass its task as `prompt`. If no agent is named, use your own native kind when \
-             it is available. Never use `shell` to launch an agent CLI such as `claude`, \
-             `codex`, `cursor`, or `gemini`. A child `shell` is an interactive terminal shown \
-             in the parent's Cmd+J pane, and its prompt is executed as shell commands; use it \
-             only when the user explicitly wants a terminal or raw commands.\n\nFor delegated work needing reliable completion, spawn_agent without an initial prompt, then submit_task, wait_for_task, and inspect its result. When receiving a Diri task, call report_task acknowledged before starting and report_task completed or failed for that exact task_id after verification. These are explicit Agent reports, not automated proof that the work is correct.\n\nFor untracked interaction: spawn_agent \
-             (optionally worktree:true and an initial prompt) → wait_for_agent(until:\"done\") \
-             → read_output → send_prompt for follow-ups → release_agent when finished. \
-             Messages are delivered at most once. Reuse message_id on retries; never send a new copy because the agent is slow or its screen has not changed. Inspect unknown delivery outcomes. A delivery receipt does not mean the agent finished. Waits observe current status and may return immediately; verify output for the submitted task before treating it as completed. \
-             get_artifacts returns PR/Linear/preview URLs and listening ports a session has \
-             produced; PR entries include live GitHub status (state, review decision, checks, \
-             comment counts, +/- lines). Quick Open skips hidden folders unless they match \
-             ~/.diri-include. When the user wants extra folders in Cmd+P (for example \
-             `.worktrees`), use get_quick_open_include and add_quick_open_include with \
-             gitignore-style patterns such as `**/.worktrees/`. set_quick_open_include \
-             replaces or clears the list.{browser}"
+             extra confirmation of intent needed.\n\n\
+             Parallel work (preferred): spawn_agents with one entry per subtask \
+             (worktree:true, prompt, task:true) → wait_any(task_ids) → for each ready task \
+             read its result (read_output mode:last_message for detail), answer_task if it is \
+             blocked, get_diff to review, integrate to bring its branch into your checkout → \
+             call wait_any again with the pending ids → release_agent when done. wait_any \
+             returns as soon as ANY target needs you; do not wait for all of them at once.\n\n\
+             Agent vs terminal rule: to spawn another agent, select its native kind (for \
+             example `claude` or `codex`) and pass its task as `prompt`. If no agent is named, \
+             use your own native kind when available. Never use `shell` to launch an agent CLI \
+             such as `claude`, `codex`, `cursor`, or `gemini`; a child `shell` is a raw \
+             terminal in the parent's Cmd+J pane whose prompt runs as shell commands.\n\n\
+             When you receive a Diri task: report_task acknowledged before starting, then \
+             completed or failed for that exact task_id after verifying (JSON matching \
+             result_schema when the task has one), or blocked with your question. \
+             report_to_parent is recorded on your open task automatically.\n\n\
+             Delivery rules: messages, spawns, and tasks are deduplicated and delivered at \
+             most once. Reuse message_id/operation_id/request_id on retries; never resend \
+             under a new identity because an agent is slow or its screen is unchanged. A \
+             delivery receipt does not mean the work is done. For untracked prompts, pass the \
+             returned since_ms to wait_for_agent/wait_any so an agent that was already idle \
+             does not count as finished.\n\n\
+             Also: get_artifacts returns PR/preview URLs and ports (PRs include live GitHub \
+             status); fork_agent branches a conversation to try an alternative; manage_agent \
+             hibernates idle children instead of killing them; quick_open_include edits the \
+             folders Cmd+P indexes (e.g. `**/.worktrees/`).{browser}"
         )
     })
 }

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use diri_proto::{
-    AgentKind, AgentReadinessResult, Method, ReadScreenResult, SessionId, SessionListResult,
-    SessionRecord, SessionSpawnParams, SessionStatus, paths::DirijorPaths,
+    AgentKind, AgentReadinessResult, Method, ReadScreenResult, ReadTranscriptResult, SessionId,
+    SessionListResult, SessionRecord, SessionSpawnParams, SessionStatus, paths::DirijorPaths,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -15,6 +15,7 @@ use crate::tools::{ToolDefinition, tool_definitions_for};
 
 #[cfg(test)]
 mod audit_tests;
+mod orchestration;
 mod policy;
 mod tasks;
 
@@ -98,10 +99,20 @@ impl Bridge {
         crate::tools::validate_arguments(tool, arguments)?;
         match tool {
             "spawn_agent" => self.spawn_agent(arguments),
+            "spawn_agents" => self.spawn_agents(arguments),
+            "fork_agent" => self.fork_agent(arguments),
+            "manage_agent" => self.manage_agent(arguments),
             "submit_task" => self.submit_task(arguments),
+            "submit_tasks" => self.submit_tasks(arguments),
             "get_task" => self.get_task(arguments),
             "report_task" => self.report_task(arguments),
             "wait_for_task" => self.wait_for_task(arguments),
+            "answer_task" => self.answer_task(arguments),
+            "cancel_task" => self.cancel_task(arguments),
+            "list_tasks" => self.list_tasks(arguments),
+            "wait_any" => self.wait_any(arguments),
+            "get_diff" => self.get_diff(arguments),
+            "integrate" => self.integrate(arguments),
             "list_agents" => self.list_agents(),
             "get_status" => self.get_status(arguments),
             "send_prompt" => self.send_prompt(arguments),
@@ -114,9 +125,7 @@ impl Bridge {
             "release_agent" => self.release_agent(arguments),
             "test_run" => self.test_run(arguments),
             "browser" => self.browser(arguments),
-            "get_quick_open_include" => self.get_quick_open_include(),
-            "add_quick_open_include" => self.add_quick_open_include(arguments),
-            "set_quick_open_include" => self.set_quick_open_include(arguments),
+            "quick_open_include" => self.quick_open_include(arguments),
             "whoami" => self.whoami(),
             "list_children" => self.list_children(arguments),
             "wait_for_children" => self.wait_for_children(arguments),
@@ -174,7 +183,7 @@ impl Bridge {
             &snapshot.projects,
             self.caller.as_deref(),
         )?
-        .authorize(WriteAction::Spawn)?;
+        .authorize(WriteAction::Spawn { count: 1 })?;
         self.spawn_session(arguments, self.caller.clone().map(SessionId))
     }
 
@@ -189,6 +198,16 @@ impl Bridge {
     }
 
     fn spawn_session(&self, arguments: &Value, parent: Option<SessionId>) -> Result<Value, String> {
+        let as_task = optional_bool(arguments, "task").unwrap_or(false);
+        if as_task && (parent.is_none() || optional_string(arguments, "prompt").is_none()) {
+            return Err(
+                "task:true requires a prompt and must run inside a Diri session".to_owned(),
+            );
+        }
+        if !as_task && arguments.get("result_schema").is_some() {
+            return Err("result_schema requires task:true".to_owned());
+        }
+        let since_ms = now_ms();
         let requested = required_string(arguments, "kind")?;
         let readiness: AgentReadinessResult =
             self.request_typed(Method::AGENT_READINESS, json!({}), DEFAULT_TIMEOUT)?;
@@ -202,7 +221,8 @@ impl Bridge {
             worktree_branch: optional_string(arguments, "branch"),
             worktree_base: optional_string(arguments, "base"),
             title: optional_string(arguments, "name"),
-            initial_prompt: optional_string(arguments, "prompt"),
+            // A tracked task is delivered after launch, with its own receipt.
+            initial_prompt: optional_string(arguments, "prompt").filter(|_| !as_task),
             parent,
             initial_cols: None,
             initial_rows: None,
@@ -226,9 +246,36 @@ impl Bridge {
                     .collect::<String>()
             )
         });
-        self.request(Method::SESSION_SPAWN_TRACKED, json!({
+        let mut spawned = self.request(Method::SESSION_SPAWN_TRACKED, json!({
             "senderID":self.require_caller()?, "operationID":operation_id, "spawn":params,
-        }), SPAWN_TIMEOUT).map_err(|error| format!("{error}. Spawn identity: {operation_id}. Retry only the same arguments and operation_id; never launch a fresh copy after a lost response."))
+        }), SPAWN_TIMEOUT).map_err(|error| format!("{error}. Spawn identity: {operation_id}. Retry only the same arguments and operation_id; never launch a fresh copy after a lost response."))?;
+        spawned["since_ms"] = json!(since_ms);
+        if as_task {
+            let session_id = spawned["spawn_receipt"]["session_id"]
+                .as_str()
+                .or_else(|| spawned["id"].as_str())
+                .map(str::to_owned);
+            spawned["task"] = match session_id {
+                Some(session_id) if spawned["ok"] == true => {
+                    // Derived from the spawn identity, so a retried spawn can
+                    // never assign the same work twice.
+                    let mut task = json!({
+                        "session_id": session_id,
+                        "text": arguments["prompt"],
+                        "request_id": format!("spawn:{operation_id}"),
+                    });
+                    if let Some(schema) = arguments.get("result_schema") {
+                        task["result_schema"] = schema.clone();
+                    }
+                    self.submit_task(&task)
+                        .unwrap_or_else(|error| json!({"ok": false, "error": error}))
+                }
+                _ => {
+                    json!({"ok": false, "error": "the session did not start; no task was submitted"})
+                }
+            };
+        }
+        Ok(spawned)
     }
 
     fn list_agents(&self) -> Result<Value, String> {
@@ -257,6 +304,7 @@ impl Bridge {
         .authorize(WriteAction::SendPrompt { target: &id })?;
         let relation = authorized.relation();
         let delivered = authorized.frame(&text);
+        let since_ms = now_ms();
         let receipt = self.deliver_message(
             arguments,
             &id,
@@ -269,6 +317,7 @@ impl Bridge {
             "relation": relation.as_str(),
             "attributed": delivered != text,
             "receipt": receipt,
+            "since_ms": since_ms,
         }))
     }
 
@@ -315,20 +364,29 @@ impl Bridge {
         let until = optional_string(arguments, "until").unwrap_or_else(|| "done".into());
         let timeout =
             Duration::from_secs_f64(optional_number(arguments, "timeout_s").unwrap_or(600.0));
+        let since = optional_number(arguments, "since_ms");
         let deadline = Instant::now() + timeout;
         let snapshot_deadline = if timeout.is_zero() {
             Instant::now() + DEFAULT_TIMEOUT
         } else {
             deadline
         };
+        let saw_working = std::cell::Cell::new(false);
         let refresh = || -> Result<Option<SessionRecord>, ControlFailure> {
-            Ok(self
+            let record = self
                 .sessions_before(snapshot_deadline)?
                 .into_iter()
-                .find(|record| record.id.0 == id))
+                .find(|record| record.id.0 == id);
+            if record
+                .as_ref()
+                .is_some_and(|record| matches!(record.status, SessionStatus::Working))
+            {
+                saw_working.set(true);
+            }
+            Ok(record)
         };
         let matches = |record: &SessionRecord| match until.as_str() {
-            "done" | "idle" => matches!(record.status, SessionStatus::Idle),
+            "done" | "idle" => turn_done_since(record, since, saw_working.get()),
             "needs_me" => matches!(record.status, SessionStatus::NeedsInput(_)),
             "exited" => matches!(record.status, SessionStatus::Exited(_)),
             _ => false, // validated before dispatch
@@ -370,32 +428,6 @@ impl Bridge {
             "matched":latest.as_ref().is_some_and(matches),
             "removed":latest.is_none(),
         }))
-    }
-
-    fn read_output(&self, arguments: &Value) -> Result<Value, String> {
-        let id = required_string(arguments, "session_id")?;
-        let mut result: ReadScreenResult = self.request_typed(
-            Method::SESSION_READ_SCREEN,
-            json!({"sessionID": id}),
-            DEFAULT_TIMEOUT,
-        )?;
-        if optional_string(arguments, "mode").as_deref() == Some("tail") {
-            let lines = optional_number(arguments, "lines")
-                .unwrap_or(50.0)
-                .clamp(1.0, 500.0) as usize;
-            let kept = result
-                .text
-                .lines()
-                .rev()
-                .take(lines)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n");
-            result.text = kept;
-        }
-        serde_json::to_value(result).map_err(|error| error.to_string())
     }
 
     fn get_artifacts(&self, arguments: &Value) -> Result<Value, String> {
@@ -528,6 +560,14 @@ impl Bridge {
         )?
         .authorize(WriteAction::TestRun)?;
         self.request("test.run", arguments.clone(), Duration::from_secs(180))
+    }
+
+    fn quick_open_include(&self, arguments: &Value) -> Result<Value, String> {
+        match arguments["action"].as_str() {
+            Some("add") => self.add_quick_open_include(arguments),
+            Some("set") => self.set_quick_open_include(arguments),
+            _ => self.get_quick_open_include(),
+        }
     }
 
     fn get_quick_open_include(&self) -> Result<Value, String> {
@@ -687,13 +727,23 @@ impl Bridge {
         }
         let wanted: HashSet<String> = targets.iter().map(|record| record.id.0.clone()).collect();
         let mode = optional_string(arguments, "until").unwrap_or_else(|| "settled".into());
+        let since = optional_number(arguments, "since_ms");
+        let worked = std::cell::RefCell::new(HashSet::<String>::new());
         let reassess = || -> Result<(Vec<SessionRecord>, bool), ControlFailure> {
             let latest: Vec<SessionRecord> = self
                 .sessions_before(snapshot_deadline)?
                 .into_iter()
                 .filter(|record| wanted.contains(&record.id.0))
                 .collect();
-            let settled = latest.iter().all(|record| reached(&mode, &record.status));
+            let mut worked = worked.borrow_mut();
+            for record in &latest {
+                if matches!(record.status, SessionStatus::Working) {
+                    worked.insert(record.id.0.clone());
+                }
+            }
+            let settled = latest
+                .iter()
+                .all(|record| reached_since(&mode, record, since, worked.contains(&record.id.0)));
             Ok((latest, settled))
         };
         let (mut latest, mut settled) = reassess().map_err(render_failure)?;
@@ -763,6 +813,24 @@ impl Bridge {
                     } else {
                         object.insert("screen_tail".into(), Value::Null);
                     }
+                    let last_message = self
+                        .request_typed::<ReadTranscriptResult>(
+                            Method::SESSION_READ_TRANSCRIPT,
+                            json!({"sessionID": record.id.0, "turns": 4}),
+                            DEFAULT_TIMEOUT,
+                        )
+                        .ok()
+                        .and_then(|transcript| {
+                            transcript
+                                .turns
+                                .into_iter()
+                                .rev()
+                                .find(|turn| turn.role == "agent")
+                        })
+                        .map(|turn| turn.text);
+                    if let Some(message) = last_message {
+                        object.insert("last_message".into(), json!(message));
+                    }
                     if let Some(artifacts) = &record.artifacts {
                         object.insert(
                             "artifacts".into(),
@@ -803,6 +871,7 @@ impl Bridge {
         if !matches!(status.as_str(), "update" | "done" | "blocked" | "failed") {
             return Err(format!("invalid report status: {status}"));
         }
+        let open_task = self.open_task_from(&parent)?;
         let mut lines = vec![
             format!("[report from id:{} · status: {status}]", caller),
             String::new(),
@@ -827,6 +896,19 @@ impl Bridge {
             }
         }
         let delivered = lines.join("\n");
+        let task = match &open_task {
+            Some(task_id) => Some(self.record_report_on_task(task_id, &status, &delivered)?),
+            None => None,
+        };
+        if task.is_some() && !optional_bool(arguments, "deliver").unwrap_or(false) {
+            return Ok(json!({
+                "ok": true,
+                "parent": parent,
+                "status": status,
+                "recorded_on_task": task,
+                "note": "Recorded on your open task; the parent receives it through wait_any/wait_for_task. Pass deliver:true to also type it into the parent's terminal.",
+            }));
+        }
         let submit = optional_bool(arguments, "submit").unwrap_or(true);
         // Exclude the mutable display title from the default message identity.
         let receipt = self.deliver_message(
@@ -842,6 +924,7 @@ impl Bridge {
             "status": status,
             "delivered": delivered,
             "receipt": receipt,
+            "recorded_on_task": task,
         }))
     }
 
@@ -1174,6 +1257,33 @@ fn child_subset<'a>(
                 .ok_or_else(|| format!("{id} is not one of your direct child sessions"))
         })
         .collect()
+}
+
+fn now_ms() -> f64 {
+    diri_proto::DateMillis::from(std::time::SystemTime::now()).0
+}
+
+/// Idle is only "done" for a given message when the Engine stamped a turn
+/// completion after it, or this wait itself watched the session work. Agents
+/// that never report turn completion still finish via the observed transition.
+fn turn_done_since(record: &SessionRecord, since: Option<f64>, saw_working: bool) -> bool {
+    matches!(record.status, SessionStatus::Idle)
+        && since.is_none_or(|since| {
+            saw_working
+                || record
+                    .last_turn_completed_at
+                    .is_some_and(|completed| completed.0 > since)
+        })
+}
+
+fn reached_since(mode: &str, record: &SessionRecord, since: Option<f64>, worked: bool) -> bool {
+    match (mode, &record.status) {
+        (_, SessionStatus::Exited(_)) => true,
+        ("exited", _) => false,
+        (_, SessionStatus::Idle) => turn_done_since(record, since, worked),
+        ("done", _) => false,
+        (_, status) => reached(mode, status),
+    }
 }
 
 fn reached(mode: &str, status: &SessionStatus) -> bool {

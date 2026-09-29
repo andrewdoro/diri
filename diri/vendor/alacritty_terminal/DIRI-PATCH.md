@@ -84,6 +84,49 @@ A decoded block used to count at full cell size toward the history budget
 until its rows were recycled. The partially consumed block now counts its
 compressed bytes plus one decompressed index.
 
+## Recycling from recipe bits and spare rows
+
+Encoding a block also records, per row, whether `Row::reset` of that row
+yields only template cells for every template: the row has the block width,
+is not empty, and every cell at or beyond its occupancy is `Cell::default()`
+(then a differing template background resets every cell, and an equal one
+means the default background, whose kept cells already are reset cells).
+Nearly every output line qualifies. Recycling such an oldest row drops it
+without decompressing or indexing its block; rows that do not qualify, or
+blocks at another width after a resize, take the indexed path above. The 64
+recipe bits fit in `Block` without changing its counted size (`start` is now
+a `u32`), so the history budget retains exactly the same rows.
+
+The rows a seal has just encoded are kept as spare allocations for the rows
+that recycling hands back, so a scroll no longer allocates and frees a row.
+A spare row whose reset would keep non-template cells is marked fully
+occupied first; the others reset only the cells they wrote. Spares are
+released at every `bound_history_bytes` (each `HeadlessScreen` settle),
+before stored bytes are measured, so they neither count toward nor outlive
+the history budget, and an idle terminal retains none.
+
+`bound_history_bytes` runs after every read that scrolled. It no longer visits
+every block: the payload term of `history_storage_bytes` is kept current by
+the block pushes and pops at the ends that streaming output uses and is
+recomputed from scratch after any other block change (debug builds assert it
+equals the recomputation), and read caches are only released when a history
+row was read or edited since the last release.
+
+## Line content sources
+
+`Term::damage_content_sources` reports, for full damage, where each screen
+line's cells were at the last `reset_damage`: scrolling (`scroll_up_relative`
+and `scroll_down_relative`, which cover linefeed, reverse index, SU/SD and
+IL/DL) moves the sources with the lines and marks uncovered lines changed,
+instead of forgetting them. Any line damage, and every other full damage,
+still marks lines changed or the sources unknown. `input` leaves its cells to
+cursor damage, so a scroll marks the cursor line first, and full damage marks
+the previous and current cursor lines like the partial damage query does.
+Clearing a wide character's leading spacer on the line above the cursor was
+not damaged at all; it now marks that line changed (renderer damage is
+unchanged). `diri-terminal-state` uses the sources to keep moved rows'
+fingerprints; rendering is unaffected.
+
 ## Printable ASCII input
 
 `Term::input_ascii` (the vendored VTE's `Handler::input_ascii`) writes a run of
@@ -94,7 +137,11 @@ colors, flags and hyperlinks, occupancy and the final cursor/wrap state match.
 Visible-row indexing also has an inlined fast path.
 
 Tests: `ascii_runs_match_per_character_input` (randomized against `input`),
-`recycled_rows_equal_decoded_rows_after_reset`,
+`recycled_rows_equal_decoded_rows_after_reset` (also checks the recipe bits
+and spare-row resets), `streaming_full_history_recycles_without_decoding`,
+`recycle_bits_keep_the_counted_block_size`,
+`random_storage_operations_match_an_uncompressed_sequence` (now with
+recycling and byte bounds), `scrolling_moves_content_sources`,
 `full_history_recycling_matches_dense_storage`,
 `every_cell_attribute_round_trips_through_the_codec` and
 `history_compression_round_trips_arbitrary_bytes`. There is no CI job for this

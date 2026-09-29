@@ -40,6 +40,7 @@ mod socket;
 pub mod server;
 
 mod fanout;
+mod log_feed;
 
 pub use client::{HolderClient, HolderManagerClient, HolderOutputStream};
 

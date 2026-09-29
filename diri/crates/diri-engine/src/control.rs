@@ -30,6 +30,7 @@ mod claude_accounts;
 mod codex_accounts;
 mod message_delivery;
 mod operations;
+mod orchestration;
 mod tasks;
 mod workspaces;
 
@@ -610,6 +611,9 @@ impl ControlServer {
                         | Method::HOST_USAGE
                         | Method::HOST_LIST_DIRECTORIES
                         | Method::SESSION_READ_DIFF
+                        | Method::WORKTREE_INTEGRATE
+                        | Method::TASK_ANSWER
+                        | Method::TASK_CANCEL
                         | Method::SESSION_CAPTURE_FIND
                         | Method::SESSION_READ_SCROLLBACK_CELLS
                         | Method::SESSION_KILL
@@ -622,6 +626,7 @@ impl ControlServer {
                         | Method::SESSION_MIGRATE
                         | Method::WORKTREE_OVERVIEW
                         | Method::WORKTREE_CLEANUP
+                        | Method::TELEMETRY_UPLOAD_NOW
                 ) || ((method == Method::AGENT_READINESS
                     || method == Method::AGENT_CONFIGURE)
                     && params
@@ -869,6 +874,9 @@ impl ControlServer {
             Method::TASK_SUBMIT => self.task_submit(params),
             Method::TASK_GET => self.task_get(params),
             Method::TASK_REPORT => self.task_report(params),
+            Method::TASK_ANSWER => self.task_answer(params),
+            Method::TASK_CANCEL => self.task_cancel(params),
+            Method::TASK_LIST => self.task_list(params),
             Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),
             Method::SESSION_DELIVER_MESSAGE => self.session_deliver_message(params),
             Method::SESSION_SEND_KEY => self.session_send_key(params),
@@ -921,11 +929,14 @@ impl ControlServer {
             Method::AGENT_CONFIGURE => self.agent_configure(params),
             Method::PROJECT_ADD => self.project_add(params),
             Method::SESSION_READ_DIFF => self.session_read_diff(params),
+            Method::SESSION_READ_TRANSCRIPT => self.session_read_transcript(params),
+            Method::WORKTREE_INTEGRATE => self.worktree_integrate(params),
             Method::SESSION_HIBERNATE => self.session_hibernate(params),
             Method::SESSION_WAKE => self.session_wake(params),
             Method::DAEMON_PREPARE_SHUTDOWN => self.daemon_prepare_shutdown(),
             Method::DAEMON_SHUTDOWN_IF_IDLE => self.daemon_shutdown_if_idle(),
             Method::DAEMON_SHUTDOWN => self.daemon_shutdown(),
+            Method::TELEMETRY_UPLOAD_NOW => telemetry_upload_now(),
             Method::GOVERNOR_CONFIGURE => self.governor_configure(params),
             Method::CLIENT_SET_ACTIVE => self.client_set_active(params),
             other => Err(ControlError::not_found(format!(
@@ -947,7 +958,7 @@ impl ControlServer {
                 .as_ref()
                 .and_then(|value| value.get("build"))
                 .and_then(Value::as_str)
-                .map(diri_telemetry::text),
+                .map(diri_telemetry::id),
             ok = proto == WIRE_VERSION as u64,
         );
         if proto != WIRE_VERSION as u64 {
@@ -2921,7 +2932,7 @@ impl ControlServer {
         record.project_id = source.project_id.clone();
         record.worktree_path = source.worktree_path.clone();
         record.git_branch = source.git_branch.clone();
-        record.parent = Some(source.id.clone());
+        record.parent = Some(p.parent.clone().unwrap_or_else(|| source.id.clone()));
         record.host = source.host.clone();
         record.remote_persistence = remote_persistence;
         record.title = format!("Fork of {}", source.title);
@@ -4159,6 +4170,40 @@ impl OrphanWatch {
     }
 }
 
+/// Uploads the telemetry spool now at the user's request (Settings, Report a
+/// Problem). Runs as a background request: the upload can take seconds.
+fn telemetry_upload_now() -> Result<JsonValue, ControlError> {
+    use diri_telemetry::upload::UploadNow;
+    let result = match diri_telemetry::upload::upload_now(Duration::from_secs(45)) {
+        UploadNow::Unavailable => diri_proto::TelemetryUploadNowResult {
+            status: "unavailable".into(),
+            ..Default::default()
+        },
+        UploadNow::TimedOut => diri_proto::TelemetryUploadNowResult {
+            status: "timeout".into(),
+            ..Default::default()
+        },
+        UploadNow::Done(report) => diri_proto::TelemetryUploadNowResult {
+            status: if report.failed {
+                "failed"
+            } else if report.batches == 0 {
+                "up_to_date"
+            } else {
+                "sent"
+            }
+            .into(),
+            batches: u32::try_from(report.batches).unwrap_or(u32::MAX),
+            records: report.lines as u64,
+        },
+    };
+    diri_telemetry::event!(
+        "telemetry.upload_now",
+        status = diri_telemetry::id(&result.status),
+        batches = result.batches,
+    );
+    encode(&result)
+}
+
 fn idle_shutdown_refusal(live_sessions: usize, connections: usize) -> Option<&'static str> {
     if live_sessions != 0 {
         Some("live sessions still require the Engine")
@@ -4762,6 +4807,15 @@ mod tests {
     mod find_capture_tests;
     mod reconnect_tests;
     mod send_key_tests;
+
+    #[test]
+    fn telemetry_upload_now_reports_unavailable_without_an_uploader() {
+        // Debug builds and tests never start the uploader.
+        let value = telemetry_upload_now().unwrap();
+        let result: diri_proto::TelemetryUploadNowResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.status, "unavailable");
+        assert_eq!(result.batches, 0);
+    }
 
     #[test]
     fn a_shared_event_frame_is_the_line_control_message_writes() {

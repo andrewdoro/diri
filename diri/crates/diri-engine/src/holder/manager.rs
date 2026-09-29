@@ -229,7 +229,7 @@ impl HolderManagerServer {
                             diri_telemetry::error_event!(
                                 "holder.session_failed",
                                 session = diri_telemetry::id(&session_id),
-                                error = diri_telemetry::text(error.to_string()),
+                                kind = crate::telemetry::holder_error_kind(&error),
                             );
                         }
                         let mut active = state.active.lock().expect("active");

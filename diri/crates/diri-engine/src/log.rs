@@ -212,7 +212,16 @@ impl OutputLog {
     /// Reads up to `max_bytes` from `from_offset`, clamped to what remains
     /// available. Returns the actual start offset and the bytes.
     pub fn read(&mut self, from_offset: u64, max_bytes: usize) -> (u64, Vec<u8>) {
-        let oldest_available = self.ring_start_offset.min(self.file_base_offset);
+        // A read-only view holds no ring, and its `ring_start_offset` is where
+        // the tail stood when it opened: once a rewrite moves the file's base
+        // past that, only the file says what is still readable. Taking the
+        // stale value let a reader far enough behind ask the file for a
+        // window that ended before its base.
+        let oldest_available = if self.read_only {
+            self.file_base_offset
+        } else {
+            self.ring_start_offset.min(self.file_base_offset)
+        };
         let start = from_offset.max(oldest_available);
         if start >= self.tail_offset {
             return (self.tail_offset, Vec::new());
@@ -521,7 +530,7 @@ impl OutputLog {
         if handle.seek(SeekFrom::Start(pos)).is_err() {
             return (tail, Vec::new());
         }
-        let count = (to_offset - start) as usize;
+        let count = to_offset.saturating_sub(start) as usize;
         let mut buffer = vec![0u8; count];
         let mut filled = 0;
         while filled < count {
@@ -850,6 +859,32 @@ mod tests {
         let (offset, data) = reader.read(0, 16);
         assert_eq!(offset, 0);
         assert_eq!(data, b"first");
+    }
+
+    #[test]
+    fn a_reader_left_behind_by_a_rewrite_resumes_at_the_new_base() {
+        let root = dir();
+        let mut writer = OutputLog::open(root.path(), "s", 0, 64 << 10, false).expect("open");
+        let mut reader = OutputLog::reader(root.path(), "s").expect("open");
+        // Far more than the file keeps, in pieces, so rewrites move its base
+        // well past where the reader stands.
+        let piece: Vec<u8> = (0..4096_u32).map(|index| index as u8).collect();
+        for _ in 0..64 {
+            writer.append(&piece).expect("append");
+        }
+        writer.flush().expect("flush");
+        // As the pump does when its watcher reports the file replaced.
+        reader.invalidate_read_handle();
+        assert!(reader.refresh_from_disk());
+        let base = reader.file_base_offset;
+        assert!(base > 16 << 10, "the file was rewritten");
+
+        // Asking for a window that ended before the base used to underflow
+        // its length: a capacity-overflow panic on the session's pump.
+        let (start, data) = reader.read(0, 1024);
+        assert_eq!(start, base, "resumes at the oldest readable byte");
+        assert_eq!(data.len(), 1024);
+        assert_eq!(data[..], piece[(base % 4096) as usize..][..1024]);
     }
 
     #[test]
