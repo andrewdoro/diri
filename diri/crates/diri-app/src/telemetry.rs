@@ -98,6 +98,8 @@ pub(crate) fn action(name: &'static str, source: &'static str) {
     debug_event!("ui.action", action = name, source = source);
 }
 
+// Only the macOS app delegate reports these.
+#[cfg(target_os = "macos")]
 pub(crate) fn app_activation_changed(active: bool) {
     APP_ACTIVE.store(active, Ordering::Relaxed);
     if active {
@@ -107,6 +109,8 @@ pub(crate) fn app_activation_changed(active: bool) {
     }
 }
 
+// Only the macOS app delegate reports these.
+#[cfg(target_os = "macos")]
 pub(crate) fn system_sleep(sleeping: bool) {
     if sleeping {
         event!("app.sleep");

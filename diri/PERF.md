@@ -152,6 +152,109 @@ cargo build --release -p diri-engine --example feedbench
 cargo bench -p diri-terminal-state --bench terminal_parity
 cargo test --release -p diri-terminal-state --test transcript_digest -- --ignored --nocapture
 ```
+## Busy local fleets: Holder output path stops serializing (2026-09-28)
+
+**Where the time went.** `fleetbench` (N sessions each `cat`-ing a 64 MiB
+colored log through real PTYs, a private Holder manager and Engine sessions)
+plateaued near 115 MB/s aggregate from 4 sessions up. Stack samples of both
+processes during a 4-session run (base = main with #542):
+
+| Thread | Base | Branch |
+| --- | --- | --- |
+| Holder log writer, in `write(2)` | 75% | ~5% busy in total |
+| Holder PTY pump, blocked on subscriber queue / log queue | 24% / 19% | 7% / 0% |
+| Engine pump, waiting on a Holder `stat` reply | 40% | 1% |
+| Engine pump, tailing the log after a dropped subscription | 8% | 1% |
+| Engine pump, parsing (`feed_with_history`) | 9% | 85% |
+
+Five serialization points were behind that:
+
+- A macOS PTY read is exactly 1 KiB (measured, at any baud rate), so the
+  log queue carried one `write(2)` per KiB and its 256-entry bound was only
+  256 KiB. A stat took the log lock, which the writer holds across each disk
+  write, and did so while holding the PTY lock. The Engine's fact sample
+  (every 100 ms since #542) queued behind the disk, and so did keystrokes.
+- The subscriber queue was bounded at 16 frames, meaning 16 KiB rather than
+  the 1 MiB its comment intended, so the pump waited on the Engine per few KiB.
+  An Engine stuck in `stat` then overran the 50 ms patience and was dropped
+  to log tailing.
+- The output stream ran over macOS's default 8 KiB AF_UNIX buffers, so
+  every 8 KiB cost a sender/receiver ping-pong. In a microbenchmark, 256 KiB
+  buffers moved 16.8 GB/s against 1.06 GB/s, for an eighth of the CPU.
+
+**What changed.**
+
+- Stat reads an atomic log tail and no longer takes the log lock.
+- The pump hands the log writer a byte buffer, which the writer swaps out
+  whole. The writer lingers at most 4 ms for a 64 KiB batch, and only while
+  bytes are pending; an idle writer parks with no deadline. The pending
+  bound is 4 MiB and the pump waits beyond it, as before. The log is
+  still fsynced every 2 s. No durability promise changes.
+- Subscriber queues are bounded in bytes (1 MiB). Contiguous waiting bytes
+  join one frame of at most 256 KiB, below the 1 MiB wire maximum every
+  Engine accepts. The wire format is unchanged.
+- Both ends of the output stream get 256 KiB socket buffers. The Engine reads
+  the subscription response through the frame buffer. Before, a frame sent
+  right behind the response was discarded and desynchronized the stream. The
+  Engine also sets the socket timeout only when a read will reach the socket.
+- A read-only `OutputLog` asked for a window that a rewrite had moved below
+  the file's base underflowed into a capacity-overflow panic of the session
+  pump. It now resumes at the base. The faster Holder made this reachable
+  in `fleetbench` with a 256 MiB payload.
+- The exit-marker scan anchors on the OSC `]` instead of ESC, which colored
+  output repeats every few bytes.
+
+**Numbers.** Alternating release builds, three runs each, 64 MiB per session,
+load average 86–165 from unrelated builds. Wall throughput is not a reliable
+measure here. CPU time is: user+sys of the fleetbench process (Engine) and of
+the private Holder manager (`ps` utime+stime), as medians.
+
+| Sessions | Holder CPU base → branch | Engine CPU base → branch | Aggregate MB/s base → branch |
+| --- | --- | --- | --- |
+| 1 | 0.81 → 0.51 s | 1.15 → 1.03 s | 16.9 → 20.4 |
+| 4 | 4.05 → 2.51 s | 3.73 → 3.65 s | 80.4 → 75.4 |
+| 8 | 11.75 → 8.65 s | 9.41 → 8.86 s | 119.0 → 111.6 |
+| 16 | 21.58 → 17.76 s | 18.45 → 17.92 s | 99.5 → 110.2 |
+
+At a lower load (26–50), 4 × 32 MiB runs went from Engine 3.02 → 2.28 s and
+Holder 2.70 → 1.56 s.
+
+`holderbench 20` (20 sessions × 5 MiB, no subscriber): idle CPU was 0% on
+both builds. Manager footprint went from 12.6–23.4 MiB to 10.1–12.0 MiB,
+because an idle session no longer holds a 1 MiB write batch.
+
+**What is not claimed.** No aggregate-throughput gain. Raw macOS PTYs with a
+trivial Python reader and no diri code reach only 94 / 133 / 117 MB/s at
+4 / 8 / 16 sessions on this machine, and reader sys time per KiB grows with
+N. That plateau is the kernel's PTY layer, and the branch now sits at it.
+Of the remaining Holder CPU, 90% is sys time in `poll`/`read` on the PTY.
+The Engine is now bound by terminal parsing, which is the terminal-feed work.
+Under heavy load its 100 ms `stat` sample still waits on Holder scheduling
+latency (about 15% of pump wall time at load 40+), but costs no CPU.
+
+**The one stalled holderbench run, root-caused.** A loop of holderbench's
+drain phase stalled 11 of 350 rounds on the branch and 11 of 550 on base. The
+pattern was the same on both: every running session had drained all 5 MiB,
+and each stalled one had never started. Its log held only the 16-byte
+header, with no socket and no child. The manager's stderr (normally
+`/dev/null`) held `PTY spawn: Unknown error: -6`. That is XNU's
+kernel-private `EREDRIVEOPEN` escaping `openpty(3)` under concurrent PTY
+creation and teardown. Sixteen processes doing `openpty`/`close` reproduce
+it with no diri code, a few times per 32,000 opens. The manager had already
+acknowledged the launch, so the session vanished silently. `Pty::spawn` now
+retries that code (and `EINTR`) up to 8 times. Retrying never lets the
+error through: 0 failures in 64,000 churned opens, against 22–32 without
+the retry.
+
+Separately, LogFeed and the byte-bounded subscriber queue each ran 80,000
+randomized rounds, with tiny thresholds, random delays on both sides and
+random hangups. None hung, and none lost or reordered a byte.
+
+Reproduce: `DIRI_HOLDER_BIN=target/release/diri-holder
+target/release/examples/fleetbench /private/tmp/dperf-payload.txt <n> 160 50`.
+The Holder manager is the `diri-holder --manager` whose parent is fleetbench.
+It lingers 30 s idle, so its CPU time can be read after the run.
+
 ## GPUI scenes give back a large frame's storage (2026-09-28)
 
 `vmmap`/`heap` on the installed app attributed about 36 MB of live heap to GPUI
