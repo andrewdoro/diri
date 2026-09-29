@@ -182,13 +182,20 @@ impl HolderClient {
             };
         }
         match &mut *transport {
-            InputTransport::Stream(stream) => match stream.send(kind, payload) {
-                Ok(()) => Ok(true),
-                Err(error) => {
-                    *transport = InputTransport::Unknown;
-                    Err(error)
+            InputTransport::Stream(stream) => {
+                // A paste can exceed one stream frame, which the Holder
+                // rejects whole. Its chunks go back to back under this lock,
+                // so no other input can land between them.
+                let mut chunks = payload.chunks(HOLDER_STREAM_MAX_PAYLOAD);
+                let first = chunks.next().unwrap_or_default();
+                for chunk in std::iter::once(first).chain(chunks) {
+                    if let Err(error) = stream.send(kind, chunk) {
+                        *transport = InputTransport::Unknown;
+                        return Err(error);
+                    }
                 }
-            },
+                Ok(true)
+            }
             InputTransport::Legacy => Ok(false),
             InputTransport::Unknown => unreachable!("negotiation resolved the transport"),
         }
