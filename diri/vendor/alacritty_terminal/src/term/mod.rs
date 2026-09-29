@@ -258,7 +258,16 @@ struct TermDamageState {
 
     /// Old terminal cursor point.
     last_cursor: Point,
+
+    /// Diri: for each screen line, the line whose cells it held at the last
+    /// reset, when scrolling moved them there and nothing damaged them since;
+    /// [`CONTENT_CHANGED`] otherwise. Empty while unknown: after any full
+    /// damage other than a scroll, and until the first reset.
+    content_sources: Vec<u32>,
 }
+
+/// A line whose cells may differ from every line at the last damage reset.
+pub const CONTENT_CHANGED: u32 = u32::MAX;
 
 impl TermDamageState {
     fn new(num_cols: usize, num_lines: usize) -> Self {
@@ -270,6 +279,59 @@ impl TermDamageState {
             full: true,
             lines,
             last_cursor: Default::default(),
+            content_sources: Vec::new(),
+        }
+    }
+
+    /// Full damage whose effect on line content is not tracked.
+    #[inline]
+    fn mark_fully_damaged(&mut self) {
+        self.full = true;
+        self.content_sources.clear();
+    }
+
+    /// A line whose cells may have changed, without damage bounds.
+    #[inline]
+    fn content_changed(&mut self, line: Line) {
+        if let Some(source) = usize::try_from(line.0)
+            .ok()
+            .and_then(|line| self.content_sources.get_mut(line))
+        {
+            *source = CONTENT_CHANGED;
+        }
+    }
+
+    /// Record `positions` lines of `region` scrolling up (text moving toward
+    /// the top) or down, with the uncovered lines reset. Lines outside the
+    /// region keep their cells, as in `Grid::scroll_up`/`scroll_down`.
+    ///
+    /// `Term::input` does not damage the cells it writes: the renderer's
+    /// damage covers them through cursor damage at the next cursor movement
+    /// or damage query. A scroll is full damage instead, so the cursor line
+    /// is marked before its cells move.
+    fn scroll_content(&mut self, cursor: Line, region: Range<Line>, positions: usize, up: bool) {
+        self.full = true;
+        self.content_changed(cursor);
+        let (Ok(start), Ok(end)) = (
+            usize::try_from(region.start.0),
+            usize::try_from(region.end.0),
+        ) else {
+            self.content_sources.clear();
+            return;
+        };
+        if self.content_sources.is_empty() || start >= end || end > self.content_sources.len() {
+            self.content_sources.clear();
+            return;
+        }
+        let positions = positions.min(end - start);
+        let sources = &mut self.content_sources[start..end];
+        let kept = sources.len() - positions;
+        if up {
+            sources.copy_within(positions.., 0);
+            sources[kept..].fill(CONTENT_CHANGED);
+        } else {
+            sources.copy_within(..kept, positions);
+            sources[..positions].fill(CONTENT_CHANGED);
         }
     }
 
@@ -277,7 +339,7 @@ impl TermDamageState {
     fn resize(&mut self, num_cols: usize, num_lines: usize) {
         // Reset point, so old cursor won't end up outside of the viewport.
         self.last_cursor = Default::default();
-        self.full = true;
+        self.mark_fully_damaged();
 
         self.lines.clear();
         self.lines.reserve(num_lines);
@@ -296,12 +358,17 @@ impl TermDamageState {
     #[inline]
     fn damage_line(&mut self, line: usize, left: usize, right: usize) {
         self.lines[line].expand(left, right);
+        if let Some(source) = self.content_sources.get_mut(line) {
+            *source = CONTENT_CHANGED;
+        }
     }
 
     /// Reset information about terminal damage.
     fn reset(&mut self, num_cols: usize) {
         self.full = false;
         self.lines.iter_mut().for_each(|line| line.reset(num_cols));
+        self.content_sources.clear();
+        self.content_sources.extend(0..self.lines.len() as u32);
     }
 }
 
@@ -522,6 +589,10 @@ impl<T> Term<T> {
         let previous_cursor = mem::replace(&mut self.damage.last_cursor, self.grid.cursor.point);
 
         if self.damage.full {
+            // Diri: full damage skips the cursor damage below, which is what
+            // covers cells `input` wrote at the cursor since it last moved.
+            self.damage.content_changed(previous_cursor.line);
+            self.damage.content_changed(self.grid.cursor.point.line);
             return TermDamage::Full;
         }
 
@@ -549,7 +620,22 @@ impl<T> Term<T> {
 
     #[inline]
     fn mark_fully_damaged(&mut self) {
-        self.damage.full = true;
+        self.damage.mark_fully_damaged();
+    }
+
+    /// Diri: where each screen line's cells were at the last
+    /// [`reset_damage`], for damage collected since then; `None` when that
+    /// is unknown. A line holds the cells line `sources[line]` held then,
+    /// unless it is [`CONTENT_CHANGED`]. Scrolling moves lines without
+    /// forgetting them, so a consumer can reuse per-line work after full
+    /// damage. This is only as complete as line damage itself: every cell
+    /// write that is not covered by full damage must damage its line.
+    ///
+    /// [`reset_damage`]: Self::reset_damage
+    #[must_use]
+    pub fn damage_content_sources(&self) -> Option<&[u32]> {
+        (self.damage.content_sources.len() == self.damage.lines.len())
+            .then_some(&self.damage.content_sources[..])
     }
 
     /// Set new options for the [`Term`].
@@ -869,7 +955,8 @@ impl<T> Term<T> {
 
         // Scroll between origin and bottom
         self.grid.scroll_down(&region, lines);
-        self.mark_fully_damaged();
+        self.damage
+            .scroll_content(self.grid.cursor.point.line, region, lines, false);
     }
 
     /// Scroll screen up
@@ -894,6 +981,8 @@ impl<T> Term<T> {
             .and_then(|s| s.rotate(self, &region, lines as i32));
 
         self.grid.scroll_up(&region, lines);
+        self.damage
+            .scroll_content(self.grid.cursor.point.line, region.clone(), lines, true);
 
         // Scroll vi mode cursor.
         let viewport_top = Line(-(self.grid.display_offset() as i32));
@@ -906,7 +995,6 @@ impl<T> Term<T> {
         if (top <= *line) && region.end > *line {
             *line = cmp::max(*line - lines, top);
         }
-        self.mark_fully_damaged();
     }
 
     fn deccolm(&mut self)
@@ -1138,6 +1226,9 @@ impl<T> Term<T> {
                 self.grid[point.line - 1i32][column]
                     .flags
                     .remove(Flags::LEADING_WIDE_CHAR_SPACER);
+                // Diri: this cell is outside the cursor damage that covers
+                // `input`; the renderer never draws the spacer flag.
+                self.damage.content_changed(point.line - 1i32);
             }
 
             cursor_cell = self.grid.cursor_cell();
@@ -4051,5 +4142,61 @@ mod ascii_run_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod content_source_tests {
+    use super::*;
+    use crate::event::VoidListener;
+    use crate::term::test::TermSize;
+    use crate::vte::ansi::Processor;
+
+    const C: u32 = CONTENT_CHANGED;
+
+    fn sources(term: &mut Term<VoidListener>) -> Option<Vec<u32>> {
+        let _ = term.damage();
+        let sources = term.damage_content_sources().map(<[u32]>::to_vec);
+        term.reset_damage();
+        sources
+    }
+
+    #[test]
+    fn scrolling_moves_content_sources() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 6), VoidListener);
+        let mut parser: Processor = Processor::new();
+        for line in 0..6 {
+            parser.advance(&mut term, format!("\x1b[{};1H{line}", line + 1).as_bytes());
+        }
+        assert_eq!(sources(&mut term), None, "sources start unknown");
+
+        // `input` leaves its cells to cursor damage. A linefeed at the
+        // bottom scrolls them up before any cursor damage covers them.
+        parser.advance(&mut term, b"ab\n");
+        assert_eq!(sources(&mut term), Some(vec![1, 2, 3, 4, C, C]));
+
+        // A region scroll moves only region lines. The cursor lines are
+        // damaged by the home move.
+        parser.advance(&mut term, b"\x1b[2;4r\x1b[1T");
+        assert_eq!(sources(&mut term), Some(vec![C, C, 1, 2, 4, C]));
+
+        // Insert and delete lines scroll from the cursor line.
+        parser.advance(&mut term, b"\x1b[r\x1b[3;1H");
+        let _ = sources(&mut term);
+        parser.advance(&mut term, b"\x1b[2M");
+        assert_eq!(sources(&mut term), Some(vec![0, 1, C, 5, C, C]));
+        parser.advance(&mut term, b"\x1b[1L");
+        assert_eq!(sources(&mut term), Some(vec![0, 1, C, C, 3, 4]));
+
+        // Scrolling an entire region resets every region line.
+        parser.advance(&mut term, b"\x1b[9S");
+        assert_eq!(sources(&mut term), Some(vec![C; 6]));
+
+        // Other full damage forgets where lines came from.
+        parser.advance(&mut term, b"\x1b[2J");
+        assert_eq!(sources(&mut term), None);
+        assert!(sources(&mut term).is_some());
+        parser.advance(&mut term, b"\x1b[?1049h");
+        assert_eq!(sources(&mut term), None);
     }
 }

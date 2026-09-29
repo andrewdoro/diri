@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use super::{GridCell, Row};
@@ -21,8 +22,14 @@ const BLOCK_CELL_BYTES: usize = 128 * 1024;
 /// The codec is a typed storage operation, never a second terminal parser.
 #[derive(Debug)]
 pub struct RowCodec<T> {
-    /// Returns the payload and the narrowest width every row can reflow to
-    /// without discarding content, or `None` when any row soft-wraps.
+    /// Encodes at most 64 rows. A row may be marked `blank_on_reset` only
+    /// when it has the first row's width, is not empty, and every cell at or
+    /// beyond its occupancy equals `T::default()`. `Row::reset` of such a row
+    /// yields only template cells: when the template's discriminant differs
+    /// from the last (default) cell's, every cell is reset; otherwise the
+    /// cells it keeps are default cells, and for the cell type a template
+    /// with the default discriminant resets any cell to the default cell.
+    /// `Cell` resets to the template's background and default attributes.
     encode: EncodeRows<T>,
     decode: fn(&[u8]) -> Vec<Row<T>>,
     resize_row: fn(&mut Row<T>, usize),
@@ -35,7 +42,19 @@ pub struct RowCodec<T> {
     reset_row: ResetRow<T>,
 }
 
-type EncodeRows<T> = fn(&[Row<T>]) -> (Box<[u8]>, Option<usize>);
+type EncodeRows<T> = fn(&[Row<T>]) -> Encoded;
+
+/// An encoded block and the facts storage needs without decoding it.
+struct Encoded {
+    bytes: Box<[u8]>,
+    /// The narrowest width every row can reflow to without discarding
+    /// content, or `None` when any row soft-wraps.
+    resize_floor: Option<usize>,
+    /// Bit `i` is set when `Row::reset` of payload row `i`, at the block's
+    /// encoded width, overwrites every cell for any template (see
+    /// [`RowCodec::encode`]). Recycling such a row needs no payload access.
+    blank_on_reset: u64,
+}
 type ResetRow<T> = fn(&EvictIndex<T>, usize, &T, usize) -> Option<Row<T>>;
 
 /// A decompressed history payload with row offsets, kept for the oldest block
@@ -63,26 +82,40 @@ impl<T> Clone for RowCodec<T> {
 #[derive(Clone, Debug)]
 struct Block<T> {
     bytes: Arc<[u8]>,
-    start: usize,
+    /// First payload row of this range (payloads hold at most 64 rows). The
+    /// narrow type keeps `Block`, which the history budget counts, the same
+    /// size with `blank_on_reset`.
+    start: u32,
     count: usize,
     columns: usize,
     resize_floor: Option<usize>,
     decoded: OnceLock<Vec<Row<T>>>,
     dirty: bool,
+    /// Payload rows that recycle as template cells (see `Encoded`). Cleared
+    /// when `columns` no longer matches the encoded width.
+    blank_on_reset: u64,
 }
 
 impl<T> Block<T> {
-    fn new(rows: Vec<Row<T>>, codec: RowCodec<T>) -> Self {
-        let (bytes, resize_floor) = (codec.encode)(&rows);
+    fn new(rows: &[Row<T>], codec: RowCodec<T>) -> Self {
+        let encoded = (codec.encode)(rows);
         Self {
-            bytes: bytes.into(),
+            bytes: encoded.bytes.into(),
             start: 0,
             count: rows.len(),
             columns: rows.first().map_or(0, Row::len),
-            resize_floor,
+            resize_floor: encoded.resize_floor,
             decoded: OnceLock::new(),
             dirty: false,
+            blank_on_reset: encoded.blank_on_reset,
         }
+    }
+
+    /// Whether the oldest row recycles as template cells without decoding.
+    fn oldest_blank_on_reset(&self) -> bool {
+        self.decoded.get().is_none()
+            && self.count != 0
+            && self.blank_on_reset >> (self.start as usize + self.count - 1) & 1 == 1
     }
 
     fn rows(&self, codec: RowCodec<T>) -> &[Row<T>] {
@@ -98,7 +131,7 @@ impl<T> Block<T> {
             return rows;
         }
         rows.into_iter()
-            .skip(self.start)
+            .skip(self.start as usize)
             .take(self.count)
             .map(|mut row| {
                 if row.len() != self.columns {
@@ -118,10 +151,11 @@ impl<T> Block<T> {
     fn release_cache(&mut self, codec: RowCodec<T>) {
         if let Some(rows) = self.decoded.take() {
             if self.dirty {
-                let (bytes, resize_floor) = (codec.encode)(&rows);
-                self.bytes = bytes.into();
+                let encoded = (codec.encode)(&rows);
+                self.bytes = encoded.bytes.into();
                 self.start = 0;
-                self.resize_floor = resize_floor;
+                self.resize_floor = encoded.resize_floor;
+                self.blank_on_reset = encoded.blank_on_reset;
                 self.dirty = false;
             }
         }
@@ -152,6 +186,31 @@ pub struct CompactRows<T> {
     last_budget: usize,
     /// Index of the oldest block while its rows are recycled one by one.
     evict_cache: Option<Box<EvictCache<T>>>,
+    /// Row allocations of the newest sealed block, reused for recycled rows
+    /// until the next history bound. Never counted: they are released at
+    /// every `bound_history_bytes`, before stored bytes are measured.
+    spare: Vec<Row<T>>,
+    /// The payload term of `history_storage_bytes`, kept current by block
+    /// pushes and pops at the ends that streaming output uses, and
+    /// recomputed after any other change to `blocks`.
+    payload_bytes: Option<usize>,
+    /// Whether a block may hold a read cache, so releasing caches while
+    /// output streams does not visit every block.
+    read_cache: ReadCacheFlag,
+}
+
+#[derive(Debug, Default)]
+struct ReadCacheFlag(AtomicBool);
+
+impl Clone for ReadCacheFlag {
+    fn clone(&self) -> Self {
+        Self(AtomicBool::new(self.0.load(Ordering::Relaxed)))
+    }
+}
+
+/// A block's share of the payload term of `history_storage_bytes`.
+fn payload_bytes<T>(block: &Block<T>) -> usize {
+    block.bytes.len() + 2 * std::mem::size_of::<usize>()
 }
 
 fn block_rows<T>(columns: usize) -> usize {
@@ -179,6 +238,9 @@ impl<T> CompactRows<T> {
             needs_maintenance: true,
             last_budget: 0,
             evict_cache: None,
+            spare: Vec::new(),
+            payload_bytes: Some(0),
+            read_cache: ReadCacheFlag::default(),
         };
         storage.seal_recent();
         storage.recent.shrink_to_fit();
@@ -216,6 +278,7 @@ impl<T> CompactRows<T> {
         let cold_rows = self.cold_rows();
         if index < cold_rows {
             let block = &self.blocks[index / self.block_rows];
+            self.read_cache.0.store(true, Ordering::Relaxed);
             return &block.rows(self.codec)[index % self.block_rows];
         }
         &self.oldest[index - cold_rows]
@@ -244,6 +307,7 @@ impl<T> CompactRows<T> {
         let cold_rows = self.cold_rows();
         if index < cold_rows {
             let block = &mut self.blocks[index / self.block_rows];
+            *self.read_cache.0.get_mut() = true;
             return block.row_mut(index % self.block_rows, self.codec);
         }
         &mut self.oldest[index - cold_rows]
@@ -300,7 +364,7 @@ impl<T> CompactRows<T> {
             if self.oldest.is_empty() {
                 if let Some(block) = self.blocks.back() {
                     if self.len - len >= block.count {
-                        self.len -= self.blocks.pop_back().expect("last block").count;
+                        self.len -= self.pop_block_back().expect("last block").count;
                         continue;
                     }
                 }
@@ -315,6 +379,7 @@ impl<T> CompactRows<T> {
         self.needs_maintenance |= self.visible != visible;
         self.visible = visible;
         while self.recent.len() < visible && !self.blocks.is_empty() {
+            self.payload_bytes = None;
             let block = self.blocks.pop_front().expect("first block");
             self.recent.extend(block.into_rows(self.codec));
             if self.blocks.is_empty() {
@@ -330,14 +395,26 @@ impl<T> CompactRows<T> {
 
     /// Release all history read caches at a caller's exclusive borrow boundary.
     pub fn release_read_cache(&mut self) {
+        if !std::mem::take(self.read_cache.0.get_mut()) {
+            return;
+        }
         for block in &mut self.blocks {
+            if block.dirty {
+                // Re-encoding replaces the payload.
+                self.payload_bytes = None;
+            }
             block.release_cache(self.codec);
         }
     }
 
-    /// Stored bytes, excluding the visible cells and temporary decode work.
-    pub fn history_storage_bytes(&self) -> usize {
-        let row_bytes = |row: &Row<T>| row.len().saturating_mul(std::mem::size_of::<T>());
+    #[cfg(test)]
+    fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+            .unwrap_or_else(|| self.stored_payload_bytes())
+    }
+
+    /// The payload term of `history_storage_bytes`, computed from scratch.
+    fn stored_payload_bytes(&self) -> usize {
         // Split ranges are adjacent and share one immutable allocation. Dirty
         // edits can separate siblings; counting those allocations again is
         // conservative and requires no allocation on the idle/cursor path.
@@ -346,10 +423,52 @@ impl<T> CompactRows<T> {
         for block in &self.blocks {
             let ptr = block.bytes.as_ptr();
             if ptr != previous {
-                payload += block.bytes.len() + 2 * std::mem::size_of::<usize>();
+                payload += payload_bytes(block);
             }
             previous = ptr;
         }
+        payload
+    }
+
+    /// Push a newly sealed block, keeping the payload term current.
+    fn push_block_front(&mut self, block: Block<T>) {
+        let shared = self
+            .blocks
+            .front()
+            .is_some_and(|front| front.bytes.as_ptr() == block.bytes.as_ptr());
+        if let Some(payload) = &mut self.payload_bytes {
+            if !shared {
+                *payload += payload_bytes(&block);
+            }
+        }
+        self.blocks.push_front(block);
+    }
+
+    /// Pop the oldest block, keeping the payload term current.
+    fn pop_block_back(&mut self) -> Option<Block<T>> {
+        let block = self.blocks.pop_back()?;
+        let shared = self
+            .blocks
+            .back()
+            .is_some_and(|back| back.bytes.as_ptr() == block.bytes.as_ptr());
+        if let Some(payload) = &mut self.payload_bytes {
+            if !shared {
+                *payload -= payload_bytes(&block);
+            }
+        }
+        Some(block)
+    }
+
+    /// Stored bytes, excluding the visible cells and temporary decode work.
+    pub fn history_storage_bytes(&self) -> usize {
+        let row_bytes = |row: &Row<T>| row.len().saturating_mul(std::mem::size_of::<T>());
+        let payload = match self.payload_bytes {
+            Some(payload) => {
+                debug_assert_eq!(payload, self.stored_payload_bytes());
+                payload
+            }
+            None => self.stored_payload_bytes(),
+        };
         let evict_cache = self.evict_cache.as_ref().map_or(0, |cache| {
             std::mem::size_of::<EvictCache<T>>()
                 + cache.index.raw.capacity()
@@ -373,13 +492,19 @@ impl<T> CompactRows<T> {
     /// Discard only the oldest history when the retained representation is full.
     #[inline]
     pub fn bound_history_bytes(&mut self, budget: usize) {
+        if self.spare.capacity() != 0 {
+            self.spare = Vec::new();
+        }
         if !self.needs_maintenance && self.last_budget == budget {
             return;
         }
         self.release_read_cache();
+        if self.payload_bytes.is_none() {
+            self.payload_bytes = Some(self.stored_payload_bytes());
+        }
         while self.len > self.visible && self.history_storage_bytes() > budget {
             if self.oldest.is_empty() && self.blocks.len() > 1 {
-                self.len -= self.blocks.pop_back().expect("oldest block").count;
+                self.len -= self.pop_block_back().expect("oldest block").count;
                 self.evict_cache = None;
             } else {
                 self.drop_oldest();
@@ -416,6 +541,7 @@ impl<T> CompactRows<T> {
             rows.extend(block.into_rows(self.codec));
         }
         rows.extend(self.oldest.drain(..));
+        self.payload_bytes = Some(0);
         self.evict_cache = None;
         self.len = 0;
         rows
@@ -451,6 +577,7 @@ impl<T> CompactRows<T> {
         {
             return self.len;
         }
+        self.payload_bytes = None;
         self.coalesce_shared_ranges(block_rows::<T>(columns));
         let next_rows = self.block_rows.min(block_rows::<T>(columns));
         if next_rows != self.block_rows {
@@ -460,12 +587,14 @@ impl<T> CompactRows<T> {
                 for offset in (0..block.count).step_by(next_rows) {
                     blocks.push_back(Block {
                         bytes: block.bytes.clone(),
-                        start: block.start + offset,
+                        start: block.start + offset as u32,
                         count: next_rows,
                         columns,
                         resize_floor: block.resize_floor,
                         decoded: OnceLock::new(),
                         dirty: false,
+                        // Recycling at another width must decode and resize.
+                        blank_on_reset: 0,
                     });
                 }
             }
@@ -473,7 +602,10 @@ impl<T> CompactRows<T> {
             self.block_rows = next_rows;
         } else {
             for block in &mut self.blocks {
-                block.columns = columns;
+                if block.columns != columns {
+                    block.columns = columns;
+                    block.blank_on_reset = 0;
+                }
             }
         }
         self.reflowing_recent = true;
@@ -497,7 +629,7 @@ impl<T> CompactRows<T> {
                 (1..group).all(|offset| {
                     let block = &self.blocks[start + offset];
                     Arc::ptr_eq(&first.bytes, &block.bytes)
-                        && block.start == first.start + offset * self.block_rows
+                        && block.start as usize == first.start as usize + offset * self.block_rows
                 })
             });
             if !mergeable {
@@ -534,7 +666,7 @@ impl<T> CompactRows<T> {
         if let Some(row) = self.oldest.pop_back() {
             return Some(row);
         }
-        if let Some(block) = self.blocks.pop_back() {
+        if let Some(block) = self.pop_block_back() {
             self.evict_cache = None;
             self.oldest = block.into_rows(self.codec).into();
             return self.oldest.pop_back();
@@ -553,7 +685,7 @@ impl<T> CompactRows<T> {
             }
             block.count -= 1;
             if block.count == 0 {
-                self.blocks.pop_back();
+                self.pop_block_back();
                 self.evict_cache = None;
             }
             return;
@@ -568,6 +700,21 @@ impl<T> CompactRows<T> {
         T: ResetDiscriminant<D> + GridCell + Default,
         D: PartialEq,
     {
+        let blank =
+            self.oldest.is_empty() && self.blocks.back().is_some_and(Block::oldest_blank_on_reset);
+        if blank {
+            let columns = self.blocks.back().expect("oldest block").columns;
+            self.drop_oldest();
+            // A spare row resets to template cells (see `seal_recent`), and
+            // so does a new row of default cells.
+            let mut row = self
+                .spare
+                .pop()
+                .filter(|row| row.len() == columns)
+                .unwrap_or_else(|| Row::new(columns));
+            row.reset(template);
+            return row;
+        }
         let fast = self.oldest.is_empty()
             && self
                 .blocks
@@ -588,7 +735,7 @@ impl<T> CompactRows<T> {
             let cache = self.evict_cache.as_ref().expect("oldest block index");
             let row = (self.codec.reset_row)(
                 &cache.index,
-                block.start + block.count - 1,
+                block.start as usize + block.count - 1,
                 template,
                 block.columns,
             );
@@ -623,6 +770,7 @@ impl<T> CompactRows<T> {
             return;
         }
         if let Some(block) = self.blocks.pop_front() {
+            self.payload_bytes = None;
             self.recent.extend(block.into_rows(self.codec));
             if self.blocks.is_empty() {
                 self.evict_cache = None;
@@ -634,8 +782,25 @@ impl<T> CompactRows<T> {
 
     fn seal_recent(&mut self) {
         while self.recent.len() >= self.visible + self.block_rows {
-            let rows = self.recent.split_off(self.recent.len() - self.block_rows);
-            self.blocks.push_front(Block::new(rows.into(), self.codec));
+            let mut rows: Vec<_> = self
+                .recent
+                .drain(self.recent.len() - self.block_rows..)
+                .collect();
+            let block = Block::new(&rows, self.codec);
+            // Only full history recycles rows, and it does so one block at a
+            // time; keep one block of allocations for that. A row whose
+            // reset would keep cells that are not template cells is marked
+            // fully occupied, so `Row::reset` overwrites every cell. Others
+            // keep their occupancy and reset only the cells they wrote.
+            if self.spare.is_empty() {
+                for (index, row) in rows.iter_mut().enumerate() {
+                    if block.blank_on_reset >> index & 1 == 0 {
+                        row.occ = row.len();
+                    }
+                }
+                self.spare = rows;
+            }
+            self.push_block_front(block);
         }
     }
 }
@@ -862,19 +1027,28 @@ fn is_default(cell: &Cell, default_key: u128) -> bool {
     cell.c == ' ' && cell.extra.is_none() && plain_style_key(cell) == default_key
 }
 
-fn encode_cells(rows: &[Row<Cell>]) -> (Box<[u8]>, Option<usize>) {
+fn encode_cells(rows: &[Row<Cell>]) -> Encoded {
+    assert!(
+        rows.len() <= u64::BITS as usize,
+        "history blocks hold at most 64 rows"
+    );
+    let width = rows.first().map_or(0, Row::len);
+    let mut blank_on_reset = 0;
     let default_key = plain_style_key(&Cell::default());
     let mut table = StyleTable::default();
     let mut body = Vec::with_capacity(rows.iter().map(|row| row.len() + 8).sum());
     let mut runs: Vec<(u32, u32)> = Vec::new();
     let mut text = Vec::new();
     let mut floor = Some(1);
-    for row in rows {
+    for (index, row) in rows.iter().enumerate() {
         let cells = &row[..];
         let stored = cells
             .iter()
             .rposition(|cell| !is_default(cell, default_key))
             .map_or(0, |i| i + 1);
+        if cells.len() == width && width != 0 && row.occ >= stored {
+            blank_on_reset |= 1 << index;
+        }
         floor = floor.map(|floor: usize| floor.max(stored));
         runs.clear();
         text.clear();
@@ -936,7 +1110,11 @@ fn encode_cells(rows: &[Row<Cell>]) -> (Box<[u8]>, Option<usize>) {
     put_varint(&mut raw, styles.len());
     raw.extend_from_slice(&styles);
     raw.extend_from_slice(&body);
-    (lz::compress(&raw).into_boxed_slice(), floor)
+    Encoded {
+        bytes: lz::compress(&raw).into_boxed_slice(),
+        resize_floor: floor,
+        blank_on_reset,
+    }
 }
 
 struct Reader<'a> {
@@ -1307,7 +1485,11 @@ mod tests {
     }
 
     fn assert_codec_round_trip(rows: &[Row<Cell>]) {
-        let (bytes, floor) = encode_cells(rows);
+        let Encoded {
+            bytes,
+            resize_floor: floor,
+            ..
+        } = encode_cells(rows);
         assert_eq!(floor, reference_resize_floor(rows));
         let decoded = decode_cells(&bytes);
         assert_eq!(decoded.len(), rows.len());
@@ -1446,10 +1628,18 @@ mod tests {
                 row.occ = next() as usize % (width + 1);
                 rows.push(row);
             }
-            let (bytes, _) = encode_cells(&rows);
-            let index = index_cells(&bytes);
+            let encoded = encode_cells(&rows);
+            let index = index_cells(&encoded.bytes);
             assert_eq!(index.rows.len(), rows.len());
+            let mut blank_rows = 0;
             for (position, row) in rows.iter().enumerate() {
+                let blank_on_reset = encoded.blank_on_reset >> position & 1 == 1;
+                blank_rows += usize::from(blank_on_reset);
+                // A spare row, as `seal_recent` prepares it for recycling.
+                let mut spare = row.clone();
+                if !blank_on_reset {
+                    spare.occ = spare.len();
+                }
                 for background in backgrounds {
                     let template = Cell {
                         bg: background,
@@ -1462,10 +1652,92 @@ mod tests {
                     assert_eq!(actual, expected, "row {position} template {background:?}");
                     assert_eq!(actual.occ, expected.occ);
                     assert_eq!(actual.len(), expected.len());
+                    // Rows marked blank recycle as template cells without
+                    // the payload, and every spare row resets to them.
+                    let blank = Row::from_vec(vec![Cell::default(); width], 0);
+                    let mut blank = blank;
+                    blank.occ = width;
+                    blank.reset(&template);
+                    if blank_on_reset {
+                        assert_eq!(expected, blank, "blank row {position} {background:?}");
+                    }
+                    let mut recycled = spare.clone();
+                    recycled.reset(&template);
+                    assert_eq!(recycled, blank, "spare row {position} {background:?}");
+                    assert_eq!(recycled.occ, 0);
                 }
             }
+            assert!(
+                blank_rows > 0 && blank_rows < rows.len(),
+                "{blank_rows} blank rows"
+            );
             assert!(reset_cell_row(&index, 0, &Cell::default(), width + 1).is_none());
         }
+    }
+
+    /// Output streaming through full history recycles rows from their
+    /// recipe bits and reuses sealed row allocations: no block is
+    /// decompressed and the recycled rows are the sealed rows' storage.
+    #[test]
+    fn streaming_full_history_recycles_without_decoding() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DECODED: AtomicUsize = AtomicUsize::new(0);
+        fn decode(bytes: &[u8]) -> Vec<Row<Cell>> {
+            DECODED.fetch_add(1, Ordering::Relaxed);
+            decode_cells(bytes)
+        }
+        fn index(bytes: &[u8]) -> EvictIndex<Cell> {
+            DECODED.fetch_add(1, Ordering::Relaxed);
+            index_cells(bytes)
+        }
+        let mut codec = cell_codec();
+        codec.decode = decode;
+        codec.index = index;
+        let rows = (0..24 + 512).map(|_| Row::new(80)).collect();
+        let mut storage = CompactRows::new(rows, 24, 80, codec);
+        let template = Cell::default();
+        let mut sealed = Vec::new();
+        let mut reused = 0;
+        for line in 0..5000 {
+            storage.rotate_reset(1, &template);
+            let recycled = storage.row(0)[..].as_ptr();
+            reused += usize::from(sealed.contains(&recycled));
+            for (column, c) in format!("line {line} of streaming output")
+                .chars()
+                .enumerate()
+            {
+                storage.row_mut(0)[Column(column)].c = c;
+            }
+            // Pointers of the rows the next seal will take.
+            if storage.recent.len() + 1 == storage.visible + storage.block_rows {
+                sealed = storage
+                    .recent
+                    .iter()
+                    .rev()
+                    .take(storage.block_rows)
+                    .map(|row| row[..].as_ptr())
+                    .collect();
+            }
+        }
+        assert_eq!(
+            DECODED.load(Ordering::Relaxed),
+            0,
+            "recycling decoded history"
+        );
+        assert!(
+            reused > 4000,
+            "{reused} of 5000 recycled rows reused sealed storage"
+        );
+        let expected = storage.clone().into_rows();
+        assert_eq!(expected.len(), 24 + 512);
+    }
+
+    /// `Block` is counted by the history budget; its recipe bits must not
+    /// change how much history a budget retains.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn recycle_bits_keep_the_counted_block_size() {
+        assert_eq!(std::mem::size_of::<Block<Cell>>(), 96);
     }
 
     /// Full bounded history recycles its oldest rows on every scroll. Dense
@@ -1627,10 +1899,35 @@ mod tests {
         let mut expected = parser_rows();
         let mut actual = CompactRows::new(expected.clone(), 24, 80, cell_codec());
         let mut seed = 0x59fa_8261_u64;
-        for step in 0..350 {
+        let templates = [
+            Cell::default(),
+            Cell {
+                bg: Color::Named(NamedColor::Red),
+                ..Cell::default()
+            },
+        ];
+        for step in 0..600 {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             let n = (seed >> 32) as usize;
-            match n % 6 {
+            match n % 8 {
+                6 => {
+                    // Recycling, the full-history scroll path.
+                    let count = (1 + n % 40).min(expected.len());
+                    let template = &templates[(n >> 8) % templates.len()];
+                    actual.rotate_reset(count, template);
+                    expected.rotate_right(count);
+                    for row in &mut expected[..count] {
+                        row.reset(template);
+                    }
+                }
+                7 => {
+                    // The stored-byte bound only ever drops the oldest rows;
+                    // debug builds also check the incrementally kept payload.
+                    let budget = [usize::MAX, 64 * 1024, 16 * 1024][(n >> 8) % 3];
+                    actual.bound_history_bytes(budget);
+                    assert!(actual.len() >= 24);
+                    expected.truncate(actual.len());
+                }
                 0 => {
                     let count = 1 + n % 7;
                     actual.initialize(count, 80);
@@ -1659,7 +1956,11 @@ mod tests {
                     expected[index][column].c = '雪';
                 }
                 _ => {
-                    let len = expected.len().saturating_sub(n % 5).max(30);
+                    let len = expected
+                        .len()
+                        .saturating_sub(n % 5)
+                        .max(30)
+                        .min(expected.len());
                     actual.truncate(len);
                     expected.truncate(len);
                 }
@@ -1667,6 +1968,7 @@ mod tests {
             actual.set_visible(24);
             assert_rows(&actual, &expected);
             actual.release_read_cache();
+            assert_eq!(actual.payload_bytes(), actual.stored_payload_bytes());
         }
         assert_eq!(actual.into_rows(), expected);
     }
