@@ -1,7 +1,7 @@
 //! Settings > General > Privacy: whether diagnostics upload, the name that
 //! goes with them, the Support ID a report quotes, and the local folder they
 //! are recorded to. The files behind it belong to `diri-telemetry`; the
-//! Engine's uploader re-reads them every cycle, so a change applies at once.
+//! Engine's uploader re-reads them every cycle, so changes apply next cycle.
 use super::*;
 use crate::telemetry::PrivacySettings;
 
@@ -11,6 +11,17 @@ pub(super) struct PrivacyState {
     name: QueryEditor,
     name_active: bool,
     copied: bool,
+    save_error: Option<&'static str>,
+    send: SendState,
+}
+
+/// The "Send now" button: idle, waiting on the Engine, or the last outcome.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SendState {
+    #[default]
+    Idle,
+    Sending,
+    Done(&'static str),
 }
 
 impl UtilitySurfaces {
@@ -25,17 +36,45 @@ impl UtilitySurfaces {
         self.privacy.settings = settings;
         self.privacy.name_active = false;
         self.privacy.copied = false;
+        self.privacy.save_error = None;
+        if self.privacy.send != SendState::Sending {
+            self.privacy.send = SendState::Idle;
+        }
     }
 
     pub(super) fn deactivate_privacy_name(&mut self) {
         self.privacy.name_active = false;
     }
 
+    /// Uploads everything recorded so far, now, even with sharing off: the
+    /// click is the consent. The Engine does the upload; this waits for it.
+    fn send_diagnostics_now(&mut self, cx: &mut Context<Self>) {
+        if self.privacy.send == SendState::Sending {
+            return;
+        }
+        self.privacy.send = SendState::Sending;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { crate::telemetry::upload_now_blocking() })
+                .await;
+            let summary = crate::telemetry::upload_now_summary(&result);
+            let _ = this.update(cx, |this, cx| {
+                this.privacy.send = SendState::Done(summary);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn toggle_diagnostics_upload(&mut self, cx: &mut Context<Self>) {
         let upload = !self.privacy.settings.config.upload;
-        self.privacy.settings.config.upload = upload;
-        self.privacy.settings.save();
-        diri_telemetry::event!("privacy.upload_changed", upload = upload);
+        let mut config = self.privacy.settings.config.clone();
+        config.upload = upload;
+        if self.save_privacy_config(config) {
+            diri_telemetry::event!("privacy.upload_changed", upload = upload);
+        }
         cx.notify();
     }
 
@@ -52,8 +91,28 @@ impl UtilitySurfaces {
             Some(typed)
         };
         if settings.config.name != name {
-            settings.config.name = name;
-            settings.save();
+            let mut config = settings.config.clone();
+            config.name = name;
+            self.save_privacy_config(config);
+        }
+    }
+
+    fn save_privacy_config(&mut self, config: diri_telemetry::Config) -> bool {
+        match self.privacy.settings.save_config(config) {
+            Ok(()) => {
+                self.privacy.save_error = None;
+                true
+            }
+            Err(error) => {
+                self.privacy.save_error = Some(
+                    "Could not save. Your previous privacy settings are still active. Try again.",
+                );
+                diri_telemetry::error_event!(
+                    "settings.privacy_save_failed",
+                    io = diri_telemetry::io_error(&error)
+                );
+                false
+            }
         }
     }
 
@@ -117,6 +176,10 @@ impl UtilitySurfaces {
             div()
                 .flex()
                 .flex_col()
+                .when_some(privacy.save_error, |column, error| {
+                    column.child(div().id("privacy-save-error").px(px(12.0)).py(px(8.0))
+                        .text_size(px(12.0)).text_color(Ink::DANGER).child(error))
+                })
                 .child(toggle_row(
                     "Share diagnostics to help fix bugs",
                     "Crashes, hangs, errors and timings. Never terminal contents, prompts or files.",
@@ -165,6 +228,26 @@ impl UtilitySurfaces {
                                 },
                             ))
                         }),
+                    colors,
+                ))
+                .child(setting_divider(colors))
+                .child(setting_row(
+                    "Send diagnostics now",
+                    match privacy.send {
+                        SendState::Done(summary) => summary,
+                        _ => "Uploads what's been recorded so far, even with sharing off.",
+                    },
+                    surface_button(
+                        if privacy.send == SendState::Sending {
+                            "Sending…"
+                        } else {
+                            "Send now"
+                        },
+                        "send-diagnostics-now",
+                        colors,
+                        cx,
+                        |this, cx| this.send_diagnostics_now(cx),
+                    ),
                     colors,
                 ))
                 .child(setting_divider(colors))

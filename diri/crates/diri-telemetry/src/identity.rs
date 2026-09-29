@@ -81,7 +81,6 @@ pub fn support_id(install_id: &str) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct Config {
     /// Upload recorded diagnostics. Recording itself is always local.
     pub upload: bool,
@@ -106,7 +105,10 @@ impl Config {
         std::fs::read(telemetry_dir(state_dir).join(CONFIG_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+            .unwrap_or_else(|| Self {
+                upload: false,
+                name: Some(String::new()),
+            })
     }
 
     pub fn save(&self, state_dir: &Path) -> std::io::Result<()> {
@@ -173,11 +175,12 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     ));
     {
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let mut file = options.open(&temp)?;
         std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()?;
     }
     std::fs::rename(&temp, path)
 }
@@ -210,6 +213,20 @@ pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_or_incomplete_privacy_config_disables_uploads() {
+        let state = tempfile::tempdir().unwrap();
+        let path = telemetry_dir(state.path()).join(CONFIG_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for data in ["{", "{}", r#"{"name":"someone"}"#, r#"{"upload":"false"}"#] {
+            std::fs::write(&path, data).unwrap();
+            assert!(!Config::load(state.path()).upload, "{data}");
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(!Config::load(state.path()).upload);
+    }
 
     #[test]
     fn identity_is_created_once_and_reused() {
@@ -252,6 +269,8 @@ mod tests {
     #[test]
     fn config_defaults_to_upload_with_login_name() {
         let dir = tempfile::tempdir().unwrap();
+        assert!(!Config::load(dir.path()).upload);
+        Config::default().save(dir.path()).unwrap();
         let config = Config::load(dir.path());
         assert!(config.upload);
         assert_eq!(config.effective_name(), login_name());

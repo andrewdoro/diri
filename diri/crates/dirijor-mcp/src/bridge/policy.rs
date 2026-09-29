@@ -12,18 +12,44 @@ use diri_proto::{Project, SessionRecord, SessionStatus};
 
 use super::{Lineage, Relation};
 
-pub(super) const WRITE_POLICY: &str = "Reads are open across all sessions. Root agents may write within their project and message direct children on any host; delegated agents may write only to their parent and direct children. Every write requires a live Diri session identity. Cross-lineage messages are attributed. Agents cannot target themselves. Root agents may release only sessions in their project; delegated agents may release only direct children.";
+pub(super) const WRITE_POLICY: &str = "Reads are open across all sessions. Root agents may write within their project and message direct children on any host; delegated agents may write only to their parent and direct children. Every write requires a live Diri session identity. Cross-lineage messages are attributed. Agents cannot target themselves. Root agents may release, hibernate, wake, resume, fork, or integrate only sessions in their project; delegated agents only their direct children. Delegation depth and live children per session are capped (DIRIJOR_MAX_SPAWN_DEPTH, default 3; DIRIJOR_MAX_LIVE_CHILDREN, default 16).";
+
+const DEFAULT_MAX_SPAWN_DEPTH: usize = 3;
+const DEFAULT_MAX_LIVE_CHILDREN: usize = 16;
+
+fn limit(variable: &str, default: usize) -> usize {
+    std::env::var(variable)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum WriteAction<'a> {
-    Spawn,
+    /// `count` sessions about to become direct children of the caller.
+    Spawn {
+        count: usize,
+    },
+    /// Lifecycle control over an existing session: hibernate, wake, resume,
+    /// fork its conversation, or integrate its branch.
+    Manage {
+        target: &'a str,
+    },
     QuickOpenInclude,
-    SendPrompt { target: &'a str },
-    Release { target: &'a str },
-    Worktree { repo: &'a str },
+    SendPrompt {
+        target: &'a str,
+    },
+    Release {
+        target: &'a str,
+    },
+    Worktree {
+        repo: &'a str,
+    },
     Browser,
     TestRun,
-    ReportToParent { target: &'a str },
+    ReportToParent {
+        target: &'a str,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -86,10 +112,26 @@ impl<'a> McpPolicy<'a> {
     /// implementation details here.
     pub(super) fn authorize(&self, action: WriteAction<'_>) -> Result<Authorization<'a>, String> {
         let relation = match action {
-            WriteAction::Spawn
-            | WriteAction::QuickOpenInclude
-            | WriteAction::Browser
-            | WriteAction::TestRun => Relation::Unrelated,
+            WriteAction::Spawn { count } => {
+                self.check_fan_out(count)?;
+                Relation::Unrelated
+            }
+            WriteAction::Manage { target } => {
+                let (target_record, relation) = self.target(target)?;
+                if relation == Relation::Caller {
+                    return Err("an agent cannot manage its own session".into());
+                }
+                if !self.can_release(target_record, relation) {
+                    return Err(format!(
+                        "manage denied: {target} is {}; root agents may manage sessions in their project, delegated agents only direct children",
+                        relation.as_str()
+                    ));
+                }
+                relation
+            }
+            WriteAction::QuickOpenInclude | WriteAction::Browser | WriteAction::TestRun => {
+                Relation::Unrelated
+            }
             WriteAction::Worktree { repo } => {
                 let project = self
                     .projects
@@ -161,6 +203,33 @@ impl<'a> McpPolicy<'a> {
             caller: self.caller,
             relation,
         })
+    }
+
+    /// Recursive delegation must terminate and a single orchestrator must not
+    /// flood the machine. Both limits count live (unexited, unarchived) state.
+    fn check_fan_out(&self, count: usize) -> Result<(), String> {
+        let depth = self.lineage.ancestors(&self.caller.id.0).len();
+        let max_depth = limit("DIRIJOR_MAX_SPAWN_DEPTH", DEFAULT_MAX_SPAWN_DEPTH);
+        if depth >= max_depth {
+            return Err(format!(
+                "spawn denied: this session is at delegation depth {depth} (limit {max_depth}); do the work here or report back to your parent"
+            ));
+        }
+        let live = self
+            .lineage
+            .children(&self.caller.id.0)
+            .into_iter()
+            .filter(|child| {
+                !child.is_archived() && !matches!(child.status, SessionStatus::Exited(_))
+            })
+            .count();
+        let max_live = limit("DIRIJOR_MAX_LIVE_CHILDREN", DEFAULT_MAX_LIVE_CHILDREN);
+        if live + count > max_live {
+            return Err(format!(
+                "spawn denied: {live} live children plus {count} new would exceed the limit of {max_live}; release or wait for finished children first"
+            ));
+        }
+        Ok(())
     }
 
     fn target(&self, target: &str) -> Result<(&'a SessionRecord, Relation), String> {
@@ -446,7 +515,7 @@ mod tests {
         let projects = vec![project("p")];
         let policy = McpPolicy::new(&records, &projects, Some("root")).expect("policy");
 
-        assert!(policy.authorize(WriteAction::Spawn).is_ok());
+        assert!(policy.authorize(WriteAction::Spawn { count: 1 }).is_ok());
         assert!(policy.authorize(WriteAction::QuickOpenInclude).is_ok());
         assert!(policy.authorize(WriteAction::Browser).is_ok());
         assert!(policy.authorize(WriteAction::TestRun).is_ok());
@@ -458,6 +527,43 @@ mod tests {
         assert!(
             policy
                 .authorize(WriteAction::Worktree { repo: "/tmp/q" })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn delegation_depth_and_live_fan_out_are_bounded() {
+        let mut records = vec![
+            record("root", "p", None),
+            record("a", "p", Some("root")),
+            record("b", "p", Some("a")),
+            record("c", "p", Some("b")),
+        ];
+        let projects = vec![project("p")];
+        let deep = McpPolicy::new(&records, &projects, Some("c")).expect("policy");
+        assert!(deep.authorize(WriteAction::Spawn { count: 1 }).is_err());
+        let middle = McpPolicy::new(&records, &projects, Some("b")).expect("policy");
+        assert!(middle.authorize(WriteAction::Spawn { count: 1 }).is_ok());
+
+        for index in 0..DEFAULT_MAX_LIVE_CHILDREN - 1 {
+            records.push(record(&format!("kid{index}"), "p", Some("root")));
+        }
+        let root = McpPolicy::new(&records, &projects, Some("root")).expect("policy");
+        assert!(root.authorize(WriteAction::Spawn { count: 1 }).is_err());
+        assert!(root.authorize(WriteAction::Manage { target: "c" }).is_ok());
+        assert!(
+            root.authorize(WriteAction::Manage { target: "root" })
+                .is_err()
+        );
+        let delegated = McpPolicy::new(&records, &projects, Some("a")).expect("policy");
+        assert!(
+            delegated
+                .authorize(WriteAction::Manage { target: "b" })
+                .is_ok()
+        );
+        assert!(
+            delegated
+                .authorize(WriteAction::Manage { target: "c" })
                 .is_err()
         );
     }

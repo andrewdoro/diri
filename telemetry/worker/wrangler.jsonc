@@ -18,6 +18,8 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Source throttling is per Cloudflare location; D1 also enforces a global cap.
+  "ratelimits": [{ "name": "INGEST_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }],
   "r2_buckets": [{ "binding": "BATCHES", "bucket_name": "diri-telemetry" }],
   // Daily retention sweep (UTC). The R2 lifecycle rule is the primary
   // mechanism for objects; this deletes D1 rows and the objects they index.

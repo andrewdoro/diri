@@ -1,6 +1,6 @@
 //! Field values an event may carry.
 //!
-//! Privacy is enforced by type: there is no constructor that accepts an
+//! Types constrain the field shape; call sites enforce content policy: there is no constructor that accepts an
 //! arbitrary runtime string verbatim. Strings are either `&'static str`
 //! (authored in code, so enum-like), an [`Id`] (restricted alphabet, bounded,
 //! no path separators or spaces), or a [`Text`] (scrubbed of home paths,
@@ -36,8 +36,8 @@ pub enum Value {
 pub struct Id(String);
 
 /// Free-form text that went through [`redact::scrub`]. Use only for strings
-/// that are authored by code but carry runtime values, such as error
-/// `Display` output or panic messages. Never for terminal output, prompts,
+/// carrying diagnostic symbols or OS crash facts. Never for arbitrary error
+/// `Display` output, panic payloads, terminal output, prompts,
 /// environment, file contents, or clipboard contents.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Text(String);

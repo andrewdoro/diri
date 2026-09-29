@@ -881,7 +881,7 @@ impl Registry {
                         "holder.adopt_failed",
                         session = diri_telemetry::id(&session_id),
                         stage = "stat",
-                        error = diri_telemetry::text(error.to_string()),
+                        kind = crate::telemetry::holder_error_kind(&error),
                     );
                     continue;
                 }

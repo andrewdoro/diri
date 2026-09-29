@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufWriter, Read, Write};
 use std::sync::mpsc::{self, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use dirijor_mcp::cancellation::Cancellation;
 use serde_json::Value;
@@ -59,6 +60,7 @@ fn execute(task: Task, output: &Output, active: &Active) {
     let mut backend = DirectBackend {
         bridge: dirijor_mcp::Bridge::default().with_cancellation(cancellation.clone()),
     };
+    let heartbeat = progress_heartbeat(&message, output);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if cancellation.is_cancelled() {
             None
@@ -66,6 +68,7 @@ fn execute(task: Task, output: &Output, active: &Active) {
             handle_message(message, &mut backend)
         }
     }));
+    drop(heartbeat);
     let response = result.unwrap_or_else(|_| Some(success(response_id, tool_content(Err(
         "Tool failed unexpectedly. An action may already have reached the Engine; inspect its state before repeating it.".into()
     )))));
@@ -75,6 +78,39 @@ fn execute(task: Task, output: &Output, active: &Active) {
         respond(output, &response);
     }
     active.lock().unwrap().remove(&key);
+}
+
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
+
+/// While a long wait runs, tell a client that asked for progress (via
+/// `_meta.progressToken`) that the call is alive. Dropping the sender stops it.
+fn progress_heartbeat(message: &Value, output: &Output) -> Option<mpsc::Sender<()>> {
+    let token = message.pointer("/params/_meta/progressToken")?.clone();
+    let tool = message.pointer("/params/name")?.as_str()?.to_owned();
+    if !tool.starts_with("wait_") && !matches!(tool.as_str(), "spawn_agent" | "spawn_agents") {
+        return None;
+    }
+    let (stop, stopped) = mpsc::channel::<()>();
+    let output = output.clone();
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(PROGRESS_INTERVAL) {
+            let elapsed = started.elapsed().as_secs();
+            respond(
+                &output,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {
+                        "progressToken": token,
+                        "progress": elapsed,
+                        "message": format!("{tool}: still waiting after {elapsed}s"),
+                    },
+                }),
+            );
+        }
+    });
+    Some(stop)
 }
 
 fn read_only(message: &Value) -> bool {
@@ -90,7 +126,9 @@ fn read_only(message: &Value) -> bool {
                     | "read_output"
                     | "get_artifacts"
                     | "list_worktrees"
-                    | "get_quick_open_include"
+                    | "list_tasks"
+                    | "wait_any"
+                    | "get_diff"
                     | "whoami"
                     | "list_children"
                     | "wait_for_children"

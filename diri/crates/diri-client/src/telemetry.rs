@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use diri_proto::methods::Method;
-use diri_telemetry::{error_event, id, text, warn_event};
+use diri_telemetry::{error_event, id, warn_event};
 
 use crate::client::ClientError;
 
@@ -74,25 +74,16 @@ pub(crate) fn rpc_finished(method: &str, started: Instant, error: Option<&Client
         Some(ClientError::Disconnected(_)) => diri_telemetry::count("rpc.disconnected", 1),
         Some(error) => {
             diri_telemetry::count("rpc.errors", 1);
-            // An Engine error code is an identifier; its message may carry a
-            // path or a host, so only its scrubbed form is kept.
-            let (code, message) = match error {
-                ClientError::Control(control) => {
-                    (Some(id(&control.code)), Some(text(&control.message)))
-                }
-                ClientError::Timeout(message) | ClientError::Protocol(message) => {
-                    (None, Some(text(message)))
-                }
-                ClientError::Io(_) | ClientError::Json(_) | ClientError::Disconnected(_) => {
-                    (None, None)
-                }
+            // Error messages may contain remote output, paths or credentials.
+            let code = match error {
+                ClientError::Control(control) => Some(id(&control.code)),
+                _ => None,
             };
             error_event!(
                 "rpc.error",
                 method = id(method),
                 kind = error_kind(error),
                 code = code,
-                error = message,
                 ms = elapsed
             );
         }
@@ -243,7 +234,6 @@ impl ConnectionRecorder {
             warn_event!(
                 "client.disconnected",
                 kind = error_kind(error),
-                error = text(error.to_string()),
                 connected_s = now.duration_since(connected_at).as_secs()
             );
             return;
@@ -259,7 +249,6 @@ impl ConnectionRecorder {
                 attempts = self.failed_attempts,
                 down_ms = now.duration_since(self.down_since),
                 kind = error_kind(error),
-                error = text(error.to_string()),
                 handshake = established
             );
         }
@@ -269,6 +258,33 @@ impl ConnectionRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_error_messages_never_reach_the_client_spool() {
+        let state = tempfile::tempdir().unwrap();
+        assert!(diri_telemetry::init(
+            diri_telemetry::Process::App,
+            state.path()
+        ));
+        let error = ClientError::Control(diri_proto::control::ControlError::internal(
+            "PRIVATE_CLIENT_PAYLOAD password=hunter2",
+        ));
+        rpc_finished("host.initialize", Instant::now(), Some(&error));
+        diri_telemetry::flush(Duration::from_secs(1));
+        let mut found = false;
+        for entry in std::fs::read_dir(diri_telemetry::spool::spool_dir(state.path()))
+            .unwrap()
+            .flatten()
+        {
+            if entry.path().extension().is_some_and(|ext| ext == "open") {
+                let contents = std::fs::read_to_string(entry.path()).unwrap();
+                assert!(!contents.contains("PRIVATE_CLIENT_PAYLOAD"));
+                assert!(!contents.contains("hunter2"));
+                found |= contents.contains("rpc.error");
+            }
+        }
+        assert!(found);
+    }
 
     #[test]
     fn method_metrics_are_interned_and_bounded_to_identifiers() {

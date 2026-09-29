@@ -58,21 +58,26 @@ impl Pty {
         let winsize_ptr = &mut winsize;
         let mut master: RawFd = -1;
         let mut slave: RawFd = -1;
-        // SAFETY: both output pointers refer to initialized local storage and
-        // `winsize` is fully initialized. On success both returned fds are new
-        // owned descriptors, transferred immediately into `OwnedFd`.
-        let result = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                winsize_ptr,
-            )
-        };
-        if result != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        retry_transient_open(|| {
+            // SAFETY: both output pointers refer to initialized local storage
+            // and `winsize` is fully initialized. On success both returned fds
+            // are new owned descriptors, transferred immediately into
+            // `OwnedFd`; on failure `openpty` has closed anything it opened.
+            let result = unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    winsize_ptr,
+                )
+            };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        })?;
         // SAFETY: `openpty` succeeded and returned two fresh descriptors.
         let master = unsafe { OwnedFd::from_raw_fd(master) };
         // SAFETY: same ownership argument as `master`; each fd is wrapped once.
@@ -230,28 +235,116 @@ impl Pty {
         })?;
         // SAFETY: the child called `setsid`, therefore `-pid` names the
         // process group created by this object. No pointer memory is involved.
-        let result = unsafe { libc::kill(-pid, signal) };
-        if result < 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error);
-            }
+        if unsafe { libc::kill(-pid, signal) } == 0 {
+            return Ok(());
         }
-        Ok(())
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(()),
+            // Darwin answers EPERM, not ESRCH, when the group still exists
+            // but every member is already exiting: a session leader killed a
+            // moment ago stays in that state until its terminal output has
+            // been read. That is not a permission failure. The leader is this
+            // object's own child, so ask about it directly; only a leader
+            // that cannot be signalled either is a real EPERM.
+            Some(libc::EPERM) => {
+                // SAFETY: integer arguments only.
+                if unsafe { libc::kill(pid, signal) } == 0 {
+                    return Ok(());
+                }
+                let direct = io::Error::last_os_error();
+                if direct.raw_os_error() == Some(libc::ESRCH) {
+                    Ok(())
+                } else {
+                    Err(direct)
+                }
+            }
+            _ => Err(error),
+        }
     }
 
+    /// Stops the child: SIGTERM, then SIGKILL after `grace`.
+    ///
+    /// Terminal output is read and discarded while waiting. On macOS a dying
+    /// session leader does not become reapable until the output it left in
+    /// the terminal has been read, so waiting without reading can wait
+    /// forever. A caller with its own reader on another thread must not hold
+    /// that reader back for the duration of this call; signal with
+    /// [`Self::kill_group`] and poll [`Self::try_wait`] instead.
+    ///
+    /// The wait after SIGKILL is bounded: a child that still cannot be reaped
+    /// is reported as `TimedOut` rather than blocking the caller for good.
     pub fn terminate(&mut self, grace: std::time::Duration) -> io::Result<Exit> {
         self.kill_group(libc::SIGTERM)?;
-        let deadline = std::time::Instant::now() + grace;
-        while std::time::Instant::now() < deadline {
-            if let Some(exit) = self.try_wait()? {
-                return Ok(exit);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+        if let Some(exit) = self.wait_draining(grace)? {
+            return Ok(exit);
         }
         self.kill_group(libc::SIGKILL)?;
-        self.wait()
+        self.wait_draining(KILL_REAP_TIMEOUT)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the child did not exit after SIGKILL",
+            )
+        })
     }
+
+    /// Waits up to `timeout` for the child to exit, discarding terminal
+    /// output meanwhile so an exiting child is never held by unread output.
+    pub fn wait_draining(&mut self, timeout: std::time::Duration) -> io::Result<Option<Exit>> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut scratch = [0u8; 16 << 10];
+        let mut open = true;
+        loop {
+            if let Some(exit) = self.try_wait()? {
+                return Ok(Some(exit));
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            let step = remaining.min(REAP_POLL_INTERVAL);
+            if open {
+                open = discard_readable(self.master.as_raw_fd(), step, &mut scratch);
+            } else {
+                std::thread::sleep(step);
+            }
+        }
+    }
+}
+
+/// How long a SIGKILLed child may take to become reapable.
+pub const KILL_REAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often a bounded wait looks for the child's exit.
+pub const REAP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Waits up to `timeout` for terminal output and throws one read of it away.
+/// Returns whether the terminal can still produce more.
+fn discard_readable(fd: RawFd, timeout: std::time::Duration, scratch: &mut [u8]) -> bool {
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = timeout.as_millis().clamp(1, libc::c_int::MAX as u128) as libc::c_int;
+    // SAFETY: one initialized poll descriptor, writable for the call.
+    let ready = unsafe { libc::poll(&mut descriptor, 1, millis) };
+    if ready <= 0 {
+        // Quiet, or interrupted: either way there is nothing to discard yet.
+        return ready == 0 || io::Error::last_os_error().kind() == io::ErrorKind::Interrupted;
+    }
+    // SAFETY: `scratch` is writable for its whole length.
+    let count = unsafe { libc::read(fd, scratch.as_mut_ptr().cast(), scratch.len()) };
+    if count > 0 {
+        return true;
+    }
+    // Zero (macOS) or EIO (Linux) is the closed terminal; a transient error
+    // leaves it open.
+    count < 0
+        && matches!(
+            io::Error::last_os_error().kind(),
+            io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+        )
 }
 
 fn exit_from(status: std::process::ExitStatus) -> Exit {
@@ -259,6 +352,35 @@ fn exit_from(status: std::process::ExitStatus) -> Exit {
     status
         .signal()
         .map_or_else(|| Exit::Code(status.code().unwrap_or(-1)), Exit::Signal)
+}
+
+/// XNU's internal "redrive this open" code. Its pts open path uses it between
+/// its own layers, and under concurrent PTY creation and teardown it
+/// occasionally escapes `openpty(3)` as errno -6 ("Unknown error: -6"):
+/// about once in 8,000 opens with sixteen processes churning PTYs, and never
+/// twice in a row. Treated as fatal, it silently lost a session whose launch
+/// had already been acknowledged.
+const EREDRIVEOPEN: i32 = -6;
+
+/// Enough retries to ride out the transient, few enough that a genuinely
+/// failing open (descriptor or PTY exhaustion) still fails promptly.
+const OPEN_ATTEMPTS: u32 = 8;
+
+/// Runs `open` again while it fails transiently.
+fn retry_transient_open(mut open: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match open() {
+            Err(error)
+                if attempt < OPEN_ATTEMPTS
+                    && matches!(error.raw_os_error(), Some(EREDRIVEOPEN | libc::EINTR)) =>
+            {
+                attempt += 1;
+                std::thread::yield_now();
+            }
+            outcome => return outcome,
+        }
+    }
 }
 
 fn close_extra_fds() {
@@ -455,6 +577,94 @@ fn platform_exit_watcher(pid: u32) -> io::Result<OwnedFd> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leaked_redrive_code_is_retried_but_real_failures_are_not() {
+        let mut calls = 0;
+        let outcome = retry_transient_open(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(io::Error::from_raw_os_error(EREDRIVEOPEN))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(outcome.is_ok());
+        assert_eq!(calls, 3, "the transient failure is opened again");
+
+        let mut calls = 0;
+        let outcome = retry_transient_open(|| {
+            calls += 1;
+            Err(io::Error::from_raw_os_error(libc::EMFILE))
+        });
+        assert_eq!(outcome.unwrap_err().raw_os_error(), Some(libc::EMFILE));
+        assert_eq!(calls, 1, "exhaustion is reported at once");
+
+        let mut calls = 0;
+        let outcome = retry_transient_open(|| {
+            calls += 1;
+            Err(io::Error::from_raw_os_error(EREDRIVEOPEN))
+        });
+        assert!(outcome.is_err(), "and the retry is bounded");
+        assert_eq!(calls, OPEN_ATTEMPTS);
+    }
+
+    /// Many processes creating and closing PTYs at once, as a manager
+    /// launching a fleet does beside other PTY users. Before the retry,
+    /// `openpty` leaked `EREDRIVEOPEN` a few times per 32,000 opens on
+    /// macOS 27. `cargo test -p diri-pty --lib -- --ignored pty_churn`.
+    #[test]
+    #[ignore = "long; forks sixteen processes"]
+    fn pty_churn_never_fails_a_spawn_open() {
+        let mut children = Vec::new();
+        for _ in 0..16 {
+            // SAFETY: the child only opens and closes PTYs, then exits.
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid == 0 {
+                let mut failures = 0;
+                for _ in 0..4_000 {
+                    let (mut master, mut slave) = (-1, -1);
+                    let opened = retry_transient_open(|| {
+                        // SAFETY: local out-parameters; fds closed below.
+                        let result = unsafe {
+                            libc::openpty(
+                                &mut master,
+                                &mut slave,
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                            )
+                        };
+                        if result == 0 {
+                            Ok(())
+                        } else {
+                            Err(io::Error::last_os_error())
+                        }
+                    });
+                    match opened {
+                        // SAFETY: the two fds openpty just returned.
+                        Ok(()) => unsafe {
+                            libc::close(slave);
+                            libc::close(master);
+                        },
+                        Err(_) => failures += 1,
+                    }
+                }
+                // SAFETY: leave the forked test child without unwinding.
+                unsafe { libc::_exit(failures.min(255)) };
+            }
+            children.push(pid);
+        }
+        let mut failures = 0;
+        for pid in children {
+            let mut status = 0;
+            // SAFETY: waiting on our own forked child.
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+            failures += libc::WEXITSTATUS(status);
+        }
+        assert_eq!(failures, 0, "openpty failed under churn");
+    }
 
     #[test]
     fn pty_child_does_not_inherit_extra_descriptors() {
@@ -720,6 +930,45 @@ mod tests {
         assert!(!pty.secret_input(), "raw mode without echo is a TUI");
         writer.write_all(b"\n").expect("finish");
         let _ = pty.terminate(Duration::from_secs(1));
+    }
+
+    /// A child killed while the terminal still holds its unread output stays
+    /// in exit on macOS until that output is read: the group kill then
+    /// answers EPERM and a plain `wait` never returns (#461).
+    #[test]
+    fn terminate_reaps_a_child_whose_output_nobody_reads() {
+        use std::time::Duration;
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..20 {
+                let spec = PtySpec::new(
+                    vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "while :; do printf '0123456789012345678901234567890123456789\\r\\n'; done"
+                            .into(),
+                    ],
+                    "/",
+                );
+                let mut pty = Pty::spawn(&spec).expect("spawn");
+                // Let the child fill the terminal's output queue and block.
+                assert!(
+                    pty.reader()
+                        .expect("reader")
+                        .wait_readable(Duration::from_secs(10))
+                        .expect("poll")
+                );
+                std::thread::sleep(Duration::from_millis(20));
+                let exit = pty
+                    .terminate(Duration::from_millis(200))
+                    .expect("terminate");
+                assert!(matches!(exit, Exit::Signal(_)), "{exit:?}");
+            }
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("terminate must not wait forever on a child with unread output");
     }
 
     #[test]

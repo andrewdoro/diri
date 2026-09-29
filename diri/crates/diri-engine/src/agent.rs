@@ -447,7 +447,15 @@ impl AgentDescriptor {
                 .map(|argument| shell_quote(argument))
                 .collect::<Vec<_>>()
                 .join(" ");
-            command.push_str(&format!("; exec {} -i -l", shell_quote(&shell)));
+            // An agent that dies or is killed (hibernation, a crash, Codex
+            // self-updating) leaves its terminal modes behind, and the shell
+            // then receives mouse reports and escape-coded keys as text:
+            // `35;12;38M35;13;38M` at the prompt. Reset them before the shell
+            // takes over, as the agent itself should have on a clean exit.
+            command.push_str(&format!(
+                "; printf '{AGENT_EXIT_TERMINAL_RESET}'; exec {} -i -l",
+                shell_quote(&shell)
+            ));
             spec.argv = vec![shell, "-i".into(), "-l".into(), "-c".into(), command];
         } else if let Some(first) = spec.argv.first_mut()
             && !first.contains('/')
@@ -531,6 +539,26 @@ pub(crate) fn assert_color_environment(env: &mut Vec<(String, String)>) {
     env.push(("TERM".into(), "xterm-256color".into()));
     env.push(("COLORTERM".into(), "truecolor".into()));
 }
+
+/// Terminal modes an agent may leave on, turned off after it exits and
+/// before the login shell takes the PTY, written for the shell's `printf`
+/// (octal escapes work in sh, bash, zsh and fish). In order: end any open
+/// synchronized update; mouse tracking and its encodings; focus and
+/// colour-scheme reports; bracketed paste (shells re-enable their own);
+/// modifyOtherKeys; the kitty keyboard stack; cursor-key and keypad
+/// application modes; SGR; visible cursor; leave the alternate screen.
+/// Claude Code sets all of these and never clears them when it is killed.
+const AGENT_EXIT_TERMINAL_RESET: &str = concat!(
+    r"\033[?2026l",
+    r"\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l",
+    r"\033[?1004l\033[?2031l",
+    r"\033[?2004l",
+    r"\033[>4;0m",
+    r"\033[<99u\033[=0;1u",
+    r"\033[?1l\033>",
+    r"\033[0m\033[?25h",
+    r"\033[?1049l",
+);
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
@@ -743,7 +771,10 @@ mod tests {
 
         assert_eq!(spec.argv[..4], ["/bin/sh", "-i", "-l", "-c"]);
         assert_eq!(
-            spec.argv[4], "'codex' '--version'; exec '/bin/sh' -i -l",
+            spec.argv[4],
+            format!(
+                "'codex' '--version'; printf '{AGENT_EXIT_TERMINAL_RESET}'; exec '/bin/sh' -i -l"
+            ),
             "the agent runs first, then the shell takes the PTY over"
         );
     }
@@ -872,6 +903,39 @@ mod tests {
             stdout.contains("shell-ready"),
             "the session did not accept shell input after agent exit: {stdout:?}"
         );
+        // The reset reaches the terminal between the agent and the shell.
+        let reset = stdout.find("\x1b[?1003l").expect("mouse tracking reset");
+        assert!(stdout.find("agent-finished").unwrap() < reset);
+        assert!(reset < stdout.find("shell-ready").unwrap());
+        assert!(stdout.contains("\x1b[>4;0m\x1b[<99u\x1b[=0;1u"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_reset_clears_every_mode_claude_code_leaves_on() {
+        // Exactly what Claude Code writes on start (from session logs),
+        // then the wrapper's reset as the shell's printf renders it.
+        let reset = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("printf '{AGENT_EXIT_TERMINAL_RESET}'")])
+            .output()
+            .expect("printf")
+            .stdout;
+        let mut screen =
+            diri_terminal_state::HeadlessScreen::new_with_keyboard_enhancements(80, 24);
+        screen.feed(
+            b"\x1b[?1049h\x1b[?1004h\x1b[?2004h\x1b[?2031h\x1b[>4;1m\x1b[>7u\x1b[=5u\
+              \x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1h\x1b=\x1b[?2026h",
+        );
+        assert_ne!(screen.mouse_modes(), diri_proto::terminal::MouseModes::OFF);
+        assert!(screen.is_alt_screen());
+
+        screen.feed(&reset);
+        assert_eq!(screen.mouse_modes(), diri_proto::terminal::MouseModes::OFF);
+        assert!(!screen.is_alt_screen());
+        assert!(!screen.bracketed_paste());
+        let keyboard = screen.keyboard_state();
+        assert!(!keyboard.application_cursor_keys && !keyboard.application_keypad);
+        assert_eq!(keyboard.enhancements.map(|flags| flags.bits()), Some(0));
     }
 
     #[test]

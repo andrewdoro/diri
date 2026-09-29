@@ -3,7 +3,8 @@ use crate::store::TabOrientation;
 use crate::tab_navigation::{TAB_STRIP_HEIGHT, selected_project_tabs};
 use diri_ui::title_fade;
 
-const TAB_WIDTH: f32 = 164.0;
+pub(super) const TAB_WIDTH: f32 = 164.0;
+pub(super) const TAB_HEIGHT: f32 = 30.0;
 const TAB_GAP: f32 = 4.0;
 /// What a tab leaves its title: the width less the border, padding, mark
 /// slot, close button and the two gaps between them.
@@ -366,7 +367,6 @@ impl Sidebar {
         if self.tab_shift.settled.get() {
             self.tab_shift.deltas.clear();
         }
-        let entity = cx.entity();
         let mut rows = div()
             .id(SharedString::from(format!(
                 "horizontal-tab-list-{}",
@@ -437,6 +437,7 @@ impl Sidebar {
             let weak = self.weak_self.clone();
             rows = rows.child(
                 div()
+                    .debug_selector(|| "horizontal-tab-pill".into())
                     .absolute()
                     .top(px(0.0))
                     .left(px(frame.x))
@@ -459,222 +460,242 @@ impl Sidebar {
                     }),
             );
         }
-        let held_hint = self.strip_held_hint;
         let tab_count = tabs.sessions.len();
+        let mut mounted = HashSet::with_capacity(tab_count);
         for (index, (session, state)) in tabs.sessions.into_iter().zip(marks).enumerate() {
-            let id = session.id.clone();
-            let active = selected.as_ref() == Some(&id);
-            // The same rule the sidebar rows follow: ⌘1–⌘8, then ⌘9 = last.
-            let rank = if index < 8 {
-                Some(index + 1)
-            } else {
-                (index + 1 == tab_count).then_some(9)
-            };
-            let title = display_title(&session);
-            self.working_row_rendered |= state == StatusState::Working;
-            let mark = match state {
-                StatusState::IdleSeen | StatusState::None => div()
-                    .id(SharedString::from(format!("horizontal-tab-logo-{}", id.0)))
-                    .debug_selector({
-                        let id = id.0.clone();
-                        move || format!("horizontal-tab-logo-{id}")
-                    })
-                    .child(Self::agent_tab_icon(session.effective_kind(), colors))
-                    .into_any_element(),
-                state => div()
+            mounted.insert(session.id.clone());
+            let active = selected.as_ref() == Some(&session.id);
+            let props = self.strip_tab_props(
+                &session,
+                index,
+                tab_count,
+                active,
+                state,
+                colors,
+                custom_ordering,
+                reduce_motion,
+                pill.is_some(),
+            );
+            rows = rows.child(self.mount_strip_tab(props, cx));
+        }
+        self.tabs_stale = false;
+        // Tabs mounted this pass keep their views.
+        self.strip_tab_views.retain(|id, _| mounted.contains(id));
+        rows.into_any_element()
+    }
+
+    /// Builds one strip tab from `props` alone, so a tab whose props are
+    /// unchanged renders identically and its cached view can be reused (see
+    /// `strip_tabs.rs`). The only other read is the title settle, which
+    /// forces a render while it runs.
+    pub(super) fn strip_tab(
+        &mut self,
+        props: &strip_tabs::StripTabProps,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        #[cfg(test)]
+        render_probe::tab_built();
+        let strip_tabs::StripTabProps {
+            ref id,
+            ref title,
+            ref kind,
+            active,
+            rank,
+            state,
+            colors,
+            custom_ordering,
+            held_hint,
+            pill_drawn,
+            ..
+        } = *props;
+        let id = id.clone();
+        let title = title.clone();
+        let entity = cx.entity();
+        let mark = match state {
+            StatusState::IdleSeen | StatusState::None => div()
+                .id(SharedString::from(format!("horizontal-tab-logo-{}", id.0)))
+                .debug_selector({
+                    let id = id.0.clone();
+                    move || format!("horizontal-tab-logo-{id}")
+                })
+                .child(Self::agent_tab_icon(kind, colors))
+                .into_any_element(),
+            state => div()
+                .id(SharedString::from(format!(
+                    "horizontal-tab-status-{}",
+                    id.0
+                )))
+                .debug_selector({
+                    let id = id.0.clone();
+                    move || format!("horizontal-tab-status-{id}")
+                })
+                .role(Role::Image)
+                .aria_label(state.label())
+                .child(activity_mark(state, props.activity_frame, colors))
+                .into_any_element(),
+        };
+        let mark = crate::held_hints::in_leading_slot(
+            mark,
+            16.0,
+            format!("held-hint:tab:{}", id.0),
+            rank.and_then(crate::held_hints::session_label),
+            held_hint,
+            colors,
+        );
+        let debug_id = id.0.clone();
+        let close_id = id.clone();
+        let probe_key = SharedString::from(format!("tab:{}", id.0));
+        // At rest the title fades out where it overflows; while it settles
+        // the crossfading label owns the box.
+        let face = match self.settling_title(&id, TAB_TITLE_WIDTH) {
+            Some(settling) => settling.into_any_element(),
+            None => title_fade(title.clone()).into_any_element(),
+        };
+        let tab = session_tab_face(mark, face, active, colors)
+            .id(SharedString::from(format!("horizontal-tab-{}", id.0)))
+            .debug_selector(move || format!("horizontal-tab-{}", debug_id))
+            .role(Role::Tab)
+            .aria_label(title.clone())
+            .aria_selected(active)
+            .relative()
+            .child(self.fade_probe(probe_key.clone()))
+            .flex_none()
+            .w(px(TAB_WIDTH))
+            .h(px(TAB_HEIGHT))
+            .cursor_pointer()
+            .border_1()
+            .border_color(colors.primary.alpha(0.0))
+            // The shared pill layer draws the selection; a tab fills itself
+            // only while that layer stands down.
+            .glass_pill(colors, active && !pill_drawn)
+            .hover(move |row| {
+                if active {
+                    row
+                } else {
+                    row.bg(colors.primary.alpha(0.06))
+                }
+            })
+            .when(custom_ordering, |row| {
+                let drag_id = id.clone();
+                let drag_entity = entity.clone();
+                row.on_drag(DraggedTab(id.clone()), move |dragged, grab, window, cx| {
+                    // The tab itself lifts from where the pointer grabbed it
+                    // and travels only along the strip.
+                    let origin = window.mouse_position() - grab;
+                    drag_entity.update(cx, |this, cx| {
+                        let order = this.store.write().expect("store").sidebar_session_order();
+                        this.ui.session_order_at_drag_start = Some(order);
+                        this.lift = Some(Lift::new(
+                            LiftKey::SessionTab(drag_id.clone()),
+                            origin,
+                            grab,
+                            LiftAxis::Horizontal,
+                        ));
+                        cx.notify();
+                    });
+                    cx.new(|_| dragged.clone())
+                })
+                // Tabs trade places once the pointer crosses a tab's
+                // midline in its direction of travel, and the displaced
+                // tabs slide into their new slots.
+                .drag_over::<DraggedTab>({
+                    let id = id.clone();
+                    let entity = entity.clone();
+                    move |row, dragged, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            if this.pointer_crossed_tab(&dragged.0, &id)
+                                && this.reorder_tab(&dragged.0, &id, cx.reduce_motion())
+                            {
+                                // The held tab traded places with this one.
+                                haptics::perform(Haptic::Snap, haptics::key("tab-slot", &id));
+                                cx.notify();
+                            }
+                        });
+                        row
+                    }
+                })
+            })
+            .child(crate::held_hints::below(
+                div()
                     .id(SharedString::from(format!(
-                        "horizontal-tab-status-{}",
-                        id.0
+                        "close-horizontal-tab-{}",
+                        close_id.0
                     )))
-                    .debug_selector({
-                        let id = id.0.clone();
-                        move || format!("horizontal-tab-status-{id}")
-                    })
-                    .role(Role::Image)
-                    .aria_label(state.label())
-                    .child(activity_mark(state, self.activity_frame, colors))
+                    .role(Role::Button)
+                    .aria_label("Close session")
+                    .size(px(18.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .hover(move |button| button.bg(colors.primary.alpha(0.10)))
+                    .child(sf_symbol("xmark", 8.0, colors.tertiary))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.close_sessions(vec![close_id.clone()], cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
                     .into_any_element(),
-            };
-            let mark = crate::held_hints::in_leading_slot(
-                mark,
-                16.0,
-                format!("held-hint:tab:{}", id.0),
-                rank.and_then(crate::held_hints::session_label),
+                "close-tab",
+                // ⌘W closes the selected session, so only its ✕ says so.
+                active
+                    .then(|| crate::held_hints::label(crate::commands::CommandId::CloseSession))
+                    .flatten(),
                 held_hint,
                 colors,
-            );
-            let debug_id = id.0.clone();
-            let close_id = id.clone();
-            let probe_key = SharedString::from(format!("tab:{}", id.0));
-            let lifting = self.lift_offset(&LiftKey::SessionTab(id.clone()));
-            let dragging_self = lifting.is_some();
-            // The lifted tab never slides: it is drawn from the pointer, and
-            // its slot simply moves.
-            let shift = if reduce_motion || dragging_self {
-                None
-            } else {
-                self.tab_shift.deltas.get(&id).copied()
-            };
-            if shift.is_none() {
-                self.tab_shift.applied.borrow_mut().remove(&id);
-            }
-            // At rest the title fades out where it overflows; while it settles
-            // the crossfading label owns the box.
-            let face = match self.settling_title(&id, TAB_TITLE_WIDTH) {
-                Some(settling) => settling.into_any_element(),
-                None => title_fade(title.clone()).into_any_element(),
-            };
-            let tab = session_tab_face(mark, face, active, colors)
-                .id(SharedString::from(format!("horizontal-tab-{}", id.0)))
-                .debug_selector(move || format!("horizontal-tab-{}", debug_id))
-                .role(Role::Tab)
-                .aria_label(title.clone())
-                .aria_selected(active)
-                .relative()
-                .child(self.fade_probe(probe_key.clone()))
-                .flex_none()
-                .w(px(TAB_WIDTH))
-                .h(px(30.0))
-                .cursor_pointer()
-                .border_1()
-                .border_color(colors.primary.alpha(0.0))
-                // The shared pill layer draws the selection; a tab fills
-                // itself only while that layer stands down.
-                .glass_pill(colors, active && pill.is_none())
-                .hover(move |row| {
-                    if active {
-                        row
-                    } else {
-                        row.bg(colors.primary.alpha(0.06))
-                    }
-                })
-                .when(custom_ordering, |row| {
-                    let drag_id = id.clone();
-                    let drag_entity = entity.clone();
-                    row.on_drag(DraggedTab(id.clone()), move |dragged, grab, window, cx| {
-                        // The tab itself lifts from where the pointer grabbed it
-                        // and travels only along the strip.
-                        let origin = window.mouse_position() - grab;
-                        drag_entity.update(cx, |this, cx| {
-                            let order = this.store.write().expect("store").sidebar_session_order();
-                            this.ui.session_order_at_drag_start = Some(order);
-                            this.lift = Some(Lift::new(
-                                LiftKey::SessionTab(drag_id.clone()),
-                                origin,
-                                grab,
-                                LiftAxis::Horizontal,
-                            ));
-                            cx.notify();
-                        });
-                        cx.new(|_| dragged.clone())
-                    })
-                    // Tabs trade places once the pointer crosses a tab's
-                    // midline in its direction of travel, and the displaced
-                    // tabs slide into their new slots.
-                    .drag_over::<DraggedTab>({
-                        let id = id.clone();
-                        let entity = entity.clone();
-                        move |row, dragged, _, cx| {
-                            entity.update(cx, |this, cx| {
-                                if this.pointer_crossed_tab(&dragged.0, &id)
-                                    && this.reorder_tab(&dragged.0, &id, cx.reduce_motion())
-                                {
-                                    // The held tab traded places with this one.
-                                    haptics::perform(Haptic::Snap, haptics::key("tab-slot", &id));
-                                    cx.notify();
-                                }
-                            });
-                            row
-                        }
-                    })
-                })
-                .child(crate::held_hints::below(
-                    div()
-                        .id(SharedString::from(format!(
-                            "close-horizontal-tab-{}",
-                            close_id.0
-                        )))
-                        .role(Role::Button)
-                        .aria_label("Close session")
-                        .size(px(18.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(5.0))
-                        .hover(move |button| button.bg(colors.primary.alpha(0.10)))
-                        .child(sf_symbol("xmark", 8.0, colors.tertiary))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.close_sessions(vec![close_id.clone()], cx);
-                            cx.stop_propagation();
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                    "close-tab",
-                    // ⌘W closes the selected session, so only its ✕ says so.
-                    active
-                        .then(|| crate::held_hints::label(crate::commands::CommandId::CloseSession))
-                        .flatten(),
-                    held_hint,
-                    colors,
-                ))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener({
-                        let id = id.clone();
-                        move |this, event: &gpui::MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            this.ui.focus_cursor = Some(id.clone());
-                            this.open_strip_menu(
-                                Popover::SessionActions {
-                                    id: id.clone(),
-                                    position: event.position,
-                                },
-                                window,
-                                cx,
-                            );
-                        }
-                    }),
-                )
-                .on_click(cx.listener({
+            ))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
                     let id = id.clone();
-                    move |this, _, _, cx| {
-                        this.commit_rename();
-                        this.store.write().expect("store").select(id.clone());
-                        cx.emit(SidebarEvent::SessionActivated);
-                        cx.notify();
+                    move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.ui.focus_cursor = Some(id.clone());
+                        this.open_strip_menu(
+                            Popover::SessionActions {
+                                id: id.clone(),
+                                position: event.position,
+                            },
+                            window,
+                            cx,
+                        );
                     }
-                }));
-            let tab = match (lifting, shift) {
-                (Some(offset), _) => lift_in_place(tab, LiftAxis::Horizontal, offset, colors),
-                (None, None) => tab.into_any_element(),
-                (None, Some(delta)) => {
-                    let applied = Rc::clone(&self.tab_shift.applied);
-                    let settled = Rc::clone(&self.tab_shift.settled);
-                    let id = id.clone();
-                    tab.with_animation(
-                        SharedString::from(format!(
-                            "tab-shift:{}:{}",
-                            id.0, self.tab_shift.generation
-                        )),
-                        Animation::new(SECTION_SHIFT_TIME)
-                            .with_easing(|delta| Motion::SETTLE.settle(delta)),
-                        move |tab, progress| {
-                            let offset = delta * (1.0 - progress);
-                            applied.borrow_mut().insert(id.clone(), offset);
-                            if progress >= 1.0 {
-                                settled.set(true);
-                            }
-                            tab.left(px(offset))
-                        },
-                    )
-                    .into_any_element()
+                }),
+            )
+            .on_click(cx.listener({
+                let id = id.clone();
+                move |this, _, _, cx| {
+                    this.commit_rename();
+                    this.store.write().expect("store").select(id.clone());
+                    cx.emit(SidebarEvent::SessionActivated);
+                    cx.notify();
                 }
-            };
-            rows = rows.child(tab);
+            }));
+        match (props.lift, props.shift) {
+            (Some(offset), _) => lift_in_place(tab, LiftAxis::Horizontal, offset, colors),
+            (None, None) => tab.into_any_element(),
+            (None, Some((delta, generation))) => {
+                let applied = Rc::clone(&self.tab_shift.applied);
+                let settled = Rc::clone(&self.tab_shift.settled);
+                let id = id.clone();
+                tab.with_animation(
+                    SharedString::from(format!("tab-shift:{}:{}", id.0, generation)),
+                    Animation::new(SECTION_SHIFT_TIME)
+                        .with_easing(|delta| Motion::SETTLE.settle(delta)),
+                    move |tab, progress| {
+                        let offset = delta * (1.0 - progress);
+                        applied.borrow_mut().insert(id.clone(), offset);
+                        if progress >= 1.0 {
+                            settled.set(true);
+                        }
+                        tab.left(px(offset))
+                    },
+                )
+                .into_any_element()
+            }
         }
-        rows.into_any_element()
     }
 
     /// Session tabs as the strip currently shows them, in order.
@@ -685,6 +706,12 @@ impl Sidebar {
             .iter()
             .map(|session| session.id.clone())
             .collect()
+    }
+
+    /// How many session tabs the strip shows, for render-cost benches.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn strip_tab_count_for_test(&self) -> usize {
+        self.visible_tab_order().len()
     }
 
     /// Whether the pointer has passed `target`'s midline in the direction
@@ -786,6 +813,8 @@ impl Sidebar {
         trailing: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(test)]
+        let started = std::time::Instant::now();
         // While horizontal tabs hide the panel this strip is the sidebar's
         // only painted surface, so the per-frame work `Sidebar::render`
         // does has to happen here: settle workspace navigation (a pending
@@ -803,6 +832,8 @@ impl Sidebar {
         let strip = self.horizontal_strip(available_width, trailing, cx);
         self.schedule_activity_tick(cx);
         self.schedule_title_tick(cx);
+        #[cfg(test)]
+        render_probe::strip_finished(started.elapsed());
         strip
     }
 
@@ -1061,6 +1092,272 @@ mod tests {
             [],
             "holding the new slot and letting go add nothing"
         );
+    }
+
+    /// How many times each mounted strip tab has rendered.
+    fn tab_renders(
+        sidebar: &Entity<Sidebar>,
+        cx: &mut VisualTestContext,
+    ) -> HashMap<SessionId, usize> {
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar
+                .strip_tab_views
+                .iter()
+                .map(|(id, view)| (id.clone(), view.read(cx).renders))
+                .collect()
+        })
+    }
+
+    /// Tabs whose render count moved between two samples.
+    fn rerendered(
+        before: &HashMap<SessionId, usize>,
+        after: &HashMap<SessionId, usize>,
+    ) -> Vec<SessionId> {
+        let mut ids: Vec<SessionId> = after
+            .iter()
+            .filter(|(id, renders)| before.get(*id) != Some(*renders))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort_by(|left, right| left.0.cmp(&right.0));
+        ids
+    }
+
+    #[gpui::test]
+    fn strip_tabs_rerender_only_when_they_change(cx: &mut TestAppContext) {
+        let (sidebar, cx) = strip_harness(cx, false);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let order = sidebar.update(cx, |sidebar, _| sidebar.visible_tab_order());
+        assert!(order.len() >= 3, "the preview strip shows several tabs");
+        let working: Vec<SessionId> = sidebar.update(cx, |sidebar, _| {
+            let store = sidebar.store.read().unwrap();
+            let mut working: Vec<SessionId> = order
+                .iter()
+                .filter(|id| store.sessions()[*id].status == diri_proto::SessionStatus::Working)
+                .cloned()
+                .collect();
+            working.sort_by(|left, right| left.0.cmp(&right.0));
+            working
+        });
+        assert!(!working.is_empty(), "the preview strip has a working tab");
+        assert_eq!(tab_renders(&sidebar, cx).len(), order.len());
+
+        // A working mark's tick re-renders the working tabs alone.
+        let before = tab_renders(&sidebar, cx);
+        cx.executor().advance_clock(Duration::from_millis(125));
+        cx.run_until_parked();
+        assert_eq!(rerendered(&before, &tab_renders(&sidebar, cx)), working);
+
+        // A store publication that changes nothing re-renders no tab.
+        let before = tab_renders(&sidebar, cx);
+        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+        cx.run_until_parked();
+        assert_eq!(rerendered(&before, &tab_renders(&sidebar, cx)), []);
+
+        // A frame the strip's host draws for its own reasons (a terminal
+        // repaint) reuses every tab.
+        let host = cx.update(|window, _| window.root::<StripOnly>().flatten().unwrap());
+        let before = tab_renders(&sidebar, cx);
+        host.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(rerendered(&before, &tab_renders(&sidebar, cx)), []);
+
+        // Hovering a tab re-renders that tab for its hover fill.
+        let hovered = order
+            .iter()
+            .find(|id| {
+                !working.contains(id)
+                    && sidebar.update(cx, |sidebar, _| {
+                        sidebar.store.read().unwrap().selected_session_id() != Some(*id)
+                    })
+            })
+            .unwrap()
+            .clone();
+        let bounds = cx
+            .debug_bounds(Box::leak(
+                format!("horizontal-tab-{}", hovered.0).into_boxed_str(),
+            ))
+            .expect("tab");
+        let before = tab_renders(&sidebar, cx);
+        cx.simulate_mouse_move(bounds.center(), None, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(rerendered(&before, &tab_renders(&sidebar, cx)), [hovered]);
+
+        // Selecting another tab re-renders the old and the new selection
+        // (and, if the strip scrolls to it, every tab whose bounds moved).
+        let (old, new) = sidebar.update(cx, |sidebar, _| {
+            let mut store = sidebar.store.write().unwrap();
+            let old = store.selected_session_id().cloned().unwrap();
+            let new = order.iter().find(|id| **id != old).unwrap().clone();
+            store.select(new.clone());
+            (old, new)
+        });
+        let before = tab_renders(&sidebar, cx);
+        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+        cx.run_until_parked();
+        let changed = rerendered(&before, &tab_renders(&sidebar, cx));
+        assert!(
+            changed.contains(&old) && changed.contains(&new),
+            "{changed:?}"
+        );
+        cx.run_until_parked();
+        let before = tab_renders(&sidebar, cx);
+        host.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(rerendered(&before, &tab_renders(&sidebar, cx)), []);
+
+        // Any other sidebar notify re-renders every tab once, as a safety net.
+        let before = tab_renders(&sidebar, cx);
+        sidebar.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(
+            rerendered(&before, &tab_renders(&sidebar, cx)).len(),
+            order.len()
+        );
+    }
+
+    /// Tabs stepping aside in a reorder slide are drawn from their animation
+    /// every frame, so they render on every frame until they rest; the rest
+    /// of the strip is reused.
+    #[gpui::test]
+    fn sliding_strip_tabs_render_every_frame_until_they_rest(cx: &mut TestAppContext) {
+        let (sidebar, cx) = strip_harness(cx, false);
+        cx.run_until_parked();
+        let host = cx.update(|window, _| window.root::<StripOnly>().flatten().unwrap());
+        let order = sidebar.update(cx, |sidebar, _| sidebar.visible_tab_order());
+        let sliding: Vec<SessionId> = order
+            .iter()
+            .enumerate()
+            .flat_map(|(index, moved)| {
+                order[index + 1..]
+                    .iter()
+                    .map(move |target| (moved.clone(), target.clone()))
+            })
+            .find_map(|(moved, target)| {
+                sidebar.update(cx, |sidebar, _| {
+                    sidebar
+                        .reorder_tab(&moved, &target, false)
+                        .then(|| sidebar.tab_shift.deltas.keys().cloned().collect())
+                })
+            })
+            .expect("the preview strip has two tabs that can trade places");
+        assert!(!sliding.is_empty());
+        let mut sliding = sliding;
+        sliding.sort_by(|left, right| left.0.cmp(&right.0));
+        host.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        for _ in 0..3 {
+            let before = tab_renders(&sidebar, cx);
+            host.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            assert_eq!(rerendered(&before, &tab_renders(&sidebar, cx)), sliding);
+        }
+        // At rest they are reused like any other tab.
+        sidebar.update(cx, |sidebar, _| sidebar.tab_shift.settled.set(true));
+        host.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let before = tab_renders(&sidebar, cx);
+        host.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(rerendered(&before, &tab_renders(&sidebar, cx)), []);
+    }
+
+    /// The held-⌘ hints reach cached tabs through their props: they appear
+    /// and leave with the opacity the host hands the strip.
+    #[gpui::test]
+    fn held_hints_show_and_leave_on_cached_strip_tabs(cx: &mut TestAppContext) {
+        let (sidebar, cx) = strip_harness(cx, true);
+        cx.run_until_parked();
+        let host = cx.update(|window, _| window.root::<StripOnly>().flatten().unwrap());
+        let first = sidebar.update(cx, |sidebar, _| sidebar.visible_tab_order()[0].clone());
+        let mark_hint: &'static str =
+            Box::leak(format!("held-hint:tab:{}", first.0).into_boxed_str());
+        assert!(cx.debug_bounds(mark_hint).is_none());
+        assert!(cx.debug_bounds("held-hint:close-tab").is_none());
+        for (opacity, shown) in [(1.0, true), (1.0, true), (0.0, false)] {
+            sidebar.update(cx, |sidebar, _| sidebar.strip_held_hint = opacity);
+            host.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            assert_eq!(cx.debug_bounds(mark_hint).is_some(), shown);
+            assert_eq!(cx.debug_bounds("held-hint:close-tab").is_some(), shown);
+        }
+    }
+
+    /// The selection pill glides as its own layer: while it travels, the
+    /// cached tabs are reused frame after frame, and only the old and new
+    /// selection re-render, once, when the selection changes (their fills
+    /// hand over to the pill).
+    #[gpui::test]
+    fn the_pill_glides_over_reused_strip_tabs(cx: &mut TestAppContext) {
+        let (sidebar, cx) = strip_harness(cx, false);
+        cx.run_until_parked();
+        let host = cx.update(|window, _| window.root::<StripOnly>().flatten().unwrap());
+        let order = sidebar.update(cx, |sidebar, _| sidebar.visible_tab_order());
+        let tab = |cx: &mut VisualTestContext, id: &SessionId| {
+            cx.debug_bounds(Box::leak(
+                format!("horizontal-tab-{}", id.0).into_boxed_str(),
+            ))
+            .expect("tab")
+        };
+        let (old, new) = sidebar.update(cx, |sidebar, _| {
+            let mut store = sidebar.store.write().unwrap();
+            let old = store.selected_session_id().cloned().unwrap();
+            let at = order.iter().position(|id| *id == old).unwrap();
+            // A neighbour, so the strip does not need to scroll to it.
+            let new = order[if at > 0 { at - 1 } else { at + 1 }].clone();
+            store.select(new.clone());
+            (old, new)
+        });
+        let pill = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("horizontal-tab-pill")
+                .expect("the pill is drawn")
+                .origin
+                .x
+        };
+        let before = tab_renders(&sidebar, cx);
+        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+        cx.run_until_parked();
+        let changed = rerendered(&before, &tab_renders(&sidebar, cx));
+        assert!(
+            changed.contains(&old) && changed.contains(&new),
+            "{changed:?}"
+        );
+        let start = pill(cx);
+        let old_x = tab(cx, &old).origin.x;
+        let new_x = tab(cx, &new).origin.x;
+        assert!(
+            (start - new_x).abs() > px(1.0),
+            "the pill starts its glide away from the new tab"
+        );
+        let mut last = start;
+        let mut moved = false;
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(20));
+            let before = tab_renders(&sidebar, cx);
+            host.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            assert_eq!(
+                rerendered(&before, &tab_renders(&sidebar, cx)),
+                [],
+                "tabs are reused while the pill travels"
+            );
+            let x = pill(cx);
+            moved |= x != last;
+            assert!(
+                (x - old_x).abs() <= (new_x - old_x).abs() + px(0.5),
+                "the pill travels between the two tabs"
+            );
+            last = x;
+        }
+        assert!(moved, "the pill keeps moving over cached tabs");
+        std::thread::sleep(Motion::ROW_SELECT_TIME);
+        host.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(pill(cx), new_x, "the pill lands on the new tab");
+        let before = tab_renders(&sidebar, cx);
+        host.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(rerendered(&before, &tab_renders(&sidebar, cx)), []);
     }
 
     #[gpui::test]
