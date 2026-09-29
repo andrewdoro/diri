@@ -17,6 +17,9 @@ use crate::term::cell::{Cell, CellExtra, Flags, Hyperlink};
 use crate::vte::ansi::{Color, NamedColor, Rgb};
 
 const MAX_BLOCK_ROWS: usize = 64;
+/// The most decoded cells deferred history keeps for lines that are
+/// reflowed eagerly (see [`LineExtra::Eager`]).
+const MAX_EAGER_BYTES: usize = 256 * 1024;
 const BLOCK_CELL_BYTES: usize = 128 * 1024;
 
 /// The codec is a typed storage operation, never a second terminal parser.
@@ -40,9 +43,566 @@ pub struct RowCodec<T> {
     /// that the reset overwrites. `None` when the encoded width is not
     /// `columns`, so the caller must decode and resize first.
     reset_row: ResetRow<T>,
+    /// What a column change needs to know about a row without its cells
+    /// (see [`RowShape`]), with its wide character runs, relative to the
+    /// row, appended to the vector; `None` when a soft wrap is not the
+    /// row's last cell, so reflow may join it to another logical line.
+    shape: ShapeRow<T>,
+    /// The rows of one greedy logical line at `columns`, oldest first: its
+    /// source rows (oldest first, all but the newest soft-wrapped), the
+    /// content cells already dropped from its start and its content cells.
+    line_rows: LineRows<T>,
+    /// Eager reflow of one logical line's rows (oldest first, all but the
+    /// newest soft-wrapped) to `columns`: exactly what `Grid::resize` does
+    /// to them in history.
+    reflow_line: fn(Vec<Row<T>>, usize) -> Vec<Row<T>>,
+    clone_row: fn(&Row<T>) -> Row<T>,
+    #[cfg(test)]
+    rows_equal: RowsEqual<T>,
 }
 
 type EncodeRows<T> = fn(&[Row<T>]) -> Encoded;
+type LineRows<T> = fn(Vec<Row<T>>, usize, usize, usize, &mut Vec<Row<T>>);
+type ShapeRow<T> = fn(&Row<T>, &mut Vec<(u32, u32)>) -> Option<RowShape>;
+#[cfg(test)]
+type RowsEqual<T> = fn(&[Row<T>], &[Row<T>]) -> bool;
+
+/// A row's part in a logical line, for deferring a column change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowShape {
+    /// The row soft-wraps into the next (newer) row.
+    wraps: bool,
+    /// The row's last cell is the spacer before a wide character that did
+    /// not fit; it is not content.
+    padded: bool,
+    /// Cells through the last cell that is not empty, ignoring the wrap
+    /// flag of a wrapping row's last cell.
+    content: usize,
+    /// Every cell after `content` is the default cell.
+    default_tail: bool,
+    /// Wide characters are whole, a leading spacer only ends a wrapping
+    /// row, and every cell above the occupancy is a default cell.
+    plain: bool,
+    /// The first cell is a wide character.
+    starts_wide: bool,
+}
+
+/// A logical line of history whose column changes are deferred.
+///
+/// History reflow never moves cells across a hard line break, so each
+/// logical line reflows on its own. Eager reflow of a greedy line (see
+/// [`CompactRows::prepare_reflow`]) always yields its content cells laid out
+/// greedily in rows of the terminal width: a row ends with a soft wrap when
+/// the next cell (or wide character) does not fit, a wide character that
+/// would start in the last column leaves a leading spacer there, and the last
+/// row is padded with default cells. Its rows are therefore known from
+/// `cells`, `skip` and `wide` alone at any width, whatever widths it went
+/// through. Other lines are kept as rows (see [`LineExtra::Eager`]).
+#[derive(Clone, Debug)]
+struct DeferredLine<T> {
+    /// Source rows holding the line.
+    rows: u32,
+    /// Content cells in the source rows: every cell of the soft-wrapped
+    /// rows (without a trailing leading spacer), then the newest row's cells
+    /// through its last one that is not empty. Cells after that are default
+    /// cells.
+    cells: u32,
+    /// `None` for a greedy line of single-width cells with nothing dropped.
+    extra: Option<LineExtra<T>>,
+}
+
+#[derive(Clone, Debug)]
+enum LineExtra<T> {
+    Greedy {
+        /// Leading content cells already dropped with the oldest rows.
+        skip: u32,
+        /// Runs of wide characters as (first content cell, characters).
+        wide: Option<Box<[(u32, u32)]>>,
+    },
+    /// Any other line (styled blanks after its content, for example), kept
+    /// as its rows at the current width, oldest first, and reflowed eagerly.
+    Eager(Vec<Row<T>>),
+}
+
+impl<T> LineExtra<T> {
+    fn eager_cells(&self) -> usize {
+        match self {
+            LineExtra::Eager(rows) => rows.iter().map(Row::len).sum(),
+            LineExtra::Greedy { .. } => 0,
+        }
+    }
+}
+
+/// Rows at `columns` of a line with `cells` and `extra`, and the content
+/// cells the first of them holds.
+fn line_layout<T>(cells: u32, extra: Option<&LineExtra<T>>, columns: usize) -> (usize, usize) {
+    let (skip, runs) = match extra {
+        None => (0, None),
+        Some(LineExtra::Eager(rows)) => return (rows.len(), 0),
+        Some(LineExtra::Greedy { skip, wide }) => (*skip as usize, wide.as_deref()),
+    };
+    let end = cells as usize;
+    let Some(runs) = runs else {
+        let cells = end - skip;
+        return (cells.div_ceil(columns).max(1), cells.min(columns));
+    };
+    // Deferred history with wide characters is never narrower than 2.
+    debug_assert!(columns >= 2);
+    let mut layout = Layout {
+        columns,
+        rows: 1,
+        column: 0,
+        position: skip,
+        first: None,
+    };
+    for &(start, count) in runs {
+        let (start, end) = (start as usize, start as usize + 2 * count as usize);
+        if end > layout.position {
+            layout.narrow(start.max(layout.position));
+            layout.wide((end - layout.position) / 2);
+        }
+    }
+    layout.narrow(end);
+    (layout.rows, layout.first.unwrap_or(end) - skip)
+}
+
+impl<T> DeferredLine<T> {
+    fn layout(&self, columns: usize) -> (usize, usize) {
+        line_layout(self.cells, self.extra.as_ref(), columns)
+    }
+
+    fn rows_at(&self, columns: usize) -> usize {
+        self.layout(columns).0
+    }
+
+    fn eager_cells(&self) -> usize {
+        self.extra.as_ref().map_or(0, LineExtra::eager_cells)
+    }
+
+    /// The line's rows at `columns`, oldest first, from its source rows.
+    fn into_rows(self, sources: Vec<Row<T>>, columns: usize, codec: RowCodec<T>) -> Vec<Row<T>> {
+        let skip = match self.extra {
+            Some(LineExtra::Eager(rows)) => return rows,
+            Some(LineExtra::Greedy { skip, .. }) => skip,
+            None => 0,
+        };
+        let mut rows = Vec::new();
+        (codec.line_rows)(
+            sources,
+            skip as usize,
+            self.cells as usize,
+            columns,
+            &mut rows,
+        );
+        rows
+    }
+}
+
+/// A packed [`DeferredLine`]: most lines have no extra.
+#[derive(Clone, Copy, Debug)]
+struct PackedLine {
+    /// Source rows, with [`HAS_EXTRA`].
+    rows: u32,
+    cells: u32,
+}
+
+const HAS_EXTRA: u32 = 1 << 31;
+
+/// Deferred lines, newest first, 8 bytes each; the extras of the lines that
+/// have one are kept in the same order.
+#[derive(Clone, Debug)]
+struct Lines<T> {
+    packed: VecDeque<PackedLine>,
+    extras: VecDeque<LineExtra<T>>,
+}
+
+impl<T> Lines<T> {
+    fn new() -> Self {
+        Self {
+            packed: VecDeque::new(),
+            extras: VecDeque::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.packed.is_empty()
+    }
+
+    fn pack(line: DeferredLine<T>) -> (PackedLine, Option<LineExtra<T>>) {
+        debug_assert!(line.rows < HAS_EXTRA);
+        let flag = if line.extra.is_some() { HAS_EXTRA } else { 0 };
+        let packed = PackedLine {
+            rows: line.rows | flag,
+            cells: line.cells,
+        };
+        (packed, line.extra)
+    }
+
+    fn push_front(&mut self, line: DeferredLine<T>) {
+        let (packed, extra) = Self::pack(line);
+        self.packed.push_front(packed);
+        if let Some(extra) = extra {
+            self.extras.push_front(extra);
+        }
+    }
+
+    fn push_back(&mut self, line: DeferredLine<T>) {
+        let (packed, extra) = Self::pack(line);
+        self.packed.push_back(packed);
+        self.extras.extend(extra);
+    }
+
+    fn unpack(packed: PackedLine, extra: impl FnOnce() -> LineExtra<T>) -> DeferredLine<T> {
+        DeferredLine {
+            rows: packed.rows & !HAS_EXTRA,
+            cells: packed.cells,
+            extra: (packed.rows & HAS_EXTRA != 0).then(extra),
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<DeferredLine<T>> {
+        let packed = self.packed.pop_front()?;
+        Some(Self::unpack(packed, || {
+            self.extras.pop_front().expect("line extra")
+        }))
+    }
+
+    fn pop_back(&mut self) -> Option<DeferredLine<T>> {
+        let packed = self.packed.pop_back()?;
+        Some(Self::unpack(packed, || {
+            self.extras.pop_back().expect("line extra")
+        }))
+    }
+
+    /// The oldest line's rows at `columns`.
+    fn back_rows_at(&self, columns: usize) -> Option<usize> {
+        let packed = self.packed.back()?;
+        let extra = (packed.rows & HAS_EXTRA != 0).then(|| self.extras.back().expect("line extra"));
+        Some(line_layout(packed.cells, extra, columns).0)
+    }
+
+    /// Whether the oldest line is kept as rows (see [`LineExtra::Eager`]).
+    fn back_is_eager(&self) -> bool {
+        self.packed
+            .back()
+            .is_some_and(|packed| packed.rows & HAS_EXTRA != 0)
+            && matches!(self.extras.back(), Some(LineExtra::Eager(_)))
+    }
+
+    /// Each line's source rows, content cells and extra, newest first.
+    fn iter(&self) -> impl Iterator<Item = (u32, u32, Option<&LineExtra<T>>)> {
+        let mut extras = self.extras.iter();
+        self.packed.iter().map(move |packed| {
+            let extra = (packed.rows & HAS_EXTRA != 0).then(|| extras.next().expect("line extra"));
+            (packed.rows & !HAS_EXTRA, packed.cells, extra)
+        })
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.packed.capacity() * std::mem::size_of::<PackedLine>()
+            + self.extras.capacity() * std::mem::size_of::<LineExtra<T>>()
+            + self
+                .extras
+                .iter()
+                .map(|extra| match extra {
+                    LineExtra::Greedy { wide, .. } => wide
+                        .as_ref()
+                        .map_or(0, |runs| std::mem::size_of_val(&**runs)),
+                    LineExtra::Eager(rows) => rows.capacity() * std::mem::size_of::<Row<T>>(),
+                })
+                .sum::<usize>()
+    }
+}
+
+/// Greedy placement of content cells in rows, counting rows.
+struct Layout {
+    columns: usize,
+    rows: usize,
+    column: usize,
+    position: usize,
+    /// The content position the second row starts at.
+    first: Option<usize>,
+}
+
+impl Layout {
+    fn break_row(&mut self) {
+        self.rows += 1;
+        self.first.get_or_insert(self.position);
+        self.column = 0;
+    }
+
+    /// Place single-width cells up to content position `to`.
+    fn narrow(&mut self, to: usize) {
+        while self.position < to {
+            if self.column == self.columns {
+                self.break_row();
+            }
+            let take = (to - self.position).min(self.columns - self.column);
+            self.column += take;
+            self.position += take;
+        }
+    }
+
+    /// Place `count` wide characters.
+    fn wide(&mut self, mut count: usize) {
+        while count != 0 {
+            if self.column + 2 > self.columns {
+                self.break_row();
+            }
+            let take = count.min((self.columns - self.column) / 2);
+            self.column += 2 * take;
+            self.position += 2 * take;
+            count -= take;
+        }
+    }
+}
+
+/// History older than the rows a column change reflowed, kept at the width
+/// it was stored at. Rows are produced at `columns` when read.
+#[derive(Clone, Debug)]
+struct Deferred<T> {
+    /// Source blocks, newest first. Rows decode at `Block::columns`.
+    sources: VecDeque<Block<T>>,
+    /// Logical lines, newest first; together they hold every source row.
+    lines: Lines<T>,
+    columns: usize,
+    /// Rows at `columns`.
+    rows: usize,
+    /// The payload term of `history_storage_bytes` for `sources`.
+    payload: usize,
+    /// Cells of eager lines' rows.
+    eager_cells: usize,
+    /// Every row at `columns`, newest first, built by the first read.
+    read: OnceLock<Vec<Row<T>>>,
+}
+
+impl<T> Deferred<T> {
+    /// `rows`, `payload` and `eager_cells` computed from scratch.
+    fn counted(&self) -> (usize, usize, usize) {
+        let rows = self
+            .lines
+            .iter()
+            .map(|(_, cells, extra)| line_layout(cells, extra, self.columns).0)
+            .sum();
+        let eager = self
+            .lines
+            .iter()
+            .map(|(_, _, extra)| extra.map_or(0, LineExtra::eager_cells))
+            .sum();
+        let mut previous = std::ptr::null();
+        let mut payload = 0;
+        for block in &self.sources {
+            let ptr = block.bytes.as_ptr();
+            if ptr != previous {
+                payload += payload_bytes(block);
+            }
+            previous = ptr;
+        }
+        (rows, payload, eager)
+    }
+
+    fn recount(&mut self) {
+        (self.rows, self.payload, self.eager_cells) = self.counted();
+    }
+
+    /// Pop an emptied source block from either end, keeping `payload`.
+    fn pop_source(&mut self, front: bool) {
+        let block = if front {
+            self.sources.pop_front()
+        } else {
+            self.sources.pop_back()
+        };
+        let block = block.expect("deferred source block");
+        let neighbour = if front {
+            self.sources.front()
+        } else {
+            self.sources.back()
+        };
+        if !neighbour.is_some_and(|next| next.bytes.as_ptr() == block.bytes.as_ptr()) {
+            self.payload -= payload_bytes(&block);
+        }
+    }
+
+    /// Remove the newest line's rows at `columns`, oldest first.
+    fn pop_newest_line(&mut self, codec: RowCodec<T>) -> Vec<Row<T>> {
+        let line = self.lines.pop_front().expect("deferred line");
+        self.rows -= line.rows_at(self.columns);
+        self.eager_cells -= line.eager_cells();
+        let sources = match line.extra {
+            Some(LineExtra::Eager(_)) => {
+                self.drop_newest_sources(line.rows as usize);
+                Vec::new()
+            }
+            _ => {
+                let mut sources = self.take_newest_sources(line.rows as usize, codec);
+                sources.reverse();
+                sources
+            }
+        };
+        line.into_rows(sources, self.columns, codec)
+    }
+
+    /// Remove the oldest line's rows at `columns`, oldest first.
+    fn pop_oldest_line(&mut self, codec: RowCodec<T>) -> Vec<Row<T>> {
+        let line = self.lines.pop_back().expect("deferred line");
+        self.rows -= line.rows_at(self.columns);
+        self.eager_cells -= line.eager_cells();
+        let sources = match line.extra {
+            Some(LineExtra::Eager(_)) => {
+                self.drop_oldest_sources(line.rows as usize);
+                Vec::new()
+            }
+            _ => self.take_oldest_sources(line.rows as usize, codec),
+        };
+        line.into_rows(sources, self.columns, codec)
+    }
+
+    /// Drop the oldest line and its source rows without decoding them.
+    fn drop_oldest_line(&mut self) {
+        let line = self.lines.pop_back().expect("deferred line");
+        self.rows -= line.rows_at(self.columns);
+        self.eager_cells -= line.eager_cells();
+        self.drop_oldest_sources(line.rows as usize);
+    }
+
+    /// Drop the oldest row: the start of the oldest line.
+    fn drop_oldest_row(&mut self) {
+        let mut line = self.lines.pop_back().expect("deferred line");
+        let (rows, first) = line.layout(self.columns);
+        if rows == 1 {
+            self.rows -= 1;
+            self.eager_cells -= line.eager_cells();
+            self.drop_oldest_sources(line.rows as usize);
+            return;
+        }
+        // Eager reflow would leave the rest of the line as the oldest line.
+        match &mut line.extra {
+            None => {
+                line.extra = Some(LineExtra::Greedy {
+                    skip: first as u32,
+                    wide: None,
+                });
+            }
+            Some(LineExtra::Greedy { skip, .. }) => *skip += first as u32,
+            Some(LineExtra::Eager(rows)) => self.eager_cells -= rows.remove(0).len(),
+        }
+        self.lines.push_back(line);
+        self.rows -= 1;
+    }
+
+    /// Every row at `columns`, newest first.
+    fn build_rows(&self, codec: RowCodec<T>) -> Vec<Row<T>> {
+        let mut out = Vec::with_capacity(self.rows);
+        let mut sources = self.sources.iter();
+        let mut decoded = Vec::new().into_iter();
+        let mut chunks = Vec::new();
+        for (source_rows, cells, extra) in self.lines.iter() {
+            let mut rows = Vec::with_capacity(source_rows as usize);
+            while rows.len() < source_rows as usize {
+                match decoded.next() {
+                    Some(row) => rows.push(row),
+                    None => {
+                        let block = sources.next().expect("deferred source row");
+                        decoded = block.decode_rows(codec).into_iter();
+                    }
+                }
+            }
+            let skip = match extra {
+                Some(LineExtra::Eager(rows)) => {
+                    out.extend(rows.iter().rev().map(codec.clone_row));
+                    continue;
+                }
+                Some(LineExtra::Greedy { skip, .. }) => *skip as usize,
+                None => 0,
+            };
+            rows.reverse();
+            (codec.line_rows)(rows, skip, cells as usize, self.columns, &mut chunks);
+            out.extend(chunks.drain(..).rev());
+        }
+        out
+    }
+
+    /// Remove the newest `count` source rows, newest first.
+    fn take_newest_sources(&mut self, mut count: usize, codec: RowCodec<T>) -> Vec<Row<T>> {
+        let mut rows = Vec::with_capacity(count);
+        while count != 0 {
+            let block = self.sources.front_mut().expect("deferred source row");
+            let take = count.min(block.count);
+            let mut decoded = block
+                .decoded
+                .take()
+                .unwrap_or_else(|| block.decode_rows(codec));
+            let rest = decoded.split_off(take);
+            rows.append(&mut decoded);
+            block.start += take as u32;
+            block.count -= take;
+            if block.count == 0 {
+                self.pop_source(true);
+            } else {
+                let _ = block.decoded.set(rest);
+            }
+            count -= take;
+        }
+        rows
+    }
+
+    /// Drop the newest `count` source rows.
+    fn drop_newest_sources(&mut self, mut count: usize) {
+        while count != 0 {
+            let block = self.sources.front_mut().expect("deferred source row");
+            let take = count.min(block.count);
+            block.start += take as u32;
+            block.count -= take;
+            if let Some(rows) = block.decoded.get_mut() {
+                rows.drain(..take);
+            }
+            if block.count == 0 {
+                self.pop_source(true);
+            }
+            count -= take;
+        }
+    }
+
+    /// Drop the oldest `count` source rows.
+    fn drop_oldest_sources(&mut self, mut count: usize) {
+        while count != 0 {
+            let block = self.sources.back_mut().expect("deferred source row");
+            let take = count.min(block.count);
+            block.count -= take;
+            if let Some(rows) = block.decoded.get_mut() {
+                rows.truncate(block.count);
+            }
+            if block.count == 0 {
+                self.pop_source(false);
+            }
+            count -= take;
+        }
+    }
+
+    /// Remove the oldest `count` source rows, oldest first. The rest of a
+    /// partly taken block stays decoded for the next oldest line.
+    fn take_oldest_sources(&mut self, mut count: usize, codec: RowCodec<T>) -> Vec<Row<T>> {
+        let mut rows = Vec::with_capacity(count);
+        while count != 0 {
+            let block = self.sources.back_mut().expect("deferred source row");
+            let take = count.min(block.count);
+            let mut decoded = block
+                .decoded
+                .take()
+                .unwrap_or_else(|| block.decode_rows(codec));
+            let taken = decoded.split_off(decoded.len() - take);
+            rows.extend(taken.into_iter().rev());
+            block.count -= take;
+            if block.count == 0 {
+                self.pop_source(false);
+            } else {
+                let _ = block.decoded.set(decoded);
+            }
+            count -= take;
+        }
+        rows
+    }
+}
 
 /// An encoded block and the facts storage needs without decoding it.
 struct Encoded {
@@ -197,6 +757,12 @@ pub struct CompactRows<T> {
     /// Whether a block may hold a read cache, so releasing caches while
     /// output streams does not visit every block.
     read_cache: ReadCacheFlag,
+    /// History a column change did not reflow, older than every block and
+    /// newer than `oldest`.
+    deferred: Option<Box<Deferred<T>>>,
+    /// Reflow every column change eagerly: the oracle for deferral tests.
+    #[cfg(test)]
+    pub(crate) eager_reflow: bool,
 }
 
 #[derive(Debug, Default)]
@@ -241,6 +807,9 @@ impl<T> CompactRows<T> {
             spare: Vec::new(),
             payload_bytes: Some(0),
             read_cache: ReadCacheFlag::default(),
+            deferred: None,
+            #[cfg(test)]
+            eager_reflow: false,
         };
         storage.seal_recent();
         storage.recent.shrink_to_fit();
@@ -281,7 +850,22 @@ impl<T> CompactRows<T> {
             self.read_cache.0.store(true, Ordering::Relaxed);
             return &block.rows(self.codec)[index % self.block_rows];
         }
-        &self.oldest[index - cold_rows]
+        index -= cold_rows;
+        if let Some(deferred) = &self.deferred {
+            if index < deferred.rows {
+                self.read_cache.0.store(true, Ordering::Relaxed);
+                return &deferred
+                    .read
+                    .get_or_init(|| deferred.build_rows(self.codec))[index];
+            }
+            index -= deferred.rows;
+        }
+        &self.oldest[index]
+    }
+
+    /// Rows before `oldest`, from the newest.
+    fn rows_before_oldest(&self) -> usize {
+        self.recent.len() + self.cold_rows() + self.deferred.as_ref().map_or(0, |d| d.rows)
     }
 
     #[inline(always)]
@@ -303,6 +887,13 @@ impl<T> CompactRows<T> {
         if index < self.recent.len() {
             return &mut self.recent[index];
         }
+        if self.deferred.is_some()
+            && index >= self.recent.len() + self.cold_rows()
+            && index < self.rows_before_oldest()
+        {
+            // Editing deferred history reflows it first.
+            self.materialize_deferred();
+        }
         index -= self.recent.len();
         let cold_rows = self.cold_rows();
         if index < cold_rows {
@@ -310,7 +901,11 @@ impl<T> CompactRows<T> {
             *self.read_cache.0.get_mut() = true;
             return block.row_mut(index % self.block_rows, self.codec);
         }
-        &mut self.oldest[index - cold_rows]
+        index -= cold_rows;
+        if let Some(deferred) = &self.deferred {
+            index -= deferred.rows;
+        }
+        &mut self.oldest[index]
     }
 
     pub fn initialize(&mut self, count: usize, columns: usize)
@@ -362,7 +957,15 @@ impl<T> CompactRows<T> {
         self.needs_maintenance |= self.len != len;
         while self.len > len {
             if self.oldest.is_empty() {
-                if let Some(block) = self.blocks.back() {
+                if let Some(deferred) = &mut self.deferred {
+                    let rows = deferred.lines.back_rows_at(deferred.columns).expect("line");
+                    if self.len - len >= rows {
+                        deferred.drop_oldest_line();
+                        self.len -= rows;
+                        self.deferred_changed();
+                        continue;
+                    }
+                } else if let Some(block) = self.blocks.back() {
                     if self.len - len >= block.count {
                         self.len -= self.pop_block_back().expect("last block").count;
                         continue;
@@ -386,6 +989,10 @@ impl<T> CompactRows<T> {
                 self.evict_cache = None;
             }
         }
+        while self.recent.len() < visible && self.deferred.is_some() {
+            let rows = self.take_deferred_line();
+            self.recent.extend(rows);
+        }
         while self.recent.len() < visible {
             self.recent
                 .push_back(self.oldest.pop_front().expect("visible row"));
@@ -404,6 +1011,18 @@ impl<T> CompactRows<T> {
                 self.payload_bytes = None;
             }
             block.release_cache(self.codec);
+        }
+        if self
+            .deferred
+            .as_ref()
+            .is_some_and(|d| d.read.get().is_some())
+        {
+            // History that is read is reflowed once, not per read.
+            self.materialize_deferred();
+        } else if let Some(deferred) = &mut self.deferred {
+            for block in &mut deferred.sources {
+                block.decoded.take();
+            }
         }
     }
 
@@ -475,8 +1094,16 @@ impl<T> CompactRows<T> {
                 + cache.index.rows.capacity() * std::mem::size_of::<usize>()
                 + cache.index.styles.capacity() * std::mem::size_of::<T>()
         });
+        let deferred = self.deferred.as_ref().map_or(0, |deferred| {
+            std::mem::size_of::<Deferred<T>>()
+                + deferred.payload
+                + deferred.sources.capacity() * std::mem::size_of::<Block<T>>()
+                + deferred.lines.heap_bytes()
+                + deferred.eager_cells * std::mem::size_of::<T>()
+        });
         payload
             + evict_cache
+            + deferred
             + self.blocks.capacity() * std::mem::size_of::<Block<T>>()
             + self.recent.capacity() * std::mem::size_of::<Row<T>>()
             + self.oldest.capacity() * std::mem::size_of::<Row<T>>()
@@ -503,7 +1130,7 @@ impl<T> CompactRows<T> {
             self.payload_bytes = Some(self.stored_payload_bytes());
         }
         while self.len > self.visible && self.history_storage_bytes() > budget {
-            if self.oldest.is_empty() && self.blocks.len() > 1 {
+            if self.oldest.is_empty() && self.deferred.is_none() && self.blocks.len() > 1 {
                 self.len -= self.pop_block_back().expect("oldest block").count;
                 self.evict_cache = None;
             } else {
@@ -519,7 +1146,8 @@ impl<T> CompactRows<T> {
         self.last_budget = budget;
     }
 
-    pub fn into_rows(self) -> Vec<Row<T>> {
+    pub fn into_rows(mut self) -> Vec<Row<T>> {
+        self.materialize_deferred();
         let mut rows = Vec::with_capacity(self.len);
         rows.extend(self.recent);
         for block in self.blocks {
@@ -535,6 +1163,7 @@ impl<T> CompactRows<T> {
             self.len -= rows.len();
             return rows;
         }
+        self.materialize_deferred();
         let mut rows = Vec::with_capacity(self.len);
         rows.extend(self.recent.drain(..));
         for block in self.blocks.drain(..) {
@@ -557,13 +1186,80 @@ impl<T> CompactRows<T> {
             self.seal_recent();
             return;
         }
+        #[cfg(test)]
+        let eager_reflow = self.eager_reflow;
         *self = Self::new(rows, visible, columns, self.codec);
+        #[cfg(test)]
+        {
+            self.eager_reflow = eager_reflow;
+        }
     }
 
-    /// Preserve cold hard lines that cannot participate in this reflow. Their
-    /// storage range stays compressed; only requested read rows gain padding.
-    pub fn prepare_reflow(&mut self, columns: usize) -> usize {
+    /// Choose the rows a column change reflows eagerly; returns how many.
+    ///
+    /// Hard lines that fit the new width keep their compressed payloads;
+    /// only requested read rows gain padding. Otherwise, when every older
+    /// logical line reflows as a plain re-chunking of its cells (see
+    /// [`DeferredLine`]) and none of them lies below `display_offset`,
+    /// those lines are deferred: their row count at the new width is known
+    /// without decoding them, and their rows are produced when read or
+    /// changed. The remaining rows are the ones that eager reflow can change
+    /// in other ways (the screen and the lines ending on it). Rows kept back
+    /// follow a hard line break and are already at the new width, so the
+    /// caller's reflow of the rest matches reflowing every row.
+    pub fn prepare_reflow(&mut self, columns: usize, reflow: bool, display_offset: usize) -> usize {
         self.release_read_cache();
+        if self.deferred.is_none() && self.keep_hard_lines(columns) {
+            return self.recent.len();
+        }
+        #[cfg(test)]
+        let reflow = reflow && !self.eager_reflow;
+        if reflow && self.defer_history(columns, display_offset) {
+            self.reflowing_recent = true;
+            return self.recent.len();
+        }
+        self.materialize_deferred();
+        self.len
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_deferred(&self) -> bool {
+        self.deferred.is_some()
+    }
+
+    /// Rows `prepare_reflow` kept back, while the caller reflows the rest.
+    pub fn reflow_suffix_rows(&self) -> usize {
+        if self.reflowing_recent { self.len } else { 0 }
+    }
+
+    /// Remove at least `count` of the newest rows kept back from a reflow
+    /// (fewer only when none remain), newest first, at the new width.
+    pub fn take_reflowed_newest(&mut self, count: usize) -> Vec<Row<T>> {
+        debug_assert!(self.reflowing_recent);
+        let mut rows = Vec::with_capacity(count);
+        while rows.len() < count {
+            if let Some(block) = self.blocks.pop_front() {
+                self.payload_bytes = None;
+                if self.blocks.is_empty() {
+                    self.evict_cache = None;
+                }
+                rows.extend(block.into_rows(self.codec));
+            } else if self.deferred.is_some() {
+                let line = self.take_deferred_line();
+                rows.extend(line);
+            } else if let Some(row) = self.oldest.pop_front() {
+                rows.push(row);
+            } else {
+                break;
+            }
+        }
+        self.needs_maintenance = true;
+        self.len -= rows.len();
+        rows
+    }
+
+    /// The hard-line case of `prepare_reflow`: cold history needs no reflow.
+    fn keep_hard_lines(&mut self, columns: usize) -> bool {
         if !self.oldest.is_empty()
             || self.blocks.is_empty()
             || self
@@ -575,7 +1271,7 @@ impl<T> CompactRows<T> {
                 .iter()
                 .any(|block| block.resize_floor.is_none_or(|floor| floor > columns))
         {
-            return self.len;
+            return false;
         }
         self.payload_bytes = None;
         self.coalesce_shared_ranges(block_rows::<T>(columns));
@@ -609,7 +1305,194 @@ impl<T> CompactRows<T> {
             }
         }
         self.reflowing_recent = true;
-        self.recent.len()
+        true
+    }
+
+    /// The deferring case of `prepare_reflow`; `false` leaves every row in
+    /// order, possibly with more of them in `recent`.
+    fn defer_history(&mut self, columns: usize, display_offset: usize) -> bool {
+        let codec = self.codec;
+        // A wide character never fits one column; eager reflow handles it.
+        if columns < 2 {
+            return false;
+        }
+        // A logical line ending among the eagerly reflowed rows is reflowed
+        // with them.
+        while let Some(block) = self.blocks.front() {
+            match (codec.shape)(&block.rows(codec)[0], &mut Vec::new()) {
+                Some(shape) if !shape.wraps => break,
+                Some(_) => {}
+                None => return false,
+            }
+            self.payload_bytes = None;
+            let block = self.blocks.pop_front().expect("first block");
+            self.recent.extend(block.into_rows(codec));
+            if self.blocks.is_empty() {
+                self.evict_cache = None;
+            }
+        }
+        if display_offset > self.recent.len() {
+            return false;
+        }
+        let oldest_wraps = self
+            .oldest
+            .front()
+            .map(|row| (codec.shape)(row, &mut Vec::new()));
+        match oldest_wraps {
+            Some(Some(shape)) if !shape.wraps => {}
+            Some(_) => return false,
+            None => {}
+        }
+
+        // Lines of the blocks, which are newer than deferred history, and of
+        // the oldest rows, which are older.
+        let mut scan = LineScan::new(codec, columns);
+        for block in self.blocks.iter_mut().rev() {
+            // The newest block was decoded above; others are decoded one at
+            // a time and dropped.
+            let rows = block
+                .decoded
+                .take()
+                .unwrap_or_else(|| block.decode_rows(codec));
+            if rows
+                .into_iter()
+                .rev()
+                .try_for_each(|row| scan.push(row))
+                .is_none()
+            {
+                return false;
+            }
+        }
+        let Some(newer) = scan.finish() else {
+            return false;
+        };
+        let mut scan = LineScan::new(codec, columns);
+        let oldest = self.oldest.iter().rev().map(codec.clone_row);
+        if oldest
+            .into_iter()
+            .try_for_each(|row| scan.push(row))
+            .is_none()
+        {
+            return false;
+        }
+        let Some(older) = scan.finish() else {
+            return false;
+        };
+
+        let deferred = self.deferred.get_or_insert_with(|| {
+            Box::new(Deferred {
+                sources: VecDeque::new(),
+                lines: Lines::new(),
+                columns,
+                rows: 0,
+                payload: 0,
+                eager_cells: 0,
+                read: OnceLock::new(),
+            })
+        });
+        // Lines deferred earlier: only eager ones change.
+        for extra in &mut deferred.lines.extras {
+            if let LineExtra::Eager(rows) = extra {
+                *rows = (codec.reflow_line)(std::mem::take(rows), columns);
+            }
+        }
+        for block in self.blocks.drain(..).rev() {
+            deferred.sources.push_front(block);
+        }
+        for line in newer {
+            deferred.lines.push_front(line);
+        }
+        if !self.oldest.is_empty() {
+            let rows: Vec<_> = self.oldest.drain(..).collect();
+            for chunk in rows.chunks(MAX_BLOCK_ROWS) {
+                deferred.sources.push_back(Block::new(chunk, codec));
+            }
+            for line in older.into_iter().rev() {
+                deferred.lines.push_back(line);
+            }
+        }
+        deferred.columns = columns;
+        deferred.read = OnceLock::new();
+        deferred.recount();
+        self.payload_bytes = Some(0);
+        self.evict_cache = None;
+        self.block_rows = block_rows::<T>(columns);
+        self.needs_maintenance = true;
+        self.len = self.recent.len() + deferred.rows;
+        if deferred.lines.is_empty() {
+            self.deferred = None;
+        } else if deferred.eager_cells * std::mem::size_of::<T>() > MAX_EAGER_BYTES {
+            // Too many lines that must be reflowed eagerly: store them all.
+            self.materialize_deferred();
+        }
+        true
+    }
+
+    /// Reflow deferred history into blocks after every newer block.
+    fn materialize_deferred(&mut self) {
+        let Some(deferred) = self.deferred.take() else {
+            return;
+        };
+        let codec = self.codec;
+        let columns = deferred.columns;
+        let mut deferred = *deferred;
+        let rows = deferred
+            .read
+            .take()
+            .unwrap_or_else(|| deferred.build_rows(codec));
+        debug_assert!(
+            self.blocks
+                .iter()
+                .all(|block| block.count == self.block_rows)
+        );
+        debug_assert_eq!(self.block_rows, block_rows::<T>(columns));
+        for chunk in rows.chunks(self.block_rows) {
+            self.blocks.push_back(Block::new(chunk, codec));
+        }
+        self.payload_bytes = None;
+        self.evict_cache = None;
+        self.needs_maintenance = true;
+    }
+
+    /// Remove the newest deferred line's rows, newest first.
+    fn take_deferred_line(&mut self) -> Vec<Row<T>> {
+        let codec = self.codec;
+        let deferred = self.deferred.as_mut().expect("deferred history");
+        let mut rows = deferred.pop_newest_line(codec);
+        rows.reverse();
+        self.deferred_changed();
+        rows
+    }
+
+    /// Move the oldest deferred line into `oldest` as rows at the width.
+    fn deferred_line_to_oldest(&mut self) {
+        debug_assert!(self.oldest.is_empty());
+        let codec = self.codec;
+        let deferred = self.deferred.as_mut().expect("deferred history");
+        let rows = deferred.pop_oldest_line(codec);
+        for row in rows {
+            self.oldest.push_front(row);
+        }
+        // The rest of a partly taken source block stays decoded until the
+        // next read cache release.
+        *self.read_cache.0.get_mut() = true;
+        self.deferred_changed();
+    }
+
+    /// Deferred history lost its newest or oldest line.
+    fn deferred_changed(&mut self) {
+        self.needs_maintenance = true;
+        if let Some(deferred) = &mut self.deferred {
+            deferred.read = OnceLock::new();
+            debug_assert_eq!(
+                (deferred.rows, deferred.payload, deferred.eager_cells),
+                deferred.counted()
+            );
+            if deferred.lines.is_empty() {
+                debug_assert!(deferred.sources.is_empty());
+                self.deferred = None;
+            }
+        }
     }
 
     /// Undo a wide resize's index splitting without decoding or recompressing
@@ -666,6 +1549,10 @@ impl<T> CompactRows<T> {
         if let Some(row) = self.oldest.pop_back() {
             return Some(row);
         }
+        if self.deferred.is_some() {
+            self.deferred_line_to_oldest();
+            return self.oldest.pop_back();
+        }
         if let Some(block) = self.pop_block_back() {
             self.evict_cache = None;
             self.oldest = block.into_rows(self.codec).into();
@@ -677,6 +1564,11 @@ impl<T> CompactRows<T> {
     /// Discard the oldest row without decoding any other row.
     fn drop_oldest(&mut self) {
         if self.oldest.pop_back().is_some() {
+            return;
+        }
+        if let Some(deferred) = &mut self.deferred {
+            deferred.drop_oldest_row();
+            self.deferred_changed();
             return;
         }
         if let Some(block) = self.blocks.back_mut() {
@@ -700,8 +1592,27 @@ impl<T> CompactRows<T> {
         T: ResetDiscriminant<D> + GridCell + Default,
         D: PartialEq,
     {
-        let blank =
-            self.oldest.is_empty() && self.blocks.back().is_some_and(Block::oldest_blank_on_reset);
+        if self.oldest.is_empty() {
+            if let Some(deferred) = &self.deferred {
+                if !deferred.lines.back_is_eager() {
+                    // Every cell of a greedy line's row after its occupancy
+                    // is a default cell, so the reset leaves template cells
+                    // only (see `RowCodec::encode`).
+                    let columns = deferred.columns;
+                    self.drop_oldest();
+                    let mut row = self
+                        .spare
+                        .pop()
+                        .filter(|row| row.len() == columns)
+                        .unwrap_or_else(|| Row::new(columns));
+                    row.reset(template);
+                    return row;
+                }
+            }
+        }
+        let blank = self.oldest.is_empty()
+            && self.deferred.is_none()
+            && self.blocks.back().is_some_and(Block::oldest_blank_on_reset);
         if blank {
             let columns = self.blocks.back().expect("oldest block").columns;
             self.drop_oldest();
@@ -716,6 +1627,7 @@ impl<T> CompactRows<T> {
             return row;
         }
         let fast = self.oldest.is_empty()
+            && self.deferred.is_none()
             && self
                 .blocks
                 .back()
@@ -775,6 +1687,9 @@ impl<T> CompactRows<T> {
             if self.blocks.is_empty() {
                 self.evict_cache = None;
             }
+        } else if self.deferred.is_some() {
+            let rows = self.take_deferred_line();
+            self.recent.extend(rows);
         } else {
             self.recent.append(&mut self.oldest);
         }
@@ -805,6 +1720,107 @@ impl<T> CompactRows<T> {
     }
 }
 
+/// The logical lines of consecutive rows fed oldest first, reflowed to
+/// `columns`.
+struct LineScan<T> {
+    codec: RowCodec<T>,
+    columns: usize,
+    lines: Vec<DeferredLine<T>>,
+    /// Rows of the line not ended yet.
+    open: Vec<Row<T>>,
+    open_cells: usize,
+    open_plain: bool,
+    /// The last open row ends with a leading spacer.
+    open_padded: bool,
+    wide: Vec<(u32, u32)>,
+    row_wide: Vec<(u32, u32)>,
+}
+
+impl<T> LineScan<T> {
+    fn new(codec: RowCodec<T>, columns: usize) -> Self {
+        Self {
+            codec,
+            columns,
+            lines: Vec::new(),
+            open: Vec::new(),
+            open_cells: 0,
+            open_plain: true,
+            open_padded: false,
+            wide: Vec::new(),
+            row_wide: Vec::new(),
+        }
+    }
+
+    /// `None` when reflow may join the row's line to another line.
+    fn push(&mut self, row: Row<T>) -> Option<()> {
+        self.row_wide.clear();
+        let shape = (self.codec.shape)(&row, &mut self.row_wide)?;
+        // A leading spacer stays where a merged row ends with it unless the
+        // wide character it made room for follows.
+        self.open_plain &= shape.plain && (!self.open_padded || shape.starts_wide);
+        self.open_padded = shape.padded;
+        if self.open_plain {
+            let offset = u32::try_from(self.open_cells).ok()?;
+            self.wide.extend(
+                self.row_wide
+                    .iter()
+                    .map(|&(start, count)| (start + offset, count)),
+            );
+        }
+        if shape.wraps {
+            self.open_cells += row.len() - usize::from(shape.padded);
+            self.open.push(row);
+            return Some(());
+        }
+        let rows = u32::try_from(self.open.len() + 1)
+            .ok()
+            .filter(|rows| *rows < HAS_EXTRA)?;
+        let cells = u32::try_from(self.open_cells + shape.content).ok()?;
+        // A continuation row without content, or styled blanks after the
+        // content, do not reflow as greedy placement of the content.
+        let greedy =
+            self.open_plain && shape.default_tail && (self.open.is_empty() || shape.content != 0);
+        // Tests check every greedy line against eager reflow of its rows.
+        #[cfg(test)]
+        if greedy {
+            let clone = self.codec.clone_row;
+            let sources = || self.open.iter().chain([&row]).map(clone).collect();
+            let eager = (self.codec.reflow_line)(sources(), self.columns);
+            let mut rows = Vec::new();
+            (self.codec.line_rows)(sources(), 0, cells as usize, self.columns, &mut rows);
+            assert!(
+                (self.codec.rows_equal)(&eager, &rows),
+                "greedy placement is not reflow"
+            );
+        }
+        let extra = if greedy {
+            self.open.clear();
+            (!self.wide.is_empty()).then(|| LineExtra::Greedy {
+                skip: 0,
+                wide: Some(std::mem::take(&mut self.wide).into_boxed_slice()),
+            })
+        } else {
+            let mut sources = std::mem::take(&mut self.open);
+            sources.push(row);
+            Some(LineExtra::Eager((self.codec.reflow_line)(
+                sources,
+                self.columns,
+            )))
+        };
+        self.lines.push(DeferredLine { rows, cells, extra });
+        self.open_cells = 0;
+        self.open_plain = true;
+        self.open_padded = false;
+        self.wide.clear();
+        Some(())
+    }
+
+    /// The lines, oldest first; `None` when the newest row did not end one.
+    fn finish(self) -> Option<Vec<DeferredLine<T>>> {
+        self.open.is_empty().then_some(self.lines)
+    }
+}
+
 /// Lossless cell/style encoding for process-local history. This is not a
 /// persistent format and must not be used to decode external protocol data.
 pub fn cell_codec() -> RowCodec<Cell> {
@@ -814,7 +1830,176 @@ pub fn cell_codec() -> RowCodec<Cell> {
         resize_row: resize_cell_row,
         index: index_cells,
         reset_row: reset_cell_row,
+        shape: cell_shape,
+        line_rows: cell_line_rows,
+        reflow_line: cell_reflow_line,
+        clone_row: Row::clone,
+        #[cfg(test)]
+        rows_equal: |a, b| a == b,
     }
+}
+
+/// See [`RowCodec::shape`]. A plain row has whole wide characters (a
+/// character cell followed by its spacer) and a leading spacer only as the
+/// last cell of a wrapping row.
+fn cell_shape(row: &Row<Cell>, wide: &mut Vec<(u32, u32)>) -> Option<RowShape> {
+    let cells = &row[..];
+    let len = cells.len();
+    let wraps = cells
+        .last()
+        .is_some_and(|cell| cell.flags.contains(Flags::WRAPLINE));
+    let default_key = plain_style_key(&Cell::default());
+    let mut content = 0;
+    let mut stored = 0;
+    let mut padded = false;
+    let mut plain = true;
+    for (index, cell) in cells.iter().enumerate() {
+        if is_default(cell, default_key) {
+            continue;
+        }
+        stored = index + 1;
+        let flags = cell.flags;
+        let last = index + 1 == len;
+        if flags.contains(Flags::WRAPLINE) && !last {
+            return None;
+        }
+        if flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+            if last && wraps && !flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER) {
+                padded = true;
+                continue;
+            }
+            plain = false;
+        } else if flags.contains(Flags::WIDE_CHAR) {
+            let whole = !flags.contains(Flags::WIDE_CHAR_SPACER)
+                && cells.get(index + 1).is_some_and(|next| {
+                    next.flags.contains(Flags::WIDE_CHAR_SPACER)
+                        && !next
+                            .flags
+                            .intersects(Flags::WIDE_CHAR | Flags::LEADING_WIDE_CHAR_SPACER)
+                });
+            plain &= whole;
+            match wide.last_mut() {
+                Some((start, count)) if *start as usize + 2 * *count as usize == index => {
+                    *count += 1;
+                }
+                _ => wide.push((index as u32, 1)),
+            }
+        } else if flags.contains(Flags::WIDE_CHAR_SPACER)
+            && !(index > 0 && cells[index - 1].flags.contains(Flags::WIDE_CHAR))
+        {
+            plain = false;
+        }
+        let empty = if flags.contains(Flags::WRAPLINE) {
+            let mut cell = cell.clone();
+            cell.flags.remove(Flags::WRAPLINE);
+            cell.is_empty()
+        } else {
+            cell.is_empty()
+        };
+        if !empty {
+            content = index + 1;
+        }
+    }
+    Some(RowShape {
+        wraps,
+        padded,
+        content,
+        default_tail: wraps
+            || cells[content..]
+                .iter()
+                .all(|cell| is_default(cell, default_key)),
+        // A row reset by a coloured template keeps coloured blanks above its
+        // occupancy; `Row::reset` treats them unlike greedy rows' padding.
+        plain: plain && row.occ >= stored,
+        starts_wide: cells
+            .first()
+            .is_some_and(|cell| cell.flags.contains(Flags::WIDE_CHAR)),
+    })
+}
+
+/// See [`RowCodec::reflow_line`]. The line's rows become the history of a
+/// one-line grid whose blank screen row holds the cursor, so `Grid::resize`
+/// applies to them exactly the reflow it applies to any history line.
+fn cell_reflow_line(rows: Vec<Row<Cell>>, columns: usize) -> Vec<Row<Cell>> {
+    let width = rows[0].len();
+    let count = rows.len();
+    // No history limit: nothing may be truncated.
+    let mut grid: super::Grid<Cell> = super::Grid::new(1, width, usize::MAX / 4);
+    let mut raw = Vec::with_capacity(count + 1);
+    raw.push(Row::new(width));
+    raw.extend(rows.into_iter().rev());
+    grid.raw.replace_inner(raw);
+    grid.resize(true, 1, columns);
+    debug_assert!(grid.cursor.point == crate::index::Point::default());
+    let mut rows = grid.raw.take_all();
+    let screen = rows.remove(0);
+    debug_assert!(screen.is_clear() && screen.len() == columns);
+    rows.reverse();
+    rows
+}
+
+/// See [`RowCodec::line_rows`].
+fn cell_line_rows(
+    mut sources: Vec<Row<Cell>>,
+    skip: usize,
+    cells: usize,
+    columns: usize,
+    out: &mut Vec<Row<Cell>>,
+) {
+    if sources.len() == 1 && skip == 0 && cells <= columns {
+        // A hard line that fits: the row itself at the new width.
+        let mut row = sources.pop().expect("one source row");
+        resize_cell_row(&mut row, columns);
+        out.push(row);
+        return;
+    }
+    let mut content = Vec::with_capacity(cells);
+    let last = sources.len() - 1;
+    for (index, mut row) in sources.into_iter().enumerate() {
+        let len = row.len();
+        let mut row = row.front_split_off(len);
+        if index != last {
+            if row
+                .last()
+                .is_some_and(|cell| cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER))
+            {
+                row.pop();
+            } else if let Some(cell) = row.last_mut() {
+                cell.flags.remove(Flags::WRAPLINE);
+            }
+        }
+        content.append(&mut row);
+    }
+    content.truncate(cells);
+    let content = &content[skip..];
+    let mut row = Vec::with_capacity(columns);
+    let mut index = 0;
+    while index < content.len() {
+        let width = if content[index].flags.contains(Flags::WIDE_CHAR) {
+            2
+        } else {
+            1
+        };
+        if row.len() + width > columns {
+            if row.len() < columns {
+                let mut spacer = Cell::default();
+                spacer.flags.insert(Flags::LEADING_WIDE_CHAR_SPACER);
+                row.push(spacer);
+            }
+            let mut full =
+                Row::from_vec(std::mem::replace(&mut row, Vec::with_capacity(columns)), 0);
+            full.last_mut()
+                .expect("nonempty row")
+                .flags
+                .insert(Flags::WRAPLINE);
+            out.push(full);
+        }
+        row.extend_from_slice(&content[index..index + width]);
+        index += width;
+    }
+    let occ = row.len();
+    row.resize(columns, Cell::default());
+    out.push(Row::from_vec(row, occ));
 }
 
 fn resize_cell_row(row: &mut Row<Cell>, columns: usize) {
@@ -2052,7 +3237,7 @@ mod tests {
         codec.decode = decode;
         let mut storage = CompactRows::new(original.clone(), 24, 80, codec);
         let original_ptr = storage.blocks.back().unwrap().bytes.as_ptr();
-        let count = storage.prepare_reflow(320);
+        let count = storage.prepare_reflow(320, true, 0);
         assert!(count < storage.len());
         let mut recent = storage.drain_rows();
         for row in &mut recent {
@@ -2074,7 +3259,7 @@ mod tests {
         storage.release_read_cache();
         assert!(DECODED.load(Ordering::Relaxed) > 0);
         for columns in [4096, 80] {
-            storage.prepare_reflow(columns);
+            storage.prepare_reflow(columns, true, 0);
             let mut recent = storage.drain_rows();
             for row in &mut recent {
                 resize_cell_row(row, columns);
@@ -2239,5 +3424,431 @@ mod tests {
             compact_parser.advance(&mut compact, action.as_bytes());
             same(&mut compact, &dense, "erase or reset");
         }
+    }
+
+    struct Geometry(usize, usize);
+    impl Dimensions for Geometry {
+        fn total_lines(&self) -> usize {
+            self.1
+        }
+        fn screen_lines(&self) -> usize {
+            self.1
+        }
+        fn columns(&self) -> usize {
+            self.0
+        }
+    }
+
+    /// Everything a reader can observe: history length, cursors and every
+    /// row, compared with dense storage.
+    fn same_as_dense(actual: &mut Term<VoidListener>, expected: &Term<VoidListener>, step: &str) {
+        let (a, e) = (actual.grid(), expected.grid());
+        assert_eq!(a.history_size(), e.history_size(), "history after {step}");
+        assert_eq!(
+            a.display_offset(),
+            e.display_offset(),
+            "offset after {step}"
+        );
+        assert_eq!(a.cursor, e.cursor, "cursor after {step}");
+        assert_eq!(a.saved_cursor, e.saved_cursor, "saved cursor after {step}");
+        for line in -(e.history_size() as i32)..e.screen_lines() as i32 {
+            assert_eq!(a[Line(line)], e[Line(line)], "line {line} after {step}");
+        }
+        actual.grid_mut().release_history_read_cache();
+    }
+
+    fn visible_same_as_dense(
+        actual: &Term<VoidListener>,
+        expected: &Term<VoidListener>,
+        step: &str,
+    ) {
+        let (a, e) = (actual.grid(), expected.grid());
+        assert_eq!(a.history_size(), e.history_size(), "history after {step}");
+        assert_eq!(a.cursor, e.cursor, "cursor after {step}");
+        for line in 0..e.screen_lines() as i32 {
+            assert_eq!(a[Line(line)], e[Line(line)], "line {line} after {step}");
+        }
+    }
+
+    #[test]
+    fn grow_pulls_kept_history_into_the_viewport_like_dense_storage() {
+        // Hard-line history keeps its payloads through a column change. When
+        // growing merges more wrapped screen rows than the newest editable
+        // history holds, history rows must come down into the viewport, as
+        // in dense storage, not blank rows appear at the bottom.
+        for extra in 0..70 {
+            let config = Config {
+                scrolling_history: 1000,
+                ..Config::default()
+            };
+            let mut dense = Term::new(config.clone(), &Size, VoidListener);
+            let mut compact = Term::new(config, &Size, VoidListener);
+            compact.grid_mut().enable_compact_history();
+            let mut text = String::new();
+            for i in 0..(200 + extra) {
+                text.push_str(&format!("short {i}\r\n"));
+            }
+            for i in 0..10 {
+                text.push_str(&format!("{i} {}\r\n", "w".repeat(150)));
+            }
+            let mut dense_parser: Processor = Processor::new();
+            let mut compact_parser: Processor = Processor::new();
+            dense_parser.advance(&mut dense, text.as_bytes());
+            compact_parser.advance(&mut compact, text.as_bytes());
+            dense.resize(Geometry(160, 24));
+            compact.resize(Geometry(160, 24));
+            same_as_dense(
+                &mut compact,
+                &dense,
+                &format!("grow with {extra} extra rows"),
+            );
+        }
+    }
+
+    /// Output that exercises every reflow rule: soft-wrapped lines of any
+    /// length, exact-width lines, trailing styled blanks, background erases,
+    /// tabs, wide and zero-width characters, empty lines, rewrites of wrapped
+    /// lines, scroll regions, reverse index and the alternate screen.
+    fn reflow_output(random: u64, n: usize, coloured_scroll: bool) -> String {
+        let words = |count: usize| "word ".repeat(count);
+        match random % 28 {
+            0..=5 => format!(
+                "\x1b[3{}m{n:05} {}\x1b[0m\r\n",
+                random % 8,
+                words((random >> 8) as usize % 40)
+            ),
+            6 => format!("{n:05} {}\r\n", "x".repeat((random >> 8) as usize % 400)),
+            7 => format!("\x1b[1m{n:05} bold blanks    \x1b[0m\r\n"),
+            8 => format!("\x1b[44m{n:05} blue\x1b[K\x1b[0m\r\n"),
+            9 => format!("{n:05}\tt\tab\r\n"),
+            10 => "\r\n\r\n".to_string(),
+            11 => format!("{n:05} 界面 {} 🦀\r\n", words((random >> 8) as usize % 30)),
+            12 => format!("{n:05} e\u{301} {}\r\n", words((random >> 8) as usize % 30)),
+            13 => format!(
+                "{n:05} {}\x1b[4m   \x1b[0m\r\n",
+                words((random >> 8) as usize % 30)
+            ),
+            // Rewrite part of a wrapped line above the cursor.
+            14 => "\x1b[2A\rrewritten\x1b[2B\r".to_string(),
+            15 => "\x1b[3;9r\x1b[5;1H\x1b[2S\x1b[1T\x1b[r\x1b[99;1H".to_string(),
+            16 => "\x1b[H\x1bM\x1bM\x1b[99;1H".to_string(),
+            17 => format!("\x1b[?1049h{n:05} alternate {}\x1b[?1049l", words(20)),
+            18 => format!("{n:05} {}", words((random >> 8) as usize % 50)),
+            19 => "\x1b[5;3H\x1b[2L\x1b[1M\x1b[99;1H".to_string(),
+            20 => format!("\x1b[{}G{n:05} placed\r\n", 1 + (random >> 8) % 100),
+            21 if (random >> 8) % 32 == 0 => "\x1b[3J".to_string(),
+            22 => format!("{n:05}{}\r\n", "界面🦀".repeat((random >> 8) as usize % 60)),
+            // Overwrite cells that may hold half of a wide character.
+            23 => format!("\x1b[1A\x1b[{}Gx\x1b[1B\r", 1 + (random >> 8) % 40),
+            24 => format!("a{}\r\n", "界".repeat((random >> 8) as usize % 90)),
+            // Shift cells, and so a soft wrap, within a row above.
+            25 if (random >> 8) % 2 == 0 => "\x1b[1A\x1b[3P\x1b[1B\r".to_string(),
+            25 => "\x1b[1A\x1b[4@\x1b[1B\r".to_string(),
+            // Scroll with a coloured template, so recycled rows reset to it.
+            26 if coloured_scroll => format!("\x1b[42m{n:05} green\r\n\r\n\x1b[0m"),
+            _ => format!("{n:05}{}\r\n", "=".repeat((random >> 8) as usize % 160)),
+        }
+    }
+
+    #[test]
+    fn deferred_reflow_matches_dense_through_random_resizes() {
+        random_resizes(false);
+    }
+
+    /// Dense storage recycles rows beyond its history length, whose cells a
+    /// coloured-template reset may keep; eager compact reflow is the oracle
+    /// for output that scrolls with a coloured template.
+    #[test]
+    fn deferred_reflow_matches_eager_compact_reflow_through_random_resizes() {
+        random_resizes(true);
+    }
+
+    fn random_resizes(oracle_is_compact: bool) {
+        // Resizes that deferred history, by seed parity.
+        let mut deferred_resizes = [0; 2];
+        // DIRI_REFLOW_SEEDS=<n> fuzzes more sequences.
+        let seeds: u64 = std::env::var("DIRI_REFLOW_SEEDS").map_or(12, |n| n.parse().unwrap());
+        for seed in 1..=seeds {
+            let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let config = Config {
+                scrolling_history: 300 + seed as usize * 40,
+                ..Config::default()
+            };
+            let mut dense = Term::new(config.clone(), &Size, VoidListener);
+            if oracle_is_compact {
+                dense.grid_mut().enable_compact_history();
+                dense.grid_mut().raw.compact_mut().unwrap().eager_reflow = true;
+            }
+            let mut compact = Term::new(config, &Size, VoidListener);
+            compact.grid_mut().enable_compact_history();
+            let mut dense_parser: Processor = Processor::new();
+            let mut compact_parser: Processor = Processor::new();
+            let (mut columns, mut lines): (usize, usize) = (80, 24);
+            let mut output = 0;
+            for step in 0..700 {
+                let random = next();
+                if random % 3 == 0 {
+                    // Drags move one column at a time; jumps go anywhere.
+                    columns = match (random >> 4) % 4 {
+                        0 => columns.saturating_sub(1).max(2),
+                        1 => columns + 1,
+                        2 => [2, 3, 7, 13, 40, 79, 80, 81, 120, 160, 200]
+                            [(random >> 8) as usize % 11],
+                        _ => columns,
+                    };
+                    if (random >> 12) % 5 == 0 {
+                        lines = [1, 3, 10, 24, 50][(random >> 16) as usize % 5];
+                    }
+                    dense.resize(Geometry(columns, lines));
+                    compact.resize(Geometry(columns, lines));
+                    if compact
+                        .grid()
+                        .raw
+                        .compact()
+                        .is_some_and(CompactRows::has_deferred)
+                    {
+                        deferred_resizes[seed as usize % 2] += 1;
+                    }
+                    let label = format!("seed {seed} step {step}: resize {columns}x{lines}");
+                    visible_same_as_dense(&compact, &dense, &label);
+                    if (random >> 20) % 7 == 0 {
+                        same_as_dense(&mut compact, &dense, &label);
+                    }
+                } else {
+                    for _ in 0..1 + (random >> 4) % 12 {
+                        let mut kind = next();
+                        // Odd seeds print only lines that reflow as greedy
+                        // placement (no styled trailing blanks, tabs, broken
+                        // wide characters or shifted soft wraps).
+                        while seed % 2 == 1 && matches!(kind % 28, 7 | 9 | 23 | 25 | 26) {
+                            kind = next();
+                        }
+                        let text = reflow_output(kind, output, oracle_is_compact);
+                        output += 1;
+                        dense_parser.advance(&mut dense, text.as_bytes());
+                        compact_parser.advance(&mut compact, text.as_bytes());
+                    }
+                    let label = format!("seed {seed} step {step}: output");
+                    visible_same_as_dense(&compact, &dense, &label);
+                    match (random >> 24) % 9 {
+                        // A few history reads, as a scrolled viewport does.
+                        0 => {
+                            let history = dense.grid().history_size() as i32;
+                            for _ in 0..3 {
+                                let line = -((next() % (history as u64 + 1)) as i32);
+                                if line < 0 {
+                                    assert_eq!(
+                                        compact.grid()[Line(line)],
+                                        dense.grid()[Line(line)],
+                                        "read {line} at {label}"
+                                    );
+                                }
+                            }
+                            compact.grid_mut().release_history_read_cache();
+                        }
+                        1 => compact.bound_primary_history_storage(usize::MAX / 2),
+                        2 => same_as_dense(&mut compact, &dense, &label),
+                        _ => {}
+                    }
+                }
+            }
+            same_as_dense(&mut compact, &dense, &format!("seed {seed} end"));
+        }
+        let [mixed, greedy] = deferred_resizes;
+        assert!(
+            greedy > 40 * seeds as usize,
+            "{greedy} greedy resizes deferred history"
+        );
+        assert!(
+            mixed > 30 * seeds as usize,
+            "{mixed} mixed resizes deferred history"
+        );
+    }
+
+    #[test]
+    fn greedy_lines_stay_greedy_through_any_widths() {
+        // Arbitrary cells, not only what a parser writes: every line that
+        // scans as greedy must reflow, one width after another, to exactly
+        // its greedy placement at each width (the scan itself checks the
+        // first width against eager reflow).
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut greedy_lines = 0;
+        for _ in 0..20_000 {
+            let width = 2 + (next() % 12) as usize;
+            let count = 1 + (next() % 4) as usize;
+            let mut rows = Vec::new();
+            for index in 0..count {
+                let mut cells = Vec::new();
+                while cells.len() < width {
+                    let mut cell = Cell::default();
+                    match next() % 12 {
+                        0..=2 => {}
+                        3 | 4 => cell.c = 'a',
+                        5 => {
+                            cell.c = ' ';
+                            cell.flags = Flags::BOLD;
+                        }
+                        6 => {
+                            cell.c = ' ';
+                            cell.bg = Color::Named(NamedColor::Blue);
+                        }
+                        7 => cell.c = '\t',
+                        8 | 9 if cells.len() + 1 < width => {
+                            cell.c = '界';
+                            cell.flags = Flags::WIDE_CHAR;
+                            cells.push(cell);
+                            cells.push(Cell {
+                                flags: Flags::WIDE_CHAR_SPACER,
+                                ..Cell::default()
+                            });
+                            continue;
+                        }
+                        10 => cell.flags = Flags::WIDE_CHAR_SPACER,
+                        _ => cell.c = 'b',
+                    }
+                    cells.push(cell);
+                }
+                if index + 1 != count {
+                    if next() % 3 == 0 && !cells[width - 2].flags.contains(Flags::WIDE_CHAR) {
+                        cells[width - 1] = Cell {
+                            flags: Flags::LEADING_WIDE_CHAR_SPACER,
+                            ..Cell::default()
+                        };
+                    }
+                    cells[width - 1].flags.insert(Flags::WRAPLINE);
+                }
+                rows.push(Row::from_vec(cells, width));
+            }
+            let codec = cell_codec();
+            let first = 2 + (next() % 15) as usize;
+            let mut scan = LineScan::new(codec, first);
+            for row in rows.iter().cloned() {
+                scan.push(row).expect("soft wraps end rows");
+            }
+            let line = scan.finish().expect("one line").pop().expect("one line");
+            let mut line = line;
+            if matches!(line.extra, Some(LineExtra::Eager(_))) {
+                continue;
+            }
+            greedy_lines += 1;
+            let mut eager = cell_reflow_line(rows.clone(), first);
+            let mut columns = first;
+            for _ in 0..6 {
+                if next() % 3 == 0 && eager.len() > 1 {
+                    // History drops the line's oldest row.
+                    eager.remove(0);
+                    let first = line.layout(columns).1;
+                    match &mut line.extra {
+                        Some(LineExtra::Greedy { skip, .. }) => *skip += first as u32,
+                        extra => {
+                            *extra = Some(LineExtra::Greedy {
+                                skip: first as u32,
+                                wide: None,
+                            })
+                        }
+                    }
+                }
+                columns = 2 + (next() % 15) as usize;
+                eager = cell_reflow_line(eager, columns);
+                let skip = match &line.extra {
+                    Some(LineExtra::Greedy { skip, .. }) => *skip as usize,
+                    _ => 0,
+                };
+                let mut greedy = Vec::new();
+                cell_line_rows(
+                    rows.clone(),
+                    skip,
+                    line.cells as usize,
+                    columns,
+                    &mut greedy,
+                );
+                assert_eq!(greedy, eager, "{rows:?} at {columns}");
+                assert_eq!(line.rows_at(columns), eager.len(), "{rows:?} at {columns}");
+            }
+        }
+        assert!(greedy_lines > 2_000, "only {greedy_lines} greedy lines");
+    }
+
+    #[test]
+    fn column_changes_after_the_first_decode_only_new_history() {
+        thread_local! {
+            static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+            static ENCODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        fn decode(bytes: &[u8]) -> Vec<Row<Cell>> {
+            DECODED.with(|count| count.set(count.get() + 1));
+            decode_cells(bytes)
+        }
+        fn encode(rows: &[Row<Cell>]) -> Encoded {
+            ENCODED.with(|count| count.set(count.get() + 1));
+            encode_cells(rows)
+        }
+        let taken = || {
+            (
+                DECODED.with(|count| count.replace(0)),
+                ENCODED.with(|count| count.replace(0)),
+            )
+        };
+        let config = Config {
+            scrolling_history: 2000,
+            ..Config::default()
+        };
+        let mut dense = Term::new(config.clone(), &Size, VoidListener);
+        let mut compact = Term::new(config, &Size, VoidListener);
+        let mut codec = cell_codec();
+        codec.decode = decode;
+        codec.encode = encode;
+        compact.grid_mut().raw.enable_compact(codec);
+        let mut text = String::new();
+        for n in 0..1500 {
+            // Every third line wraps below 120 columns; some hold wide
+            // characters.
+            let tail = if n % 3 == 0 {
+                " and a tail that wraps".repeat(4)
+            } else {
+                String::new()
+            };
+            text.push_str(&format!(
+                "\x1b[3{}m{n:05} 界 building{tail}\x1b[0m\r\n",
+                n % 8
+            ));
+        }
+        let mut dense_parser: Processor = Processor::new();
+        let mut compact_parser: Processor = Processor::new();
+        dense_parser.advance(&mut dense, text.as_bytes());
+        compact_parser.advance(&mut compact, text.as_bytes());
+        let blocks = compact.grid().raw.compact().unwrap().blocks.len();
+        assert!(blocks > 20, "{blocks} history blocks");
+        taken();
+        for (step, columns) in (60..80).rev().chain(61..=100).enumerate() {
+            dense.resize(Geometry(columns, 24));
+            compact.resize(Geometry(columns, 24));
+            let (decoded, encoded) = taken();
+            if step != 0 {
+                // Only blocks sealed since the last change are read, and
+                // only the rows reflowed eagerly are sealed again.
+                assert!(
+                    decoded <= 2,
+                    "{decoded} blocks decoded at {columns} columns"
+                );
+                assert!(
+                    encoded <= 4,
+                    "{encoded} blocks encoded at {columns} columns"
+                );
+            }
+        }
+        same_as_dense(&mut compact, &dense, "the drag");
     }
 }

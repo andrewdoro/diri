@@ -1,5 +1,94 @@
 # diri performance record
 
+## Cheap column changes: deferred history reflow (2026-09-29)
+
+#561 made a drag stop blocking other sessions, but each column change still
+reflowed 10,000 wrapped history rows by decoding, reflowing and re-encoding
+the whole compact history (8 ms p50, `encode_cells`/`lz::compress` ~57%,
+decode ~20%, memmove ~20%). A window drag kept the Engine about a core busy,
+and a Remote Helper did the same for each Resize it received.
+
+Changes:
+
+- History reflow never moves cells across a hard line break, so compact
+  storage now reflows only the editable rows (screen, newest history, any
+  line ending there) and **defers** older logical lines. A line whose reflow
+  is greedy placement of its content (almost every output line, including
+  wide characters) is stored as 8 bytes and its rows at any width are counted
+  without decoding. Other lines (styled trailing blanks, tabs, broken wide
+  characters) are kept as rows and reflowed by `Grid::resize` itself on a
+  one-line grid, up to 256 KiB. Rows are built from the compressed payloads
+  when history is read or edited, once. Recycling and dropping the oldest rows
+  need no decoding. Details and the exact conditions are in
+  `vendor/alacritty_terminal/DIRI-PATCH.md` ("Deferred column changes").
+- Growing now takes kept-back history into the screen when merged rows leave
+  too few, as dense storage does. The hard-line case used to append blank rows
+  instead (a pre-existing compact/dense divergence).
+- The Remote Helper applies only the last of adjacent valid Resize frames in
+  one read, like the Engine's attach reader.
+
+### Measurements
+
+Apple M4 Max, macOS 27.0, release builds, load average 4.5–9.4. Base is
+`923a98a` (origin/main + #554 + #561). Base and branch alternated three times
+each; ranges over the runs are shown.
+
+`cargo bench -p diri-terminal-state --bench terminal_interactions` (160×50,
+10,000 rows of the coloured build log with wrapped lines, one resize + grid
+update per step; CPU is this process's user+sys from `getrusage`):
+
+| | Base | Branch |
+| --- | ---: | ---: |
+| Drag step, ASCII, p50 / p95 | 7.8–8.1 / 9.9–10.1 ms | 54–62 / 60–69 µs |
+| Drag step, CJK/emoji, p50 / p95 | 8.9–9.8 / 11.2–11.7 ms | 95–97 / 100–104 µs |
+| First column change (max), ASCII / CJK | 16.5–17.4 / 13.3–15.2 ms | 5.4–6.8 / 6.6–6.7 ms |
+| Drag 160→100→160 as 60 changes, CPU, ASCII | 417–424 ms | 8.3–8.6 ms |
+| same, CJK/emoji | 523–527 ms | 12.1 ms |
+| Allocations per step, ASCII / CJK | 26,598 / 27,756 | 154 / 173 |
+| 20,000 lines streamed after the drag, CPU, ASCII / CJK | 15.5–16.1 / 18.8–19.7 ms | 15.7–16.1 / 19.3–19.6 ms |
+| 380×110 (no history row wraps), 60-change drag CPU | 11.5–11.8 ms | 11.3–11.4 ms |
+
+The first change of a drag scans history once (decode, no encode); later
+changes only count lines. `--gate` now also gates the drag step p95 at the
+8.3 ms frame budget.
+
+Engine, real Holders (`cargo test --release -p diri-engine --test
+interactions -- --ignored --nocapture --test-threads=1 drag`: 161 Resize
+frames over 1.3 s while another session is typed into every 20 ms):
+
+| | Base | Branch |
+| --- | ---: | ---: |
+| Engine CPU for the drag | 1.21–1.24 s | 129–160 ms |
+| Last resize → grid at final size | 7.7–17.2 ms | 0.37–12.2 ms |
+| Other session's echo, p95 | 6.7–10.4 ms | 0.38–1.2 ms |
+| Grids published to the dragged pane | 88–94 | 128–136 |
+
+Memory: `terminal_fleet` gates pass (fresh/full-history heap +80 bytes per
+core). While history is deferred it keeps its line index: +110 KB for 10,000
+ASCII log lines (compressed history 375 KB), +190 KB when every third line
+has wide characters, until history is read or edited.
+
+Equivalence: `transcript_digest` and the new `reflow_digest` probe (drags
+160↔100, jumps 300/40/13/2 columns, output and coloured-template scrolling
+between resizes, alternate screen, paged, full and no history reads) print the
+same digests on base and branch. The vendored tests compare against dense
+storage over random output/resize sequences (600 seeds fuzzed) and against
+eager compact reflow.
+
+Not claimed: RSS or renderer effects; byte-budget-limited histories (their
+retained rows can differ after a resize, since the stored representation
+differs). Not done: a payload-level shape scan to make the first change of a
+drag cheaper (~5 ms); per-thread stack samples of the Engine drag.
+
+Reproduce from `diri/`:
+
+```sh
+cargo bench -p diri-terminal-state --bench terminal_interactions -- --gate
+cargo test --release -p diri-terminal-state --test transcript_digest -- --ignored --nocapture
+cargo test --release -p diri-engine --test interactions -- --ignored --nocapture --test-threads=1 drag
+cd vendor/alacritty_terminal && DIRI_REFLOW_SEEDS=600 cargo --config 'patch.crates-io.vte.path="../vte"' test --release --features compact-history reflow
+```
+
 ## Terminal feed: scrolling without decompression, moved-row fingerprints (2026-09-28)
 
 After #529, a stack sample of four Engine sessions draining a colored build log

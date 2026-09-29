@@ -17,6 +17,10 @@ diri-proto.workspace = true
 # Already linked through vendored VTE; used for escape scans on every read.
 memchr = "2.8"
 
+[dev-dependencies]
+# CPU time of benchmark drags (getrusage); already in the lockfile.
+libc = "0.2"
+
 [[bench]]
 name = "terminal_throughput"
 harness = false

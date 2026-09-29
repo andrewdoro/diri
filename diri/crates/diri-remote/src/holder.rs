@@ -875,7 +875,13 @@ impl Holder {
                             break;
                         }
                     };
-                    for message in messages {
+                    let mut messages = messages.into_iter().peekable();
+                    while let Some(message) = messages.next() {
+                        if connection.epoch.is_some()
+                            && resize_superseded(&message, messages.peek())
+                        {
+                            continue;
+                        }
                         if let Err(error) = self.handle_message(connection, message) {
                             let code = if self.stop.is_some()
                                 && error.kind() == io::ErrorKind::NotConnected
@@ -1825,6 +1831,24 @@ fn poll_timeout(deadline: Instant) -> libc::c_int {
         .min(libc::c_int::MAX as u128) as libc::c_int
 }
 
+/// A valid Resize immediately followed by another in the same read: applying
+/// it would resize the PTY, reflow and publish a size the terminal leaves at
+/// once, as the Engine's attach reader also skips. Only adjacent Resizes
+/// supersede one another, so input and mouse frames keep their order; a
+/// malformed Resize is still handled, and rejected.
+fn resize_superseded(message: &RemoteMessage, next: Option<&RemoteMessage>) -> bool {
+    let (RemoteMessage::Terminal(frame), Some(RemoteMessage::Terminal(next))) = (message, next)
+    else {
+        return false;
+    };
+    frame.frame_type == FrameType::Resize
+        && next.frame_type == FrameType::Resize
+        && frame.payload.len() == 4
+        && frame
+            .resize_payload()
+            .is_some_and(|(cols, rows)| validate_terminal_dimensions(cols, rows).is_ok())
+}
+
 fn terminate_process_group(pid: u32) {
     if let Ok(pid) = libc::pid_t::try_from(pid) {
         // SAFETY: the hidden Holder called `setsid`, so its pid is also its
@@ -1937,6 +1961,40 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn only_a_valid_resize_followed_by_a_resize_is_superseded() {
+        let resize = |cols, rows| RemoteMessage::Terminal(Frame::resize(cols, rows));
+        let input = RemoteMessage::Terminal(Frame::input(b"x".to_vec()));
+        assert!(resize_superseded(&resize(100, 30), Some(&resize(101, 30))));
+        assert!(!resize_superseded(&resize(100, 30), None));
+        assert!(!resize_superseded(&resize(100, 30), Some(&input)));
+        assert!(!resize_superseded(&input, Some(&resize(100, 30))));
+        // A malformed Resize is handled, so the controller hears about it.
+        assert!(!resize_superseded(&resize(0, 30), Some(&resize(100, 30))));
+        let mut short = Frame::resize(100, 30);
+        short.payload.truncate(3);
+        assert!(!resize_superseded(
+            &RemoteMessage::Terminal(short),
+            Some(&resize(100, 30))
+        ));
+        // Only the last of a burst is applied, and input keeps its place.
+        let burst = [
+            resize(100, 30),
+            resize(101, 30),
+            input.clone(),
+            resize(102, 30),
+            resize(103, 31),
+        ];
+        let mut kept = Vec::new();
+        let mut messages = burst.iter().peekable();
+        while let Some(message) = messages.next() {
+            if !resize_superseded(message, messages.peek().copied()) {
+                kept.push(message);
+            }
+        }
+        assert_eq!(kept, [&burst[1], &input, &burst[4]]);
+    }
 
     #[test]
     fn annotations_are_negotiated_without_breaking_old_controllers() {

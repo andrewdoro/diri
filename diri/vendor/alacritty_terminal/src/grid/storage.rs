@@ -103,6 +103,16 @@ impl<T> Storage<T> {
         self.compact = Some(CompactRows::new(rows, self.visible_lines, columns, codec));
     }
 
+    #[cfg(all(test, feature = "compact-history"))]
+    pub(crate) fn compact(&self) -> Option<&CompactRows<T>> {
+        self.compact.as_ref()
+    }
+
+    #[cfg(all(test, feature = "compact-history"))]
+    pub(crate) fn compact_mut(&mut self) -> Option<&mut CompactRows<T>> {
+        self.compact.as_mut()
+    }
+
     #[cfg(feature = "compact-history")]
     pub fn release_read_cache(&mut self) {
         if let Some(compact) = &mut self.compact {
@@ -357,13 +367,41 @@ impl<T> Storage<T> {
         buffer
     }
 
-    pub fn prepare_reflow(&mut self, columns: usize) -> usize {
+    /// The number of rows `take_all` hands to a column change. Compact
+    /// history may keep older rows back, reflowed without decoding them;
+    /// `display_offset` rows below the viewport are always handed over.
+    pub fn prepare_reflow(&mut self, columns: usize, reflow: bool, display_offset: usize) -> usize {
         #[cfg(feature = "compact-history")]
         if let Some(compact) = &mut self.compact {
-            return compact.prepare_reflow(columns);
+            let rows = compact.prepare_reflow(columns, reflow, display_offset);
+            self.len = compact.len();
+            return rows;
         }
-        let _ = columns;
+        let _ = (columns, reflow, display_offset);
         self.len
+    }
+
+    /// Rows a column change kept back (see `prepare_reflow`). They are at
+    /// the new width and older than every row `take_all` returned.
+    pub fn reflow_suffix_rows(&self) -> usize {
+        #[cfg(feature = "compact-history")]
+        if let Some(compact) = &self.compact {
+            return compact.reflow_suffix_rows();
+        }
+        0
+    }
+
+    /// Remove at least `count` of the newest kept-back rows (fewer only when
+    /// no more are kept), newest first.
+    pub fn take_reflowed_newest(&mut self, count: usize) -> Vec<Row<T>> {
+        #[cfg(feature = "compact-history")]
+        if let Some(compact) = &mut self.compact {
+            let rows = compact.take_reflowed_newest(count);
+            self.len = compact.len();
+            return rows;
+        }
+        let _ = count;
+        Vec::new()
     }
 
     /// Compute actual index in underlying storage given the requested index.

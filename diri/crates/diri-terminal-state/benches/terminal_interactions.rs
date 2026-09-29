@@ -6,10 +6,11 @@
 //!
 //! Reports per-operation distributions (p50/p95/max) and requested heap
 //! allocations. `--gate` enforces the 120 Hz frame budget on the p95 of a
-//! scroll page and of an attach seed. A drag step is reported, not gated:
-//! reflowing 10,000 wrapped history rows costs several frames today (see
-//! PERF.md, "Terminal interactions"). This is parser/grid cost only: no IPC,
-//! PTY, renderer or display presentation.
+//! drag step, a scroll page and an attach seed. The first column change of a
+//! drag scans history once and is reported (max), not gated. The 60-change
+//! drag also reports this process's CPU time for the whole drag (see PERF.md,
+//! "Cheap column changes"). This is parser/grid cost only: no IPC, PTY,
+//! renderer or display presentation.
 use std::hint::black_box;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
@@ -22,6 +23,18 @@ mod allocation;
 use allocation::ALLOCS;
 
 const HISTORY_LINES: usize = 10_000;
+
+/// User plus system CPU time of this (single-threaded) process.
+fn cpu_time() -> Duration {
+    // SAFETY: getrusage only writes the zeroed struct it is given.
+    let usage = unsafe {
+        let mut usage = std::mem::zeroed::<libc::rusage>();
+        assert_eq!(libc::getrusage(libc::RUSAGE_SELF, &mut usage), 0);
+        usage
+    };
+    let time = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1_000);
+    time(usage.ru_utime) + time(usage.ru_stime)
+}
 
 struct Stats {
     samples: Vec<Duration>,
@@ -122,7 +135,41 @@ fn scenario(cols: usize, rows: usize, wide: bool, gate: bool) -> bool {
             });
         }
     }
-    drag.report("drag step (resize cols + grid_update)");
+    let p95 = drag.report("drag step (resize cols + grid_update)");
+    ok &= p95 <= budget;
+
+    // A window drag 160 -> 100 -> 160 columns as 60 width changes, from a
+    // terminal that has not been resized yet, with its total CPU time.
+    let mut screen = fed(cols, rows, wide);
+    let mut changes = Stats::new();
+    let cpu = cpu_time();
+    for step in (1..=30).chain((0..30).rev()) {
+        changes.time(|| {
+            screen.resize(cols - 2 * step, rows);
+            screen.grid_update(false)
+        });
+    }
+    let cpu = cpu_time() - cpu;
+    let p95 = changes.report("drag 60 width changes, per change");
+    println!(
+        "{:<44} cpu {cpu:>9.1?}",
+        "drag 60 width changes, whole drag"
+    );
+    ok &= p95 <= budget;
+
+    // Output streaming through full history after the drag: every line
+    // recycles the oldest history row.
+    let log = build_log(20_000, wide);
+    let cpu = cpu_time();
+    for chunk in log.chunks(16 * 1024) {
+        screen.feed(chunk);
+    }
+    black_box(screen.grid_update(false));
+    println!(
+        "{:<44} cpu {:>9.1?}",
+        "20,000 lines after the drag",
+        cpu_time() - cpu
+    );
     let mut rows_drag = Stats::new();
     for step in (0..20).chain((0..20).rev()) {
         rows_drag.time(|| {
