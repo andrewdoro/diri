@@ -2166,13 +2166,20 @@ impl ControlServer {
         let p: diri_proto::ResizeParams = decode(params)?;
         let cols = u16::try_from(p.cols.clamp(2, u16::MAX as i64)).expect("clamped");
         let rows = u16::try_from(p.rows.clamp(2, u16::MAX as i64)).expect("clamped");
-        let registry = self.registry.lock().map_err(poisoned)?;
-        let session = registry
-            .get(&p.session_id.0)
-            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
-        session
-            .resize(cols, rows)
-            .map_err(|error| ControlError::internal(error.to_string()))?;
+        let reflow = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            let session = registry
+                .get(&p.session_id.0)
+                .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+            session
+                .resize_pty(cols, rows)
+                .map_err(|error| ControlError::internal(error.to_string()))?
+        };
+        // The reflow runs after the Registry lock is released; see
+        // `Session::resize_pty`.
+        if let Some(reflow) = reflow {
+            reflow.apply();
+        }
         Ok(json!({}))
     }
 
