@@ -21,7 +21,8 @@
 //! ```
 //!
 //! `DIRI_KEY_LATENCY_SAMPLES` sets the key count (default 200). Cleanup: the
-//! session is killed with the Engine's process and the temp root removed.
+//! session is killed, this run's Holder manager (matched by its unique temp
+//! root) is stopped, and the root removed.
 
 use std::io::{BufRead, Write};
 use std::os::unix::net::UnixStream;
@@ -121,6 +122,12 @@ impl PrivateEngine {
 
 impl Drop for PrivateEngine {
     fn drop(&mut self) {
+        // The Holder manager outlives an in-process Engine by design; this
+        // root is unique to the run, so only its own Holders match.
+        let _ = std::process::Command::new("pkill")
+            .arg("-f")
+            .arg(self.root.join("holders"))
+            .status();
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
