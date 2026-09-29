@@ -1297,7 +1297,6 @@ impl Session {
                 transport = transport,
                 stage = "spawn",
                 io = diri_telemetry::io_error(error),
-                error = diri_telemetry::text(error.to_string()),
                 ms = started.elapsed(),
             ),
         }
@@ -5130,13 +5129,13 @@ fn watch_early_return_to_shell(shared: &Arc<Shared>, client: &HolderClient) {
 
 /// Records a deferred launch that never produced a child: the session
 /// reports exit 127, the spawn-failure convention the app already knows.
-fn mark_launch_failed(shared: &Shared, stage: &'static str, error: &dyn std::fmt::Display) {
+fn mark_launch_failed(shared: &Shared, stage: &'static str, error: &crate::holder::HolderError) {
     diri_telemetry::incident!(
         "session.launch_failed",
         session = diri_telemetry::id(&shared.id),
         agent = diri_telemetry::id(&shared.agent),
         stage = stage,
-        error = diri_telemetry::text(error.to_string()),
+        kind = crate::telemetry::holder_error_kind(error),
     );
     // Already reported as a launch failure, not as an early exit.
     shared.exit_recorded.store(true, Ordering::SeqCst);

@@ -114,7 +114,7 @@ fn main() {
         eprintln!("diri-holder: {error}");
         diri_telemetry::incident!(
             "holder.manager_failed",
-            error = diri_telemetry::text(error.to_string()),
+            kind = diri_engine::telemetry::holder_error_kind(&error),
         );
         diri_telemetry::flush(Duration::from_secs(1));
         std::process::exit(1);

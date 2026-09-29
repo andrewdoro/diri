@@ -11,11 +11,11 @@ Worker (`telemetry/worker`) and the investigation CLI (`telemetry/cli`).
 - **Local first.** Every process records to a spool on disk. Uploading is a
   separate step the Engine performs, and the user can turn it off in
   Settings > General > Privacy. Recording itself costs a channel send per event.
-- **No content, by type.** Fields are numbers, booleans, `&'static str`
-  literals, `Id`s (`[A-Za-z0-9_.:-]{1,96}`) or scrubbed `Text`. There is no
-  way to record terminal output, prompts, clipboard or pasted contents, file
+- **No content.** Fields are numbers, booleans, `&'static str`
+  literals, `Id`s (`[A-Za-z0-9_.:-]{1,96}`) or scrubbed diagnostic symbols/OS crash facts in `Text`. Never record terminal output, prompts, clipboard or pasted contents, file
   contents, environment variables, command lines, or URLs. Paths are recorded
-  only as `path_hash`. Conversation UUIDs, session ids, agent ids, error codes
+  only as `path_hash`. Arbitrary error messages, subprocess stderr and panic
+  payloads are excluded, not passed through a best-effort scrubber. Conversation UUIDs, session ids, agent ids, error codes
   and RPC method names are allowed: they identify, they don't reveal.
 - **Never on the hot path.** No event per PTY read, per byte, or per
   terminal cell. Hot paths accumulate locally and report totals through
@@ -71,7 +71,7 @@ One JSON object per line:
 | `process.start` | info | `recorder_version, os, arch, debug_build` (the app/Engine version is on `app.launch` / `engine.start` and every batch header) |
 | `health` | info | `uptime_s, rss_mb, footprint_mb, cpu_pct, cpu_ms, threads, fds, fd_limit` + registered gauges |
 | `metrics` | info | `window_s, counters{name:n}, timings{name:{n,avg,p50,p90,p99,max}}` |
-| `panic` | incident | `message, location, thread, signature, frames[]` |
+| `panic` | incident | `location, signature, frames[]` |
 | `telemetry.dropped` | warn | `count` (channel was full) |
 | `telemetry.upload_rejected` | warn | `status, lines` |
 
@@ -109,7 +109,7 @@ recorded by the Engine, not the Holder.
 | `engine.catalog` | info | `manifests, failed` | a short or unparsable Agent catalog |
 | `engine.no_manifests` | incident | `failed` | the Engine refusing to start with no catalog |
 | `engine.state_loaded` | info | `records, ms` | slow or empty state loads |
-| `engine.state_quarantined` | incident | `error` | a corrupt state file (records moved aside) |
+| `engine.state_quarantined` | incident | `io` | a corrupt state file (records moved aside) |
 | `engine.state_unreadable` | incident | `io` | the Engine refusing to start over unreadable state |
 | `engine.restore` | info | `adopted, records, live, ms` | sessions not coming back after an Engine restart |
 | `engine.holders_lost` | warn | `count` | holders that died with the Engine or the machine |
@@ -125,7 +125,7 @@ recorded by the Engine, not the Holder.
 | kind | sev | fields | catches |
 |---|---|---|---|
 | `rpc.slow` | warn | `method, ms, ok, session` | any request over 250 ms (except `events.wait`, `task.get`) |
-| `rpc.error` | error | `method, code, ms, session, message` | every error reply, with its structured code (`remote_transport_unavailable`, `initial_prompt_delivery_failed`, ...) |
+| `rpc.error` | error | `method, code, ms, session` | every error reply, with its structured code (`remote_transport_unavailable`, `initial_prompt_delivery_failed`, ...) |
 | `rpc.op` | info | `method, session, ms` | successful lifecycle requests: spawn, kill, remove, archive, resume, fork, migrate, reconnect, hibernate/wake, account switch/login, worktree create/remove, shutdown, send_text |
 | `client.hello` | info | `proto, build, ok` | stale or mismatched clients (`build` is the client's identity string) |
 | `hook.report` | debug | `session, kind, event, parsed` | agent hooks arriving (or not) |
@@ -137,7 +137,7 @@ recorded by the Engine, not the Holder.
 | `session.spawn` | info | `session, agent, mode: fresh\|history, conv, host, project, worktree, parent, account, prompt, ms` | what was launched, where (`project` is a `path_hash`), with which conversation |
 | `session.resume` | info | `session, agent, decision, conv, recorded_conv, transcript, host, status, exit_reason, archived` | resume decisions: `resume_verified` (transcript found), `resume` (id not verified), `fresh_unwritten` (Claude never wrote it; started fresh), `no_conversation`, `remote`, `already_live` |
 | `session.launch` | info | `session, agent, transport: held_deferred\|held\|direct\|remote, ms` | every Session start, including resume, fork and account relaunches |
-| `session.launch_failed` | incident | `session, agent, transport, stage: spawn\|holder_launch\|holder_wait, io, error, ms` | spawns that never produced a child (holder missing, manager down, exec errno) |
+| `session.launch_failed` | incident | `session, agent, transport, stage: spawn\|holder_launch\|holder_wait, io\|kind, ms` | spawns that never produced a child (holder missing, manager down, exec errno) |
 | `session.exec` | debug | `session, defer_ms, ms, cols, rows` | a deferred launch waiting on the first client size |
 | `session.status` | debug | `session, from, to` | status transitions (`starting, idle, working, needs_input, exited, unknown`) |
 | `session.exit` | info | `session, agent, code, signal, requested, runtime_s, adopted, modes` | how every PTY child ended; `requested` distinguishes kills from crashes |
@@ -148,7 +148,7 @@ recorded by the Engine, not the Holder.
 | `session.transcript` | debug | `session, path (hash), moved` | the transcript moving (worktree entry) |
 | `session.lost` | info | `session, agent, conv, status` | each session whose holder was gone at Engine start |
 | `session.adopted` | debug | `session, agent, hibernated, from_capsule` | each holder re-adopted at start |
-| `holder.adopt_failed` | warn (stat), error (adopt) | `session, stage, error\|io` | a live holder the Engine could not re-adopt |
+| `holder.adopt_failed` | warn (stat), error (adopt) | `session, stage, kind\|io` | a live holder the Engine could not re-adopt |
 | `session.wake` | info | `session, reason, frozen_s` | a hibernated session thawed |
 | `session.migrate` | info | `session, agent, from_host, to_host, transcript_migrated, warnings` | local↔remote handoffs |
 | `governor.freeze` | info | `session, reason: idle\|memory_pressure, idle_s, footprint_mb, processes, idle_threshold_s` | sessions frozen and the evidence used (idle status, unattended, quiet CPU/output, no ports) |
@@ -182,7 +182,7 @@ recorded by the Engine, not the Holder.
 | `remote.connection_fatal` | error | `session, reconnects` | protocol violations that fail the transport closed |
 | `remote.uncertain_input` | error | `session` | input whose delivery could not be proven; the session fails closed |
 | `remote.helper_ready` | info | `host, path: cached\|bootstrap\|reinstall, target, protocol, ms` | bootstrap and probe latency, artifact selection |
-| `remote.helper_failed` | incident | `host, forced, io, error, ms` | bootstrap failures (the error keeps phase and status, never remote output) |
+| `remote.helper_failed` | incident | `host, forced, io, ms` | bootstrap failures (only structured I/O facts; never remote output) |
 | `remote.helper_upload` | info | `host, target, bytes, ok, ms` | Helper uploads |
 | `remote.persistence` | info | `host, capability: native-detach\|user-supervisor\|non-persistent` | persistence probe outcome |
 | `remote.restore_skipped` | warn | `session, host, reason: helper_unavailable\|inspect_failed, io` | remote sessions left behind at Engine start |
@@ -202,8 +202,8 @@ recorded by the Engine, not the Holder.
 |---|---|---|---|
 | `holder.manager_start` | info | `guard` | manager (re)starts; `guard: false` means crash cleanup is unavailable |
 | `holder.manager_exit` | info | `ok` | idle retirement vs. accept failure |
-| `holder.manager_failed` | incident | `error` | the manager exiting with an error |
-| `holder.session_failed` | error | `session, error` | a session Holder that failed to run |
+| `holder.manager_failed` | incident | `kind` | the manager exiting with an error |
+| `holder.session_failed` | error | `session, kind` | a session Holder that failed to run |
 | `holder.spawn` | info | `session, cols, rows, ms` | the PTY child the Holder started |
 | `holder.spawn_failed` | incident | `session, io` | PTY spawn/exec failures with errno |
 | `holder.exit` | info | `session, code, signal, runtime_s` | the child's exit as the Holder reaped it |
@@ -250,17 +250,17 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `ui.action` | debug | `action` (GPUI action name), `source` (`shortcut`\|`palette`) | what the user did just before a failure |
 | `ui.toast` | info | `title` (static toast title) | errors the user was shown ("Terminal", "Target unavailable", …) |
 | `privacy.notice_shown` / `privacy.upload_changed` | info | `upload` | consent history |
-| `settings.privacy_save_failed` | error | `error` (io kind) | toggle that doesn't stick |
+| `settings.privacy_save_failed` | error | `io` (io kind) | failed save; the UI keeps the confirmed value and shows an error |
 | `user.report` | incident | `version, support_id` | Help › Report a Problem…: the moment to look around |
 | `client.connected` | info | `reconnect, attempts, down_ms, connect_ms, hello_ms, first_failure, engine_build, engine_pid, proto` | slow Engine start, how long an outage lasted |
-| `client.disconnected` | warn | `kind, error, connected_s` | Engine crash/restart seen from the app |
-| `client.connect_failing` | error | `attempts, down_ms, kind, error, handshake` | Engine never came up (≈ 45 s of retries) |
+| `client.disconnected` | warn | `kind, connected_s` | Engine crash/restart seen from the app |
+| `client.connect_failing` | error | `attempts, down_ms, kind, handshake` | Engine never came up (≈ 45 s of retries) |
 | `client.identity_rejected` | warn (`instance_changed`), error | `reason, engine_kind, engine_build, engine_pid, proto` | stale/foreign daemon on the socket |
-| `rpc.error` | error | `method, kind, code, error, ms` | failing spawn/resume/kill… by method and Engine error code |
+| `rpc.error` | error | `method, kind, code, ms` | failing spawn/resume/kill… by method and Engine error code |
 | `rpc.slow` | warn | `method, ms` (≥ 2 s; not `events.wait`/`test.run`) | slow Engine operations |
 | `attach.closed` | warn, error (decode) | `session, reason` (`eof`\|`read_error`\|`write_error`\|`keepalive_timeout`\|`decode_error`\|`bad_grid`\|`bad_modes`\|`commands_closed`), `live_ms` | why a terminal connection dropped; protocol corruption |
 | `pane.attached` | info | `session, reconnect, attempts, connect_ms, since_mount_ms` | attach latency, reattach loops |
-| `pane.attach_failing` | error | `session, attempts, reason, error, since_mount_ms` | a session that cannot be attached (3 failures) |
+| `pane.attach_failing` | error | `session, attempts, reason, since_mount_ms` | a session that cannot be attached (3 failures) |
 | `pane.first_grid` | debug; warn if not a snapshot | `session, ms, snapshot` | first frame missing or a diff before a seed |
 | `pane.first_paint` | debug | `session, ms, grid_ms, parked` | attach → first painted content |
 | `pane.blank` | incident; warn if live with a (blank) grid | `session, agent, state, got_grid, frames, ms` | "session doesn't render": visible, running, nothing painted 10 s after mount |
@@ -276,7 +276,7 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `clipboard.paste` | info | `outcome` (`sent`\|`review`\|`into_find`\|`image_staged`\|`image_stage_failed`\|`empty_clipboard`\|`no_session`\|`no_terminal`\|`no_text`\|`copy_mode`\|`ignored_in_find`), `kind, size, bracketed, ms` | "paste doesn't work" |
 | `clipboard.image_upload_failed` | error | `session` | image paste into a remote session |
 | `term.slow_paint` | warn | `ms, cols, rows, shape_misses` | one terminal paint ≥ 50 ms |
-| `update.check` / `update.download` / `update.install` | info; error on failure | `outcome, from, to, user_initiated, ms, error_kind, error` | updates that fail or never arrive |
+| `update.check` / `update.download` / `update.install` | info; error on failure | `outcome, from, to, user_initiated, ms, error_kind` | updates that fail or never arrive |
 
 Sizes are buckets (`0`, `<64`, `<1k`, `<16k`, `<256k`, `<1m`, `>=1m`); no
 clipboard, paste, keystroke or terminal content is ever recorded.
@@ -311,7 +311,8 @@ cycle.
 Cloudflare Worker + R2 + D1.
 
 - **Ingest** validates the header, caps sizes (5 MiB compressed, 64 MiB
-  raw, 50k lines), rate-limits per install, stores the original gzip body in
+  raw, 50k lines), throttles by edge-provided source, globally and per install,
+  stores the original gzip body in
   R2 at `v1/<install>/<yyyy-mm-dd>/<sent_at>-<rand>.ndjson.gz`, and indexes it
   in D1: the install (upsert), the batch (time range, processes, R2 key),
   incidents and errors (`s` of `error` or `incident`, with a grouping
@@ -335,8 +336,16 @@ Cloudflare Worker + R2 + D1.
   | `GET /v1/admin/batch?key=<r2 key>` | the stored gzip body, streamed as `application/gzip` (the caller gunzips) |
   | `GET /v1/admin/sessions?install=` | `(session, conv)` spans with agent, newest first |
   | `GET /v1/admin/find?id=<session id or conversation uuid>` | matching spans joined with the owning install's name and Support ID |
-- **Retention**: R2 objects and D1 rows older than 30 days are deleted by a
-  daily cron.
+- **Admission**: a required Workers Rate Limiting binding throttles each
+  edge-provided source to 30 attempts/minute/location, before D1/body processing.
+  An atomic D1 reservation limits all sources together to 3,600 attempts per UTC
+  hour (config may lower it). No IP is stored in D1/R2. Install IDs remain
+  untrusted labels, not authenticated identities.
+- **Retention**: the daily cron uses server receipt time for batches, incidents
+  and session indexes. Client event clocks never extend retention. Migration
+  `0003_server_retention.sql` assigns existing incident/session indexes a zero
+  receipt time, so the next sweep expires them conservatively. R2 lifecycle
+  expiration remains the backstop for raw batches.
 
 ## CLI (`telemetry/cli`)
 
@@ -356,3 +365,18 @@ diri-debug local [--since 1h] [...]         # same views over ~/Library/Applicat
 
 Configuration: `DIRI_TELEMETRY_URL` and `DIRI_TELEMETRY_ADMIN_TOKEN`, or
 `~/.config/diri-debug/config.json`.
+
+## Security boundary for queued records and privacy settings
+
+New Engine, client, Holder and app events omit free-form errors and panic
+payloads. Before upload, the Engine removes retired `message`/`error` fields
+from every queued record, including files still being written by old processes.
+The upload projection preserves canonical key order and original-file offsets.
+Detailed local spool files from old versions are not rewritten; their content
+is not permission to transmit the retired fields.
+
+`Config::load` requires an explicit boolean `upload` in a readable, valid file.
+Absent or invalid settings disable sharing. The first-run app notice explicitly
+persists the ordinary default; the uploader itself never treats a read failure
+as consent. Settings edits are committed to UI state only after successful
+atomic persistence. A failed toggle or name edit displays an inline error.

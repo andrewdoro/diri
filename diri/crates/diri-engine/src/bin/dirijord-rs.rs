@@ -199,7 +199,7 @@ fn main() {
             eprintln!("dirijord-rs: state load: {error}");
             diri_telemetry::incident!(
                 "engine.state_quarantined",
-                error = diri_telemetry::text(error.to_string()),
+                io = diri_telemetry::io_error(&error),
             );
             false
         }

@@ -54,7 +54,7 @@ export async function usage(env: Env, now = Date.now()): Promise<Usage> {
   const since = dayOf(now - retentionDays(env) * DAY_MS);
   const { results } = await env.DB.prepare(
     `SELECT period, metric, value FROM budget
-     WHERE (period = ?1 AND metric IN ('puts', 'gets')) OR (metric = 'bytes' AND period > ?2)`,
+     WHERE (period = ?1 AND metric IN ('puts', 'gets')) OR (metric = 'bytes' AND period >= ?2)`,
   )
     .bind(month, since)
     .all<{ period: string; metric: string; value: number }>();
@@ -67,34 +67,45 @@ export async function usage(env: Env, now = Date.now()): Promise<Usage> {
   return out;
 }
 
-/** Why a write of `bytes` must be refused, or null when it fits. */
-export function refuseWrite(current: Usage, bytes: number): string | null {
-  if (current.puts + 1 > current.caps.puts) return `monthly R2 write budget (${current.caps.puts}) used up`;
-  if (current.bytes + bytes > current.caps.bytes) return `R2 storage budget (${current.caps.bytes} bytes) used up`;
-  return null;
+/** Atomic, global admission before reading or inflating any request body.
+ * Counts rejected/failed attempts too: rotating identities or invalid gzip
+ * must not buy unlimited database work and decompression. */
+export async function reserveIngest(env: Env, now: number): Promise<boolean> {
+  const limit = Math.floor(cap(env.GLOBAL_RATE_LIMIT_PER_HOUR, 3600));
+  const period = new Date(now).toISOString().slice(0, 13);
+  const result = await env.DB.prepare(
+    `INSERT INTO budget (period, metric, value) SELECT ?1, 'ingest', 1 WHERE ?2 >= 1
+     ON CONFLICT (period, metric) DO UPDATE SET value = value + 1 WHERE value < ?2`,
+  ).bind(period, limit).run();
+  return result.meta.changes === 1;
 }
 
-export function refuseRead(current: Usage): string | null {
-  return current.gets + 1 > current.caps.gets ? `monthly R2 read budget (${current.caps.gets}) used up` : null;
+/** Reserve both counters in one SQL statement BEFORE the R2 PUT. The
+ * materialized decision sees the same pre-write budget for both rows.
+ * Failed PUTs/index writes keep their reservations: conservative overcount
+ * is preferable to unaccounted objects or concurrent overspend. */
+export async function reserveWrite(env: Env, now: number, bytes: number): Promise<boolean> {
+  const limits = caps(env);
+  const { results } = await env.DB.prepare(
+    `WITH allowed AS MATERIALIZED (
+       SELECT coalesce((SELECT value FROM budget WHERE period = ?1 AND metric = 'puts'), 0) + 1 <= ?4
+         AND coalesce((SELECT sum(value) FROM budget WHERE metric = 'bytes' AND period >= ?6), 0) + ?3 <= ?5 AS ok
+     ), charges(period, metric, amount) AS (VALUES (?1, 'puts', 1), (?2, 'bytes', ?3))
+     INSERT INTO budget (period, metric, value)
+     SELECT period, metric, amount FROM charges, allowed WHERE allowed.ok
+     ON CONFLICT (period, metric) DO UPDATE SET value = value + excluded.value
+     RETURNING metric`,
+  ).bind(monthOf(now), dayOf(now), bytes, limits.puts, limits.bytes,
+    dayOf(now - retentionDays(env) * DAY_MS)).all();
+  return results.length === 2;
 }
 
-/** Statements recording one R2 write of `bytes`, for the ingest D1 batch. */
-export function recordWrite(env: Env, now: number, bytes: number): D1PreparedStatement[] {
-  const add = `INSERT INTO budget (period, metric, value) VALUES (?1, ?2, ?3)
-               ON CONFLICT (period, metric) DO UPDATE SET value = value + excluded.value`;
-  return [
-    env.DB.prepare(add).bind(monthOf(now), "puts", 1),
-    env.DB.prepare(add).bind(dayOf(now), "bytes", bytes),
-  ];
-}
-
-export async function recordRead(env: Env, now = Date.now()): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO budget (period, metric, value) VALUES (?1, 'gets', 1)
-     ON CONFLICT (period, metric) DO UPDATE SET value = value + 1`,
-  )
-    .bind(monthOf(now))
-    .run();
+export async function reserveRead(env: Env, now = Date.now()): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `INSERT INTO budget (period, metric, value) SELECT ?1, 'gets', 1 WHERE ?2 >= 1
+     ON CONFLICT (period, metric) DO UPDATE SET value = value + 1 WHERE value < ?2`,
+  ).bind(monthOf(now), caps(env).gets).run();
+  return result.meta.changes === 1;
 }
 
 /** Drops counters older than any window that reads them. */
@@ -102,8 +113,8 @@ export async function pruneBudget(env: Env, now = Date.now()): Promise<void> {
   const oldestDay = dayOf(now - (retentionDays(env) + 2) * DAY_MS);
   const lastMonth = monthOf(now - 32 * DAY_MS);
   await env.DB.prepare(
-    `DELETE FROM budget WHERE (metric = 'bytes' AND period < ?1) OR (metric IN ('puts', 'gets') AND period < ?2)`,
+    `DELETE FROM budget WHERE (metric = 'bytes' AND period < ?1) OR (metric IN ('puts', 'gets') AND period < ?2) OR (metric = 'ingest' AND period < ?3)`,
   )
-    .bind(oldestDay, lastMonth)
+    .bind(oldestDay, lastMonth, dayOf(now - 2 * DAY_MS))
     .run();
 }

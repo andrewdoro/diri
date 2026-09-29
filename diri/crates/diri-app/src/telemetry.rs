@@ -463,7 +463,7 @@ impl TransportTrace {
         self.attempt_at = Instant::now();
     }
 
-    pub(crate) fn connect_failed(&mut self, reason: &'static str, error: Option<&str>) {
+    pub(crate) fn connect_failed(&mut self, reason: &'static str) {
         self.failures += 1;
         diri_telemetry::count("pane.attach_retries", 1);
         if self.failures == ATTACH_FAILING_AFTER {
@@ -472,7 +472,6 @@ impl TransportTrace {
                 session = self.session.clone(),
                 attempts = self.failures,
                 reason = reason,
-                error = error.map(diri_telemetry::text),
                 since_mount_ms = self.mounted_at.elapsed()
             );
         }
@@ -601,16 +600,15 @@ impl PrivacySettings {
         }
     }
 
-    pub(crate) fn save(&self) {
-        if let Some(dir) = state_dir()
-            && let Err(error) = self.config.save(&dir)
-        {
-            eprintln!("diri: could not save diagnostics settings: {error}");
-            diri_telemetry::error_event!(
-                "settings.privacy_save_failed",
-                error = diri_telemetry::io_error(&error)
-            );
-        }
+    pub(crate) fn save_config(&mut self, config: Config) -> std::io::Result<()> {
+        let state = self
+            .folder
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| std::io::Error::other("diagnostics settings folder unavailable"))?;
+        config.save(state)?;
+        self.config = config;
+        Ok(())
     }
 }
 
@@ -628,7 +626,7 @@ pub(crate) fn take_first_run_notice() -> bool {
     if path.exists() {
         return false;
     }
-    if Config::load(&dir).save(&dir).is_err() {
+    if Config::default().save(&dir).is_err() {
         return false;
     }
     event!("privacy.notice_shown");
@@ -695,6 +693,32 @@ pub(crate) fn install_latency_trace() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privacy_changes_are_committed_only_after_a_successful_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = PrivacySettings {
+            folder: Some(dir.path().join("telemetry")),
+            ..PrivacySettings::default()
+        };
+        Config::default().save(dir.path()).unwrap();
+        let disabled = Config {
+            upload: false,
+            name: Some(String::new()),
+        };
+        let config_path = dir.path().join("telemetry/config.json");
+        std::fs::remove_file(&config_path).unwrap();
+        std::fs::create_dir(&config_path).unwrap();
+        assert!(settings.save_config(disabled.clone()).is_err());
+        assert!(
+            settings.config.upload,
+            "UI must keep its last confirmed setting"
+        );
+        std::fs::remove_dir(&config_path).unwrap();
+        settings.save_config(disabled.clone()).unwrap();
+        assert_eq!(settings.config, disabled);
+        assert_eq!(Config::load(dir.path()), disabled);
+    }
 
     #[test]
     fn sizes_are_bucketed_not_recorded() {

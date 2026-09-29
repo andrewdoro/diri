@@ -116,8 +116,8 @@ describe("retention", () => {
     await env.DB.batch([
       env.DB.prepare("UPDATE batches SET received_at = ?2 WHERE install = ?1").bind(old, ancient),
       env.DB.prepare("UPDATE installs SET last_seen = ?2 WHERE install = ?1").bind(old, ancient),
-      env.DB.prepare("UPDATE incidents SET t = ?2 WHERE install = ?1").bind(old, ancient),
-      env.DB.prepare("UPDATE sessions SET first_t = ?2, last_t = ?2 WHERE install = ?1").bind(old, ancient),
+      env.DB.prepare("UPDATE incidents SET received_at = ?2 WHERE install = ?1").bind(old, ancient),
+      env.DB.prepare("UPDATE sessions SET received_at = ?2 WHERE install = ?1").bind(old, ancient),
     ]);
 
     const report = await sweep(env);

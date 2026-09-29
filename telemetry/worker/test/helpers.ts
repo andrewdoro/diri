@@ -67,6 +67,7 @@ export async function ingest(
       "content-type": "application/x-ndjson",
       "content-encoding": "gzip",
       "x-diri-install": opts.installHeader ?? install,
+      "cf-connecting-ip": `2001:db8:${install.slice(0, 4)}:${install.slice(4, 8)}::1`,
     },
     body,
   });

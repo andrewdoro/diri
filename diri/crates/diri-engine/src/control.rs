@@ -956,7 +956,7 @@ impl ControlServer {
                 .as_ref()
                 .and_then(|value| value.get("build"))
                 .and_then(Value::as_str)
-                .map(diri_telemetry::text),
+                .map(diri_telemetry::id),
             ok = proto == WIRE_VERSION as u64,
         );
         if proto != WIRE_VERSION as u64 {

@@ -18,9 +18,10 @@ sessions take to start, attach and first draw; errors and their codes;
 whether copy, paste, file drops and updates worked (with size classes such as
 "under 1 KB", never contents); which commands ran (by name); and identifiers
 that let a report be followed: session ids, agent names, and agent
-conversation ids. Folders are recorded only as a one-way hash. Error messages
-are kept with your home folder, user name, e-mail addresses and token-like
-strings removed.
+conversation ids. Folders are recorded only as a one-way hash. Errors are
+recorded as codes and classes. Free-form error messages,
+subprocess stderr and panic payloads are excluded; stack symbols and source
+locations remain available for diagnosing crashes.
 
 **What is never recorded:** terminal output or input, prompts, pasted or copied
 text, file contents, environment variables, command lines, URLs you open,
@@ -36,7 +37,9 @@ deleted; only the maintainers can read them.
 **Your controls:** Settings › General › Privacy has the switch (*Share
 diagnostics to help fix bugs*), the name, your Support ID and a button that
 shows the local folder. Turning sharing off stops uploads at the next cycle;
-recording stays local. Setting `DIRI_TELEMETRY=off` in Diri's environment
+recording stays local. Missing, unreadable or malformed settings disable uploads.
+A settings change only appears saved after it has been written successfully.
+Setting `DIRI_TELEMETRY=off` in Diri's environment
 turns recording off entirely. Help › Report a Problem… marks the moment in the
 log, copies your Support ID and opens a GitHub issue with it filled in.
 

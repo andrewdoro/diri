@@ -7,7 +7,7 @@ use crate::value::{Value, id, text};
 
 const MAX_FRAMES: usize = 48;
 
-/// Chains a hook that records a `panic` incident (message, location, thread,
+/// Chains a hook that records a `panic` incident (location,
 /// symbolized frames) and flushes it to disk, then calls the previous hook.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
@@ -21,19 +21,9 @@ fn record_panic(info: &PanicHookInfo<'_>) {
     if !crate::is_enabled() {
         return;
     }
-    let message = info
-        .payload()
-        .downcast_ref::<&str>()
-        .map(|s| (*s).to_owned())
-        .or_else(|| info.payload().downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "<non-string panic payload>".to_owned());
     let location = info
         .location()
         .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
-    let thread = std::thread::current()
-        .name()
-        .unwrap_or("<unnamed>")
-        .to_owned();
     let backtrace = std::backtrace::Backtrace::force_capture().to_string();
     let frames = frames(&backtrace);
     let signature = frames
@@ -46,9 +36,7 @@ fn record_panic(info: &PanicHookInfo<'_>) {
         "panic",
         crate::Severity::Incident,
         vec![
-            ("message", Value::from(text(&message))),
             ("location", Value::from(location.map(text))),
-            ("thread", Value::from(text(&thread))),
             ("signature", Value::from(text(&signature))),
             (
                 "frames",

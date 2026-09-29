@@ -662,8 +662,8 @@ fn spawn_transport(
             };
             match &connected {
                 Ok(Ok(_)) => {}
-                Ok(Err(error)) => trace.connect_failed("error", Some(&error.to_string())),
-                Err(_) => trace.connect_failed("timeout", None),
+                Ok(Err(_)) => trace.connect_failed("error"),
+                Err(_) => trace.connect_failed("timeout"),
             }
             if let Ok(Ok(mut attachment)) = connected {
                 let writer = attachment.handle();

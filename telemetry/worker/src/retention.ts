@@ -39,8 +39,8 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepReport> {
     if (results.length < CHUNK) break;
   }
   const [incidents, sessions] = await env.DB.batch([
-    env.DB.prepare("DELETE FROM incidents WHERE t < ?1").bind(cutoff),
-    env.DB.prepare("DELETE FROM sessions WHERE last_t < ?1").bind(cutoff),
+    env.DB.prepare("DELETE FROM incidents WHERE received_at < ?1").bind(cutoff),
+    env.DB.prepare("DELETE FROM sessions WHERE received_at < ?1").bind(cutoff),
   ]);
   report.incidents = incidents.meta.changes;
   report.sessions = sessions.meta.changes;

@@ -28,11 +28,27 @@ cron 03:17 UTC ──▶ delete D1 rows + their R2 objects older than 30 days
 
 400/413/422 are permanent: the client drops the batch. 429 and 5xx are retried next cycle. A record line that is not a JSON object is counted in `bad_lines` and skipped; it never rejects the batch. Only the header line can do that.
 
-Per request the Worker makes one D1 read (the rate limit), one R2 PUT, and one D1 `batch()` of at most four statements. Incidents and sessions go in as one `INSERT … SELECT FROM json_each(?)` each, however many rows, so a batch never approaches D1's per-invocation query limit. At most 200 incident rows and 200 session spans are indexed per batch; anything past that is still in R2 and is counted in the response.
+Accepted requests reserve global admission and R2 budget in D1, check the per-install limit, then make one R2 PUT and one D1 index `batch()` of at most four statements. Incidents and sessions go in as one `INSERT … SELECT FROM json_each(?)` each, however many rows, so a batch never approaches D1's per-invocation query limit. At most 200 incident rows and 200 session spans are indexed per batch; anything past that is still in R2 and is counted in the response.
 
 Records are scanned with an anchored regex over the recorder's fixed key order (`t, seq, p, pid, k, s, f`). Only `error`/`incident` lines and lines in another key order are `JSON.parse`d.
 
-**Rate limiting uses D1, not the Rate Limiting binding.** The check is `COUNT(*)` over this install's batch rows from the last hour, using the `(install, received_at)` index and capped by `LIMIT`, so it reads at most 120 rows and writes nothing (the batch row it counts is written anyway). The Workers Rate Limiting binding is per-colo, eventually consistent and only supports 10 s or 60 s periods, so it cannot express an hourly budget. The healthy uploader sends about 6 batches per hour, plus one per minute while incidents are happening.
+**Admission has independent limits.** The required `INGEST_RATE_LIMITER`
+binding keys on Cloudflare's `CF-Connecting-IP`, never a client-supplied
+install UUID or `X-Forwarded-For`. It allows 30 attempts per minute per location
+before any D1/body work; IPs are not persisted in D1 or R2. The binding is
+[per-location and eventually consistent](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/),
+so it is backed by an atomic, global D1 reservation: at most 3,600 attempts per
+UTC hour. `GLOBAL_RATE_LIMIT_PER_HOUR` may lower that cap, including zero to
+pause admission. Failed/invalid bodies consume admission too. Missing source
+identity returns 400; a missing limiter binding returns 503. The existing
+per-install 120/hour limit remains an additional fairness check, not proof of
+identity. Upload labels and events are still untrusted client claims.
+
+R2 write/byte and read budgets are reserved atomically before the respective
+operation. A failed R2 operation or later index write keeps the reservation,
+so retries can exhaust the budget early but cannot leave unaccounted usage.
+The global/source limits are independent of these monthly storage budgets.
+
 
 ## Admin API
 
@@ -53,12 +69,23 @@ Incident signatures: a `panic` groups by `panic:<f.signature>` (first non-runtim
 
 ## Retention
 
-Nothing is kept longer than 30 days (`RETENTION_DAYS`).
+The retention window is 30 days (`RETENTION_DAYS`); the daily sweep uses server
+receipt times, so deletion occurs at the next sweep after expiry. R2 lifecycle
+expiration is an independent backstop.
 
 1. **R2 lifecycle rule (primary).** Objects under `v1/` expire 30 days after upload. Lifecycle deletions are free and also catch objects whose D1 row was never written, for example when the Worker died between the PUT and the D1 batch.
 2. **Daily cron (`17 3 * * *`).** Walks `batches` for rows older than the window, deletes their R2 objects in chunks of 1,000 (R2 deletes are free; listing the bucket is not), then deletes old `batches`, `incidents`, `sessions` and silent `installs` rows. Each run handles at most 50,000 batches; anything left is picked up the next day.
 
 ## Deploy
+
+Apply migration `0003_server_retention.sql` before deploying this revision.
+It intentionally expires the existing incident/session index at the next sweep
+because old rows have no reliable server receipt time. Existing R2 batches and
+their index remain available until normal expiry. Old Worker writes during a
+rolling deployment get receipt time zero and also expire conservatively.
+Ensure `INGEST_RATE_LIMITER` is included when deploying; choose a namespace ID
+unique to this limiter within the account. Verify the R2 lifecycle rule remains
+active. CI only validates and bundles; it does not migrate or deploy production.
 
 Run everything from this directory. The owner deploys; CI only runs the tests.
 
@@ -112,29 +139,21 @@ The free-plan limits used below (check the current pricing pages before relying 
 - R2: 10 GB-month of storage, 1M Class A operations (PUTs) and 10M Class B operations (GETs) per month, free egress.
 - D1: 5M rows read and 100,000 rows written per day, 5 GB of storage.
 
-Assumptions for one install with Diri open 8 hours a day:
+Routine uploads run every ten minutes; incidents can upload within a minute.
+Admission and R2 reservations add D1 writes, including rejected attempts at the
+global admission stage. Capacity depends on batch frequency, incident/session
+index rows and their indexes, retention, and admin traffic. Measure D1 rows read
+and written in the deployed workload before setting an install capacity target.
+The global admission cap is an abuse bound, not a guarantee that the D1 free
+quota can sustain that many accepted batches.
 
-- Routine uploads are hourly (`ROUTINE_INTERVAL` in `diri-telemetry`'s `upload.rs`); incidents upload within a minute. With one upload at start and a couple of incidents that is about 10 batches per day.
-- Health and metrics from 3 or 4 processes plus events come to roughly 5,000 records, about 1.5 MB raw or about 150 KB gzipped per day. Uploading less often doesn't change this, only how it's split into batches.
+The client caps each batch at 1 MiB raw (`BATCH_RAW_BYTES`). Keep CPU and D1
+quota failures visible when validating production traffic.
 
-| Resource | Per install per day | Free limit | Installs it covers |
-|---|---|---|---|
-| Worker requests | ~10 | 100,000/day | ~10,000 |
-| R2 PUT (Class A) | ~10 | ~33,000/day | ~3,300 |
-| R2 storage, 30 days | ~4.5 MB | 10 GB | **~2,200** |
-| D1 rows written (≈5/batch incl. indexes) | ~50 | 100,000/day | **~2,000** |
-| D1 rows read (rate-limit count + upserts, ≈10/batch) | ~100 | 5M/day | ~50,000 |
-
-So the free tier carries about **2,000 daily-active installs**, with D1 row writes and R2 storage running out at about the same point. Batch count is the lever for writes, PUTs and requests; retention is the lever for storage (`RETENTION_DAYS` of 14 roughly doubles it). Admin queries and the daily sweep cost a few thousand reads and are negligible.
-
-Past that, Workers Paid is $5/month. It includes 10M requests, 50M D1 rows written and 25B D1 rows read per month, and 30 s of CPU per request. R2 beyond its free tier costs $4.50 per million PUTs and $0.015 per GB-month, which is still cents at a few thousand installs.
-
-**CPU.** The client caps a batch at 1 MiB raw (`BATCH_RAW_BYTES`), about 8k records, which scans in about 5 ms, inside the free plan's 10 ms. An hourly batch is typically around 200 KB. (A 4 MiB batch measured 15–25 ms, which is why the cap is 1 MiB: a batch the free plan kills with error 1102 returns 5xx and would be retried every cycle.)
-
-## Spend guard: this never bills
+## Spend guard
 
 - **Workers and D1:** stay on the Workers **Free** plan. Over its limits, requests fail instead of billing. Never upgrade to Workers Paid for this Worker; that is what turns D1 overage into money.
-- **R2** is the only resource that bills past its free tier once enabled, and Cloudflare has no spending cap for it. So the Worker enforces one itself (`src/budget.ts`): it counts its R2 writes, reads and stored bytes in D1 (`budget` table) and refuses work at **90% of the free tier**: 900k writes/month, 9M reads/month, 9 GB stored. Over a cap, ingest answers `429 budget_exhausted` and the app keeps the data locally and retries later. `BUDGET_MONTHLY_PUTS`, `BUDGET_MONTHLY_GETS` and `BUDGET_STORED_BYTES` can lower the caps, never raise them.
+- **R2** is the only resource that bills past its free tier once enabled, and Cloudflare has no spending cap for it. So the Worker enforces one itself (`src/budget.ts`): it atomically reserves its R2 writes, reads and stored bytes in D1 (`budget` table) and refuses work at **90% of the free tier**: 900k writes/month, 9M reads/month, 9 GB stored. Over a cap, ingest answers `429 budget_exhausted` and the app keeps the data locally and retries later. `BUDGET_MONTHLY_PUTS`, `BUDGET_MONTHLY_GETS` and `BUDGET_STORED_BYTES` can lower the caps, never raise them.
 - **Backstops:** the R2 lifecycle rule deletes objects after 30 days even if the daily sweep fails (the stored-bytes counter assumes it). Add a Cloudflare **billing notification** (Notifications → Add → Usage Based Billing) as a last alarm.
 - `diri-debug budget` (or `GET /v1/admin/budget`) shows current usage against the caps.
 

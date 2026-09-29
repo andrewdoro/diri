@@ -214,6 +214,10 @@ impl Uploader {
         offsets: &mut BTreeMap<String, u64>,
         report: &mut CycleReport,
     ) -> bool {
+        // Old app/Holder processes may still write the former error fields.
+        // Project every queued record before it can leave this machine.
+        let safe_body = upload_records(body);
+        *lines = safe_body.iter().filter(|byte| **byte == b'\n').count();
         let header = Header {
             v: 1,
             kind: "batch",
@@ -226,7 +230,7 @@ impl Uploader {
         };
         let mut payload = serde_json::to_vec(&header).unwrap_or_default();
         payload.push(b'\n');
-        payload.extend_from_slice(body);
+        payload.extend_from_slice(&safe_body);
         let status = gzip(&payload)
             .and_then(|gz| (self.transport)(&self.endpoint, &gz, &identity.install_id));
         let accepted = match status {
@@ -259,6 +263,49 @@ impl Uploader {
         *lines = 0;
         accepted
     }
+}
+
+/// Removes retired content-bearing fields, including records written by old
+/// processes before an upgrade. Preserve the scanner's canonical key order.
+fn upload_records(body: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(body.len());
+    for line in body
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let Ok(serde_json::Value::Object(mut record)) = serde_json::from_slice(line) else {
+            continue;
+        };
+        let hello = record.get("k").and_then(serde_json::Value::as_str) == Some("client.hello");
+        let panic = record.get("k").and_then(serde_json::Value::as_str) == Some("panic");
+        if let Some(serde_json::Value::Object(fields)) = record.get_mut("f") {
+            fields.remove("message");
+            fields.remove("error");
+            if hello {
+                fields.remove("build");
+            }
+            if panic {
+                fields.remove("thread");
+            }
+        } else if record.contains_key("f") {
+            continue;
+        }
+        output.push(b'{');
+        let mut first = true;
+        for key in ["t", "seq", "p", "pid", "k", "s", "f"] {
+            if let Some(value) = record.get(key) {
+                if !first {
+                    output.push(b',');
+                }
+                first = false;
+                serde_json::to_writer(&mut output, key).expect("Vec writes cannot fail");
+                output.push(b':');
+                serde_json::to_writer(&mut output, value).expect("JSON value serializes");
+            }
+        }
+        output.extend_from_slice(b"}\n");
+    }
+    output
 }
 
 fn list_spool(dir: &Path) -> Vec<(String, PathBuf, SpoolName)> {
@@ -427,6 +474,12 @@ mod tests {
     }
 
     fn uploader(state: &Path, transport: Transport) -> Uploader {
+        if !crate::identity::telemetry_dir(state)
+            .join("config.json")
+            .exists()
+        {
+            Config::default().save(state).unwrap();
+        }
         Uploader::new(
             state.to_path_buf(),
             "https://t.example".into(),
@@ -436,6 +489,33 @@ mod tests {
             },
         )
         .with_transport(transport)
+    }
+
+    #[test]
+    fn queued_legacy_error_payloads_are_removed_before_transport() {
+        let state = tempfile::tempdir().unwrap();
+        let dir = spool::spool_dir(state.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = r#"{"t":1,"seq":1,"p":"engine","pid":1,"k":"rpc.error","s":"error","f":{"code":"internal","message":"PRIVATE_PROJECT password=hunter2","error":"SECRET_JSON_KEY"}}"#;
+        std::fs::write(dir.join("engine-1-0-0000.jsonl"), format!("{record}\n")).unwrap();
+        let (transport, bodies) = capture(202);
+        assert_eq!(uploader(state.path(), transport).run_cycle().lines, 1);
+        let bodies = bodies.lock().unwrap();
+        for forbidden in ["PRIVATE_PROJECT", "hunter2", "SECRET_JSON_KEY"] {
+            assert!(!bodies[0].contains(forbidden));
+        }
+        assert!(bodies[0].contains(r#""code":"internal""#));
+        assert!(
+            bodies[0]
+                .lines()
+                .nth(1)
+                .unwrap()
+                .starts_with(r#"{"t":1,"seq":1,"p":"engine""#)
+        );
+        let legacy_panic = br#"{"k":"panic","f":{"thread":"PRIVATE_THREAD","message":"PRIVATE_PANIC","signature":"known_symbol"}}"#;
+        let projected = String::from_utf8(upload_records(legacy_panic)).unwrap();
+        assert!(!projected.contains("PRIVATE_"));
+        assert!(projected.contains("known_symbol"));
     }
 
     #[test]
