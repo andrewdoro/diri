@@ -97,6 +97,364 @@ cargo test --release -p diri-app --bin diri workspace_terminal_echo_redraw_cpu -
 `only_a_keystroke_echo_asks_for_an_immediate_frame`,
 `a_keystroke_buys_one_echo_frame` and
 `immediate_frames_wait_until_the_last_present_is_on_screen` guard the policy.
+## Horizontal strip tabs re-render only when they change (2026-09-28)
+
+**Where the time went.** With horizontal tabs, the sidebar is hidden and
+`RootView` paints the tab strip inline. RootView is the window root and is
+never cached, so every window frame rebuilt, laid out, prepainted and painted
+every tab of the selected project. That includes each terminal output frame,
+each 125 ms working-mark tick and each store publication. #517 moved sidebar
+rows onto cached views and left the strip as it was.
+
+**What changed.** Each strip tab is now a cached view (`StripTabView`,
+`sidebar/view/strip_tabs.rs`) that renders from a `StripTabProps` snapshot. It
+uses the same pattern and the same vendored-GPUI nested cache as the sidebar
+rows. A tab re-renders only when:
+
+- its props change: selection, activity state or mark frame, title, kind,
+  theme, held-⌘ hint, ordering mode, or whether the shared selection pill
+  (#533) stands in for its fill;
+- it is lifted or sliding in a drag reorder, or its title is settling. These
+  tabs are forced every frame while they move;
+- its own hover changes;
+- the sidebar is notified for anything other than a store publication or its
+  own animation tick. This is the `tabs_stale` safety net.
+
+The selection pill is its own layer, drawn inline beside the tabs. Its glide
+keeps moving on reused tabs, and its frames notify the sidebar without
+marking tabs stale.
+
+GPUI's cache key still re-renders tabs whose bounds or clip change, for
+example while the strip scrolls or slides in. A drag refreshes the window on
+every pointer move. In horizontal mode the activity tick no longer marks tabs
+stale: the new mark frame reaches the working tabs through their props.
+
+**How it was measured.** `strip_fleet_render_cost` (root.rs, ignored,
+macOS) mounts the real RootView under headless Metal. It uses the fleet from
+`sidebar_fleet_render_cost`: 51 sessions over five projects, four of them
+working. Tabs are horizontal, the sidebar is hidden, and `bench-0` is
+selected, so its project shows 11 tabs, one of them working. Brand marks use
+the same cached blank raster stand-in.
+
+A step is one notify followed by the frames it causes. At this bench that is
+two root renders. The terminal output frame notifies the primary terminal
+pane. "Strip render" is the strip's own render call plus the cached tab
+renders.
+
+Numbers are release builds, 1,000 steps, with base (`main` at `a1219ae`,
+after #533, plus the bench commit) and branch binaries alternated three times
+each. Load average during the runs was 40–70, which shows in the first two
+base runs' p90 and CPU.
+
+| 51 sessions, 11 tabs | Tabs built per step | Step median | CPU per step |
+| --- | ---: | ---: | ---: |
+| Terminal output frame | 22 → 0 | 0.596–0.600 → 0.310–0.312 ms | 0.653–0.752 → 0.322–0.395 ms |
+| Activity tick | 22 → 1 | 0.595–0.601 → 0.330–0.331 ms | 0.615–0.767 → 0.350–0.446 ms |
+| Store publication (nothing changed) | 22 → 0 | 0.593–0.597 → 0.309–0.311 ms | 0.617–0.752 → 0.320–0.381 ms |
+| Root-only frame | 22 → 0 | 0.588–0.593 → 0.308–0.309 ms | 0.599–0.731 → 0.320–0.361 ms |
+
+Whole-process CPU time (`/usr/bin/time -p`, user) for the full bench, which
+is setup plus 4 × 1,020 steps, fell from 2.64–3.18 s to 1.45–1.76 s.
+
+Most of the saving is in layout, prepaint and paint of the tab elements, not
+in the render call: strip render time per step fell from 0.06 ms to 0.02 ms, a small part of the step.
+
+Scaling was measured before #533 merged, with one alternating run per size,
+terminal output frame step medians:
+
+| Sessions (tabs shown) | Before | After |
+| --- | ---: | ---: |
+| 10 (2) | 0.276 ms | 0.222 ms |
+| 51 (11) | 0.578 ms | 0.296 ms |
+| 100 (20) | 0.852 ms | 0.361 ms |
+| 250 (50) | 1.870 ms | 0.588 ms |
+
+What remains per tab is computing and comparing props, a view and its
+wrapper node, and replaying cached ranges.
+
+**Visual checks.** Pixels match `main` exactly in these cases:
+
+- `render_tab_orientation_screenshots` horizontal-dark, horizontal-light and
+  horizontal-narrow, for the typical, stress and projects scenarios;
+- the strip bench's final frame, after about 1,300 steps.
+
+The fixture's `vertical-light` frame differs from run to run on `main` itself,
+in the selected row's band (up to 6/255). It is excluded.
+
+`reused_strip_tabs_paint_like_a_full_render` checks the reuse path. It runs 11
+ticks, each interleaved with no-op publications or root frames and a terminal
+frame. Midway it selects another tab and draws the pill's whole glide over
+reused tabs. It then compares against a `window.refresh()` rebuild and
+requires zero differing pixels. It passed 12 of 12 runs. With `force_render_if(changed)`
+disabled, 216 pixels differ.
+
+`strip_tabs_rerender_only_when_they_change`,
+`sliding_strip_tabs_render_every_frame_until_they_rest`,
+`the_pill_glides_over_reused_strip_tabs` and
+`held_hints_show_and_leave_on_cached_strip_tabs` pin the re-render rules.
+
+**Not claimed:**
+
+- any installed-app CPU change;
+- GPU or present cost;
+- the strip chrome: the project control, peek and new-tab buttons, and the
+  hosted title-bar actions are still rebuilt with every root frame;
+- the rest of RootView's per-frame work.
+
+## Terminal feed: scrolling without decompression, moved-row fingerprints (2026-09-28)
+
+After #529, a stack sample of four Engine sessions draining a colored build log
+through `fleetbench` put 44–56% of pump time in `HeadlessScreen::feed`, most of
+it scrolling: `rotate_reset` decompressed the oldest history block to recycle
+one row, built a new `Vec<Cell>` for it, and encoded each block as rows left
+the screen. At small reads every scroll re-fingerprinted the whole screen, and
+every settle walked every history block to measure stored bytes.
+
+Changes. No wire, checkpoint or history-budget accounting change:
+
+- Encoding a block records one bit per row: whether `Row::reset` of that row
+  yields only template cells. Nearly all output lines qualify, and recycling
+  them no longer decompresses or indexes the block. The bits fit in `Block`
+  without changing its counted size.
+- Recycled rows reuse the allocations of the rows the last seal encoded. Spare
+  rows are dropped at each settle's history bound, so they are never counted
+  and an idle terminal holds none.
+- The payload bytes in `history_storage_bytes` are kept current as blocks are
+  pushed and popped. Read caches are released only after a history read. The
+  per-settle history bound no longer visits every block.
+- The vendored `Term` tracks where each screen line's cells came from. With
+  that, full damage from scrolling moves line sources instead of discarding
+  them. `HeadlessScreen::settle` keeps the fingerprints of rows that only
+  moved and hashes rows that anything wrote.
+  - Because `input` relies on cursor damage, the cursor line is marked before
+    a scroll moves it.
+  - A wide character's leading-spacer edit on the line above the cursor is
+    now marked; it was never damaged.
+  - Rows left stale by such undamaged edits are re-hashed at the next full
+    damage, exactly as before.
+
+Details are in `vendor/alacritty_terminal/DIRI-PATCH.md`. VTE is unchanged.
+
+**Lazy compaction (encoding history in larger batches, or when idle) was
+measured and not done.** In a sustained stream every row that enters history
+is encoded exactly once before the 10,000-row limit evicts it. Batching
+therefore cannot remove encode work; it only holds more raw rows (about
+3.9 KB each at 160 columns) against the memory gates, and idle-time compaction
+would need a timer. Doubling blocks to 64 rows measured +2–5% cycles at 4 KiB
+reads, because more spare rows were dropped per settle, and −1% at 64 KiB.
+
+### Measurements
+
+Apple M4 Max, macOS 27.0, release builds, load average 45–70 from unrelated
+builds. Wall time was 2–4× CPU time, so this reports hardware counters from
+`/usr/bin/time -l` (cycles and instructions retired) and process CPU time.
+`feedbench` gained an optional fourth argument that runs one configuration,
+so the process counters describe it; the base ran the same harness. Values
+are medians of three alternating base/branch runs at 160×50. The base is
+`f44bcf0`.
+
+| Payload, read size | Gcycles, base → branch | CPU MB/s, base → branch |
+| --- | ---: | ---: |
+| Colored build log (64 MiB), 4 KiB | 2.94 → 2.53 (−14%) | 86 → 101 |
+| same, 16 KiB | 2.34 → 1.92 (−18%) | 109 → 133 |
+| same, 64 KiB | 2.17 → 1.72 (−21%) | 117 → 147 |
+| same, one call | 2.14 → 1.65 (−23%) | 118 → 155 |
+| same, Engine config (notifications), 4 KiB | 3.03 → 2.56 (−16%) | 83 → 99 |
+| same, Engine config, 64 KiB | 2.26 → 1.81 (−20%) | 112 → 139 |
+| `git log -p --color` (32 MiB), 4 KiB | 2.93 → 2.31 (−21%) | 44 → 55 |
+| same, 64 KiB | 2.53 → 1.85 (−27%) | 50 → 68 |
+
+Instructions retired, colored log: 15.46 → 12.96 G at 4 KiB and
+10.63 → 8.58 G at 64 KiB.
+
+A 64 KiB sample of the branch attributes feed time as follows:
+
+- `encode_cells`: about 23%.
+- LZ compression: about 16%.
+- Resetting recycled rows: about 15%. The base also paid this, inside
+  `reset_cell_row`.
+- The parser's writes: about 15%.
+
+Decompression and row allocation no longer appear. At 4 KiB, fingerprints of
+newly written rows are about a quarter of feed time. With about 40 new lines
+per 4 KiB read on a 50-row screen, 10 rows are reused.
+
+**`fleetbench`** (4 sessions × 64 MiB, 160×50, sampled for the whole run,
+three alternating runs):
+
+| Metric | Base | Branch |
+| --- | ---: | ---: |
+| Benchmark process user CPU | 3.87–4.08 s | 3.34–3.44 s |
+| Instructions retired | 57.3–58.6 G | 50.9–51.6 G |
+| Cycles | 18.0–18.7 G | 16.2–16.7 G |
+| `feed` share of pump-thread busy samples | 76–78% | 68–72% |
+| `rotate_reset` share of `feed` | 68–69% | 55–58% |
+
+- Aggregate throughput did not change measurably (97–102 vs 84–108 MB/s). That
+  fixture is bound by the PTY and Holder path.
+- System time rose from 0.95–1.05 s to 1.06–1.11 s, and voluntary context
+  switches from 48–54k to 55–59k. This is consistent with faster pumps waiting
+  on the PTY more often; it was not investigated further.
+
+**`terminal_throughput`** (whole-binary counters, three runs): instructions
+32.3 → 25.0 G (−23%), cycles 4.27–4.38 → 3.11–3.25 G (−26%). Its wall-clock
+scrolling budget (150 µs) failed on both revisions under this load: base
+196–269 µs, branch 137–186 µs, against 36 µs recorded unloaded.
+
+**`terminal_parity`**, 10,000 lines per 80×24 core: feed p50 34.1/46.9 ms →
+7.4/8.6 ms (two loaded runs each; one line per read, so skipping the
+per-settle block walk and moved-row hashing both apply).
+
+- Retained heap per core: 259,699 → 260,427 bytes.
+- Peak heap per core: 324,211 → 324,939 bytes.
+
+**`terminal_fleet`** gates pass. For 20 cores, fresh heap is 2,120,620 →
+2,125,620 bytes and full history is 6,388,780 → 6,397,780 bytes; those are the
+new per-row source and fingerprint vectors. Other results:
+
+- Widened: 16.21 → 16.22 MiB.
+- After churn: 11.46 → 11.47 MiB.
+- Warmed cursor updates allocate nothing, and nothing leaks.
+
+`scripts/terminal-perf-gate.sh`:
+
+- `terminal_fleet`, the `vte` tests and the Holder latency, attach and
+  output-compat tests pass.
+- The `terminal_throughput` scroll budget and the `diri-term` renderer fling
+  budget (8 ms; frames of 239–278 ms under load) fail on base and branch
+  alike on this loaded machine.
+
+### Equivalence
+
+- `transcript_digest` prints the same final digest on base and branch
+  (`96018b6b3bdda84f`), with identical checkpoints. Retained history rows are
+  unchanged because accounting is unchanged.
+- `fingerprints_after_scrolling_match_the_cells` runs 20,000 random multi-piece
+  reads with and without moved-fingerprint reuse, then compares fingerprints,
+  fill counts and `content_seq` after every read. Four injected bugs fail it:
+  no cursor-line mark on scroll, no cursor marks on full damage, no
+  leading-spacer mark, and no stale-row carry.
+- `scrolling_moves_content_sources` checks line sources through LF, SU/SD,
+  IL/DL and regions.
+- Vendored storage tests check that recipe-bit rows and spare rows reset to
+  template cells for every background.
+- The randomized storage test now includes recycling and byte bounds. Debug
+  builds assert the kept payload equals a recomputation, and a broken pop fails
+  three tests.
+- `streaming_full_history_recycles_without_decoding` fails if recycling decodes
+  or stops reusing sealed rows.
+
+Not claimed: GUI rendering, latency, SSH, or any installed-app CPU change. The
+Remote Helper Build ID changes because it hashes vendored parser sources.
+
+```sh
+cargo build --release -p diri-engine --example feedbench
+/usr/bin/time -l target/release/examples/feedbench <payload> 160 50 4k   # or 16k, 64k, whole, engine4k, engine64k
+cargo bench -p diri-terminal-state --bench terminal_parity
+cargo test --release -p diri-terminal-state --test transcript_digest -- --ignored --nocapture
+```
+## Busy local fleets: Holder output path stops serializing (2026-09-28)
+
+**Where the time went.** `fleetbench` (N sessions each `cat`-ing a 64 MiB
+colored log through real PTYs, a private Holder manager and Engine sessions)
+plateaued near 115 MB/s aggregate from 4 sessions up. Stack samples of both
+processes during a 4-session run (base = main with #542):
+
+| Thread | Base | Branch |
+| --- | --- | --- |
+| Holder log writer, in `write(2)` | 75% | ~5% busy in total |
+| Holder PTY pump, blocked on subscriber queue / log queue | 24% / 19% | 7% / 0% |
+| Engine pump, waiting on a Holder `stat` reply | 40% | 1% |
+| Engine pump, tailing the log after a dropped subscription | 8% | 1% |
+| Engine pump, parsing (`feed_with_history`) | 9% | 85% |
+
+Five serialization points were behind that:
+
+- A macOS PTY read is exactly 1 KiB (measured, at any baud rate), so the
+  log queue carried one `write(2)` per KiB and its 256-entry bound was only
+  256 KiB. A stat took the log lock, which the writer holds across each disk
+  write, and did so while holding the PTY lock. The Engine's fact sample
+  (every 100 ms since #542) queued behind the disk, and so did keystrokes.
+- The subscriber queue was bounded at 16 frames, meaning 16 KiB rather than
+  the 1 MiB its comment intended, so the pump waited on the Engine per few KiB.
+  An Engine stuck in `stat` then overran the 50 ms patience and was dropped
+  to log tailing.
+- The output stream ran over macOS's default 8 KiB AF_UNIX buffers, so
+  every 8 KiB cost a sender/receiver ping-pong. In a microbenchmark, 256 KiB
+  buffers moved 16.8 GB/s against 1.06 GB/s, for an eighth of the CPU.
+
+**What changed.**
+
+- Stat reads an atomic log tail and no longer takes the log lock.
+- The pump hands the log writer a byte buffer, which the writer swaps out
+  whole. The writer lingers at most 4 ms for a 64 KiB batch, and only while
+  bytes are pending; an idle writer parks with no deadline. The pending
+  bound is 4 MiB and the pump waits beyond it, as before. The log is
+  still fsynced every 2 s. No durability promise changes.
+- Subscriber queues are bounded in bytes (1 MiB). Contiguous waiting bytes
+  join one frame of at most 256 KiB, below the 1 MiB wire maximum every
+  Engine accepts. The wire format is unchanged.
+- Both ends of the output stream get 256 KiB socket buffers. The Engine reads
+  the subscription response through the frame buffer. Before, a frame sent
+  right behind the response was discarded and desynchronized the stream. The
+  Engine also sets the socket timeout only when a read will reach the socket.
+- A read-only `OutputLog` asked for a window that a rewrite had moved below
+  the file's base underflowed into a capacity-overflow panic of the session
+  pump. It now resumes at the base. The faster Holder made this reachable
+  in `fleetbench` with a 256 MiB payload.
+- The exit-marker scan anchors on the OSC `]` instead of ESC, which colored
+  output repeats every few bytes.
+
+**Numbers.** Alternating release builds, three runs each, 64 MiB per session,
+load average 86–165 from unrelated builds. Wall throughput is not a reliable
+measure here. CPU time is: user+sys of the fleetbench process (Engine) and of
+the private Holder manager (`ps` utime+stime), as medians.
+
+| Sessions | Holder CPU base → branch | Engine CPU base → branch | Aggregate MB/s base → branch |
+| --- | --- | --- | --- |
+| 1 | 0.81 → 0.51 s | 1.15 → 1.03 s | 16.9 → 20.4 |
+| 4 | 4.05 → 2.51 s | 3.73 → 3.65 s | 80.4 → 75.4 |
+| 8 | 11.75 → 8.65 s | 9.41 → 8.86 s | 119.0 → 111.6 |
+| 16 | 21.58 → 17.76 s | 18.45 → 17.92 s | 99.5 → 110.2 |
+
+At a lower load (26–50), 4 × 32 MiB runs went from Engine 3.02 → 2.28 s and
+Holder 2.70 → 1.56 s.
+
+`holderbench 20` (20 sessions × 5 MiB, no subscriber): idle CPU was 0% on
+both builds. Manager footprint went from 12.6–23.4 MiB to 10.1–12.0 MiB,
+because an idle session no longer holds a 1 MiB write batch.
+
+**What is not claimed.** No aggregate-throughput gain. Raw macOS PTYs with a
+trivial Python reader and no diri code reach only 94 / 133 / 117 MB/s at
+4 / 8 / 16 sessions on this machine, and reader sys time per KiB grows with
+N. That plateau is the kernel's PTY layer, and the branch now sits at it.
+Of the remaining Holder CPU, 90% is sys time in `poll`/`read` on the PTY.
+The Engine is now bound by terminal parsing, which is the terminal-feed work.
+Under heavy load its 100 ms `stat` sample still waits on Holder scheduling
+latency (about 15% of pump wall time at load 40+), but costs no CPU.
+
+**The one stalled holderbench run, root-caused.** A loop of holderbench's
+drain phase stalled 11 of 350 rounds on the branch and 11 of 550 on base. The
+pattern was the same on both: every running session had drained all 5 MiB,
+and each stalled one had never started. Its log held only the 16-byte
+header, with no socket and no child. The manager's stderr (normally
+`/dev/null`) held `PTY spawn: Unknown error: -6`. That is XNU's
+kernel-private `EREDRIVEOPEN` escaping `openpty(3)` under concurrent PTY
+creation and teardown. Sixteen processes doing `openpty`/`close` reproduce
+it with no diri code, a few times per 32,000 opens. The manager had already
+acknowledged the launch, so the session vanished silently. `Pty::spawn` now
+retries that code (and `EINTR`) up to 8 times. Retrying never lets the
+error through: 0 failures in 64,000 churned opens, against 22–32 without
+the retry.
+
+Separately, LogFeed and the byte-bounded subscriber queue each ran 80,000
+randomized rounds, with tiny thresholds, random delays on both sides and
+random hangups. None hung, and none lost or reordered a byte.
+
+Reproduce: `DIRI_HOLDER_BIN=target/release/diri-holder
+target/release/examples/fleetbench /private/tmp/dperf-payload.txt <n> 160 50`.
+The Holder manager is the `diri-holder --manager` whose parent is fleetbench.
+It lingers 30 s idle, so its CPU time can be read after the run.
 
 ## GPUI scenes give back a large frame's storage (2026-09-28)
 

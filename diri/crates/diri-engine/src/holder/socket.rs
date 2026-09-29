@@ -16,6 +16,31 @@ pub fn connect(path: &Path) -> HolderResult<UnixStream> {
     UnixStream::connect(path).map_err(|error| HolderError::io("connect", error))
 }
 
+/// Kernel buffering for a socket carrying a session's output stream, each way.
+///
+/// macOS gives an AF_UNIX stream 8 KiB, so a stream of output moved 8 KiB per
+/// wakeup of each end: the sender blocked, the receiver drained, and both went
+/// round again. A quarter megabyte lets a burst cross in one pass, and costs
+/// nothing while idle, since the kernel holds only bytes in flight.
+pub const OUTPUT_SOCKET_BUFFER: usize = 256 << 10;
+
+/// Raises `SO_SNDBUF` or `SO_RCVBUF` on `stream`. Best effort: a kernel that
+/// refuses keeps its default, which is slower but correct.
+pub fn set_buffer(stream: &UnixStream, option: libc::c_int, bytes: usize) {
+    use std::os::fd::AsRawFd;
+    let size = libc::c_int::try_from(bytes).unwrap_or(libc::c_int::MAX);
+    // SAFETY: a live socket fd and a correctly sized option value.
+    let _ = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            option,
+            (&size as *const libc::c_int).cast(),
+            std::mem::size_of_val(&size) as libc::socklen_t,
+        )
+    };
+}
+
 /// Binds an owner-only listening socket, replacing any stale file at `path`.
 pub fn listen(path: &Path) -> HolderResult<UnixListener> {
     let _ = std::fs::remove_file(path);

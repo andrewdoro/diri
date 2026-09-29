@@ -6,6 +6,7 @@ mod hue_tests;
 mod lineage;
 mod project_picker;
 mod rows;
+mod strip_tabs;
 mod tabs;
 mod titles;
 mod workspaces;
@@ -638,6 +639,11 @@ pub struct Sidebar {
     row_held_hint: f32,
     /// Sessions whose rows this render mounted.
     mounted_row_ids: HashSet<SessionId>,
+    /// Cached views of the horizontal strip's session tabs, by session (see
+    /// `strip_tabs.rs`).
+    strip_tab_views: HashMap<SessionId, Entity<strip_tabs::StripTabView>>,
+    /// Every strip tab renders on the next strip render.
+    tabs_stale: bool,
     _self_observer: Option<gpui::Subscription>,
     /// Project hues for the list being rendered.
     hues: crate::project_hue::ProjectHues,
@@ -826,6 +832,8 @@ impl Sidebar {
             notify_keeps_rows: false,
             row_held_hint: 0.0,
             mounted_row_ids: HashSet::new(),
+            strip_tab_views: HashMap::new(),
+            tabs_stale: true,
             _self_observer: None,
             hues: Default::default(),
             shortcut_ranks: HashMap::new(),
@@ -7821,6 +7829,36 @@ pub(crate) mod render_probe {
         static ROWS: Cell<usize> = const { Cell::new(0) };
         static RENDERS: Cell<usize> = const { Cell::new(0) };
         static RENDER_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+        static TABS: Cell<usize> = const { Cell::new(0) };
+        static STRIP_RENDERS: Cell<usize> = const { Cell::new(0) };
+        static STRIP_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
+    /// One horizontal-strip session tab built.
+    pub(crate) fn tab_built() {
+        TABS.with(|tabs| tabs.set(tabs.get() + 1));
+    }
+
+    pub(crate) fn strip_finished(elapsed: Duration) {
+        STRIP_RENDERS.with(|renders| renders.set(renders.get() + 1));
+        strip_time(elapsed);
+    }
+
+    /// Strip work done outside the strip's own render call: its cached tabs
+    /// render later in the frame.
+    pub(crate) fn strip_time(elapsed: Duration) {
+        STRIP_TIME.with(|time| time.set(time.get() + elapsed));
+    }
+
+    /// (strip tabs built, strip renders, time inside the strip's render,
+    /// cached tab renders included)
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn take_strip() -> (usize, usize, Duration) {
+        (
+            TABS.with(|tabs| tabs.replace(0)),
+            STRIP_RENDERS.with(|renders| renders.replace(0)),
+            STRIP_TIME.with(|time| time.replace(Duration::ZERO)),
+        )
     }
 
     pub(crate) fn row_built() {
