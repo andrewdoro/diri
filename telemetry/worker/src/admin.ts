@@ -4,6 +4,7 @@
 // JSON except /v1/admin/batch, which streams the stored gzip object untouched
 // (the CLI gunzips it). Times are epoch milliseconds throughout.
 
+import { recordRead, refuseRead, usage } from "./budget";
 import { DAY_MS, type Env, error, json } from "./env";
 
 const encoder = new TextEncoder();
@@ -210,6 +211,9 @@ async function batchBody(url: URL, env: Env): Promise<Response> {
   if (!/^v1\/[0-9a-f-]{36}\/\d{4}-\d{2}-\d{2}\/\d+-[0-9a-f]+\.ndjson\.gz$/.test(key)) {
     return error(400, "bad_key");
   }
+  const refused = refuseRead(await usage(env));
+  if (refused) return error(429, "budget_exhausted", refused);
+  await recordRead(env);
   const object = await env.BATCHES.get(key);
   if (!object) return error(404, "not_found");
   // Deliberately no Content-Encoding: the client receives the gzip bytes as
@@ -270,6 +274,8 @@ export async function handleAdmin(request: Request, env: Env, url: URL): Promise
       return sessions(url, env);
     case "/v1/admin/find":
       return find(url, env);
+    case "/v1/admin/budget":
+      return json(await usage(env));
   }
   const detail = /^\/v1\/admin\/installs\/([0-9a-fA-F-]{36})$/.exec(path);
   if (detail) return installDetail(detail[1].toLowerCase(), env);

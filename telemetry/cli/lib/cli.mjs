@@ -18,6 +18,7 @@ usage:
   diri-debug sessions <who>
   diri-debug find <session id | conversation uuid>
   diri-debug raw <batch key>
+  diri-debug budget                  R2 usage against the spend caps (free tier)
   diri-debug local [timeline|incidents|top|health|sessions|find] [--dir spool] [same flags]
 
 flags:
@@ -292,7 +293,21 @@ async function rawCmd(ctx, source, args) {
   ctx.io.stdout(text.endsWith("\n") ? text : `${text}\n`);
 }
 
+/** R2 usage this month against the Worker's spend caps. */
+async function budgetCmd(ctx, source) {
+  if (!(source instanceof RemoteSource)) throw new Error("budget needs the Worker (not --local)");
+  const u = await source.get("/v1/admin/budget");
+  if (ctx.flags.json) return ctx.json(u);
+  const pct = (v, c) => (c > 0 ? `${((100 * v) / c).toFixed(1)}%` : "-");
+  const gb = (b) => `${(b / 1e9).toFixed(2)} GB`;
+  ctx.out(`R2 budget ${u.month} (caps are 90% of the free tier; over a cap, ingest returns 429)`);
+  ctx.out(`  writes   ${u.puts} / ${u.caps.puts}  ${pct(u.puts, u.caps.puts)}`);
+  ctx.out(`  reads    ${u.gets} / ${u.caps.gets}  ${pct(u.gets, u.caps.gets)}`);
+  ctx.out(`  stored   ${gb(u.bytes)} / ${gb(u.caps.bytes)}  ${pct(u.bytes, u.caps.bytes)}`);
+}
+
 const COMMANDS = {
+  budget: budgetCmd,
   who: whoCmd,
   incidents: incidentsCmd,
   top: topCmd,

@@ -12,6 +12,7 @@
 // error/incident lines are JSON.parse'd, which keeps a 4 MiB batch inside a
 // Worker's CPU budget.
 
+import { recordWrite, refuseWrite, usage } from "./budget";
 import { type Env, error, json, rateLimitPerHour } from "./env";
 
 export const MAX_COMPRESSED_BYTES = 5 * 1024 * 1024;
@@ -432,6 +433,10 @@ export async function handleIngest(request: Request, env: Env, now = Date.now())
     return error(422, "install_mismatch", "header install differs from X-Diri-Install");
   }
 
+  // Spend guard, after validation so only real batches count against it.
+  const refused = refuseWrite(await usage(env, now), gz.byteLength);
+  if (refused) return error(429, "budget_exhausted", refused);
+
   const key = objectKey(header.install, header.sent_at);
   await env.BATCHES.put(key, gz, {
     httpMetadata: { contentType: "application/x-ndjson", contentEncoding: "gzip" },
@@ -448,6 +453,7 @@ export async function handleIngest(request: Request, env: Env, now = Date.now())
   const incidents = scan.incidents.map((i) => ({ ...i, install: header.install, app_version: header.app_version }));
   const sessions = [...scan.sessions.values()];
   const statements: D1PreparedStatement[] = [
+    ...recordWrite(env, now, gz.byteLength),
     env.DB.prepare(
       `INSERT INTO installs (install, support_id, name, app_version, build, channel, os, os_version, arch, first_seen, last_seen)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)

@@ -131,6 +131,13 @@ Past that, Workers Paid is $5/month. It includes 10M requests, 50M D1 rows writt
 
 **CPU.** The client caps a batch at 1 MiB raw (`BATCH_RAW_BYTES`), about 8k records, which scans in about 5 ms, inside the free plan's 10 ms. An hourly batch is typically around 200 KB. (A 4 MiB batch measured 15–25 ms, which is why the cap is 1 MiB: a batch the free plan kills with error 1102 returns 5xx and would be retried every cycle.)
 
+## Spend guard: this never bills
+
+- **Workers and D1:** stay on the Workers **Free** plan. Over its limits, requests fail instead of billing. Never upgrade to Workers Paid for this Worker; that is what turns D1 overage into money.
+- **R2** is the only resource that bills past its free tier once enabled, and Cloudflare has no spending cap for it. So the Worker enforces one itself (`src/budget.ts`): it counts its R2 writes, reads and stored bytes in D1 (`budget` table) and refuses work at **90% of the free tier**: 900k writes/month, 9M reads/month, 9 GB stored. Over a cap, ingest answers `429 budget_exhausted` and the app keeps the data locally and retries later. `BUDGET_MONTHLY_PUTS`, `BUDGET_MONTHLY_GETS` and `BUDGET_STORED_BYTES` can lower the caps, never raise them.
+- **Backstops:** the R2 lifecycle rule deletes objects after 30 days even if the daily sweep fails (the stored-bytes counter assumes it). Add a Cloudflare **billing notification** (Notifications → Add → Usage Based Billing) as a last alarm.
+- `diri-debug budget` (or `GET /v1/admin/budget`) shows current usage against the caps.
+
 ## Develop
 
 ```sh

@@ -9,6 +9,9 @@ declare global {
       ADMIN_TOKEN?: string;
       RETENTION_DAYS?: string;
       RATE_LIMIT_PER_HOUR?: string;
+      BUDGET_MONTHLY_PUTS?: string;
+      BUDGET_MONTHLY_GETS?: string;
+      BUDGET_STORED_BYTES?: string;
       TEST_MIGRATIONS: D1Migration[];
     }
   }
