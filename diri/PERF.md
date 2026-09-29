@@ -1,5 +1,94 @@
 # diri performance record
 
+## A paste waits for a busy program instead of being lost (2026-09-29)
+
+**What was wrong.** A paste into a program that was not reading yet (an agent
+mid-turn, `sleep 5; cat`) filled the PTY's input buffer. The Holder gave up
+once the PTY had taken nothing for one second, the Engine dropped the attach,
+and the unread tail of the paste was lost. For that second the Engine held the
+Registry lock, so every other session's typing and screen updates waited too.
+A large paste into a program that *was* reading held the same lock for the
+whole delivery: 1.4–1.7 s for 16 MiB. The remote Helper had the same loss in
+another form: more than 1 MiB of unread input closed the attach with a
+protocol error.
+
+**What changed.**
+- Local Holder input stream version 2. An input frame is acknowledged once
+  the Holder has queued it, and the Holder delivers the queue in order for as
+  long as the program lives. The queue is bounded at 32 MiB (two of the
+  largest attach frames). A frame that does not fit is refused whole with a
+  distinct answer, the stream stays open, and the Engine reports
+  `input_queue_full` (control) or ends the attach with `attach.input_refused`
+  telemetry. With nothing queued, a keystroke is written straight to the PTY
+  as before; only what the PTY has no room for goes to a drainer thread, which
+  waits in `poll` with no lock held and exits when the queue is empty. The
+  pump reads output on its own thread throughout, so a program that is blocked
+  writing output while its input waits is always drained.
+- Version 1 and the legacy JSON write keep their semantics for old Engines
+  (reply after the PTY took the bytes, fail after a second without progress),
+  but the bytes of a write that gives up stay queued instead of being lost.
+  A new Engine asks for version 2 and falls back to version 1 on a Holder
+  started by an older build.
+- The Engine writes input outside the Registry lock. `Session` is now a
+  cloneable `SessionCore` plus its pump thread; attach and control take a
+  clone under the lock (after the keyboard-controller check and the wake) and
+  write after releasing it. Order within a session is kept by the Holder
+  client's input lock. `session.send_text`'s 30 ms submit settle and the
+  message-receipt SQLite writes no longer run under the lock either.
+- Remote Helper: past 1 MiB of unread input it stops handling controller
+  messages, keeps them in order, and stops reading the socket until the
+  program catches up, so the backpressure reaches the Engine through SSH. The
+  Engine's own 1 MiB remote queue is unchanged and still refuses explicitly
+  beyond it, which old live Helpers need.
+
+**Measured.** A real Engine with real Holders (release), one attach frame
+pasted into a raw-mode `head -c N > file` while a second session is typed
+into every 10 ms. "Busy" means the program starts reading 1.5 s after the
+paste lands. Exact means the file equals the paste byte for byte. Three
+alternating base/branch runs per case; base is main with #560 and #561 merged.
+Load average 6–10, and 20–290 during the busy cases (another agent's build).
+
+| Case | main: delivered | main: other echo max | branch: delivered | branch: other echo max |
+|---|---|---:|---|---:|
+| 1 MiB, reading | exact, 63–65 ms | 48–56 ms | exact, 62–67 ms | 3–33 ms |
+| 4 MiB, reading | exact, 221–230 ms | 208–215 ms | exact, 225–229 ms | 5–14 ms |
+| 16 MiB, reading | exact, 1.42–1.72 s | 1.38–1.66 s | exact, 1.47–2.00 s | 10–148 ms |
+| 1 MiB, busy 1.5 s | lost 2 of 3 | 0.74–1.10 s | exact, 1.02–1.54 s | 0.4–153 ms |
+| 4 MiB, busy 1.5 s | lost 3 of 3 | 0.99–1.31 s | exact, 0.98–1.69 s | 0.5–12 ms |
+| 16 MiB, busy 1.5 s | lost 3 of 3 | 0.99–1.00 s | exact, 2.21–2.25 s | 2–8 ms |
+
+Other-session echo p50 was 0.1–0.6 ms on main and 0.10–0.13 ms on the branch.
+CPU for a delivered paste, from `getrusage` (Engine) and `ps` (Holder
+manager, 10 ms grain): 16 MiB reading, Engine 57–62 ms on main against 77–90
+ms on the branch, Holder 0.81–1.05 s against 0.87–0.89 s. The Engine figure
+includes the echo probe, which completed 6× more keystrokes on the branch
+because they were no longer stalled, so it is not a like-for-like cost.
+Keystroke input over the Holder stream (`holder_input_latency_is_reported`,
+two alternating runs each): p50 10–11 µs / p95 13 µs on main, 10–11 µs / 13–15
+µs on the branch.
+
+**Not claimed.** Nothing about remote throughput: the remote change was
+verified for correctness only
+(`input_for_a_busy_program_waits_instead_of_closing_the_attach`). A refused paste in the desktop ends and re-opens the
+attach rather than showing a toast; that needs an attach frame for Engine-side
+refusals. Pastes over 1 MiB from the desktop are still refused by the
+client's own 1 MiB command budget, so the 4 and 16 MiB cases here are the
+Engine path (attach frames and `session.send_text`), not the app's paste.
+Old live Holders still give up after a second and lose the tail; only
+Holders started by this build queue. The Engine's 1 MiB remote queue still
+refuses larger remote pastes, explicitly.
+
+Reproduce from `diri/`:
+
+```sh
+cargo test -p diri-engine --test holder -- paste_into_a_program full_input_queue
+cargo test -p diri-engine --test interactions a_paste_into_a_busy_program
+cargo test -p diri-engine --lib negotiation_tests
+cargo test -p diri-remote --test holder_e2e input_for_a_busy_program
+DIRI_PASTE_CASE=16777200,1500 DIRI_PASTE_RUNS=3 \
+  cargo test --release -p diri-engine --test interactions -- --ignored --nocapture --test-threads=1 paste_measurement
+```
+
 ## Terminal interactions other than typing (2026-09-29)
 
 Every interaction except keystroke echo was measured separately: scrolling

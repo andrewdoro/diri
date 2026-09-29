@@ -639,6 +639,7 @@ pub(crate) struct AttachmentSeed {
 }
 
 /// Who owns the PTY.
+#[derive(Clone)]
 enum Transport {
     /// This process does; dropping the session kills the child.
     Direct(Arc<Mutex<Pty>>),
@@ -651,12 +652,42 @@ enum Transport {
 }
 
 pub struct Session {
+    core: SessionCore,
+    pump: Option<JoinHandle<()>>,
+}
+
+/// Everything a Session is except the thread that pumps its output, cheap to
+/// clone. Input goes through a clone taken under the Registry lock and used
+/// after releasing it, so a program slow to take a paste delays only its own
+/// session. Per-session order is kept by the transport's own input lock, and
+/// every check `write_input` makes (exit, hibernation, keyboard modes, the
+/// remote controller lease) reads live shared state, so a clone decides
+/// exactly as the Session would. Dropping a clone ends nothing: the child's
+/// fate stays with [`Session`]'s drop.
+#[derive(Clone)]
+pub struct SessionCore {
     shared: Arc<Shared>,
     transport: Transport,
-    pump: Option<JoinHandle<()>>,
-    manifest_id: String,
+    manifest_id: Arc<str>,
     /// Present while the exec is deferred to the first settled client size.
     deferred: Option<Arc<DeferredLaunch>>,
+}
+
+impl std::ops::Deref for Session {
+    type Target = SessionCore;
+
+    fn deref(&self) -> &SessionCore {
+        &self.core
+    }
+}
+
+impl Session {
+    /// A handle for input and other live-state calls that outlives the
+    /// Registry lock it was taken under.
+    #[must_use]
+    pub fn core(&self) -> SessionCore {
+        self.core.clone()
+    }
 }
 
 /// An emulator reflow owed after [`Session::resize_pty`]. Applying it reflows
@@ -1419,11 +1450,13 @@ impl Session {
         };
 
         let session = Self {
-            shared,
-            transport: Transport::Remote(client),
+            core: SessionCore {
+                shared,
+                transport: Transport::Remote(client),
+                manifest_id: spec.manifest_id.into(),
+                deferred: None,
+            },
             pump: Some(pump),
-            manifest_id: spec.manifest_id,
-            deferred: None,
         };
         cleanup.disarm();
         Ok(session)
@@ -1454,7 +1487,7 @@ impl Session {
         engine: Arc<ManifestEngine>,
         inspected: diri_proto::remote_pty::RemoteProcessState,
     ) -> std::io::Result<(bool, bool)> {
-        let Transport::Remote(client) = &self.transport else {
+        let Transport::Remote(client) = &self.core.transport else {
             return Err(std::io::Error::other("session has no remote transport"));
         };
         if self.shared.exited.load(Ordering::SeqCst) {
@@ -1498,7 +1531,7 @@ impl Session {
                     mark_remote_transport_failed(&shared);
                     return;
                 }
-                pump_remote(shared, engine, client, manifest_id);
+                pump_remote(shared, engine, client, manifest_id.to_string());
             });
         match worker {
             Ok(worker) => {
@@ -1579,11 +1612,13 @@ impl Session {
                 .spawn(move || pump_remote(shared, engine, client, manifest_id))?
         };
         Ok(Self {
-            shared,
-            transport: Transport::Remote(client),
+            core: SessionCore {
+                shared,
+                transport: Transport::Remote(client),
+                manifest_id: spec.manifest_id.into(),
+                deferred: None,
+            },
             pump: Some(pump),
-            manifest_id: spec.manifest_id,
-            deferred: None,
         })
     }
 
@@ -1607,11 +1642,13 @@ impl Session {
         };
 
         Ok(Self {
-            shared,
-            transport: Transport::Direct(pty),
+            core: SessionCore {
+                shared,
+                transport: Transport::Direct(pty),
+                manifest_id: spec.manifest_id.into(),
+                deferred: None,
+            },
             pump: Some(pump),
-            manifest_id: spec.manifest_id,
-            deferred: None,
         })
     }
 
@@ -1778,11 +1815,13 @@ impl Session {
         };
 
         Ok(Self {
-            shared,
-            transport: Transport::Held(client),
+            core: SessionCore {
+                shared,
+                transport: Transport::Held(client),
+                manifest_id: spec.manifest_id.into(),
+                deferred: Some(deferred),
+            },
             pump: Some(pump),
-            manifest_id: spec.manifest_id,
-            deferred: Some(deferred),
         })
     }
 
@@ -1882,14 +1921,18 @@ impl Session {
         };
 
         Ok(Self {
-            shared,
-            transport: Transport::Held(client),
+            core: SessionCore {
+                shared,
+                transport: Transport::Held(client),
+                manifest_id: spec.manifest_id.into(),
+                deferred: None,
+            },
             pump: Some(pump),
-            manifest_id: spec.manifest_id,
-            deferred: None,
         })
     }
+}
 
+impl SessionCore {
     pub(crate) fn remote_stop(&self) -> Option<RemoteStop> {
         match &self.transport {
             Transport::Remote(client) => Some(RemoteStop {
@@ -2573,7 +2616,7 @@ impl Session {
             ));
         }
         // Text answering a password prompt must not become the session's name.
-        if self.manifest_id != "shell" && !self.refresh_secret_input() {
+        if &*self.manifest_id != "shell" && !self.refresh_secret_input() {
             self.capture_prompt_title(text);
         }
         let framed = if self.bracketed_paste() {
@@ -2676,7 +2719,7 @@ impl Session {
     }
 
     fn observe_prompt_input(&self, bytes: &[u8]) {
-        if self.manifest_id == "shell"
+        if &*self.manifest_id == "shell"
             || self
                 .shared
                 .prompt_title
@@ -2726,7 +2769,7 @@ impl Session {
     }
 
     fn capture_prompt_title(&self, prompt: &str) {
-        if self.manifest_id == "shell" {
+        if &*self.manifest_id == "shell" {
             return;
         }
         let title = crate::hooks::title_from_prompt(prompt);
@@ -2738,41 +2781,6 @@ impl Session {
             *current = Some(title);
             drop(current);
             self.shared.bump_state_version();
-        }
-    }
-
-    /// Resets the emulator without touching the child: the PTY, process and
-    /// session identity stay, the screen, history, modes and title go. Remote
-    /// sessions ask their Holder; held local sessions queue the reset for
-    /// their pump, which applies it between log chunks and persists a
-    /// checkpoint at that exact offset so an Engine restart replays only
-    /// bytes after the boundary. Acceptance means queued, not applied.
-    pub fn reset_terminal(&self) -> std::io::Result<()> {
-        if self.shared.exited.load(Ordering::SeqCst) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "session has exited",
-            ));
-        }
-        match &self.transport {
-            Transport::Remote(client) => client.reset_terminal(),
-            Transport::Held(_) => {
-                if self.pump.is_none() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotConnected,
-                        "session has no terminal owner to apply a reset",
-                    ));
-                }
-                self.shared.reset_requested.store(true, Ordering::SeqCst);
-                // A reset is a user touch: keep the pump on its fast tick so
-                // the request is applied within it even for an idle session.
-                self.shared.note_hot();
-                Ok(())
-            }
-            Transport::Direct(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "direct PTY sessions do not support an emulator reset",
-            )),
         }
     }
 
@@ -2843,6 +2851,43 @@ impl Session {
             is_subagent,
             pending_work: None,
         })
+    }
+}
+
+impl Session {
+    /// Resets the emulator without touching the child: the PTY, process and
+    /// session identity stay, the screen, history, modes and title go. Remote
+    /// sessions ask their Holder; held local sessions queue the reset for
+    /// their pump, which applies it between log chunks and persists a
+    /// checkpoint at that exact offset so an Engine restart replays only
+    /// bytes after the boundary. Acceptance means queued, not applied.
+    pub fn reset_terminal(&self) -> std::io::Result<()> {
+        if self.shared.exited.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "session has exited",
+            ));
+        }
+        match &self.transport {
+            Transport::Remote(client) => client.reset_terminal(),
+            Transport::Held(_) => {
+                if self.pump.is_none() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotConnected,
+                        "session has no terminal owner to apply a reset",
+                    ));
+                }
+                self.shared.reset_requested.store(true, Ordering::SeqCst);
+                // A reset is a user touch: keep the pump on its fast tick so
+                // the request is applied within it even for an idle session.
+                self.shared.note_hot();
+                Ok(())
+            }
+            Transport::Direct(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "direct PTY sessions do not support an emulator reset",
+            )),
+        }
     }
 
     /// Ends the session, killing the child's whole tree.
@@ -3065,7 +3110,12 @@ fn wait_for_holder(
 }
 
 fn holder_io_error(error: crate::holder::HolderError) -> std::io::Error {
-    std::io::Error::other(error.to_string())
+    let kind = match error {
+        // Refused whole: the caller may retry once the program reads.
+        crate::holder::HolderError::InputQueueFull => std::io::ErrorKind::WouldBlock,
+        _ => std::io::ErrorKind::Other,
+    };
+    std::io::Error::new(kind, error.to_string())
 }
 
 /// Replaces control characters other than `\n`, `\r` and `\t` with a space,
@@ -5592,16 +5642,18 @@ mod prompt_title_tests {
             // Keep the real Session input/reducer path, but hold input in the
             // pre-launch queue so a PTY pump cannot race our status timeline.
             let session = Session {
-                shared: new_shared(
-                    &spec,
-                    OutputLog::writer(temp.path(), &spec.id).unwrap(),
-                    &engine,
-                    true,
-                ),
-                transport: Transport::Held(HolderClient::new(temp.path().join("unused.sock"))),
+                core: SessionCore {
+                    shared: new_shared(
+                        &spec,
+                        OutputLog::writer(temp.path(), &spec.id).unwrap(),
+                        &engine,
+                        true,
+                    ),
+                    transport: Transport::Held(HolderClient::new(temp.path().join("unused.sock"))),
+                    manifest_id: spec.manifest_id.clone().into(),
+                    deferred: Some(Arc::new(DeferredLaunch::new())),
+                },
                 pump: None,
-                manifest_id: spec.manifest_id.clone(),
-                deferred: Some(Arc::new(DeferredLaunch::new())),
             };
             *session.shared.status.lock().unwrap() = initial.clone();
             for byte in b"Fix chat naming" {
@@ -5957,16 +6009,18 @@ mod preview_tests {
             defer_launch: true,
         };
         let session = Session {
-            shared: new_shared(
-                &spec,
-                OutputLog::writer(temp.path(), &spec.id).unwrap(),
-                &engine,
-                true,
-            ),
-            transport: Transport::Held(HolderClient::new(temp.path().join("unused.sock"))),
+            core: SessionCore {
+                shared: new_shared(
+                    &spec,
+                    OutputLog::writer(temp.path(), &spec.id).unwrap(),
+                    &engine,
+                    true,
+                ),
+                transport: Transport::Held(HolderClient::new(temp.path().join("unused.sock"))),
+                manifest_id: spec.manifest_id.clone().into(),
+                deferred: Some(Arc::new(DeferredLaunch::new())),
+            },
             pump: None,
-            manifest_id: spec.manifest_id.clone(),
-            deferred: Some(Arc::new(DeferredLaunch::new())),
         };
         session.shared.keyboard_known.store(false, Ordering::SeqCst);
         assert_eq!(session.keyboard_state(), None);
@@ -6056,16 +6110,18 @@ mod preview_tests {
             defer_launch: true,
         };
         let session = Session {
-            shared: new_shared(
-                &spec,
-                OutputLog::writer(temp.path(), &spec.id).unwrap(),
-                &engine,
-                true,
-            ),
-            transport: Transport::Held(HolderClient::new(temp.path().join("unused.sock"))),
+            core: SessionCore {
+                shared: new_shared(
+                    &spec,
+                    OutputLog::writer(temp.path(), &spec.id).unwrap(),
+                    &engine,
+                    true,
+                ),
+                transport: Transport::Held(HolderClient::new(temp.path().join("unused.sock"))),
+                manifest_id: spec.manifest_id.clone().into(),
+                deferred: Some(Arc::new(DeferredLaunch::new())),
+            },
             pump: None,
-            manifest_id: spec.manifest_id.clone(),
-            deferred: Some(Arc::new(DeferredLaunch::new())),
         };
         session.shared.last_hot.store(0, Ordering::Relaxed);
         session.shared.screen.lock().unwrap().feed(b"last received");

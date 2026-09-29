@@ -381,43 +381,96 @@ fn drag_resize_measurement() {
     }
 }
 
+/// A process's CPU time (user+sys) as `ps` reports it, at its 10 ms grain.
+fn process_cpu(pid: &str) -> Duration {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-o", "time=", "-p", pid])
+        .output()
+        .expect("ps");
+    let text = String::from_utf8_lossy(&output.stdout);
+    // `[[dd-]hh:]mm:ss[.ff]`; days never occur in a measurement.
+    let seconds = text.trim().split(':').fold(0.0, |total, part| {
+        total * 60.0 + part.parse::<f64>().unwrap_or(0.0)
+    });
+    Duration::from_secs_f64(seconds)
+}
+
+struct PasteResult {
+    /// Until the program had read every byte, or `None` if it never did.
+    consumed: Option<Duration>,
+    /// Whether what the program read equals what was pasted, byte for byte.
+    exact: bool,
+    echo_p50: Duration,
+    echo_max: Duration,
+    echoes: usize,
+    engine_cpu: Duration,
+    holder_cpu: Duration,
+}
+
 /// A large paste into a program that reads it all, while another session is
-/// typed into: time until the program has consumed every byte, and the other
-/// session's echo latency meanwhile.
-fn paste(tag: &str, bytes: usize, busy_ms: u32) -> (Option<Duration>, Duration, Duration, usize) {
+/// typed into: time until the program has consumed every byte, whether it
+/// read exactly what was pasted, the other session's echo latency meanwhile,
+/// and the CPU the Engine (this process) and the Holder manager spent.
+fn paste(tag: &str, bytes: usize, busy_ms: u32) -> PasteResult {
     let mut harness = Harness::new(tag);
+    let received = harness.root.join("received");
     // `busy_ms` models a program that is busy when the paste lands (an agent
     // mid-turn) and reads its input only afterwards.
     let reader = harness.spawn(&format!(
-        "stty -echo -icanon; printf 'waiting\\n'; sleep {}; head -c {} > /dev/null; printf 'PASTED\\n'; exec cat",
+        "stty raw -echo; printf 'waiting\\n'; sleep {}; head -c {} > '{}'; printf 'PASTED\\n'; exec cat",
         f64::from(busy_ms) / 1000.0,
-        bytes + 12
+        bytes,
+        received.display()
     ));
     let typed = harness.spawn("printf 'ready\\n'; exec cat");
     let reader_data = harness.attach(&reader);
     // Drained so the attach never backs up; its frames are not measured.
     let _reader_watch = watch(reader_data.try_clone().unwrap());
-    let mut typed_data = harness.attach(&typed);
+    let typed_data = harness.attach(&typed);
     let typed_watch = watch(typed_data.try_clone().unwrap());
     std::thread::sleep(Duration::from_millis(500));
+    // Holders are threads of one manager process; its pid is in every
+    // session's pid file once that session's Holder runs.
+    let holder_pid = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let found = std::fs::read_dir(harness.root.join("holders"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "pid"))
+                .find_map(|entry| std::fs::read_to_string(entry.path()).ok())
+                .map(|pid| pid.trim().to_owned())
+                .filter(|pid| !pid.is_empty());
+            if let Some(pid) = found {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "no Holder pid file");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
 
     let stop = Arc::new(AtomicBool::new(false));
     let echoes = echo_probe(&typed_data, &typed_watch, &stop, Duration::from_millis(10));
     std::thread::sleep(Duration::from_millis(100));
-    let mut text = Vec::with_capacity(bytes + 12);
+    let mut text = Vec::with_capacity(bytes);
     text.extend_from_slice(b"\x1b[200~");
-    while text.len() < bytes + 6 {
-        text.extend_from_slice(b"pasted line of text for a large clipboard\n");
+    let mut line = 0_usize;
+    while text.len() < bytes - 6 {
+        line += 1;
+        text.extend_from_slice(format!("pasted line {line} of a large clipboard\n").as_bytes());
     }
-    text.truncate(bytes + 6);
+    text.truncate(bytes - 6);
     text.extend_from_slice(b"\x1b[201~");
+    let engine_before = cpu_time();
+    let holder_before = process_cpu(&holder_pid);
     let started = Instant::now();
     let mut writer = reader_data.try_clone().unwrap();
     writer
-        .write_all(&FrameCodec::encode(&Frame::input(text)).unwrap())
+        .write_all(&FrameCodec::encode(&Frame::input(text.clone())).unwrap())
         .unwrap();
-    // A paste that has not fully arrived after ten seconds was lost.
-    let deadline = Instant::now() + Duration::from_secs(10) + Duration::from_millis(busy_ms.into());
+    // A paste that has not fully arrived after twenty seconds was lost.
+    let deadline = Instant::now() + Duration::from_secs(20) + Duration::from_millis(busy_ms.into());
     let consumed = loop {
         let screen = harness.request("session.read_screen", json!({ "sessionID": reader }));
         if screen["text"]
@@ -431,26 +484,32 @@ fn paste(tag: &str, bytes: usize, busy_ms: u32) -> (Option<Duration>, Duration, 
         }
         std::thread::sleep(Duration::from_millis(2));
     };
+    let engine_cpu = cpu_time() - engine_before;
+    let holder_cpu = process_cpu(&holder_pid).saturating_sub(holder_before);
     std::thread::sleep(Duration::from_millis(100));
     stop.store(true, Ordering::SeqCst);
     let mut echo = echoes.join().expect("echo thread");
-    let _ = typed_data.flush();
+    let exact = std::fs::read(&received).is_ok_and(|read| read == text);
     for id in [&reader, &typed] {
         harness.request("session.kill", json!({ "sessionID": id }));
     }
-    let count = echo.len();
-    (
+    let echoes = echo.len();
+    PasteResult {
         consumed,
-        percentile(&mut echo, 0.5),
-        percentile(&mut echo, 1.0),
-        count,
-    )
+        exact,
+        echo_p50: percentile(&mut echo, 0.5),
+        echo_max: percentile(&mut echo, 1.0),
+        echoes,
+        engine_cpu,
+        holder_cpu,
+    }
 }
 
 /// Opt-in measurement: `cargo test --release -p diri-engine --test
 /// interactions -- --ignored --nocapture --test-threads=1 paste`.
 /// `DIRI_PASTE_CASE=<bytes>,<busy_ms>` runs one case, e.g. `102400,1500`
-/// for a program that reads its input only after 1.5 s.
+/// for a program that reads its input only after 1.5 s. Sizes include the
+/// bracketed-paste markers; one attach frame carries at most 16 MiB.
 #[test]
 #[ignore = "measurement; run explicitly"]
 fn paste_measurement() {
@@ -461,15 +520,24 @@ fn paste_measurement() {
         }
         Err(_) => vec![(100 << 10, 0), (1 << 20, 0)],
     };
+    let runs = std::env::var("DIRI_PASTE_RUNS").map_or(3, |runs| runs.parse().unwrap());
     for (bytes, busy_ms) in cases {
-        for run in 0..3 {
-            let (consumed, p50, max, count) = paste(&format!("paste{run}"), bytes, busy_ms);
+        for run in 0..runs {
+            let result = paste(&format!("paste{run}"), bytes, busy_ms);
             eprintln!(
-                "paste {} KiB into a program busy {busy_ms} ms, run {run}: {}; other-session echo p50 {p50:?} max {max:?} (n={count})",
+                "paste {} KiB into a program busy {busy_ms} ms, run {run}: {}; exact {}; other-session echo p50 {:?} max {:?} (n={}); engine cpu {:?}, holder cpu {:?}",
                 bytes >> 10,
-                consumed.map_or("LOST (never fully delivered)".to_string(), |at| format!(
-                    "consumed in {at:?}"
-                )),
+                result
+                    .consumed
+                    .map_or("LOST (never fully delivered)".to_string(), |at| format!(
+                        "consumed in {at:?}"
+                    )),
+                result.exact,
+                result.echo_p50,
+                result.echo_max,
+                result.echoes,
+                result.engine_cpu,
+                result.holder_cpu,
             );
         }
     }
@@ -556,4 +624,93 @@ fn scroll_and_switch_measurement() {
         );
     }
     eprintln!("page payload {bytes} base64 bytes; seed read {seed_bytes} bytes");
+}
+
+/// Printable text with newlines and tabs, different at every offset, so a
+/// dropped, duplicated or reordered chunk cannot compare equal.
+fn paste_payload(size: usize) -> Vec<u8> {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    (0..size)
+        .map(|index| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            match index % 97 {
+                96 => b'\n',
+                48 => b'\t',
+                _ => b' ' + (state % 95) as u8,
+            }
+        })
+        .collect()
+}
+
+/// A paste into a program that is busy when it lands and reads it seconds
+/// later, through the desktop's attach channel. On `main` the Holder gave up
+/// after one second of a full PTY, the Engine dropped the attach and the
+/// unread tail was lost, and for that second every other session's input
+/// waited on the Registry lock the write held.
+#[test]
+fn a_paste_into_a_busy_program_arrives_whole_without_stalling_other_sessions() {
+    let mut harness = Harness::new("busypaste");
+    let received = harness.root.join("received");
+    let paste = paste_payload(4 << 20);
+    let tail = b"<typed after the paste>";
+    let reader = harness.spawn(&format!(
+        "stty raw -echo; printf 'busy\\n'; sleep 3; head -c {} > '{}'; printf 'PASTED\\n'; exec cat",
+        paste.len() + tail.len(),
+        received.display()
+    ));
+    let typed = harness.spawn("printf 'ready\\n'; exec cat");
+    let reader_data = harness.attach(&reader);
+    let _reader_watch = watch(reader_data.try_clone().unwrap());
+    let typed_data = harness.attach(&typed);
+    let typed_watch = watch(typed_data.try_clone().unwrap());
+    let screen_has = |harness: &mut Harness, id: &str, text: &str| {
+        harness.request("session.read_screen", json!({ "sessionID": id }))["text"]
+            .as_str()
+            .is_some_and(|screen| screen.contains(text))
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !screen_has(&mut harness, &reader, "busy") || !screen_has(&mut harness, &typed, "ready") {
+        assert!(Instant::now() < deadline, "sessions never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let echoes = echo_probe(&typed_data, &typed_watch, &stop, Duration::from_millis(10));
+    std::thread::sleep(Duration::from_millis(100));
+    let mut writer = reader_data.try_clone().unwrap();
+    writer
+        .write_all(&FrameCodec::encode(&Frame::input(paste.clone())).unwrap())
+        .unwrap();
+    writer
+        .write_all(&FrameCodec::encode(&Frame::input(tail.to_vec())).unwrap())
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while !screen_has(&mut harness, &reader, "PASTED") {
+        assert!(
+            Instant::now() < deadline,
+            "the paste never fully arrived: {} of {} bytes",
+            std::fs::metadata(&received).map_or(0, |meta| meta.len()),
+            paste.len() + tail.len()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    stop.store(true, Ordering::SeqCst);
+    let mut echo = echoes.join().expect("echo thread");
+    for id in [&reader, &typed] {
+        harness.request("session.kill", json!({ "sessionID": id }));
+    }
+
+    let mut expected = paste;
+    expected.extend_from_slice(tail);
+    let received = std::fs::read(&received).expect("received");
+    assert_eq!(received.len(), expected.len(), "every byte arrived once");
+    assert!(received == expected, "byte for byte, and in order");
+    let worst = percentile(&mut echo, 1.0);
+    assert!(
+        worst < Duration::from_millis(500),
+        "another session's echo waited {worst:?} behind the paste (n={})",
+        echo.len()
+    );
 }

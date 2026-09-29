@@ -686,23 +686,29 @@ impl AttachHub {
             }
             return true;
         }
-        let Ok(mut guard) = registry.lock() else {
-            return false;
-        };
-        if frame.frame_type == FrameType::Input
-            && guard
-                .get(session_id)
-                .is_some_and(|session| !session.accepts_keyboard_input(enhanced_keyboard))
-        {
-            return false;
-        }
-        if matches!(frame.frame_type, FrameType::Input | FrameType::Mouse) {
-            // Input to a frozen session wakes it; write_input's queue covers
-            // the race where the governor froze it mid-keystroke.
-            let _ = guard.wake_session(session_id);
-        }
-        let Some(session) = guard.get(session_id) else {
-            return true; // session ended; swallow input quietly, as Swift does
+        // The Registry lock covers the checks and the wake, not the write: a
+        // program slow to take a paste must delay only its own session, and
+        // every other session's input and publication needs this lock.
+        let session = {
+            let Ok(mut guard) = registry.lock() else {
+                return false;
+            };
+            if frame.frame_type == FrameType::Input
+                && guard
+                    .get(session_id)
+                    .is_some_and(|session| !session.accepts_keyboard_input(enhanced_keyboard))
+            {
+                return false;
+            }
+            if matches!(frame.frame_type, FrameType::Input | FrameType::Mouse) {
+                // Input to a frozen session wakes it; write_input's queue
+                // covers the race where the governor froze it mid-keystroke.
+                let _ = guard.wake_session(session_id);
+            }
+            let Some(session) = guard.get(session_id) else {
+                return true; // session ended; swallow input quietly, as Swift does
+            };
+            session.core()
         };
         // Guards would move the failed-write check into the patterns; the
         // explicit form keeps every input arm reading the same way.
@@ -710,7 +716,17 @@ impl AttachHub {
         match frame.frame_type {
             FrameType::Input => {
                 trace_hop!(InputDecoded);
-                if session.write_input(&frame.payload).is_err() {
+                if let Err(error) = session.write_input(&frame.payload) {
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        // Refused whole, not half written: the program has
+                        // left too much earlier input unread. Ending the
+                        // attach reports it rather than dropping keys.
+                        diri_telemetry::warn_event!(
+                            "attach.input_refused",
+                            session = diri_telemetry::id(session_id),
+                            bytes = frame.payload.len(),
+                        );
+                    }
                     return false;
                 }
                 trace_hop!(InputHandled);
