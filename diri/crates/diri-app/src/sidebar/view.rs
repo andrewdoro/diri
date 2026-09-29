@@ -10407,6 +10407,23 @@ mod tests {
             }
             cx.notify();
         });
+        // The archived row grows into its section on the wall clock. A slow
+        // runner (Linux CI) measured it mid-motion and clicked where its
+        // revive control had been, so wait the motion out and paint the
+        // settled frame before any test reads row bounds.
+        cx.run_until_parked();
+        let motion = crate::sidebar::row_motion::ENTER
+            .max(crate::sidebar::row_motion::EXIT)
+            .max(SECTION_SHIFT_TIME);
+        std::thread::sleep(motion + Duration::from_millis(40));
+        sidebar.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(
+            !sidebar.read_with(cx, |sidebar, _| sidebar
+                .row_motion
+                .is_animating(Instant::now())),
+            "archived rows settle before a test measures them"
+        );
     }
 
     fn assert_drag_source_revived(sidebar: &Entity<Sidebar>, cx: &VisualTestContext) {

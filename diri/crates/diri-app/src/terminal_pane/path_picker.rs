@@ -143,7 +143,8 @@ impl TerminalPane {
         }
     }
 
-    #[cfg(test)]
+    // Only the macOS screenshot fixture drives the query.
+    #[cfg(all(test, target_os = "macos"))]
     pub(super) fn path_picker_query_for_test(&mut self, query: &str) {
         if let Some(state) = self.path_picker.as_mut() {
             state.picker.query.insert(query);

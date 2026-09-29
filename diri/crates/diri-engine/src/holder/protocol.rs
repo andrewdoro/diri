@@ -470,18 +470,29 @@ impl HolderExitMarker {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    // Anchored on the first byte rather than comparing the whole needle at
-    // every offset. Every byte of every session's output passes through here,
-    // and a nineteen-byte window comparison per position was costing more than
-    // parsing the bytes did.
-    let (first, rest) = needle.split_first()?;
-    let mut offset = 0;
-    while let Some(hit) = haystack[offset..].iter().position(|byte| byte == first) {
-        let start = offset + hit;
-        if haystack[start + 1..].starts_with(rest) {
+    // Anchored on one byte rather than comparing the whole needle at every
+    // offset: every byte of every session's output passes through here, and a
+    // nineteen-byte window comparison per position was costing more than
+    // parsing the bytes did. The anchor is the needle's second byte. Its first
+    // is ESC, which colored output repeats every few bytes, so anchoring there
+    // stopped for a comparison at every color change; the `]` of an OSC is
+    // rare by comparison.
+    let [_, anchor, ..] = *needle else {
+        return haystack
+            .iter()
+            .position(|byte| Some(byte) == needle.first());
+    };
+    let mut offset = 1;
+    while let Some(hit) = haystack
+        .get(offset..)?
+        .iter()
+        .position(|&byte| byte == anchor)
+    {
+        let start = offset + hit - 1;
+        if haystack[start..].starts_with(needle) {
             return Some(start);
         }
-        offset = start + 1;
+        offset += hit + 1;
     }
     None
 }
@@ -615,6 +626,21 @@ mod tests {
 
         let encoded = serde_json::to_string(&HolderManagerResponse::success(7)).expect("encode");
         assert!(encoded.contains(r#""managerPID":7"#), "{encoded}");
+    }
+
+    #[test]
+    fn the_marker_is_found_at_every_position_among_color_escapes() {
+        let prefix = HolderExitMarker::PREFIX;
+        let colored = b"\x1b[31mred\x1b[0m \x1b]0;title\x07]]\x1b".repeat(3);
+        assert_eq!(super::find(&colored, prefix), None);
+        for at in 0..=colored.len() {
+            let mut haystack = colored[..at].to_vec();
+            haystack.extend_from_slice(prefix);
+            haystack.extend_from_slice(&colored[at..]);
+            assert_eq!(super::find(&haystack, prefix), Some(at), "marker at {at}");
+        }
+        assert_eq!(super::find(&prefix[..prefix.len() - 1], prefix), None);
+        assert_eq!(super::find(b"", prefix), None);
     }
 
     #[test]

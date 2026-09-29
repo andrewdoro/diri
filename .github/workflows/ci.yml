@@ -24,11 +24,17 @@ on:
 permissions:
   contents: read
 
-# A new push supersedes the run it interrupts. macOS runners queue — a public
-# repo gets five concurrent — so without this a branch pushed three times in a
-# row sits behind two runs whose results nobody will read.
+# On a pull request a new push supersedes the run it interrupts. macOS runners
+# queue — a public repo gets five concurrent — so without this a branch pushed
+# three times in a row sits behind two runs whose results nobody will read.
+#
+# Pushes to main are the opposite: every main commit is a release candidate,
+# and diri/scripts/release.sh gates on CI's result for the exact commit it
+# ships. Sharing one group there cancelled a commit's run whenever the next
+# merge landed (and GitHub cancels a *pending* run in a group even without
+# cancel-in-progress), so each main push gets a group of its own.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-{0}', github.ref) || format('ci-push-{0}', github.sha) }}
   cancel-in-progress: true
 
 env:
