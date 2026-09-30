@@ -32,7 +32,7 @@ use diri_proto::{
     SessionStatus,
 };
 use diri_term::buffer::GridBuffer;
-use diri_term::element::{SharedGridBuffer, TerminalElement, TerminalReference};
+use diri_term::element::{ContentPaint, SharedGridBuffer, TerminalElement, TerminalReference};
 use diri_term::find::{
     FindSearchScheduler, FindSnapshot, ReadCompletion, SearchRequest, SearchResult,
     TerminalFindModel,
@@ -563,11 +563,17 @@ const PANE_BLANK_AFTER: Duration = Duration::from_secs(10);
 /// is not drawn at all (the selection-following pane while a workspace
 /// workbench covers it, a warm pane of another tab, a window the system
 /// stopped drawing), and such a pane has painted nothing.
+///
+/// The clock starts at the mount or, for a pane nobody drew at mount, at the
+/// frame that first put it on screen: a covered pane that is uncovered a
+/// minute later with its grid long since arrived painted in 0 ms, not in a
+/// minute.
 struct PaneTrace {
     mounted_at: Instant,
     first_grid: Arc<OnceLock<Instant>>,
-    /// Set by the element's first paint with content after this mount.
-    painted: Arc<OnceLock<Instant>>,
+    /// Set by the element's first paint with content after this mount, to
+    /// the recorded `pane.first_paint` duration.
+    painted: Arc<OnceLock<Duration>>,
     /// The element's paint count at mount: an unchanged count later means
     /// the pane was never drawn in between.
     paints_at_mount: u64,
@@ -584,11 +590,12 @@ impl PaneTrace {
         let session = diri_telemetry::id(&id.0);
         let grid = Arc::clone(&first_grid);
         let paint = Arc::clone(&painted);
-        element.on_first_content_paint(Box::new(move |at: Instant| {
-            if paint.set(at).is_err() {
+        element.on_first_content_paint(Box::new(move |paint_at: ContentPaint| {
+            let shown_at = paint_at.shown_at.max(mounted_at);
+            let ms = paint_at.at.saturating_duration_since(shown_at);
+            if paint.set(ms).is_err() {
                 return;
             }
-            let ms = at.saturating_duration_since(mounted_at);
             diri_telemetry::observe("pane.first_paint", ms);
             diri_telemetry::debug_event!(
                 "pane.first_paint",
@@ -597,6 +604,7 @@ impl PaneTrace {
                 grid_ms = grid
                     .get()
                     .map(|grid: &Instant| grid.saturating_duration_since(mounted_at)),
+                shown_ms = shown_at.saturating_duration_since(mounted_at),
                 parked = parked
             );
         }));
@@ -616,6 +624,34 @@ impl PaneTrace {
     /// Whether the element was drawn in any frame since this mount.
     fn drawn_since_mount(&self, element: &TerminalElement) -> bool {
         element.paint_count() != self.paints_at_mount
+    }
+}
+
+/// The mouse and alternate-screen modes `pane.modes` last reported for each
+/// session. Every view attached to a session (the selection pane and a
+/// workspace pane, one set per window) receives the same Modes chunk and sees
+/// the same flip; only the first of them reports it.
+#[derive(Default)]
+struct ModeReports(HashMap<SessionId, (MouseModes, bool)>);
+
+impl ModeReports {
+    fn global() -> std::sync::MutexGuard<'static, Self> {
+        static REPORTS: OnceLock<Mutex<ModeReports>> = OnceLock::new();
+        REPORTS
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether `mouse`/`alt_screen` differ from what was last reported for
+    /// `id`, remembering them when they do.
+    fn changed(&mut self, id: &SessionId, mouse: MouseModes, alt_screen: bool) -> bool {
+        let modes = (mouse, alt_screen);
+        if self.0.get(id) == Some(&modes) {
+            return false;
+        }
+        self.0.insert(id.clone(), modes);
+        true
     }
 }
 
@@ -1610,8 +1646,9 @@ impl TerminalPane {
                     return;
                 }
                 if let Some(resident) = self.residents.get_mut(&id) {
-                    if resident.element.mouse_modes() != mouse
-                        || resident.element.alt_screen() != alt_screen
+                    if (resident.element.mouse_modes() != mouse
+                        || resident.element.alt_screen() != alt_screen)
+                        && ModeReports::global().changed(&id, mouse, alt_screen)
                     {
                         // Mode flips are rare (an agent starting or exiting);
                         // one left on after its program exits is how mouse
@@ -6151,10 +6188,7 @@ mod tests {
 
     fn first_paint(pane: &TerminalPane, id: &SessionId) -> Option<Duration> {
         let trace = &pane.residents[id].trace;
-        trace
-            .painted
-            .get()
-            .map(|at| at.saturating_duration_since(trace.mounted_at))
+        trace.painted.get().copied()
     }
 
     /// Telemetry had 14 of 57 `pane.first_paint` samples at 10.0 s: the blank
@@ -6243,6 +6277,84 @@ mod tests {
         pane.read_with(cx, |pane, _| {
             assert!(first_paint(pane, &id).is_some_and(|ms| ms < PANE_BLANK_AFTER));
         });
+    }
+
+    /// 0.8.10 recorded `pane.first_paint` twice for one attach, the second
+    /// ~10 s later, from the selection pane a workbench covered. A pane that
+    /// comes on screen long after its screen arrived paints it at once, and
+    /// the time it spent hidden is not a paint latency.
+    #[gpui::test]
+    fn a_pane_shown_after_its_screen_arrived_times_first_paint_from_showing(
+        cx: &mut TestAppContext,
+    ) {
+        struct Toggle {
+            pane: Entity<TerminalPane>,
+            shown: bool,
+        }
+        impl Render for Toggle {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let root = div().size_full();
+                if self.shown {
+                    root.child(self.pane.clone())
+                } else {
+                    root
+                }
+            }
+        }
+        const HIDDEN: Duration = Duration::from_millis(300);
+        let (runtime, tokio, id, _) = first_paint_fixture();
+        let (toggle, cx) = cx.add_window_view(move |window, cx| Toggle {
+            pane: cx.new(|cx| TerminalPane::new(runtime, tokio, window, cx)),
+            shown: false,
+        });
+        cx.simulate_resize(gpui::size(px(400.0), px(200.0)));
+        let pane = toggle.read_with(cx, |toggle, _| toggle.pane.clone());
+        pane.update(cx, |pane, cx| {
+            pane.reconcile_residency(cx);
+            land_screen(pane, &id, cx);
+        });
+        cx.run_until_parked();
+        // Real time: the element stamps paints with `Instant::now()`.
+        std::thread::sleep(HIDDEN);
+        pane.read_with(cx, |pane, _| assert_eq!(first_paint(pane, &id), None));
+
+        toggle.update(cx, |toggle, cx| {
+            toggle.shown = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let painted = pane
+            .read_with(cx, |pane, _| first_paint(pane, &id))
+            .expect("the first frame that shows the pane paints its screen");
+        assert!(
+            painted < HIDDEN,
+            "first paint {painted:?} counted the time the pane was hidden"
+        );
+    }
+
+    /// Every view attached to a session gets the same Modes chunk: telemetry
+    /// had each `pane.modes` twice in the same millisecond. A flip is
+    /// reported once per session, whichever view sees it first.
+    #[test]
+    fn a_mode_flip_is_reported_once_per_session() {
+        let mut reports = ModeReports::default();
+        let (a, b) = (SessionId::new("modes-a"), SessionId::new("modes-b"));
+        let mouse = MouseModes::new(
+            diri_proto::terminal::MouseTrackingMode::AnyMotion,
+            diri_proto::terminal::MouseEncoding::Sgr,
+        );
+        assert!(reports.changed(&a, mouse, true), "the first view reports");
+        assert!(
+            !reports.changed(&a, mouse, true),
+            "the second view does not"
+        );
+        assert!(
+            reports.changed(&b, mouse, true),
+            "another session is its own"
+        );
+        assert!(reports.changed(&a, MouseModes::OFF, false), "the flip back");
+        assert!(!reports.changed(&a, MouseModes::OFF, false));
+        assert!(reports.changed(&a, mouse, true), "and the next start");
     }
 
     #[gpui::test]

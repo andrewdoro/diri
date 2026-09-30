@@ -5052,14 +5052,7 @@ fn set_current_thread_interactive(_interactive: bool) {}
 /// The modes the screen still has on, from the same emulator that reduces
 /// status (a remote session's raw output feeds it too).
 fn terminal_modes_left(shared: &Shared) -> crate::telemetry::LeftModes {
-    let screen = shared.screen.lock().expect("screen");
-    let mouse = screen.mouse_modes();
-    crate::telemetry::LeftModes {
-        mouse: mouse.is_reporting().then_some(mouse),
-        alt_screen: screen.is_alt_screen(),
-        bracketed_paste: screen.bracketed_paste(),
-        app_cursor: screen.keyboard_state().application_cursor_keys,
-    }
+    crate::telemetry::LeftModes::of(&shared.screen.lock().expect("screen"))
 }
 
 /// Records how the child ended, once: `session.exit`, plus an incident when a

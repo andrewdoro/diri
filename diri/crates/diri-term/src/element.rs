@@ -375,11 +375,27 @@ struct ElementSharedState {
     paints: AtomicU64,
     /// Called once, from the first paint that puts non-blank content on
     /// screen after it was armed; see [`TerminalElement::on_first_content_paint`].
-    content_paint: Mutex<Option<ContentPaintCallback>>,
+    content_paint: Mutex<Option<ArmedContentPaint>>,
 }
 
-/// Told when a view first painted content, with the instant it did.
-pub type ContentPaintCallback = Box<dyn FnOnce(Instant) + Send>;
+/// When a view first painted content after the host armed the callback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentPaint {
+    /// The first frame of any kind (blank included) drawn since arming: when
+    /// the view came on screen. A view armed while nothing draws it (a
+    /// covered or background pane) is shown only later.
+    pub shown_at: Instant,
+    /// The frame that put content on screen.
+    pub at: Instant,
+}
+
+/// Told when a view first painted content.
+pub type ContentPaintCallback = Box<dyn FnOnce(ContentPaint) + Send>;
+
+struct ArmedContentPaint {
+    callback: ContentPaintCallback,
+    shown_at: Option<Instant>,
+}
 
 /// The glide to a find match, if one is running, and the clock it reads.
 #[derive(Default)]
@@ -925,7 +941,10 @@ impl TerminalElement {
     /// paint, so the instant it gets is when the content was drawn, not when
     /// the host next looked.
     pub fn on_first_content_paint(&self, callback: ContentPaintCallback) {
-        *mutex_lock(&self.shared.content_paint) = Some(callback);
+        *mutex_lock(&self.shared.content_paint) = Some(ArmedContentPaint {
+            callback,
+            shown_at: None,
+        });
     }
 
     #[must_use]
@@ -2469,6 +2488,9 @@ impl Element for TerminalElement {
     ) {
         let paint_started = Instant::now();
         self.shared.paints.fetch_add(1, Ordering::Relaxed);
+        if let Some(armed) = mutex_lock(&self.shared.content_paint).as_mut() {
+            armed.shown_at.get_or_insert(paint_started);
+        }
         if let (Some(focus_handle), Some(text_input)) = (&self.focus_handle, &self.text_input) {
             let (cursor_bounds, cell_width) = match (prepaint.metrics, prepaint.cursor.as_ref()) {
                 (Some(metrics), Some(cursor)) => (
@@ -2747,10 +2769,14 @@ impl TerminalElement {
         if armed.is_none() || read_lock(&self.buffer).is_blank() {
             return;
         }
-        let callback = armed.take();
+        let taken = armed.take();
         drop(armed);
-        if let Some(callback) = callback {
-            callback(Instant::now());
+        if let Some(ArmedContentPaint { callback, shown_at }) = taken {
+            let at = Instant::now();
+            callback(ContentPaint {
+                shown_at: shown_at.unwrap_or(at),
+                at,
+            });
         }
     }
 }

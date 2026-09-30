@@ -721,6 +721,14 @@ impl HeadlessScreen {
     }
 
     /// The current grid geometry.
+    /// Whether the child asked for focus in/out reports (DEC 1004): left on
+    /// under a shell, every window switch types `^[[I` / `^[[O` at its prompt.
+    pub fn focus_reporting(&self) -> bool {
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::FOCUS_IN_OUT)
+    }
+
     pub fn size(&self) -> (usize, usize) {
         (self.geometry.cols, self.geometry.rows)
     }
