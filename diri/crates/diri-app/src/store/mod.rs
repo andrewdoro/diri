@@ -5,8 +5,8 @@ mod prefs;
 mod projection;
 mod residency;
 mod window_navigation;
-mod workspace_spawn;
 mod work_items;
+mod workspace_spawn;
 mod workspaces;
 
 use std::collections::{HashMap, HashSet};
@@ -36,7 +36,6 @@ use crate::switcher::{
     SessionSwitcherState, SwitcherKey, SwitcherOutcome,
 };
 
-pub use work_items::WorkLink;
 pub use prefs::{
     InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
     WindowMaterial, WindowMode, WindowPlacement,
@@ -44,6 +43,7 @@ pub use prefs::{
 pub use projection::{SidebarProject, SidebarProjection, SidebarRow};
 pub use residency::{ResidencyUpdate, TerminalResidency};
 pub(crate) use window_navigation::{WindowAction, WindowStore, WindowWrite};
+pub use work_items::WorkLink;
 pub use workspace_spawn::{
     SpawnDestination, SpawnOwner, WindowSpawnTarget, WorkspaceSpawnReceipt, WorkspaceSpawnState,
     WorkspaceSpawnTarget,

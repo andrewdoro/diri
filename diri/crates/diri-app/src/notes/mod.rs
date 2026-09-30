@@ -8,9 +8,9 @@
 //! step with the note's, and reloads writes made by the CLI or agents.
 
 pub(crate) mod editor_view;
-pub(crate) mod work_item;
 #[cfg(test)]
 pub(crate) mod tests;
+pub(crate) mod work_item;
 #[cfg(test)]
 pub(crate) mod work_item_tests;
 
@@ -176,7 +176,12 @@ impl NotePane {
             self.load(session, note_id, window, cx);
         }
         // Arrived from a session's header: show the to-do it works on.
-        let reveal = self.runtime.store.write().expect("store").take_note_reveal(session);
+        let reveal = self
+            .runtime
+            .store
+            .write()
+            .expect("store")
+            .take_note_reveal(session);
         if let (Some(child), PaneState::Open(open)) = (reveal, &self.state) {
             let editor = open.editor.clone();
             if editor.update(cx, |view, cx| view.reveal_session(&child.0, cx)) {
@@ -211,7 +216,11 @@ impl NotePane {
         };
         let note = store::parse_note(&source);
         let colors = self.colors();
-        let editor = cx.new(|cx| NoteEditorView::new(Editor::new(&note.doc), colors, cx));
+        let editor = cx.new(|cx| {
+            let mut view = NoteEditorView::new(Editor::new(&note.doc), colors, cx);
+            view.fold_started_work();
+            view
+        });
         let subscription = cx.subscribe_in(&editor, window, |this, _, event, _, cx| match event {
             EditorEvent::Changed => this.schedule_save(cx),
             EditorEvent::Dismiss => {

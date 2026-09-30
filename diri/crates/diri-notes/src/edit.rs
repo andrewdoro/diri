@@ -1080,13 +1080,21 @@ impl Editor {
     /// Links a session to the to-do at `index` with a trailing mention chip
     /// (an agent started from it). One undo step; `false` when the block is
     /// not a to-do or already links that session.
-    pub fn link_session(&mut self, index: usize, label: &str, session_id: &str, now_ms: u64) -> bool {
+    pub fn link_session(
+        &mut self,
+        index: usize,
+        label: &str,
+        session_id: &str,
+        now_ms: u64,
+    ) -> bool {
         let target = crate::mention::MentionTarget::Session(session_id.to_owned());
         let Some(block) = self.blocks.get(index) else {
             return false;
         };
         if !matches!(block.kind, BlockKind::Todo { .. })
-            || crate::mention::in_block(block).iter().any(|m| m.target == target)
+            || crate::mention::in_block(block)
+                .iter()
+                .any(|m| m.target == target)
         {
             return false;
         }

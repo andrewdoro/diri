@@ -286,9 +286,10 @@ impl NoteEditorView {
 
     /// Ticking a to-do whose agent is still running asks first. Returns
     /// whether the tick was intercepted.
-    pub(super) fn guard_tick(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn guard_tick(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
         let block = self.editor.block(index);
-        if block.kind != (BlockKind::Todo { checked: false }) || !self.work.state(block).is_running()
+        if block.kind != (BlockKind::Todo { checked: false })
+            || !self.work.state(block).is_running()
         {
             return false;
         }
@@ -296,10 +297,11 @@ impl NoteEditorView {
             return false;
         };
         self.work.start = None;
+        // Return keeps the agent running; stopping it is a deliberate pick.
         self.work.tick = Some(TickPanel {
             block: block.id,
             session,
-            selected: 0,
+            selected: 1,
         });
         cx.notify();
         true
@@ -355,6 +357,20 @@ impl NoteEditorView {
             return true;
         }
         false
+    }
+
+    /// A note opens with the context of started work folded away, the way
+    /// it folded when the work started.
+    pub(crate) fn fold_started_work(&mut self) {
+        for index in 0..self.editor.blocks().len() {
+            let block = self.editor.block(index);
+            if block.kind == (BlockKind::Todo { checked: false })
+                && !work::sessions(block).is_empty()
+                && self.editor.has_children(index)
+            {
+                self.editor.set_collapsed(index, true);
+            }
+        }
     }
 
     /// Puts the caret on the to-do that links `session`, unfolded, and
@@ -417,11 +433,7 @@ impl NoteEditorView {
                         })
                         .hover(|el| el.bg(colors.primary.alpha(0.06)).text_color(colors.primary))
                         .child("Start")
-                        .child(
-                            div()
-                                .text_color(colors.tertiary)
-                                .child(START_SHORTCUT),
-                        )
+                        .child(div().text_color(colors.tertiary).child(START_SHORTCUT))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |_, _: &MouseDownEvent, _, cx| {
@@ -520,21 +532,23 @@ impl NoteEditorView {
             })
             .child(div().font_weight(FontWeight::MEDIUM).child(text));
         for (index, (label, request)) in actions.into_iter().enumerate() {
-            line = line.child(div().text_color(colors.tertiary).child("·")).child(
-                div()
-                    .id(SharedString::from(format!("work-action-{id}-{index}")))
-                    .cursor_pointer()
-                    .text_color(colors.tertiary)
-                    .hover(|el| el.text_color(accent()))
-                    .child(label)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            cx.emit(EditorEvent::Work(request.clone()));
-                        }),
-                    ),
-            );
+            line = line
+                .child(div().text_color(colors.tertiary).child("·"))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("work-action-{id}-{index}")))
+                        .cursor_pointer()
+                        .text_color(colors.tertiary)
+                        .hover(|el| el.text_color(accent()))
+                        .child(label)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(EditorEvent::Work(request.clone()));
+                            }),
+                        ),
+                );
         }
         Some(
             div()
@@ -563,17 +577,17 @@ impl NoteEditorView {
     /// Anchors an open panel under its to-do's text. Runs before the frame
     /// replaces the block layouts, while last frame's are still measured.
     pub(super) fn anchor_work_menu(&mut self) {
-        let Some(block) = self
+        let Some(block) = self.work.start.as_ref().map(|p| p.block).or(self
             .work
-            .start
+            .tick
             .as_ref()
-            .map(|p| p.block)
-            .or(self.work.tick.as_ref().map(|p| p.block))
+            .map(|p| p.block))
         else {
             return;
         };
         if let Some(index) = self.block_index(block) {
-            self.anchor_menus_at(Pos::new(index, self.editor.block(index).text.len()));
+            // Under the row's first character, like a dropdown from the row.
+            self.anchor_menus_at(Pos::new(index, 0));
         }
     }
 
@@ -585,12 +599,11 @@ impl NoteEditorView {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let block = self
+        let block = self.work.start.as_ref().map(|p| p.block).or(self
             .work
-            .start
+            .tick
             .as_ref()
-            .map(|p| p.block)
-            .or(self.work.tick.as_ref().map(|p| p.block))?;
+            .map(|p| p.block))?;
         self.block_index(block)?;
         if self.work.start.is_some() {
             let height = self.start_panel_height();
@@ -617,12 +630,18 @@ impl NoteEditorView {
 
     fn start_panel_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let rows = self.start_panel_rows(cx)?;
-        Some(floating::surface(self.colors(), floating::MENU_RADIUS, PANEL_WIDTH, rows).into_any_element())
+        Some(
+            floating::surface(self.colors(), floating::MENU_RADIUS, PANEL_WIDTH, rows)
+                .into_any_element(),
+        )
     }
 
     fn tick_panel_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let rows = self.tick_panel_rows(cx)?;
-        Some(floating::surface(self.colors(), floating::MENU_RADIUS, TICK_WIDTH, rows).into_any_element())
+        Some(
+            floating::surface(self.colors(), floating::MENU_RADIUS, TICK_WIDTH, rows)
+                .into_any_element(),
+        )
     }
 
     fn start_panel_height(&self) -> f32 {
@@ -664,29 +683,35 @@ impl NoteEditorView {
             )
             .badged(false)
             .into_any_element();
-            let row = floating::menu_row(("note-work-agent", index), logo, colors, index == panel.selected)
-                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                    if *hovered && let Some(panel) = &mut this.work.start
-                        && panel.selected != index
-                    {
-                        panel.selected = index;
-                        cx.notify();
-                    }
-                }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.confirm_start(index, cx);
-                    }),
-                )
-                .child(super::editor_view::menu_label(agent.name.clone(), colors))
-                .when(index == panel.selected, |row| {
-                    row.child(floating::menu_shortcut("↩", colors))
-                })
-                .when(agent.is_default && index != panel.selected, |row| {
-                    row.child(floating::menu_shortcut("Default", colors))
-                });
+            let row = floating::menu_row(
+                ("note-work-agent", index),
+                logo,
+                colors,
+                index == panel.selected,
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered
+                    && let Some(panel) = &mut this.work.start
+                    && panel.selected != index
+                {
+                    panel.selected = index;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.confirm_start(index, cx);
+                }),
+            )
+            .child(super::editor_view::menu_label(agent.name.clone(), colors))
+            .when(index == panel.selected, |row| {
+                row.child(floating::menu_shortcut("↩", colors))
+            })
+            .when(agent.is_default && index != panel.selected, |row| {
+                row.child(floating::menu_shortcut("Default", colors))
+            });
             list = list.child(row);
         }
         let brief = &panel.brief;
@@ -755,24 +780,32 @@ impl NoteEditorView {
                 super::editor_view::MENU_ICON,
                 colors.secondary,
             );
-            let row = floating::menu_row(("note-work-tick", index), icon, colors, index == panel.selected)
-                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                    if *hovered && let Some(panel) = &mut this.work.tick
-                        && panel.selected != index
-                    {
-                        panel.selected = index;
-                        cx.notify();
-                    }
-                }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.confirm_tick(index, cx);
-                    }),
-                )
-                .child(super::editor_view::menu_label(*label, colors))
-                .when(index == 2, |row| row.child(floating::menu_shortcut("esc", colors)));
+            let row = floating::menu_row(
+                ("note-work-tick", index),
+                icon,
+                colors,
+                index == panel.selected,
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered
+                    && let Some(panel) = &mut this.work.tick
+                    && panel.selected != index
+                {
+                    panel.selected = index;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.confirm_tick(index, cx);
+                }),
+            )
+            .child(super::editor_view::menu_label(*label, colors))
+            .when(index == 2, |row| {
+                row.child(floating::menu_shortcut("esc", colors))
+            });
             list = list.child(row);
         }
         Some(list)
@@ -863,8 +896,7 @@ pub(crate) fn link_in_file(link: &crate::store::WorkLink, session: &SessionId) {
     };
     let _ = store.update(&link.note_id, |note| {
         let found = note.doc.blocks.iter().position(|block| {
-            matches!(block.kind, BlockKind::Todo { .. })
-                && work::task_text(block) == link.todo_text
+            matches!(block.kind, BlockKind::Todo { .. }) && work::task_text(block) == link.todo_text
         });
         if let Some(index) = found {
             diri_notes::handoff::link_session(note, index, &link.label, &session.0);
@@ -926,7 +958,7 @@ impl super::NotePane {
         });
     }
 
-    pub(super) fn on_work(&mut self, request: &WorkRequest, cx: &mut Context<Self>) {
+    pub(crate) fn on_work(&mut self, request: &WorkRequest, cx: &mut Context<Self>) {
         match request {
             WorkRequest::Prepare { block } => self.prepare_work(*block, cx),
             WorkRequest::Start {
@@ -936,7 +968,14 @@ impl super::NotePane {
             } => self.start_work(*block, kind.clone(), agent_name, cx),
             WorkRequest::Open { session } => {
                 let id = SessionId::new(session.clone());
-                if self.runtime.store.read().expect("store").sessions().contains_key(&id) {
+                if self
+                    .runtime
+                    .store
+                    .read()
+                    .expect("store")
+                    .sessions()
+                    .contains_key(&id)
+                {
                     self.save(cx);
                     cx.emit(super::NotePaneEvent::Reveal(id));
                 }
@@ -953,7 +992,11 @@ impl super::NotePane {
 
     /// The note as it stands in the editor, and the document index of the
     /// editor block `block` (the editor's block 0 is the title).
-    fn work_note(&self, block: BlockId, cx: &Context<Self>) -> Option<(diri_notes::store::Note, usize)> {
+    fn work_note(
+        &self,
+        block: BlockId,
+        cx: &Context<Self>,
+    ) -> Option<(diri_notes::store::Note, usize)> {
         let super::PaneState::Open(open) = &self.state else {
             return None;
         };
@@ -1050,14 +1093,22 @@ impl super::NotePane {
         });
     }
 
-    fn start_work(&mut self, block: BlockId, kind: AgentKind, agent_name: &str, cx: &mut Context<Self>) {
+    fn start_work(
+        &mut self,
+        block: BlockId,
+        kind: AgentKind,
+        agent_name: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some((note, todo)) = self.work_note(block, cx) else {
             return;
         };
         let brief = self.brief_for(&note, todo);
         let todo_block = &note.doc.blocks[todo];
         let title = work::task_title(todo_block);
-        let label = diri_notes::mention::session_label(agent_name, &title);
+        // The chip sits right after the to-do's own words: name the agent,
+        // not the task again.
+        let label = diri_notes::mention::session_label(agent_name, "");
         // The file must hold the to-do before the Engine answers, so the
         // executor can link it even if this note is closed by then.
         self.save(cx);

@@ -95,19 +95,19 @@ Links to web pages are passed as links; Diri does not fetch them.
 
 ## 4. Starting
 
-- **Affordance:** a quiet `Start` text button with a `play` symbol at the
+- **Affordance:** a quiet `Start` text button with the plain shortcut at the
   right end of an unlinked, unchecked to-do row. Visible on row hover or
   when the caret is in the row, like Things/Linear. Linked rows show the
   status line instead.
-- **Shortcut:** ⌥⌘↩ with the caret in a to-do. ⌘⇧↩ is taken by Toggle pane
-  zoom (`commands.rs`), and ⌘↩ already ticks a to-do in the editor.
-- **Start panel:** a glass floating panel (`crate::floating`) under the
-  row, native-menu structure:
+- **Shortcut:** ⌃⌘↩ with the caret in a to-do. ⌘⇧↩ is Toggle pane zoom
+  (`commands.rs`), ⌘↩ ticks a to-do, and ⌥⌘↩ folds (PR #602).
+- **Start panel:** hosted like the `/` and `@` menus (`host_menu`: a glass
+  panel window in the app), under the row, with the shared menu row:
   - agent rows (installed agents, the default first with a checkmark,
     20px logos, one row shape), ↑/↓ to choose;
   - a hairline, then "What it gets" with the exact prompt in a scrolling
     mono block and its size ("2.1 KB, 3 context lines, 1 note");
-  - a `Start` row with plain `↩` hint; Escape cancels.
+  - Return starts the highlighted agent; Escape cancels.
   The panel always shows the preview; it's quiet enough to leave on and it
   keeps the "exactly what is sent" promise without a first-use flag.
 - **Spawn:** `SessionSpawnParams { kind, cwd: note session's cwd, parent:
@@ -119,10 +119,9 @@ Links to web pages are passed as links; Diri does not fetch them.
   applies the same chip to its open buffer by block id. Both are idempotent
   (`handoff::link_session` dedups), so a pane with unsaved typing that saves
   over the file still carries the link.
-- **Fold:** the to-do's children fold as soon as it is linked. The
-  disclosure triangle sits in the gutter left of the checkbox when a to-do
-  has children; clicking it overrides the default for that block while the
-  note is open.
+- **Fold:** folding is the editor's (PR #602: gutter chevron, ⌥⌘↩, view
+  state only). Work items use it: a to-do's children fold when Start is
+  pressed, and a note opens with started, unticked to-dos folded.
 
 ## 5. Live tracking
 
@@ -149,7 +148,8 @@ session; no approve from the note.
 - Review is a live state, not a tick.
 - Ticking a to-do whose newest session is `Starting`/`Working`/`NeedsYou`
   opens a small panel: "The agent is still working." rows `Tick and stop
-  the agent` (archives the session), `Tick, keep it running`, `Cancel`.
+  the agent` (archives the session), `Tick, keep it running` (the Return
+  default, since stopping should be picked on purpose), `Cancel`.
 - Ticking in `Review`/`Stopped`/`Gone` just ticks.
 
 ## 7. Navigating
@@ -194,27 +194,26 @@ session; no approve from the note.
 - `dirijor-mcp/src/bridge/notes.rs`: nothing beyond the new `handoff`
   behaviour and its test.
 
-### Hooks in `editor_view.rs` (for the rich-nodes rebase)
+### Hooks in `editor_view.rs` (as built)
 
-1. `NoteEditorView.work: work_item::WorkView` field (fold set, directory,
-   pending starts, open panels).
-2. In the block loop: `work_item::skip_folded(index)` to hide folded
-   children; after a to-do row, `work_item::row_accessory(..)` and
-   `work_item::status_line(..)`.
-3. In `marker()` for `Todo`: a disclosure triangle from
-   `work_item::disclosure(..)` when the to-do has children.
-4. `check()`: routes through `work_item::on_tick(..)` so a running to-do
-   asks first.
-5. One action `StartWork` bound to `alt-cmd-enter` in the editor context.
-6. `EditorEvent::Work(WorkRequest)` for Start/Open/Stop, handled by the
-   pane.
+1. `NoteEditorView.work: work_item::WorkView` (live facts, starts in
+   flight, open panels); `reload` remaps it by to-do text.
+2. In the block loop: `work_accessory(..)` on the row, and
+   `work_status_line(..)` after a visible to-do row.
+3. `check()` and ⌘↩ go through `guard_tick(..)` so a running to-do asks
+   first.
+4. Action `StartWork` on `ctrl-cmd-enter`; Return/arrows/Escape reach an
+   open panel first (`work_panel_key`).
+5. `EditorEvent::Work(WorkRequest)` for Prepare/Start/Open/Stop, handled by
+   the pane (`impl NotePane` in `work_item.rs`).
+6. `anchor_work_menu()` at the top of render, and `work_menu(..)` beside
+   the `/` and `@` menus.
 
 ## 10. Cuts and open questions for the lead
 
 - No answering or approving from the note (see §5). Revisit if the Engine
   grows a structured, prompt-bound answer RPC.
 - `start_from_note` for agents is still blocked on S2; the app path works.
-- Fold state is per open note, not persisted. If (b)'s toggles persist
-  folding, work items adopt it.
+- Fold state is the editor's view state (not persisted), per #602.
 - Hosting inside a workspace pane uses the same NotePane, so it works
   there too; not separately screenshotted.

@@ -29,6 +29,31 @@ We ship the new onboarding on Thursday.
 - [ ] Book the venue for the meetup
 ";
 
+/// A launch plan mid-flight, for screenshots: work in every state.
+pub(crate) const TRACKING: &str = "# Launch plan
+
+We ship the new onboarding on Thursday. Everything below is due Wednesday.
+
+## Marketing
+
+- [ ] Draft 3 LinkedIn posts for the launch [@Claude](diri://session/s_posts)
+  - Tone: plain, confident, no emojis
+  - [Launch brief](https://example.com/launch-brief)
+  - One post per audience: founders, marketers, ops
+  - [@Claude](diri://session/s_posts) 14:02 Drafted the founders post; marketers next
+- [ ] Pick the pricing page headline [@Codex](diri://session/s_pricing)
+- [ ] Write the launch FAQ [@Claude](diri://session/s_faq)
+  - The five questions sales hears most
+- [ ] Book the venue for the meetup
+  - Budget under $2k, near Union Square
+  - 60 people, Thursday evening
+
+## Engineering
+
+- [ ] Fix the signup redirect loop [@Codex](diri://session/s_redirect)
+- [x] Ship the onboarding checklist
+";
+
 const NOTE_SESSION: &str = "s_note_launch";
 const AGENT: &str = "s_posts";
 
@@ -108,7 +133,11 @@ pub(crate) fn launch_loop(source: &str) -> Loop {
 fn open<'a>(
     cx: &'a mut gpui::TestAppContext,
     fixture: &Loop,
-) -> (Entity<NotePane>, Entity<NoteEditorView>, &'a mut gpui::VisualTestContext) {
+) -> (
+    Entity<NotePane>,
+    Entity<NoteEditorView>,
+    &'a mut gpui::VisualTestContext,
+) {
     let runtime = fixture.runtime.clone();
     let store = fixture.store.clone();
     let (pane, cx) =
@@ -121,7 +150,11 @@ fn open<'a>(
     (pane, editor, cx)
 }
 
-fn todo_index(editor: &Entity<NoteEditorView>, cx: &mut gpui::VisualTestContext, text: &str) -> usize {
+fn todo_index(
+    editor: &Entity<NoteEditorView>,
+    cx: &mut gpui::VisualTestContext,
+    text: &str,
+) -> usize {
     editor.read_with(cx, |view, _| {
         view.editor
             .blocks()
@@ -131,7 +164,11 @@ fn todo_index(editor: &Entity<NoteEditorView>, cx: &mut gpui::VisualTestContext,
     })
 }
 
-fn state(editor: &Entity<NoteEditorView>, cx: &mut gpui::VisualTestContext, index: usize) -> WorkState {
+fn state(
+    editor: &Entity<NoteEditorView>,
+    cx: &mut gpui::VisualTestContext,
+    index: usize,
+) -> WorkState {
     editor.read_with(cx, |view, _| view.work.state(view.editor.block(index)))
 }
 
@@ -160,16 +197,20 @@ fn a_todo_becomes_tracked_work_inside_its_note(cx: &mut gpui::TestAppContext) {
 
     // ⌃⌘↩ with the caret in the to-do opens the Start panel with the brief.
     editor.update(cx, |view, cx| {
-        view.editor
-            .set_caret(diri_notes::edit::Pos::new(posts, 3));
+        view.editor.set_caret(diri_notes::edit::Pos::new(posts, 3));
         view.start_work_at_caret(cx);
     });
     cx.run_until_parked();
     let brief = editor.read_with(cx, |view, _| {
-        view.work.start_panel_brief().cloned().expect("Start panel open")
+        view.work
+            .start_panel_brief()
+            .cloned()
+            .expect("Start panel open")
     });
     assert!(
-        brief.prompt.contains("Draft 3 LinkedIn posts for the launch")
+        brief
+            .prompt
+            .contains("Draft 3 LinkedIn posts for the launch")
             && brief.prompt.contains("Tone: plain, confident, no emojis")
             && brief
                 .prompt
@@ -206,7 +247,7 @@ fn a_todo_becomes_tracked_work_inside_its_note(cx: &mut gpui::TestAppContext) {
     let saved = std::fs::read_to_string(fixture.store.path_for(&fixture.id).unwrap()).unwrap();
     assert!(
         saved.contains(
-            "- [ ] Draft 3 LinkedIn posts for the launch [@Claude Code: Draft 3 LinkedIn posts for the launch](diri://session/s_posts)"
+            "- [ ] Draft 3 LinkedIn posts for the launch [@Claude Code](diri://session/s_posts)"
         ),
         "{saved}"
     );
@@ -244,8 +285,7 @@ fn a_todo_becomes_tracked_work_inside_its_note(cx: &mut gpui::TestAppContext) {
         (
             posts,
             children.clone(),
-            view.editor.is_hidden(last)
-                && blocks[last].text.ends_with("Drafted the founders post"),
+            view.editor.is_hidden(last) && blocks[last].text.ends_with("Drafted the founders post"),
         )
     });
     assert_eq!(children.len(), 4, "three context lines and one update");

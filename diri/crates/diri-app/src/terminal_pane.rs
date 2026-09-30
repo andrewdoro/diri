@@ -4088,7 +4088,11 @@ impl TerminalPane {
             let store = self.runtime.store.read().expect("store");
             let note = store.sessions().get(&parent).filter(|p| p.is_note())?;
             let title = note.title.trim();
-            if title.is_empty() { "Untitled".to_owned() } else { title.to_owned() }
+            if title.is_empty() {
+                "Untitled".to_owned()
+            } else {
+                title.to_owned()
+            }
         };
         let child = session.id.clone();
         let runtime = Arc::clone(&self.runtime);
