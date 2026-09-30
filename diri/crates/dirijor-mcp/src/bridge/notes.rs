@@ -2,21 +2,91 @@
 //!
 //! Notes live outside project repos, in Diri's app-support directory, so
 //! agents find them here rather than on disk: the notes for their project,
-//! the notes that mention them, and (once notes are sessions) the note they
-//! were started from. Reads need no Engine; anything about sessions (who is
-//! mentioned, their status, write authorization) comes from `session.list`.
+//! the notes that mention them, and the note they were started from. A note
+//! in the sidebar is a Session of kind `note` whose `note_id` names its file;
+//! "the note I was started from" is the nearest such Session among the
+//! caller's ancestors. Reads need no Engine; anything about sessions (note
+//! sessions, who is mentioned, their status, write authorization) comes from
+//! `session.list`.
 
 use super::*;
 use diri_notes::handoff::{self, TodoSelector};
 use diri_notes::mention::{self, MentionTarget};
 use diri_notes::store::{self as note_store, Note, NoteMeta, NoteStore, Resolve};
+use diri_proto::ProjectId;
 
 const DEFAULT_NOTE_LIMIT: u64 = 50;
 const MAX_NOTE_LIMIT: u64 = 200;
 const MAX_APPEND_BYTES: usize = 64 * 1024;
 const ORIGIN: &str = "origin";
+const NOTE_SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What happened when the CLI asked the Engine to create a note Session.
+#[derive(Debug)]
+pub enum NoteSpawn {
+    Created(Box<SessionRecord>),
+    /// No Engine to ask, or one that predates note Sessions: the caller
+    /// writes the file directly and the note has no Session yet.
+    Unavailable(String),
+}
 
 impl Bridge {
+    /// Creates a note Session (and its file) through `session.spawn`, so the
+    /// note appears in the sidebar under `parent`. `cwd` is the project root.
+    /// Only an unreachable or too-old Engine yields `Unavailable`; an Engine
+    /// that rejects the request is an error, never a silent fallback.
+    pub fn spawn_note(
+        &self,
+        cwd: &str,
+        title: &str,
+        body: &str,
+        parent: Option<&str>,
+    ) -> Result<NoteSpawn, String> {
+        let params = SessionSpawnParams {
+            account_profile_id: None,
+            kind: AgentKind::NOTE,
+            cwd: cwd.to_owned(),
+            new_worktree: None,
+            worktree_branch: None,
+            worktree_base: None,
+            title: Some(title.to_owned()).filter(|t| !t.trim().is_empty()),
+            initial_prompt: Some(body.to_owned()).filter(|b| !b.trim().is_empty()),
+            parent: parent.map(SessionId::new),
+            initial_cols: None,
+            initial_rows: None,
+            host: None,
+            same_repo_as: None,
+            start_directory: None,
+        };
+        let params = serde_json::to_value(params).map_err(|e| e.to_string())?;
+        let mut client = match self.connect(NOTE_SPAWN_TIMEOUT) {
+            Ok(client) => client,
+            Err(failure) => return Ok(NoteSpawn::Unavailable(render_failure(failure))),
+        };
+        let deadline = Instant::now() + NOTE_SPAWN_TIMEOUT;
+        match client.request_until(Method::SESSION_SPAWN.into(), params, deadline) {
+            Ok(value) => {
+                let record: SessionRecord = serde_json::from_value(value)
+                    .map_err(|e| format!("invalid session.spawn response: {e}"))?;
+                if !record.is_note() || record.note_id.is_none() {
+                    return Err(format!(
+                        "the Engine created session {} but not a note",
+                        record.id.0
+                    ));
+                }
+                Ok(NoteSpawn::Created(Box::new(record)))
+            }
+            Err(ControlFailure::Daemon(error))
+                if error.message.contains("no manifest for agent") =>
+            {
+                Ok(NoteSpawn::Unavailable(
+                    "the running Diri Engine predates note sessions".into(),
+                ))
+            }
+            Err(failure) => Err(render_failure(failure)),
+        }
+    }
+
     pub(super) fn list_notes(&self, args: &Value) -> Result<Value, String> {
         let store = self.note_store()?;
         let notes = store
@@ -32,16 +102,23 @@ impl Bridge {
             .unwrap_or_else(|| if self.caller.is_some() { "mine" } else { "all" }.to_owned());
         let mentions = optional_string(args, "mentions");
 
-        let snapshot = if project == "mine" || mentions.is_some() {
-            Some(self.snapshot()?)
-        } else {
-            None
+        // Session facts are optional unless the filter itself needs them.
+        let snapshot = self.snapshot();
+        let needed = || {
+            snapshot
+                .as_ref()
+                .map_err(|error| format!("this filter needs the Diri Engine: {error}"))
         };
-        let project_root = match project.as_str() {
-            "all" => None,
-            "mine" => Some(self.caller_project_root(snapshot.as_ref().expect("fetched above"))?),
-            path => Some(path.to_owned()),
+        let (project_root, project_id) = match project.as_str() {
+            "all" => (None, None),
+            "mine" => {
+                let (root, id) = self.caller_project(needed()?)?;
+                (Some(root), Some(id))
+            }
+            path => (Some(path.to_owned()), None),
         };
+        let sessions: &[SessionRecord] = snapshot.as_ref().map_or(&[], |s| &s.sessions);
+        let by_note = note_sessions(sessions);
         // Session ids that count as "mentioned", each with how it relates to
         // the subject: the subject itself, or one of its ancestors.
         let mentioned: Option<HashMap<String, &'static str>> = match mentions.as_deref() {
@@ -52,8 +129,7 @@ impl Bridge {
                 } else {
                     subject.to_owned()
                 };
-                let sessions = &snapshot.as_ref().expect("fetched above").sessions;
-                let lineage = Lineage::new(sessions, Some(&subject));
+                let lineage = Lineage::new(&needed()?.sessions, Some(&subject));
                 let mut ids = HashMap::from([(subject.clone(), "self")]);
                 for ancestor in lineage.ancestors(&subject) {
                     ids.entry(ancestor.id.0.clone()).or_insert("ancestor");
@@ -65,16 +141,23 @@ impl Bridge {
         let mut rows = Vec::new();
         let mut total = 0;
         for note in &notes {
-            if note.archived && !include_archived {
-                continue;
-            }
-            if let Some(root) = &project_root
-                && !note
-                    .project
-                    .as_deref()
-                    .is_some_and(|p| policy::same_path(p, root))
+            let session = by_note.get(note.id.as_str()).copied();
+            if (note.archived || session.is_some_and(SessionRecord::is_archived))
+                && !include_archived
             {
                 continue;
+            }
+            if let Some(root) = &project_root {
+                let by_file = note
+                    .project
+                    .as_deref()
+                    .is_some_and(|p| policy::same_path(p, root));
+                let by_session = session
+                    .zip(project_id.as_ref())
+                    .is_some_and(|(record, id)| &record.project_id == id);
+                if !by_file && !by_session {
+                    continue;
+                }
             }
             if let Some(query) = &query
                 && !note.haystack.contains(query)
@@ -97,6 +180,9 @@ impl Bridge {
             total += 1;
             if rows.len() < limit {
                 let mut row = note_row(note);
+                if let Some(record) = session {
+                    row["session_id"] = json!(record.id.0);
+                }
                 if let Some(via) = via {
                     row["mentioned_via"] = json!(via);
                 }
@@ -114,12 +200,16 @@ impl Bridge {
 
     pub(super) fn read_note(&self, args: &Value) -> Result<Value, String> {
         let store = self.note_store()?;
-        let meta = self.resolve_note(&store, &required_string(args, "note")?)?;
+        // Notes are readable without Diri running; session facts are extra.
+        let sessions = self.sessions();
+        let meta = self.resolve_note(
+            &store,
+            &required_string(args, "note")?,
+            sessions.as_deref().ok(),
+        )?;
         let note = store
             .load(&meta.id)
             .map_err(|e| format!("cannot read note {}: {e}", meta.id))?;
-        // Notes are readable without Diri running; session facts are extra.
-        let sessions = self.sessions();
         let find = |id: &str| {
             sessions
                 .as_ref()
@@ -174,6 +264,13 @@ impl Bridge {
 
         let mut result = note_row(&meta);
         let object = result.as_object_mut().expect("note_row is an object");
+        if let Some(record) = sessions
+            .as_deref()
+            .ok()
+            .and_then(|all| note_sessions(all).get(meta.id.as_str()).copied())
+        {
+            object.insert("session".into(), session_fact(record));
+        }
         object.insert("markdown".into(), json!(note.to_markdown()));
         object.insert("todos".into(), Value::Array(todos));
         object.insert("mentions".into(), Value::Array(mentions));
@@ -210,8 +307,15 @@ impl Bridge {
         }
 
         let store = self.note_store()?;
-        let meta = self.resolve_note(&store, &required_string(args, "note")?)?;
         let snapshot = self.snapshot()?;
+        let meta = self.resolve_note(
+            &store,
+            &required_string(args, "note")?,
+            Some(&snapshot.sessions),
+        )?;
+        let note_session = note_sessions(&snapshot.sessions)
+            .get(meta.id.as_str())
+            .map(|record| record.id.0.clone());
         let mentioned: Vec<String> = meta
             .mentions
             .iter()
@@ -227,6 +331,7 @@ impl Bridge {
         )?
         .authorize(WriteAction::WriteNote {
             mentions: &mentioned,
+            note_session: note_session.as_deref(),
         })?;
         let link = match link {
             Some(id) => {
@@ -291,15 +396,34 @@ impl Bridge {
         NoteStore::open(dir).map_err(|e| format!("cannot open notes: {e}"))
     }
 
-    fn resolve_note(&self, store: &NoteStore, query: &str) -> Result<NoteMeta, String> {
-        if query == ORIGIN {
-            // The origin is the nearest note session among the caller's
-            // ancestors; it arrives with note sessions on `feat/notes`.
-            return Err(
-                "\"origin\" needs note sessions, which this Diri build does not have yet; pass the note's id or title (list_notes mentions:\"me\" finds notes that mention you)"
-                    .into(),
-            );
-        }
+    /// A note by id or title, by its note Session's id, or `origin`: the
+    /// nearest note Session among the caller's ancestors.
+    fn resolve_note(
+        &self,
+        store: &NoteStore,
+        query: &str,
+        sessions: Option<&[SessionRecord]>,
+    ) -> Result<NoteMeta, String> {
+        let by_session = |id: &str| {
+            sessions
+                .and_then(|all| all.iter().find(|record| record.id.0 == id))
+                .filter(|record| record.is_note())
+                .and_then(|record| record.note_id.clone())
+        };
+        let query = if query == ORIGIN {
+            let caller = self.require_caller()?;
+            let sessions =
+                sessions.ok_or("\"origin\" needs the Diri Engine, which is not reachable")?;
+            Lineage::new(sessions, Some(caller))
+                .ancestors(caller)
+                .into_iter()
+                .find(|record| record.is_note())
+                .and_then(|record| record.note_id.clone())
+                .ok_or("this session was not started from a note (no note session among its ancestors)")?
+        } else {
+            by_session(query).unwrap_or_else(|| query.to_owned())
+        };
+        let query = query.as_str();
         let notes = store
             .list()
             .map_err(|e| format!("cannot list notes: {e}"))?;
@@ -317,20 +441,83 @@ impl Bridge {
         }
     }
 
-    fn caller_project_root(&self, snapshot: &SessionListResult) -> Result<String, String> {
+    /// The caller's project root and id.
+    fn caller_project(&self, snapshot: &SessionListResult) -> Result<(String, ProjectId), String> {
         let caller = self.require_caller()?;
         let record = find_session(&snapshot.sessions, caller)?;
         snapshot
             .projects
             .iter()
             .find(|project| project.id == record.project_id)
-            .map(|project| project.root.clone())
+            .map(|project| (project.root.clone(), project.id.clone()))
             .ok_or_else(|| {
                 format!(
                     "calling session {caller} has no live project; pass project:\"all\" or a path"
                 )
             })
     }
+
+    /// Appends a child's report to its parent note's Updates section.
+    pub(super) fn report_into_note(
+        &self,
+        note: &SessionRecord,
+        caller: &SessionRecord,
+        status: &str,
+        summary: &str,
+        artifacts: &[String],
+    ) -> Result<Value, String> {
+        let note_id = note
+            .note_id
+            .as_deref()
+            .ok_or_else(|| format!("note session {} has no note file", note.id.0))?;
+        let store = self.note_store()?;
+        let label =
+            mention::session_label(short_label(caller.effective_kind().id()), &caller.title);
+        let mut text = if status == "update" {
+            summary.to_owned()
+        } else {
+            format!("{status}: {summary}")
+        };
+        if !artifacts.is_empty() {
+            text.push_str(&format!(" ({})", artifacts.join(", ")));
+        }
+        let date = diri_notes::store::format_timestamp(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+        );
+        store
+            .update(note_id, |doc| {
+                handoff::append_update(doc, &date, &label, &caller.id.0, &text);
+                Ok(())
+            })
+            .map_err(|e| format!("cannot write note {note_id}: {e}"))?;
+        Ok(json!({
+            "ok": true,
+            "parent": note.id.0,
+            "status": status,
+            "recorded_in_note": note_id,
+            "note": "Your parent is a note: the report was added to its Updates section.",
+        }))
+    }
+}
+
+/// Note Sessions by the file they show. A file has at most one live
+/// Session; when an archived one lingers beside it the live one wins.
+fn note_sessions(sessions: &[SessionRecord]) -> HashMap<&str, &SessionRecord> {
+    let mut map: HashMap<&str, &SessionRecord> = HashMap::new();
+    for record in sessions.iter().filter(|record| record.is_note()) {
+        let Some(note_id) = record.note_id.as_deref() else {
+            continue;
+        };
+        match map.get(note_id) {
+            Some(existing) if !existing.is_archived() => {}
+            _ => {
+                map.insert(note_id, record);
+            }
+        }
+    }
+    map
 }
 
 fn note_row(note: &NoteMeta) -> Value {
@@ -496,7 +683,7 @@ mod tests {
             .bridge("child")
             .call("read_note", &json!({"note": "origin"}))
             .unwrap_err();
-        assert!(origin.contains("note sessions"), "{origin}");
+        assert!(origin.contains("not started from a note"), "{origin}");
     }
 
     #[test]
@@ -557,5 +744,159 @@ mod tests {
         ] {
             assert!(bridge.call("write_note", &args).is_err(), "{args}");
         }
+    }
+
+    fn note_session(id: &str, note_id: &str, parent: Option<&str>) -> SessionRecord {
+        let mut record = super::super::tests::record(id, parent);
+        record.kind = AgentKind::NOTE;
+        record.note_id = Some(note_id.into());
+        record.title = "Resize PRD".into();
+        record
+    }
+
+    /// A note session `s_note` with a child agent `child` started from it.
+    fn from_note() -> (Fixture, String) {
+        let notes = tempfile::tempdir().unwrap();
+        let (note_id, _) = NoteStore::open(notes.path())
+            .unwrap()
+            .create(Document::new("Resize PRD", Vec::new()), Some("/elsewhere"))
+            .unwrap();
+        let mut fixture = Fixture::new(vec![
+            note_session("s_note", &note_id, None),
+            super::super::tests::record("child", Some("s_note")),
+            super::super::tests::record("grandchild", Some("child")),
+            super::super::tests::record("stranger", None),
+        ]);
+        fixture.notes = notes;
+        (fixture, note_id)
+    }
+
+    #[test]
+    fn origin_is_the_nearest_note_session_among_ancestors() {
+        let (fixture, note_id) = from_note();
+        for caller in ["child", "grandchild"] {
+            let note = fixture
+                .bridge(caller)
+                .call("read_note", &json!({"note": "origin"}))
+                .unwrap();
+            assert_eq!(note["id"], note_id.as_str());
+            assert_eq!(note["session"]["id"], "s_note");
+        }
+        let by_session = fixture
+            .bridge("stranger")
+            .call("read_note", &json!({"note": "s_note"}))
+            .unwrap();
+        assert_eq!(by_session["id"], note_id.as_str());
+        let none = fixture
+            .bridge("stranger")
+            .call("read_note", &json!({"note": "origin"}))
+            .unwrap_err();
+        assert!(none.contains("not started from a note"), "{none}");
+
+        let whoami = fixture
+            .bridge("grandchild")
+            .call("whoami", &json!({}))
+            .unwrap();
+        assert_eq!(whoami["origin_note"]["note_id"], note_id.as_str());
+        assert_eq!(whoami["origin_note"]["session_id"], "s_note");
+    }
+
+    #[test]
+    fn project_notes_include_note_sessions_in_the_project() {
+        // The file says /elsewhere, but its Session lives in project "p".
+        let (fixture, note_id) = from_note();
+        let listed = fixture
+            .bridge("child")
+            .call("list_notes", &json!({}))
+            .unwrap();
+        assert_eq!(listed["notes"][0]["id"], note_id.as_str());
+        assert_eq!(listed["notes"][0]["session_id"], "s_note");
+    }
+
+    #[test]
+    fn reports_to_a_parent_note_land_in_its_updates() {
+        let (fixture, note_id) = from_note();
+        let report = fixture
+            .bridge("child")
+            .call(
+                "report_to_parent",
+                &json!({"summary": "Fixed the flicker", "status": "done", "artifacts": ["PR #600"]}),
+            )
+            .unwrap();
+        assert_eq!(report["recorded_in_note"], note_id.as_str());
+        let source = fixture.store().load(&note_id).unwrap().to_markdown();
+        assert!(source.contains("## Updates"), "{source}");
+        assert!(
+            source.contains("](diri://session/child)")
+                && source.contains("done: Fixed the flicker (PR #600)"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn a_note_is_not_an_agent_target_and_its_children_act_as_roots() {
+        let (fixture, _) = from_note();
+        let denied = fixture
+            .bridge("child")
+            .call(
+                "send_prompt",
+                &json!({"session_id": "s_note", "text": "hi"}),
+            )
+            .unwrap_err();
+        assert!(denied.contains("is a note, not an agent"), "{denied}");
+        // Started from a note, `child` is a root: it may add to any note.
+        let other = fixture.note("Unrelated", None, "x");
+        fixture
+            .bridge("child")
+            .call("write_note", &json!({"note": other, "append": "ok"}))
+            .unwrap();
+        // `grandchild` is delegated: its origin note yes, others no.
+        fixture
+            .bridge("grandchild")
+            .call("write_note", &json!({"note": "origin", "append": "ok"}))
+            .unwrap();
+        let denied = fixture
+            .bridge("grandchild")
+            .call("write_note", &json!({"note": other, "append": "no"}))
+            .unwrap_err();
+        assert!(denied.contains("write_note denied"), "{denied}");
+    }
+
+    #[test]
+    fn spawn_note_separates_unavailable_from_rejected() {
+        let missing = Bridge::new(PathBuf::from("/nonexistent/diri.sock"), None);
+        assert!(matches!(
+            missing.spawn_note("/tmp", "t", "", None),
+            Ok(NoteSpawn::Unavailable(_))
+        ));
+
+        let old = Peer::new(
+            |_| json!({"__error": {"code": "not_found", "message": "no manifest for agent \"note\""}}),
+        );
+        let bridge = Bridge::new(old.path.clone(), None);
+        assert!(matches!(
+            bridge.spawn_note("/tmp", "t", "", None),
+            Ok(NoteSpawn::Unavailable(reason)) if reason.contains("predates")
+        ));
+
+        let rejecting = Peer::new(
+            |_| json!({"__error": {"code": "bad_request", "message": "cwd is not a directory"}}),
+        );
+        let bridge = Bridge::new(rejecting.path.clone(), None);
+        assert!(bridge.spawn_note("/nope", "t", "", None).is_err());
+
+        let created = note_session("s_new", "n-new", Some("parent"));
+        let current = Peer::new(move |_| serde_json::to_value(&created).unwrap());
+        let bridge = Bridge::new(current.path.clone(), None);
+        let Ok(NoteSpawn::Created(record)) = bridge.spawn_note("/tmp", "t", "body", Some("parent"))
+        else {
+            panic!("expected a note session");
+        };
+        assert_eq!(record.note_id.as_deref(), Some("n-new"));
+
+        let shell = super::super::tests::record("s_shell", None);
+        let wrong = Peer::new(move |_| serde_json::to_value(&shell).unwrap());
+        let bridge = Bridge::new(wrong.path.clone(), None);
+        assert!(bridge.spawn_note("/tmp", "t", "", None).is_err());
     }
 }

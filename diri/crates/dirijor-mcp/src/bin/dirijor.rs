@@ -109,7 +109,7 @@ fn print_help() {
          dirijor session reset-terminal ID\n  \
          Resets the emulator (screen, history, modes, title) without touching the process.\n\n\
          Deferred on Linux: companion forwarding (dirijor forward).\n\n\
-         Notes (plain Markdown files; Diri need not be running):\n  {}",
+         Notes (Markdown files; new notes appear in the sidebar when Diri is running):\n  {}",
         notes::HELP
     );
 }

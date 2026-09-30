@@ -50,12 +50,14 @@ impl Peer {
                     } else {
                         respond(&method)
                     };
+                    // `{"__error": {code, message}}` answers with an Engine error.
+                    let result = match value.get("__error") {
+                        Some(error) => Err(serde_json::from_value(error.clone()).unwrap()),
+                        None => Ok(value),
+                    };
                     serde_json::to_writer(
                         &mut stream,
-                        &diri_proto::ControlMessage::Response {
-                            id,
-                            result: Ok(value),
-                        },
+                        &diri_proto::ControlMessage::Response { id, result },
                     )
                     .unwrap();
                     stream.write_all(b"\n").unwrap();

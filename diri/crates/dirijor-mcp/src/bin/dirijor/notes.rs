@@ -1,23 +1,27 @@
 //! `dirijor note` — capture into and read Diri Notes from any shell or agent.
 //!
-//! Notes are plain files, so this works whether or not Diri is running; the
-//! Notes window's file watcher shows every change the moment it lands.
+//! A new note is created through the Engine as a note Session, so it appears
+//! in the sidebar (under the agent that wrote it). When no Engine is running
+//! the note is written as a plain file instead; everything else here edits
+//! the files directly, under the store lock, and the open editor picks the
+//! change up.
 
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 
-use diri_notes::doc::{Block, Document};
+use diri_notes::doc::Document;
 use diri_notes::handoff::{self, TodoSelector};
 use diri_notes::markdown;
 use diri_notes::mention::{self, MentionTarget};
 use diri_notes::store::{self, NoteMeta, NoteStore, Resolve};
+use dirijor_mcp::bridge::NoteSpawn;
 
 use super::CliError;
 
-pub(crate) const HELP: &str = "dirijor note TEXT                     capture a note into the Inbox (first line is the title)\n  \
-dirijor note add [TEXT] [--title T] [--project PATH] [--pin]   create a note (reads stdin when TEXT is omitted)\n  \
+pub(crate) const HELP: &str = "dirijor note TEXT                     capture a note in this project (first line is the title)\n  \
+dirijor note add [TEXT] [--title T] [--project PATH | --inbox] [--pin]   create a note in this project (reads stdin when TEXT is omitted)\n  \
 dirijor note append NOTE TEXT          append Markdown to a note (NOTE is an id or part of its title)\n  \
-dirijor note todo TEXT [--to NOTE] [--project PATH]   add a to-do (default: the Inbox note \"To-dos\")\n  \
+dirijor note todo TEXT [--to NOTE] [--project PATH | --inbox]   add a to-do (default: this project's note \"To-dos\")\n  \
 dirijor note list [--project PATH] [--mentions SESSION|me] [--all] [--json]\n  \
 dirijor note check NOTE TODO [--undo]   check off a to-do (TODO is its text or part of it)\n  \
 dirijor note link NOTE TODO SESSION    link a session to a to-do as an @-mention\n  \
@@ -65,6 +69,7 @@ struct Flags {
     mentions: Option<String>,
     pin: bool,
     undo: bool,
+    inbox: bool,
     all: bool,
     json: bool,
 }
@@ -78,6 +83,7 @@ fn flags(arguments: &[String]) -> Result<Flags, CliError> {
         mentions: None,
         pin: false,
         undo: false,
+        inbox: false,
         all: false,
         json: false,
     };
@@ -94,6 +100,7 @@ fn flags(arguments: &[String]) -> Result<Flags, CliError> {
             "--to" => out.to = Some(value("--to")?),
             "--mentions" => out.mentions = Some(value("--mentions")?),
             "--undo" => out.undo = true,
+            "--inbox" => out.inbox = true,
             "--pin" => out.pin = true,
             "--all" => out.all = true,
             "--json" => out.json = true,
@@ -131,7 +138,7 @@ fn text_or_stdin(positional: &[String]) -> Result<String, CliError> {
 fn add(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
     let flags = flags(arguments)?;
     let text = text_or_stdin(&flags.positional)?;
-    let (title, body) = match flags.title {
+    let (title, body) = match flags.title.clone() {
         Some(title) => (title, text),
         None => {
             let text = text.trim_start();
@@ -142,19 +149,100 @@ fn add(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
             )
         }
     };
-    let (_, parsed) = markdown::parse(&format!("\n{body}"));
-    let doc = Document::new(title, parsed.blocks);
-    let (id, mut note) = store
-        .create(doc, flags.project.as_deref())
-        .map_err(|e| CliError::failure(format!("cannot create note: {e}")))?;
+    let place = placement(&flags)?;
+    let parent = std::env::var(diri_proto::paths::ENV_SESSION_ID).ok();
+    let id = create_note(store, &title, &body, &place, parent.as_deref())?;
     if flags.pin {
-        note.front.set_flag(diri_notes::store::KEY_PINNED, true);
         store
-            .save(&id, &note)
+            .update(&id, |note| {
+                note.front.set_flag(diri_notes::store::KEY_PINNED, true);
+                Ok(())
+            })
             .map_err(|e| CliError::failure(format!("cannot save note: {e}")))?;
     }
     println!("{id}");
     Ok(())
+}
+
+/// Where a new note belongs.
+enum Placement {
+    /// A project root: the note becomes a sidebar Session in that project.
+    Project(String),
+    /// `--inbox`: a file with no project and no Session.
+    Inbox,
+}
+
+/// `--inbox`, else `--project`, else the calling agent's project, else the
+/// current directory, the way `dirijor session spawn` treats its cwd.
+fn placement(flags: &Flags) -> Result<Placement, CliError> {
+    if flags.inbox {
+        return Ok(Placement::Inbox);
+    }
+    if let Some(project) = &flags.project {
+        return Ok(Placement::Project(project.clone()));
+    }
+    if let Some(root) = caller_project_root() {
+        return Ok(Placement::Project(root));
+    }
+    let here = std::env::current_dir()
+        .map_err(|e| CliError::failure(format!("current directory: {e}")))?;
+    project_root(&here.to_string_lossy()).map(Placement::Project)
+}
+
+/// An agent's worktree is not its project; its record's project root is.
+fn caller_project_root() -> Option<String> {
+    let caller = std::env::var(diri_proto::paths::ENV_SESSION_ID).ok()?;
+    let listing = super::bridge()
+        .request(
+            diri_proto::Method::SESSION_LIST,
+            serde_json::json!({}),
+            std::time::Duration::from_secs(3),
+        )
+        .ok()?;
+    let listing: diri_proto::SessionListResult = serde_json::from_value(listing).ok()?;
+    let record = listing.sessions.iter().find(|r| r.id.0 == caller)?;
+    listing
+        .projects
+        .into_iter()
+        .find(|project| project.id == record.project_id && project.host.is_none())
+        .map(|project| project.root)
+}
+
+/// Creates a note through the Engine so it gets a sidebar Session (under
+/// `parent`), or as a plain file when no Engine can take it. Returns the
+/// note id either way.
+fn create_note(
+    store: &NoteStore,
+    title: &str,
+    body: &str,
+    place: &Placement,
+    parent: Option<&str>,
+) -> Result<String, CliError> {
+    let project = match place {
+        Placement::Project(root) => {
+            match super::bridge()
+                .spawn_note(root, title, body, parent)
+                .map_err(|e| CliError::failure(format!("cannot create note: {e}")))?
+            {
+                NoteSpawn::Created(record) => {
+                    return Ok(record.note_id.expect("spawn_note checks note_id"));
+                }
+                NoteSpawn::Unavailable(reason) => {
+                    eprintln!(
+                        "dirijor: {reason}; saved the note as a file only, it has no sidebar entry yet"
+                    );
+                    Some(root.as_str())
+                }
+            }
+        }
+        Placement::Inbox => None,
+    };
+    let (_, parsed) = markdown::parse(&format!("\n{body}"));
+    let doc = Document::new(title, parsed.blocks);
+    store
+        .create(doc, project)
+        .map(|(id, _)| id)
+        .map_err(|e| CliError::failure(format!("cannot create note: {e}")))
 }
 
 fn append(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
@@ -185,7 +273,7 @@ fn todo(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
     }
     let meta = match &flags.to {
         Some(target) => resolve(store, target)?,
-        None => inbox_todos(store, flags.project.as_deref())?,
+        None => inbox_todos(store, &placement(&flags)?)?,
     };
     store
         .append(&meta.id, &items.join("\n"))
@@ -194,8 +282,13 @@ fn todo(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// The note loose to-dos collect in: "To-dos" in the Inbox or the project.
-fn inbox_todos(store: &NoteStore, project: Option<&str>) -> Result<NoteMeta, CliError> {
+/// The note loose to-dos collect in: "To-dos" in the project (or Inbox).
+/// It belongs to the project, not to whichever agent added the first item.
+fn inbox_todos(store: &NoteStore, place: &Placement) -> Result<NoteMeta, CliError> {
+    let project = match place {
+        Placement::Project(root) => Some(root.as_str()),
+        Placement::Inbox => None,
+    };
     let notes = store
         .list()
         .map_err(|e| CliError::failure(format!("cannot list notes: {e}")))?;
@@ -205,10 +298,7 @@ fn inbox_todos(store: &NoteStore, project: Option<&str>) -> Result<NoteMeta, Cli
     {
         return Ok(found);
     }
-    let doc = Document::new("To-dos", Vec::<Block>::new());
-    let (id, _) = store
-        .create(doc, project)
-        .map_err(|e| CliError::failure(format!("cannot create note: {e}")))?;
+    let id = create_note(store, "To-dos", "", place, None)?;
     store
         .meta(&id)
         .map_err(|e| CliError::failure(format!("cannot read note: {e}")))

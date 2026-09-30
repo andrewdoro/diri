@@ -192,12 +192,9 @@ that lands during typing is overwritten.
 
 ## Seams the lead needs to decide (not built here)
 
-- **S1: creating a note session from outside the app.** `dirijor note add`
-  and `start_from_note` on a note without a session need a way to create one.
-  Proposal: additive `SessionSpawnParams.note_id: Option<String>` with
-  `kind = note` over plain `session.spawn`. The Engine validates the id
-  charset only and never opens the file. It is idempotent per `note_id`: a
-  second call returns the existing live note session.
+- **S1: creating a note session from outside the app. Resolved** by
+  `session.spawn` kind `note` (feat/notes 49f5fc47). `dirijor note add/todo`
+  now create through it; see "CLI creation" below.
 - **S2: agent-initiated handoff with the note as parent.**
   `session.spawn_tracked` requires `spawn.parent == senderID`
   (`control/operations.rs:129`). When an agent calls `start_from_note`, the
@@ -210,11 +207,12 @@ that lands during typing is overwritten.
     dedup on MCP retries.
   - The app path is unaffected either way (`session.spawn` already accepts
     any parent).
-- **S3: terminal-only RPCs on note sessions.** `session.deliver_message`,
-  `task.submit`, `session.read_screen`, attach, and resume against a note
-  session must fail fast with a structured error (proposed
-  `session_has_no_terminal`) instead of waiting for a TUI. MCP tools map it
-  to "this is a note; use read_note".
+- **S3: terminal-only RPCs on note sessions.** Guarded client-side: MCP
+  `send_prompt`, `submit_task`, manage, and release refuse a note target
+  ("is a note, not an agent"), and `report_to_parent` to a note writes into
+  it. The Engine still accepts `session.deliver_message` / `task.submit` for
+  a note from other clients; a structured `session_has_no_terminal` there
+  would close the gap for good.
 - **S4: project of a note session.** The note session's `cwd`/`project_id`
   must be derived from the front-matter `project` root exactly as for agents
   (`session_project_id(root, None)`), or children will not indent under it.
@@ -232,13 +230,56 @@ that lands during typing is overwritten.
   archive ↔ `archived: true`, and remove → trash. Both are done by the app,
   not the Engine.
 
+- **S7: adopting orphan note files.** Notes written before note sessions
+  (the PR #597 Notes window, or `dirijor note` while the Engine was down)
+  have files but no Session, and with the Notes window gone the app no longer
+  shows them. Adopting by copying content into a new note session would change
+  the note id, which breaks `diri://note/` mentions and loses `created`.
+  Proposal: additive `SessionSpawnParams.note_id`. For kind `note` with
+  `note_id` set, `session_spawn_note` skips `store.create`, checks that the
+  file exists (`store.meta`), and returns the existing live note Session if
+  one already carries that `note_id`. Otherwise it inserts the record as it
+  does today, with title from the file and `cwd` from its `project`, falling
+  back to the request's `cwd`. The app, or the Engine at start, can then adopt
+  unarchived orphans once, and the CLI can adopt the note it touches. Until
+  then, orphans are still found by `list_notes` and `dirijor note list`.
+
+## CLI creation
+
+`dirijor note add` and `dirijor note todo` (when it has to create the
+project's "To-dos" note) go through `Bridge::spawn_note` → `session.spawn`
+kind `note`:
+
+- The project is `--project`, else the calling agent's project root (so a
+  worktree agent's note lands in the repo's project), else the current
+  directory. `--inbox` writes a project-less file with no Session.
+- The parent is the calling session (`DIRIJOR_SESSION_ID`), so a note an
+  agent writes is indented under it. The shared "To-dos" note has no parent.
+- An unreachable Engine, or one that predates note sessions (`no manifest
+  for agent "note"`), writes the file directly and says so on stderr. Any
+  other Engine error fails the command and never falls back silently.
+- Other edits (`append`, `todo --to`, `check`, `link`) stay direct file
+  writes under the store lock. The Engine never needs to know about them.
+
 ## Status
 
-Built on `notes/engine-agents` (stacked on PR #600): steps 1–4 below, plus
-`dirijor note check|link|list --mentions`. `read_note` rejects
-`"origin"` with a clear error until note sessions land. Verified against the
-live Engine: a note mentioning the calling session is found by
-`list_notes mentions:"me"`, and its to-do resolves to that live session.
+Built on `notes/engine-agents` (base `feat/notes` 49f5fc47, plus
+`diri_notes::mention` taken unchanged from PR #600):
+
+- Mentions in `NoteMeta`; `NoteStore::update` / `save_if_unchanged` under a
+  store lock; `handoff` helpers (to-dos, links, Updates, prompt).
+- MCP `list_notes` (joins note sessions: `session_id`, project via the
+  Session's `project_id`), `read_note` (id, title, note Session id, or
+  `origin`), `write_note`, `whoami.origin_note`, `report_to_parent` → note.
+- Policy: children of a note are roots, spawn depth skips notes, notes are
+  never agent targets, delegated `write_note` reaches the origin note.
+- CLI creation through note sessions with a file fallback; `check`, `link`,
+  `list --mentions`.
+- Verified: unit tests against a fake Engine; `tests/notes_cli.rs` drives the
+  real `dirijor` binary against an in-process `ControlServer`; a manual run
+  against the live Engine found a note mentioning the calling session.
+- Not built: `start_from_note` (waits on S2), orphan adoption (S7), app use
+  of `save_if_unchanged` (editor owner).
 
 ## Build order (this work)
 
@@ -247,7 +288,6 @@ live Engine: a note mentioning the calling session is found by
 3. `diri_notes::handoff` (prompt builder, to-do link insertion) + tests.
 4. MCP `list_notes` / `read_note` / `write_note` + CLI parity. Discovery by
    file project and mentions works before note sessions exist.
-5. After `feat/notes` lands note sessions: rebase, then add note-session
-   joins, `origin` resolution, `whoami.origin_note`, `start_from_note`,
-   `report_to_parent` → note, and the policy changes. Tests use a fake
-   `session.list` with `kind: note` records.
+5. Done after note sessions landed: note-session joins, `origin`,
+   `whoami.origin_note`, `report_to_parent` → note, policy changes, CLI
+   creation. Remaining: `start_from_note` once S2 is decided.

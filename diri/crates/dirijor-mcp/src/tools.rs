@@ -303,12 +303,12 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "list_notes",
-            "Find the user's Diri Notes (PRDs, plans, to-do lists). They live outside the repo, so use this rather than searching files. Defaults to notes for your project; project:\"all\" lists every note, or pass a project root path. mentions:\"me\" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body.",
+            "Find the user's Diri Notes (PRDs, plans, to-do lists). They live outside the repo, so use this rather than searching files. Defaults to notes for your project; project:\"all\" lists every note, or pass a project root path. mentions:\"me\" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body. session_id is the note's sidebar Session.",
             json!({"type":"object","properties":{"project":{"type":"string","minLength":1},"mentions":{"type":"string","minLength":1},"query":{"type":"string","minLength":1},"include_archived":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200}}}),
         ),
         ToolDefinition::new(
             "read_note",
-            "Read one Diri note as Markdown, with its to-dos (block index, checked, linked sessions and their live status) and its @-mentions resolved to sessions or notes. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, or part of a title.",
+            "Read one Diri note as Markdown, with its to-dos (block index, checked, linked sessions and their live status) and its @-mentions resolved to sessions or notes. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, part of a title, a note Session id, or \"origin\": the note you were started from (whoami shows it as origin_note).",
             json!({"type":"object","properties":{"note":{"type":"string","minLength":1}},"required":["note"]}),
         ),
         ToolDefinition::new(
