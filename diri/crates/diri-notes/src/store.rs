@@ -12,11 +12,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::doc::{BlockKind, Document};
 use crate::markdown::{self, FrontMatter};
+use crate::mentions::{self, MentionTarget};
 
 /// Notes larger than this are listed but not loaded into the editor.
 pub const MAX_NOTE_BYTES: u64 = 4 * 1024 * 1024;
 const SNIPPET_CHARS: usize = 140;
 const TRASH_DIR: &str = ".trash";
+const LOCK_FILE: &str = ".lock";
 
 pub const KEY_ID: &str = "id";
 pub const KEY_CREATED: &str = "created";
@@ -59,6 +61,8 @@ pub struct NoteMeta {
     pub todos_total: usize,
     /// Open to-dos in document order: (block index, text).
     pub open_todos: Vec<(usize, String)>,
+    /// Distinct `diri://` mention targets, in first-mention order.
+    pub mentions: Vec<MentionTarget>,
     /// Lower-cased title + body, for search.
     pub haystack: String,
 }
@@ -110,9 +114,18 @@ impl NoteMeta {
             todos_done,
             todos_total,
             open_todos,
+            mentions: mentions::targets(&note.doc),
             haystack: format!("{}\n{}", note.doc.title, body).to_lowercase(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SaveOutcome {
+    /// Written; `source` is what the file now holds.
+    Saved { source: String },
+    /// Someone else changed (or removed) the file since it was loaded.
+    Conflict { current: Option<String> },
 }
 
 pub struct NoteStore {
@@ -210,8 +223,71 @@ impl NoteStore {
 
     /// Atomically replaces the note's file.
     pub fn save(&self, id: &str, note: &Note) -> io::Result<()> {
+        let _lock = self.lock()?;
+        self.write(id, &note.to_markdown())
+    }
+
+    /// Saves only when the file still holds `expected` (the source the caller
+    /// loaded), so an editor with unsaved typing never overwrites what the
+    /// CLI or an agent wrote meanwhile. A missing file is a conflict too.
+    pub fn save_if_unchanged(
+        &self,
+        id: &str,
+        note: &Note,
+        expected: &str,
+    ) -> io::Result<SaveOutcome> {
+        let _lock = self.lock()?;
+        let current = match fs::read_to_string(self.path_for(id)?) {
+            Ok(current) => Some(current),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        if current.as_deref() != Some(expected) {
+            return Ok(SaveOutcome::Conflict { current });
+        }
+        let source = note.to_markdown();
+        self.write(id, &source)?;
+        Ok(SaveOutcome::Saved { source })
+    }
+
+    /// Read-modify-write under the store lock: `edit` sees the note as it is
+    /// on disk now, and the file is rewritten only if `edit` changed it.
+    /// Every writer outside the editor (CLI, agents) goes through here.
+    pub fn update<T>(
+        &self,
+        id: &str,
+        edit: impl FnOnce(&mut Note) -> io::Result<T>,
+    ) -> io::Result<(Note, T)> {
+        let _lock = self.lock()?;
+        let before = self.load(id)?;
+        let mut note = before.clone();
+        let out = edit(&mut note)?;
+        if note != before {
+            self.write(id, &note.to_markdown())?;
+        }
+        Ok((note, out))
+    }
+
+    /// An exclusive advisory lock over the whole store, held for one
+    /// read-modify-write and released when the returned file drops. Not
+    /// reentrant: never take it twice on one thread.
+    fn lock(&self) -> io::Result<fs::File> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join(LOCK_FILE))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        file.lock()?;
+        Ok(file)
+    }
+
+    fn write(&self, id: &str, contents: &str) -> io::Result<()> {
         let path = self.path_for(id)?;
-        let contents = note.to_markdown();
         let tmp = self.dir.join(format!(".{id}.{}.tmp", nonce()));
         let result = (|| {
             let mut file = fs::OpenOptions::new()
@@ -248,24 +324,11 @@ impl NoteStore {
 
     /// Appends Markdown to a note's body (quick capture from the CLI).
     pub fn append(&self, id: &str, markdown_body: &str) -> io::Result<Note> {
-        let mut note = self.load(id)?;
-        let (_, extra) = markdown::parse(&format!("\n{markdown_body}"));
-        let mut blocks: Vec<_> = note
-            .doc
-            .blocks
-            .iter()
-            .filter(|b| !(b.kind == BlockKind::Paragraph && b.text.is_empty()))
-            .cloned()
-            .collect();
-        blocks.extend(
-            extra
-                .blocks
-                .into_iter()
-                .filter(|b| !b.text.is_empty() || b.kind == BlockKind::Divider),
-        );
-        note.doc = Document::new(note.doc.title.clone(), blocks);
-        self.save(id, &note)?;
-        Ok(note)
+        self.update(id, |note| {
+            append_markdown(note, markdown_body);
+            Ok(())
+        })
+        .map(|(note, ())| note)
     }
 
     /// Moves the note into `.trash/`, from where it can be restored by hand.
@@ -285,6 +348,25 @@ impl NoteStore {
     }
 }
 
+/// Appends Markdown blocks to the end of a note, dropping blank paragraphs.
+pub fn append_markdown(note: &mut Note, markdown_body: &str) {
+    let (_, extra) = markdown::parse(&format!("\n{markdown_body}"));
+    let mut blocks: Vec<_> = note
+        .doc
+        .blocks
+        .iter()
+        .filter(|b| !(b.kind == BlockKind::Paragraph && b.text.is_empty()))
+        .cloned()
+        .collect();
+    blocks.extend(
+        extra
+            .blocks
+            .into_iter()
+            .filter(|b| !b.text.is_empty() || b.kind == BlockKind::Divider),
+    );
+    note.doc = Document::new(note.doc.title.clone(), blocks);
+}
+
 pub fn parse_note(source: &str) -> Note {
     let (front, doc) = markdown::parse(source);
     Note { front, doc }
@@ -300,14 +382,19 @@ pub fn note_id(path: &Path) -> Option<String> {
     Some(stem.to_owned())
 }
 
-fn validate_id(id: &str) -> io::Result<()> {
-    let ok = !id.is_empty()
+/// Note ids (and the session ids mentions carry) are single path-safe
+/// components: ASCII alphanumerics, `-` and `_`, never hidden.
+pub fn is_valid_id(id: &str) -> bool {
+    !id.is_empty()
         && id.len() <= 128
         && !id.starts_with('.')
         && id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if ok {
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn validate_id(id: &str) -> io::Result<()> {
+    if is_valid_id(id) {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -436,6 +523,108 @@ mod tests {
         assert!(store.list().unwrap().is_empty());
         store.restore(&id).unwrap();
         assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_appends_are_never_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NoteStore::open(dir.path().join("notes")).unwrap();
+        let (id, _) = store
+            .create(Document::new("Log", Vec::new()), None)
+            .unwrap();
+        std::thread::scope(|scope| {
+            for writer in 0..8 {
+                let (store, id) = (&store, &id);
+                scope.spawn(move || {
+                    // A store per writer, as separate processes would have.
+                    let store = NoteStore::open(store.dir()).unwrap();
+                    for n in 0..10 {
+                        store.append(id, &format!("- w{writer} n{n}")).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(store.load(&id).unwrap().doc.blocks.len(), 80);
+    }
+
+    #[test]
+    fn save_if_unchanged_refuses_to_overwrite_outside_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NoteStore::open(dir.path().join("notes")).unwrap();
+        let (id, note) = store
+            .create(Document::new("PRD", Vec::new()), None)
+            .unwrap();
+        let loaded = note.to_markdown();
+
+        // An agent appends while the editor has unsaved typing.
+        store.append(&id, "- [ ] from the agent").unwrap();
+        let mut typed = note.clone();
+        append_markdown(&mut typed, "typed in the editor");
+        let SaveOutcome::Conflict {
+            current: Some(current),
+        } = store.save_if_unchanged(&id, &typed, &loaded).unwrap()
+        else {
+            panic!("expected a conflict");
+        };
+        assert!(current.contains("from the agent"));
+        assert!(
+            store
+                .load(&id)
+                .unwrap()
+                .to_markdown()
+                .contains("from the agent")
+        );
+
+        // Against the current source the save goes through.
+        let SaveOutcome::Saved { source } = store.save_if_unchanged(&id, &typed, &current).unwrap()
+        else {
+            panic!("expected a save");
+        };
+        assert_eq!(
+            fs::read_to_string(store.path_for(&id).unwrap()).unwrap(),
+            source
+        );
+
+        store.trash(&id).unwrap();
+        assert_eq!(
+            store.save_if_unchanged(&id, &typed, &source).unwrap(),
+            SaveOutcome::Conflict { current: None }
+        );
+    }
+
+    #[test]
+    fn update_skips_unchanged_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NoteStore::open(dir.path().join("notes")).unwrap();
+        let (id, _) = store
+            .create(Document::new("Same", Vec::new()), None)
+            .unwrap();
+        let path = store.path_for(&id).unwrap();
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (_, answer) = store.update(&id, |_| Ok(42)).unwrap();
+        assert_eq!(answer, 42);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+    }
+
+    #[test]
+    fn meta_lists_mentions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NoteStore::open(dir.path().join("notes")).unwrap();
+        let (id, _) = store.create(Document::new("M", Vec::new()), None).unwrap();
+        store
+            .append(
+                &id,
+                "Ask [@Codex](diri://session/s_1) about [@PRD](diri://note/n1)",
+            )
+            .unwrap();
+        assert_eq!(
+            store.meta(&id).unwrap().mentions,
+            vec![
+                MentionTarget::Session("s_1".into()),
+                MentionTarget::Note("n1".into())
+            ]
+        );
     }
 
     #[test]
