@@ -2698,6 +2698,7 @@ impl SessionStore {
                 account_profile_id: None,
                 same_repo_as: None,
                 start_directory: None,
+                note_id: None,
             },
         });
         true
@@ -2789,6 +2790,7 @@ impl SessionStore {
             account_profile_id: options.account_profile_id,
             same_repo_as: options.same_repo_as,
             start_directory,
+            note_id: None,
         }
     }
 

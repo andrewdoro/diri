@@ -477,6 +477,11 @@ pub struct SessionSpawnParams {
     /// not open a new project. Ignored for Agents and remote hosts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_directory: Option<String>,
+    /// For kind `note`: adopt this existing notes file instead of creating
+    /// one. Idempotent per note id: the note's live Session is returned when
+    /// it already has one. The file keeps its id and created date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_id: Option<String>,
 }
 
 pub type SessionSpawnResult = SessionRecord;

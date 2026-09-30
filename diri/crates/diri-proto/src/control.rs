@@ -10,6 +10,9 @@ pub const WIRE_VERSION: u32 = 1;
 /// Maximum byte length of one newline-delimited control message.
 pub const MAX_CONTROL_LINE_BYTES: usize = 4 * 1024 * 1024;
 
+/// Error code for a terminal or process request aimed at a note Session.
+pub const SESSION_HAS_NO_TERMINAL: &str = "session_has_no_terminal";
+
 /// The protocol's untyped JSON payload.
 pub type JsonValue = Value;
 

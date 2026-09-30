@@ -260,6 +260,7 @@ impl Api {
             account_profile_id: None,
             same_repo_as: None,
             start_directory: None,
+            note_id: None,
         };
 
         match self

@@ -25,6 +25,10 @@ pub const KEY_CREATED: &str = "created";
 pub const KEY_PROJECT: &str = "project";
 pub const KEY_PINNED: &str = "pinned";
 pub const KEY_ARCHIVED: &str = "archived";
+/// The Session that shows this note in the sidebar. Written when the Engine
+/// creates or adopts the note and kept afterwards, so a note whose Session
+/// was removed on purpose is never adopted again.
+pub const KEY_SESSION: &str = "session";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
@@ -61,6 +65,9 @@ pub struct NoteMeta {
     pub todos_total: usize,
     /// Open to-dos in document order: (block index, text).
     pub open_todos: Vec<(usize, String)>,
+    /// The Session this note was given ([`KEY_SESSION`]); `None` for notes
+    /// written before note Sessions or while the Engine was down.
+    pub session: Option<String>,
     /// Distinct `diri://` mention targets, in first-mention order.
     pub mentions: Vec<MentionTarget>,
     /// Lower-cased title + body, for search.
@@ -114,6 +121,11 @@ impl NoteMeta {
             todos_done,
             todos_total,
             open_todos,
+            session: note
+                .front
+                .get(KEY_SESSION)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             mentions: note.doc.mentions(),
             haystack: format!("{}\n{}", note.doc.title, body).to_lowercase(),
         }
@@ -311,12 +323,23 @@ impl NoteStore {
 
     /// Creates a note and returns its id. `project` is a project root path.
     pub fn create(&self, doc: Document, project: Option<&str>) -> io::Result<(String, Note)> {
+        self.create_for_session(doc, project, None)
+    }
+
+    /// Creates a note already stamped with the Session that will show it.
+    pub fn create_for_session(
+        &self,
+        doc: Document,
+        project: Option<&str>,
+        session: Option<&str>,
+    ) -> io::Result<(String, Note)> {
         let now = SystemTime::now();
         let id = new_id(now);
         let mut front = FrontMatter::default();
         front.set(KEY_ID, Some(id.clone()));
         front.set(KEY_CREATED, Some(format_timestamp(secs(now))));
         front.set(KEY_PROJECT, project.map(str::to_owned));
+        front.set(KEY_SESSION, session.map(str::to_owned));
         let note = Note { front, doc };
         self.save(&id, &note)?;
         Ok((id, note))

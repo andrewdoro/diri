@@ -54,6 +54,30 @@ const fn default_shell() -> &'static str {
     "/bin/sh"
 }
 
+/// Requests that act on a Session's terminal or process. A note Session
+/// has neither, so these fail with `session_has_no_terminal`.
+const TERMINAL_ONLY_METHODS: &[&str] = &[
+    Method::SESSION_DELIVER_MESSAGE,
+    Method::TASK_SUBMIT,
+    Method::SESSION_SEND_KEY,
+    Method::SESSION_SEND_TEXT,
+    Method::SESSION_RESIZE,
+    Method::SESSION_READ_SCREEN,
+    Method::SESSION_TERMINAL_TITLE,
+    Method::SESSION_RESET_TERMINAL,
+    Method::SESSION_CAPTURE_FIND,
+    Method::SESSION_READ_SCROLLBACK,
+    Method::SESSION_READ_SCROLLBACK_CELLS,
+    Method::SESSION_READ_TRANSCRIPT,
+    Method::SESSION_RESUME,
+    Method::SESSION_RECONNECT,
+    Method::SESSION_HIBERNATE,
+    Method::SESSION_WAKE,
+    Method::SESSION_FORK,
+    Method::SESSION_MIGRATE,
+    Method::SESSION_CONTINUE_ACCOUNT,
+];
+
 pub struct ControlServer {
     engine_instance_id: String,
     registry: Arc<Mutex<Registry>>,
@@ -547,6 +571,15 @@ impl ControlServer {
                     // its immediate pass seeing a foreground/recent session
                     // even if registration has not completed yet.
                     if let Ok(mut registry) = self.registry.lock() {
+                        // The attach stream has no error frame: closing at once
+                        // is how it fails, as for any id without a terminal.
+                        if registry.is_note(&attach.attach.0) {
+                            diri_telemetry::event!(
+                                "attach.note_rejected",
+                                session = diri_telemetry::id(&attach.attach.0),
+                            );
+                            return Ok(());
+                        }
                         if registry.get(&attach.attach.0).is_some_and(|session| {
                             !session.allows_keyboard_controller(attach.enhanced_keyboard)
                         }) {
@@ -821,6 +854,9 @@ impl ControlServer {
         method: &str,
         params: Option<JsonValue>,
     ) -> Result<JsonValue, ControlError> {
+        if TERMINAL_ONLY_METHODS.contains(&method) {
+            self.reject_note_terminal(method, params.as_ref())?;
+        }
         // Bulk switching excludes concurrent launches/catalog edits without blocking input,
         // output, snapshots, or unrelated read-only requests.
         let _account_switch = if matches!(
@@ -1299,10 +1335,33 @@ impl ControlServer {
         serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
     }
 
+    /// A note has no terminal: typing into it, reading its screen, or
+    /// resuming it can never succeed, so every client learns that at once
+    /// instead of waiting on a PTY that will never exist.
+    fn reject_note_terminal(
+        &self,
+        method: &str,
+        params: Option<&JsonValue>,
+    ) -> Result<(), ControlError> {
+        let Some(id) = crate::telemetry::request_session(params) else {
+            return Ok(());
+        };
+        if !self.registry.lock().map_err(poisoned)?.is_note(&id) {
+            return Ok(());
+        }
+        Err(ControlError::new(
+            diri_proto::control::SESSION_HAS_NO_TERMINAL,
+            format!(
+                "{id} is a note, which has no terminal; {method} applies only to agents and terminals"
+            ),
+        ))
+    }
+
     /// A note Session: a record with no process, backed by a Markdown file
     /// in the notes store. The file is created first so a record can never
     /// point at a note that does not exist. `initial_prompt` seeds the body
-    /// (Markdown), which is how a PRD or handoff arrives pre-written.
+    /// (Markdown), which is how a PRD or handoff arrives pre-written. With
+    /// `note_id` the Session adopts that existing file instead.
     fn session_spawn_note(
         &self,
         p: diri_proto::SessionSpawnParams,
@@ -1316,41 +1375,148 @@ impl ControlServer {
         if p.new_worktree.unwrap_or(false) {
             return Err(ControlError::bad_request("a note has no worktree"));
         }
+        let store = self.note_store()?;
+        let id = reserved_id.unwrap_or_else(next_session_id);
+        if let Some(note_id) = p.note_id.as_deref() {
+            let requested = Some(p.cwd.trim()).filter(|cwd| !cwd.is_empty());
+            let record = self.adopt_note(&store, note_id, requested, p.parent.clone(), id)?;
+            return serde_json::to_value(&record)
+                .map_err(|error| ControlError::internal(error.to_string()));
+        }
         let cwd = p.cwd.trim().to_owned();
         if cwd.is_empty() || !Path::new(&cwd).is_dir() {
             return Err(ControlError::bad_request(format!(
                 "cwd {cwd:?} is not a directory"
             )));
         }
-        let store = self.note_store()?;
         let title = p.title.clone().unwrap_or_default();
         let body = p.initial_prompt.clone().unwrap_or_default();
         let (_, parsed) = diri_notes::markdown::parse(&format!("\n{body}"));
         let doc = diri_notes::doc::Document::new(title.trim(), parsed.blocks);
-        let (note_id, _) = store.create(doc, Some(&cwd)).map_err(io_control_error)?;
+        let (note_id, _) = store
+            .create_for_session(doc, Some(&cwd), Some(&id))
+            .map_err(io_control_error)?;
+        let record = note_record(&id, &cwd, title.trim(), note_id, p.parent.clone());
+        self.insert_note_record(record.clone())?;
+        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
 
-        let id = reserved_id.unwrap_or_else(next_session_id);
-        let mut registry = self.registry.lock().map_err(poisoned)?;
-        let mut record = new_record(&id, diri_proto::AgentKind::NOTE_ID, &cwd);
-        record.kind = diri_proto::AgentKind::NOTE;
-        record.project_id = crate::registry::session_project_id(&cwd, None);
-        self.ensure_published_project(&mut registry, &cwd, None);
-        if !title.trim().is_empty() {
-            record.title = title.trim().to_owned();
-            record.title_source = diri_proto::TitleSource::DirijorAssigned;
-        } else {
-            record.title = "Untitled".into();
+    /// Gives an existing notes file its Session. Idempotent per note id: a
+    /// file that already has a Session gets that one back. The file keeps its
+    /// id and created date; only its `session` stamp is written.
+    fn adopt_note(
+        &self,
+        store: &diri_notes::store::NoteStore,
+        note_id: &str,
+        requested_cwd: Option<&str>,
+        parent: Option<diri_proto::SessionId>,
+        id: String,
+    ) -> Result<diri_proto::SessionRecord, ControlError> {
+        let meta = store.meta(note_id).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ControlError::not_found(format!("no note {note_id:?}")),
+            std::io::ErrorKind::InvalidInput => {
+                ControlError::bad_request(format!("invalid note id {note_id:?}"))
+            }
+            _ => io_control_error(error),
+        })?;
+        let record = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            match note_session_for(&registry, note_id) {
+                Some(existing) => existing,
+                None => {
+                    drop(registry);
+                    let cwd = note_home(meta.project.as_deref(), requested_cwd)?;
+                    let mut record =
+                        note_record(&id, &cwd, meta.display_title(), note_id.to_owned(), parent);
+                    record.created_at = diri_proto::DateMillis(meta.created as f64 * 1000.0);
+                    record.updated_at = diri_proto::DateMillis(meta.modified_ms as f64);
+                    // A concurrent adoption of the same file wins; return it.
+                    let registry = self.registry.lock().map_err(poisoned)?;
+                    if let Some(existing) = note_session_for(&registry, note_id) {
+                        existing
+                    } else {
+                        drop(registry);
+                        self.insert_note_record(record.clone())?;
+                        record
+                    }
+                }
+            }
+        };
+        // Stamp after the record exists: a crash in between leaves an
+        // unstamped file whose record the next startup scan recognises.
+        if meta.session.as_deref() != Some(record.id.0.as_str()) {
+            let session = record.id.0.clone();
+            store
+                .update(note_id, |note| {
+                    note.front
+                        .set(diri_notes::store::KEY_SESSION, Some(session));
+                    Ok(())
+                })
+                .map_err(io_control_error)?;
         }
-        record.parent = p.parent.clone();
-        record.git_branch = None;
-        record.status = diri_proto::SessionStatus::Idle;
-        record.resumability = diri_proto::Resumability::NotResumable;
-        record.note_id = Some(note_id);
-        registry.insert_record(record.clone());
+        Ok(record)
+    }
+
+    fn insert_note_record(&self, record: diri_proto::SessionRecord) -> Result<(), ControlError> {
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        self.ensure_published_project(&mut registry, &record.cwd, None);
+        let id = record.id.0.clone();
+        registry.insert_record(record);
         registry.persist_for_shutdown().map_err(io_control_error)?;
         self.publish_updated(&registry, &id);
-        drop(registry);
-        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+        Ok(())
+    }
+
+    /// Gives every orphan note a Session so it shows in the sidebar: notes
+    /// written before note Sessions existed, or by `dirijor note` while the
+    /// Engine was down. An orphan is an unarchived file with no `session`
+    /// stamp and no Session; a note whose Session was removed keeps its stamp
+    /// and stays removed. Runs once per Engine start, oldest note first.
+    pub fn adopt_orphan_notes(&self) -> Result<usize, ControlError> {
+        let store = self.note_store()?;
+        let mut notes = store.list().map_err(io_control_error)?;
+        notes.sort_by(|a, b| a.created.cmp(&b.created).then(a.id.cmp(&b.id)));
+        let known: std::collections::HashSet<String> = self
+            .registry
+            .lock()
+            .map_err(poisoned)?
+            .records()
+            .into_iter()
+            .filter(diri_proto::SessionRecord::is_note)
+            .filter_map(|record| record.note_id)
+            .collect();
+        let mut adopted = 0;
+        for note in notes {
+            // Stamped: shown, or removed on purpose. Unstamped but listed:
+            // created before stamps, so adopt_note only stamps it.
+            let listed = known.contains(&note.id);
+            if note.session.is_some() || (note.archived && !listed) {
+                continue;
+            }
+            match self.adopt_note(&store, &note.id, None, None, next_session_id()) {
+                Ok(_) if !listed => adopted += 1,
+                Ok(_) => {}
+                Err(error) => diri_telemetry::event!(
+                    "notes.adopt_failed",
+                    code = diri_telemetry::id(&error.code),
+                ),
+            }
+        }
+        Ok(adopted)
+    }
+
+    /// Adopts orphan notes on a one-shot thread, off the accept path.
+    pub fn spawn_note_adoption(self: &Arc<Self>) {
+        let server = Arc::clone(self);
+        let _ = std::thread::Builder::new()
+            .name("dirijord-note-adoption".into())
+            .spawn(move || {
+                if let Ok(adopted) = server.adopt_orphan_notes()
+                    && adopted > 0
+                {
+                    diri_telemetry::event!("notes.adopted", count = adopted);
+                }
+            });
     }
 
     fn note_store(&self) -> Result<diri_notes::store::NoteStore, ControlError> {
@@ -4143,6 +4309,56 @@ fn random_session_token() -> Result<diri_proto::remote_pty::SessionToken, Contro
         .map_err(|error| ControlError::internal(error.to_string()))
 }
 
+/// The note Session showing `note_id`, if any.
+fn note_session_for(registry: &Registry, note_id: &str) -> Option<diri_proto::SessionRecord> {
+    registry
+        .records()
+        .into_iter()
+        .find(|record| record.is_note() && record.note_id.as_deref() == Some(note_id))
+}
+
+/// Where an adopted note lives in the sidebar: its own project folder when it
+/// still exists, else the folder the caller asked for, else the home folder,
+/// where a note with no project (an Inbox note) belongs, the same place a new
+/// terminal without a project opens.
+fn note_home(project: Option<&str>, requested: Option<&str>) -> Result<String, ControlError> {
+    project
+        .into_iter()
+        .chain(requested)
+        .find(|path| Path::new(path).is_dir())
+        .map(str::to_owned)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|home| Path::new(home).is_dir())
+                .map(|home| home.to_string_lossy().into_owned())
+        })
+        .ok_or_else(|| ControlError::internal("no folder to place the note in"))
+}
+
+fn note_record(
+    id: &str,
+    cwd: &str,
+    title: &str,
+    note_id: String,
+    parent: Option<diri_proto::SessionId>,
+) -> diri_proto::SessionRecord {
+    let mut record = new_record(id, diri_proto::AgentKind::NOTE_ID, cwd);
+    record.kind = diri_proto::AgentKind::NOTE;
+    record.project_id = crate::registry::session_project_id(cwd, None);
+    if title.trim().is_empty() {
+        record.title = "Untitled".into();
+    } else {
+        record.title = title.trim().to_owned();
+        record.title_source = diri_proto::TitleSource::DirijorAssigned;
+    }
+    record.parent = parent;
+    record.git_branch = None;
+    record.status = diri_proto::SessionStatus::Idle;
+    record.resumability = diri_proto::Resumability::NotResumable;
+    record.note_id = Some(note_id);
+    record
+}
+
 pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::SessionRecord {
     use diri_proto::{AgentKind, DateMillis, Resumability, SessionId, TitleSource};
     let now: DateMillis = std::time::SystemTime::now().into();
@@ -5284,6 +5500,224 @@ mod tests {
             .record(&record.id.0)
             .expect("still listed");
         assert!(matches!(after.status, diri_proto::SessionStatus::Idle));
+    }
+
+    fn note_server(temp: &tempfile::TempDir) -> (Arc<Mutex<Registry>>, Arc<ControlServer>) {
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let server = Arc::new(
+            ControlServer::new(Arc::clone(&registry), temp.path().join("daemon.sock"))
+                .with_notes_dir(temp.path().join("notes")),
+        );
+        (registry, server)
+    }
+
+    #[test]
+    fn adopting_a_note_keeps_its_id_and_date_and_is_idempotent() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (_, server) = note_server(&temp);
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let store = diri_notes::store::NoteStore::open(temp.path().join("notes")).expect("store");
+        let (note_id, _) = store
+            .create(
+                diri_notes::doc::Document::new("Q3 campaign", Vec::new()),
+                Some(&project.to_string_lossy()),
+            )
+            .expect("note");
+        let before = store.meta(&note_id).expect("meta");
+
+        let adopt = || {
+            let record = ok_of(call(
+                &server,
+                "session.spawn",
+                Some(json!({"kind": "note", "cwd": "", "noteId": note_id})),
+            ));
+            serde_json::from_value::<diri_proto::SessionRecord>(record).expect("record")
+        };
+        let first = adopt();
+        assert_eq!(first.note_id.as_deref(), Some(note_id.as_str()));
+        assert_eq!(first.title, "Q3 campaign");
+        assert_eq!(first.cwd, project.to_string_lossy());
+        assert_eq!(first.created_at.0, before.created as f64 * 1000.0);
+        let second = adopt();
+        assert_eq!(second.id, first.id, "one Session per note");
+
+        let after = store.load(&note_id).expect("note");
+        assert_eq!(after.front.get("id"), Some(note_id.as_str()));
+        assert_eq!(
+            after.front.get("created"),
+            before_created(&before).as_deref()
+        );
+        assert_eq!(after.front.get("session"), Some(first.id.0.as_str()));
+
+        let missing = err_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({"kind": "note", "cwd": "", "noteId": "20000101-000000-dead"})),
+        ));
+        assert_eq!(missing.code, "not_found");
+    }
+
+    fn before_created(meta: &diri_notes::store::NoteMeta) -> Option<String> {
+        Some(diri_notes::store::format_timestamp(meta.created))
+    }
+
+    #[test]
+    fn startup_adopts_only_true_orphans_once() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (registry, server) = note_server(&temp);
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let project = project.to_string_lossy().into_owned();
+        let store = diri_notes::store::NoteStore::open(temp.path().join("notes")).expect("store");
+        let doc = |title: &str| diri_notes::doc::Document::new(title, Vec::new());
+
+        let (offline, _) = store
+            .create(doc("Written offline"), Some(&project))
+            .unwrap();
+        let (inbox, _) = store.create(doc("Loose idea"), None).unwrap();
+        let (archived, mut note) = store.create(doc("Old"), Some(&project)).unwrap();
+        note.front.set_flag(diri_notes::store::KEY_ARCHIVED, true);
+        store.save(&archived, &note).unwrap();
+        // Removed on purpose: stamped with a Session that no longer exists.
+        let (removed, _) = store
+            .create_for_session(doc("Removed"), Some(&project), Some("s_gone"))
+            .unwrap();
+        // Already a Session.
+        let shown = ok_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({"kind": "note", "cwd": project, "title": "Shown"})),
+        ));
+
+        assert_eq!(server.adopt_orphan_notes().expect("scan"), 2);
+        assert_eq!(
+            server.adopt_orphan_notes().expect("rescan"),
+            0,
+            "deterministic"
+        );
+
+        let notes: Vec<diri_proto::SessionRecord> = registry
+            .lock()
+            .unwrap()
+            .records()
+            .into_iter()
+            .filter(diri_proto::SessionRecord::is_note)
+            .collect();
+        let by_note = |id: &str| notes.iter().find(|r| r.note_id.as_deref() == Some(id));
+        assert_eq!(notes.len(), 3);
+        assert_eq!(by_note(&offline).unwrap().cwd, project);
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            by_note(&inbox).unwrap().cwd,
+            home,
+            "Inbox notes live in the home folder"
+        );
+        assert!(by_note(&archived).is_none());
+        assert!(by_note(&removed).is_none());
+        assert!(by_note(shown["noteId"].as_str().unwrap()).is_some());
+        assert_eq!(
+            store.meta(&offline).unwrap().session.as_deref(),
+            Some(by_note(&offline).unwrap().id.0.as_str())
+        );
+    }
+
+    #[test]
+    fn tracked_spawns_may_start_from_a_note() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (_, server) = note_server(&temp);
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let note = ok_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({"kind": "note", "cwd": project.to_string_lossy(), "title": "PRD"})),
+        ));
+        let note_session = note["id"].as_str().unwrap().to_owned();
+        // A note may not send anything itself, so an agent starts the work.
+        let started = ok_of(call(
+            &server,
+            "session.spawn_tracked",
+            Some(json!({
+                "senderID": "s_agent",
+                "operationID": "op-1",
+                "spawn": {"kind": "note", "cwd": project.to_string_lossy(), "title": "Brief", "parent": note_session},
+            })),
+        ));
+        assert_eq!(started["ok"], true);
+        assert_eq!(started["parent"], note_session.as_str());
+
+        // Any other parent that is not the sender stays refused.
+        let refused = err_of(call(
+            &server,
+            "session.spawn_tracked",
+            Some(json!({
+                "senderID": "s_agent",
+                "operationID": "op-2",
+                "spawn": {"kind": "note", "cwd": project.to_string_lossy(), "parent": "s_someone_else"},
+            })),
+        ));
+        assert_eq!(refused.code, "bad_request");
+    }
+
+    #[test]
+    fn terminal_requests_on_a_note_fail_fast_for_every_client() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let server = Arc::new(
+            ControlServer::new(Arc::clone(&registry), temp.path().join("daemon.sock"))
+                .with_notes_dir(temp.path().join("notes")),
+        );
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let record = ok_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({"kind": "note", "cwd": project.to_string_lossy(), "title": "Plan"})),
+        ));
+        let id = record["id"].as_str().expect("id").to_owned();
+        let started = Instant::now();
+        for (method, params) in [
+            ("session.send_text", json!({"sessionID": id, "text": "hi"})),
+            ("session.send_key", json!({"sessionID": id, "key": "enter"})),
+            ("session.read_screen", json!({"sessionID": id})),
+            ("session.resume", json!({"sessionID": id})),
+            (
+                "session.resize",
+                json!({"sessionID": id, "cols": 80, "rows": 24}),
+            ),
+            (
+                "session.deliver_message",
+                json!({"sessionID": id, "senderID": "s_x", "messageID": "m", "text": "hi"}),
+            ),
+            (
+                "task.submit",
+                json!({"caller_id": "s_x", "request_id": "r", "session_id": id, "text": "hi"}),
+            ),
+        ] {
+            let error = err_of(call(&server, method, Some(params)));
+            assert_eq!(
+                error.code,
+                diri_proto::control::SESSION_HAS_NO_TERMINAL,
+                "{method}: {error:?}"
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "must not wait on a terminal"
+        );
+        // Everything else about a note still works.
+        ok_of(call(
+            &server,
+            "session.rename",
+            Some(json!({"sessionID": id, "title": "Renamed"})),
+        ));
     }
 
     fn ok_of(message: ControlMessage) -> JsonValue {

@@ -1023,6 +1023,11 @@ impl Registry {
         self.sessions.get(id)
     }
 
+    /// Whether `id` is a note Session: a record with no process or terminal.
+    pub fn is_note(&self, id: &str) -> bool {
+        self.records.get(id).is_some_and(SessionRecord::is_note)
+    }
+
     pub fn views(&self) -> Vec<SessionView> {
         let mut views: Vec<_> = self.sessions.values().map(Session::view).collect();
         views.sort_by(|a, b| a.id.cmp(&b.id));
