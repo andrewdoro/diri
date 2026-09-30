@@ -257,7 +257,9 @@ notes:
    Updates. Entries are one or two plain sentences, with no progress chatter.
    Entries over 500 characters are refused, with a pointer to `create_note`.
 3. Never rewrite or delete the person's text. Every agent write is additive.
-4. Tick your own to-dos as you finish them (`write_note` todo + checked).
+4. Tick your own sub-tasks as you finish them (`write_note` todo + checked).
+   Leave the to-do you were started from unticked: the person reviews the
+   work and ticks it (the same rule as the app's Start brief).
 5. Finish with a one-paragraph result via `report_to_parent` with status
    done. When the parent is a note, the result lands in the note.
 
@@ -277,9 +279,13 @@ descriptions, and that note tools avoid "repo/worktree/branch/commit".
     focus from another app. CLI: `dirijor note add|create --open`.
 - **`start_from_note`** takes a note, an optional to-do, kind,
   `separate_copy`, prompt and task. It is a tracked spawn whose parent is
-  the note Session. The agent is briefed with the note and the non-note
-  sessions it mentions, and its chip goes on the to-do. A note without a
+  the note Session, and its chip goes on the to-do. A note without a
   Session is adopted first.
+  - With a to-do, the agent gets exactly the brief the app's Start button
+    sends (`diri_notes::work::brief`).
+  - Without one, it gets the whole note and the sessions it mentions.
+  - `write_note` entries use the same `work` helpers as reports: under the
+    named to-do, else under the caller's own to-do, else in Updates.
   - Policy: root agents may start work from any note. Delegated agents may
     start work only from the note they came from. Depth skips notes, and
     notes do not count as live children.

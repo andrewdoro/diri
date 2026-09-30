@@ -522,28 +522,64 @@ impl Bridge {
             (None, None) => None,
             (Some(_), Some(_)) => return Err("pass todo or todo_index, not both".into()),
         };
-        let related: Vec<handoff::Related> = meta
-            .mentions
-            .iter()
-            .filter_map(|target| match target {
-                MentionTarget::Session(id) => sessions.iter().find(|r| &r.id.0 == id),
-                MentionTarget::Note(_) => None,
-            })
-            .filter(|record| !record.is_note())
-            .map(|record| handoff::Related {
-                session_id: record.id.0.clone(),
-                kind: short_label(record.effective_kind().id()).to_owned(),
-                title: record.title.clone(),
-                status: status_label(&record.status).to_owned(),
-            })
-            .collect();
-        let brief = handoff::prompt(
-            &meta.id,
-            &note,
-            todo,
-            &related,
-            optional_string(args, "prompt").as_deref(),
-        );
+        let extra = optional_string(args, "prompt");
+        let brief = match todo {
+            // A to-do gets exactly the brief the app's Start sends.
+            Some(index) => {
+                let mut notes = Vec::new();
+                let mut related = Vec::new();
+                for target in diri_notes::work::mentions(&note.doc.blocks, index) {
+                    match target {
+                        MentionTarget::Note(id) => {
+                            if let Ok(loaded) = store.load(&id) {
+                                notes.push(diri_notes::work::ResolvedNote {
+                                    body: diri_notes::markdown::write(
+                                        &Default::default(),
+                                        &loaded.doc,
+                                    ),
+                                    title: loaded.doc.title.clone(),
+                                    id,
+                                });
+                            }
+                        }
+                        MentionTarget::Session(id) => {
+                            if let Some(record) = sessions.iter().find(|r| r.id.0 == id) {
+                                related.push(diri_notes::work::ResolvedSession {
+                                    kind: short_label(record.effective_kind().id()).to_owned(),
+                                    title: record.title.clone(),
+                                    status: status_label(&record.status).to_owned(),
+                                    id,
+                                });
+                            }
+                        }
+                    }
+                }
+                let brief =
+                    diri_notes::work::brief(&meta.id, &note, index, &notes, &related).prompt;
+                match extra.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+                    Some(extra) => format!("{extra}\n\n{brief}"),
+                    None => brief,
+                }
+            }
+            None => {
+                let related: Vec<handoff::Related> = meta
+                    .mentions
+                    .iter()
+                    .filter_map(|target| match target {
+                        MentionTarget::Session(id) => sessions.iter().find(|r| &r.id.0 == id),
+                        MentionTarget::Note(_) => None,
+                    })
+                    .filter(|record| !record.is_note())
+                    .map(|record| handoff::Related {
+                        session_id: record.id.0.clone(),
+                        kind: short_label(record.effective_kind().id()).to_owned(),
+                        title: record.title.clone(),
+                        status: status_label(&record.status).to_owned(),
+                    })
+                    .collect();
+                handoff::prompt(&meta.id, &note, None, &related, extra.as_deref())
+            }
+        };
         let kind = match optional_string(args, "kind") {
             Some(kind) => kind,
             None => sessions
