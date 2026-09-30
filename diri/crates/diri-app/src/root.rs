@@ -46,9 +46,9 @@ use crate::commands::{
     OpenWorktrees, QuoteSelection, QuoteSelectionToSession, RenameSelectedSession, ReopenSession,
     SESSION_NAVIGATION_CONTEXT, SelectLastSession, SelectNextAttentionSession, SelectNextSession,
     SelectPreviousSession, SelectSession1, SelectSession2, SelectSession3, SelectSession4,
-    SelectSession5, SelectSession6, SelectSession7, SelectSession8, ToggleAuxiliaryTerminal,
-    ToggleCommandPalette, ToggleHistory, ToggleInspector, ToggleOverview, ToggleQuickOpen,
-    ToggleSidebar, ToggleTabPeek,
+    SelectSession5, SelectSession6, SelectSession7, SelectSession8, ShowTodos,
+    ToggleAuxiliaryTerminal, ToggleCommandPalette, ToggleHistory, ToggleInspector, ToggleOverview,
+    ToggleQuickOpen, ToggleSidebar, ToggleTabPeek,
 };
 use crate::external_drop::ExternalDropAction;
 use crate::haptics::{self, Haptic};
@@ -2256,6 +2256,17 @@ impl RootView {
             CommandId::ToggleOverview => {
                 if let Some(surfaces) = &self.session_surfaces {
                     surfaces.update(cx, |surfaces, cx| surfaces.toggle_overview(cx));
+                }
+            }
+            CommandId::ShowTodos => {
+                if let Some(navigation) = &self.navigation {
+                    navigation.update(cx, |navigation, cx| navigation.dismiss(cx));
+                }
+                if self.todos_open {
+                    self.close_todos(cx);
+                    self.focus_active_terminal(window, cx);
+                } else {
+                    self.open_todos(window, cx);
                 }
             }
             CommandId::NewNote => {
@@ -5023,6 +5034,11 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &NewNote, window, cx| {
                 this.run_command(CommandId::NewNote, window, cx);
             }))
+            .on_action(
+                cx.listener(|this, _: &crate::commands::ShowTodos, window, cx| {
+                    this.run_command(CommandId::ShowTodos, window, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.run_command(CommandId::OpenSettings, window, cx);
             }))

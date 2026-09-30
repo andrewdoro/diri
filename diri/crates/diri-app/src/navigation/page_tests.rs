@@ -520,6 +520,7 @@ impl Render for ActionHarness {
             MovePaneDown,
             OpenWorktrees,
             NewNote,
+            ShowTodos,
             ToggleSidebar,
             HorizontalTabs,
             VerticalTabs,
@@ -563,7 +564,7 @@ fn every_static_palette_action_dispatches_once_by_mouse_and_keyboard(cx: &mut Te
     };
     assert_eq!(
         actions.len(),
-        34,
+        35,
         "new static actions need a dispatch probe"
     );
     for action in actions {

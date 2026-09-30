@@ -62,6 +62,7 @@ actions!(
         MovePaneDown,
         OpenWorktrees,
         NewNote,
+        ShowTodos,
         OpenSettings,
         // Palette destination: open Settings even when it is already visible.
         // OpenSettings retains the Cmd+, toggle behavior.
@@ -164,6 +165,7 @@ pub enum CommandId {
     MovePaneDown,
     OpenWorktrees,
     NewNote,
+    ShowTodos,
     OpenSettings,
     ToggleSidebar,
     ToggleTabOrientation,
@@ -639,6 +641,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         "New Note",
         "doc.text",
         "note notes markdown todo todos write memo prd plan doc"
+    ),
+    spec!(
+        ShowTodos,
+        "todos",
+        Some("cmd-ctrl-t"),
+        Some("⌃⌘T"),
+        Some(APP_CONTEXT),
+        "To-dos",
+        "checklist",
+        "todos to-dos tasks checklist open review notes"
     ),
     spec!(
         OpenWorktrees,
@@ -1203,6 +1215,7 @@ impl CommandSpec {
 
             CommandId::OpenWorktrees => KeyBinding::new(key, OpenWorktrees, context),
             CommandId::NewNote => KeyBinding::new(key, NewNote, context),
+            CommandId::ShowTodos => KeyBinding::new(key, ShowTodos, context),
             CommandId::OpenSettings => KeyBinding::new(key, OpenSettings, context),
             CommandId::ToggleSidebar => KeyBinding::new(key, ToggleSidebar, context),
             CommandId::ToggleTabOrientation => KeyBinding::new(key, ToggleTabOrientation, context),
@@ -1286,6 +1299,10 @@ fn linux_keystroke(id: CommandId, key: &str) -> Option<String> {
     // after translating macOS modifiers to Linux.
     if id == CommandId::DelegateSelectedSession {
         return Some("ctrl-alt-d".to_owned());
+    }
+    // Cmd-Ctrl-T would land on New Tab's Ctrl-Shift-T.
+    if id == CommandId::ShowTodos {
+        return Some("ctrl-alt-shift-t".to_owned());
     }
     let pane_focus = match id {
         CommandId::FocusPaneLeft => Some("ctrl-alt-h"),
@@ -1629,6 +1646,11 @@ impl CommandId {
                 description: "Preview sessions across projects without changing work",
                 category: Navigation,
             },
+            Self::ShowTodos => ShortcutMetadata {
+                title: "To-dos",
+                description: "Every open to-do across your notes",
+                category: Navigation,
+            },
             Self::NewNote => ShortcutMetadata {
                 title: "New note",
                 description: "Start a note in the current project, beside its agents",
@@ -1878,6 +1900,7 @@ impl CommandId {
 
             Self::OpenWorktrees => Box::new(OpenWorktrees),
             Self::NewNote => Box::new(NewNote),
+            Self::ShowTodos => Box::new(ShowTodos),
             Self::OpenSettings => Box::new(OpenSettings),
             Self::ToggleSidebar => Box::new(ToggleSidebar),
             Self::ToggleTabOrientation => Box::new(ToggleTabOrientation),
