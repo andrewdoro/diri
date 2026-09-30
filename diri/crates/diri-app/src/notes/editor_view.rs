@@ -1817,6 +1817,7 @@ impl Render for NoteEditorView {
         self.ticked
             .retain(|(_, at)| at.elapsed() < Duration::from_millis(600));
 
+        self.anchor_work_menu();
         let mut layouts = Vec::with_capacity(self.editor.blocks().len());
         let hidden = self.editor.hidden();
         let mut column = div().flex().flex_col().w_full();

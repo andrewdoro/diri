@@ -4039,6 +4039,11 @@ impl TerminalPane {
                                 .child(glyph),
                         )
                     })
+                    .children(
+                        (header_width >= 420.0)
+                            .then(|| self.render_origin_note(session, colors))
+                            .flatten(),
+                    )
                     .child(
                         div()
                             .min_w(px(0.0))
@@ -4069,6 +4074,48 @@ impl TerminalPane {
                     }),
             )
             .into_any_element()
+    }
+
+    /// A session started from a note shows that note before its title; a
+    /// click goes back to the note, scrolled to the to-do it works on.
+    fn render_origin_note(
+        &self,
+        session: &SessionRecord,
+        colors: SemanticColors,
+    ) -> Option<AnyElement> {
+        let parent = session.parent.clone()?;
+        let title = {
+            let store = self.runtime.store.read().expect("store");
+            let note = store.sessions().get(&parent).filter(|p| p.is_note())?;
+            let title = note.title.trim();
+            if title.is_empty() { "Untitled".to_owned() } else { title.to_owned() }
+        };
+        let child = session.id.clone();
+        let runtime = Arc::clone(&self.runtime);
+        Some(
+            div()
+                .id("session-origin-note")
+                .flex_none()
+                .max_w(px(200.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(Typo::TITLE.size))
+                .text_color(colors.tertiary)
+                .cursor_pointer()
+                .hover(|el| el.text_color(colors.secondary))
+                .child(sf_symbol("doc.text", 12.0, colors.tertiary))
+                .child(div().min_w(px(0.0)).text_ellipsis().child(title))
+                .child(sf_symbol("chevron.right", 9.0, colors.tertiary))
+                .on_click(move |_, _, _| {
+                    runtime
+                        .store
+                        .write()
+                        .expect("store")
+                        .reveal_in_note(parent.clone(), child.clone());
+                })
+                .into_any_element(),
+        )
     }
 
     fn render_inspector_toggle(

@@ -11,6 +11,8 @@ pub(crate) mod editor_view;
 pub(crate) mod work_item;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+pub(crate) mod work_item_tests;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -172,6 +174,14 @@ impl NotePane {
         if !same {
             self.save(cx);
             self.load(session, note_id, window, cx);
+        }
+        // Arrived from a session's header: show the to-do it works on.
+        let reveal = self.runtime.store.write().expect("store").take_note_reveal(session);
+        if let (Some(child), PaneState::Open(open)) = (reveal, &self.state) {
+            let editor = open.editor.clone();
+            if editor.update(cx, |view, cx| view.reveal_session(&child.0, cx)) {
+                self.focus_on_show = true;
+            }
         }
         if std::mem::take(&mut self.focus_on_show) {
             let handle = self.focus_handle(cx);

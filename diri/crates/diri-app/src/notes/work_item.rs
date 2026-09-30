@@ -162,10 +162,6 @@ impl WorkView {
         }
     }
 
-    pub(crate) fn panel_open(&self) -> bool {
-        self.start.is_some() || self.tick.is_some()
-    }
-
     #[cfg(test)]
     pub(crate) fn start_panel_brief(&self) -> Option<&Brief> {
         self.start.as_ref().map(|panel| &panel.brief)
@@ -564,6 +560,23 @@ impl NoteEditorView {
         )
     }
 
+    /// Anchors an open panel under its to-do's text. Runs before the frame
+    /// replaces the block layouts, while last frame's are still measured.
+    pub(super) fn anchor_work_menu(&mut self) {
+        let Some(block) = self
+            .work
+            .start
+            .as_ref()
+            .map(|p| p.block)
+            .or(self.work.tick.as_ref().map(|p| p.block))
+        else {
+            return;
+        };
+        if let Some(index) = self.block_index(block) {
+            self.anchor_menus_at(Pos::new(index, self.editor.block(index).text.len()));
+        }
+    }
+
     /// The open Start or "still working" panel, hosted like the `/` and `@`
     /// menus: a glass panel window in the app, a floating surface in the
     /// window otherwise, anchored under the to-do.
@@ -578,9 +591,7 @@ impl NoteEditorView {
             .as_ref()
             .map(|p| p.block)
             .or(self.work.tick.as_ref().map(|p| p.block))?;
-        let index = self.block_index(block)?;
-        // Anchor under the to-do's text even if the caret moved this frame.
-        self.anchor_menus_at(Pos::new(index, self.editor.block(index).text.len()));
+        self.block_index(block)?;
         if self.work.start.is_some() {
             let height = self.start_panel_height();
             self.host_menu(
@@ -873,6 +884,23 @@ impl super::NotePane {
             return;
         };
         let editor = open.editor.clone();
+        // Answered starts first, so a session linked just now gets its
+        // facts in this same pass.
+        let pending = editor.read(cx).work.pending_tickets();
+        let outcomes: Vec<_> = {
+            let mut store = self.runtime.store.write().expect("store");
+            pending
+                .into_iter()
+                .filter_map(|(block, ticket)| Some((block, store.take_work_outcome(ticket)?)))
+                .collect()
+        };
+        if !outcomes.is_empty() {
+            editor.update(cx, |view, cx| {
+                for (block, outcome) in outcomes {
+                    view.work_finished(block, outcome, super::editor_view_now_ms(), cx);
+                }
+            });
+        }
         let linked: Vec<String> = editor
             .read(cx)
             .editor
@@ -880,29 +908,20 @@ impl super::NotePane {
             .iter()
             .flat_map(work::sessions)
             .collect();
-        let pending = editor.read(cx).work.pending_tickets();
-        let (facts, outcomes) = {
-            let mut store = self.runtime.store.write().expect("store");
-            let facts: HashMap<String, SessionFacts> = linked
+        let facts: HashMap<String, SessionFacts> = {
+            let store = self.runtime.store.read().expect("store");
+            linked
                 .into_iter()
                 .filter_map(|id| {
                     let record = store.sessions().get(&SessionId::new(id.clone()))?;
                     Some((id, SessionFacts::from_record(record)))
                 })
-                .collect();
-            let outcomes: Vec<_> = pending
-                .into_iter()
-                .filter_map(|(block, ticket)| Some((block, store.take_work_outcome(ticket)?)))
-                .collect();
-            (facts, outcomes)
+                .collect()
         };
         editor.update(cx, |view, cx| {
             if view.work.facts != facts {
                 view.work.set_facts(facts);
                 cx.notify();
-            }
-            for (block, outcome) in outcomes {
-                view.work_finished(block, outcome, super::editor_view_now_ms(), cx);
             }
         });
     }
