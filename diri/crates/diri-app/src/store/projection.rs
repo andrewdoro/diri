@@ -417,10 +417,11 @@ mod row_equality_tests {
     /// field by field (a NaN timestamp) shows the walk was skipped.
     #[test]
     fn a_row_holding_the_same_record_is_equal_without_walking_it() {
-        let mut record = crate::sidebar::SidebarPreviewFixture::bench_fleet(1, 0)
-            .list
-            .sessions
-            .remove(0);
+        let mut record =
+            crate::sidebar::SidebarPreviewFixture::make(crate::sidebar::PreviewScenario::Typical)
+                .list
+                .sessions
+                .remove(0);
         record.created_at = diri_proto::DateMillis(f64::NAN);
         let row = SidebarRow {
             session: Arc::new(record),
@@ -430,7 +431,10 @@ mod row_equality_tests {
             pinned: false,
             rails: 0,
         };
-        assert!(row.session != row.session.clone(), "NaN never equals itself");
+        assert!(
+            row.session != row.session.clone(),
+            "NaN never equals itself"
+        );
         assert_eq!(row, row.clone());
         let copy = SidebarRow {
             session: Arc::new((*row.session).clone()),

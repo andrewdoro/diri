@@ -220,15 +220,19 @@ impl Scene {
         let key = |order: DrawOrder, tile: &AtlasTile| {
             (u64::from(order) << 32) | u64::from(tile.tile_id.0)
         };
-        sort_sprites(&mut self.monochrome_sprites, &mut self.sort_keys, |sprite| {
-            key(sprite.order, &sprite.tile)
-        });
+        sort_sprites(
+            &mut self.monochrome_sprites,
+            &mut self.sort_keys,
+            |sprite| key(sprite.order, &sprite.tile),
+        );
         sort_sprites(&mut self.subpixel_sprites, &mut self.sort_keys, |sprite| {
             key(sprite.order, &sprite.tile)
         });
-        sort_sprites(&mut self.polychrome_sprites, &mut self.sort_keys, |sprite| {
-            key(sprite.order, &sprite.tile)
-        });
+        sort_sprites(
+            &mut self.polychrome_sprites,
+            &mut self.sort_keys,
+            |sprite| key(sprite.order, &sprite.tile),
+        );
         self.surfaces.sort_by_key(|surface| surface.order);
     }
 

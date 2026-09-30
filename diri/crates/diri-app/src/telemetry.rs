@@ -238,9 +238,7 @@ impl FrameStart {
         Self {
             at: Instant::now(),
             paints: diri_term::element::PaintTotals::now(),
-            cpu: diri_telemetry::is_enabled()
-                .then(thread_cpu_time)
-                .flatten(),
+            cpu: diri_telemetry::is_enabled().then(thread_cpu_time).flatten(),
         }
     }
 }
@@ -299,7 +297,10 @@ impl FrameBreakdown {
             "ui.frame.terminals",
             Duration::from_micros(self.terminals.micros),
         );
-        diri_telemetry::count("ui.frame.views_rendered", u64::from(self.gpui.views_rendered));
+        diri_telemetry::count(
+            "ui.frame.views_rendered",
+            u64::from(self.gpui.views_rendered),
+        );
         diri_telemetry::count("ui.frame.views_reused", u64::from(self.gpui.views_reused));
         diri_telemetry::count("ui.frame.terminal_paints", self.terminals.paints);
         diri_telemetry::count("ui.frame.shape_misses", self.terminals.shape_misses);
@@ -545,9 +546,9 @@ impl EchoProbe {
     /// keystroke is waiting for its first frame.
     pub(crate) fn frame_received(&self) {
         if self.sent.load(Ordering::Acquire) != 0 {
-            let _ = self
-                .received
-                .compare_exchange(0, mono_us(), Ordering::AcqRel, Ordering::Relaxed);
+            let _ =
+                self.received
+                    .compare_exchange(0, mono_us(), Ordering::AcqRel, Ordering::Relaxed);
         }
     }
 

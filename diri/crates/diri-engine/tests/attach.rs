@@ -734,10 +734,7 @@ while (sysread(STDIN, my $key, 1)) {
 /// thinking time.
 fn fake_tui_redraw_latencies(mode: &str, gap_us: u64, keys: usize) -> Vec<Duration> {
     // Short root: Holder sockets live under it and must fit SUN_LEN.
-    let root = std::path::PathBuf::from(format!(
-        "/tmp/diri-tui-{}-{mode}",
-        std::process::id()
-    ));
+    let root = std::path::PathBuf::from(format!("/tmp/diri-tui-{}-{mode}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("root");
     let registry = Arc::new(Mutex::new(Registry::new(engine(), root.join("state.json"))));
@@ -810,15 +807,11 @@ fn fake_tui_redraw_latencies(mode: &str, gap_us: u64, keys: usize) -> Vec<Durati
             .expect("send key");
         frames.until("the finished redraw", |frame| {
             frame.frame_type == FrameType::Grid
-                && frame
-                    .grid_payload()
-                    .ok()
-                    .flatten()
-                    .is_some_and(|update| {
-                        grid_text(&update)
-                            .lines()
-                            .any(|line| line.trim_end() == done)
-                    })
+                && frame.grid_payload().ok().flatten().is_some_and(|update| {
+                    grid_text(&update)
+                        .lines()
+                        .any(|line| line.trim_end() == done)
+                })
         });
         latencies.push(sent.elapsed());
         // Paced like typing, so each key is its own burst.

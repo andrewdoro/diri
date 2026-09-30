@@ -6016,7 +6016,7 @@ mod grid_wake_tests {
 
     use std::time::Duration;
 
-    use super::GridWake;
+    use super::{GridWake, INTERACTIVE_GRID_BUDGET};
 
     #[test]
     fn grid_waiter_sleeps_until_a_real_change_and_coalesces_generations() {
@@ -6047,7 +6047,7 @@ mod grid_wake_tests {
     }
 
     #[test]
-    fn interactive_priority_covers_two_grid_changes_then_expires() {
+    fn interactive_priority_covers_a_bounded_number_of_grid_changes_then_expires() {
         let wake = GridWake::new();
         let observed = wake.generation();
         wake.prioritize_interactive_changes();
@@ -6056,19 +6056,20 @@ mod grid_wake_tests {
         assert_eq!(unchanged.generation, observed);
         assert!(!unchanged.interactive);
 
-        wake.notify();
-        let changed = wake.wait_for_change(observed, Duration::from_secs(1));
-        assert!(changed.generation > observed);
-        assert!(changed.interactive);
+        // A trailing change already in flight, then the terminal's response
+        // in up to `ECHO_PUBLICATIONS` parts.
+        let mut generation = observed;
+        for _ in 0..INTERACTIVE_GRID_BUDGET {
+            wake.notify();
+            let changed = wake.wait_for_change(generation, Duration::from_secs(1));
+            assert!(changed.generation > generation);
+            assert!(changed.interactive);
+            generation = changed.generation;
+            wake.consume_interactive_priority();
+        }
 
-        wake.consume_interactive_priority();
         wake.notify();
-        let trailing = wake.wait_for_change(changed.generation, Duration::from_secs(1));
-        assert!(trailing.interactive);
-
-        wake.consume_interactive_priority();
-        wake.notify();
-        let background = wake.wait_for_change(trailing.generation, Duration::from_secs(1));
+        let background = wake.wait_for_change(generation, Duration::from_secs(1));
         assert!(!background.interactive);
     }
 }
@@ -6656,7 +6657,10 @@ mod echo_request_tests {
         let request = EchoRequest::for_input(b"a", at);
         assert!(!request.erases);
         assert!(request.answered_by(at, 10, 11, 80, false));
-        assert!(request.answered_by(at, 10, 10, 80, false), "a cursor move alone");
+        assert!(
+            request.answered_by(at, 10, 10, 80, false),
+            "a cursor move alone"
+        );
     }
 
     #[test]

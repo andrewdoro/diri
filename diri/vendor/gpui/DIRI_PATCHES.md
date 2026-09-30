@@ -179,3 +179,38 @@ Files: `src/platform.rs`, `src/window.rs`, `src/frame_observer.rs`,
 `src/gpui.rs`; in `vendor/gpui_macos`: `window.rs`, `display_link.rs`,
 `metal_renderer.rs`. Tests: `immediate_frames_wait_until_the_last_present_is_on_screen`
 (gpui_macos) and `only_a_keystroke_echo_asks_for_an_immediate_frame` (diri-app).
+
+## Frame statistics
+
+`Window::draw` stamps its phases into `FrameStats` (`src/frame_stats.rs`):
+`layout` (root and uncached renders, layout requests), `prepaint` (Taffy,
+cached views that missed, element prepaint), `paint`, `a11y` (accessibility
+tree) and `finish` (scene sort, frame swap), plus the number of views
+rendered and cached views replayed, and whether assistive technology was
+attached. `Window::last_frame_stats` returns the last finished frame and
+`Window::frame_stats_so_far` the frame being drawn, up to the call (Diri's
+frame probe reads it from inside the root's paint). The cost is a few
+`Instant::now()` calls and counter increments per frame.
+`Window::set_accessibility_active_for_test` (test-support) attaches pretend
+assistive technology so headless benches can draw frames the way a Mac
+running an accessibility client does. Files: `src/frame_stats.rs`,
+`src/gpui.rs`, `src/window.rs` (`frame_stats` fields and stamps,
+`WindowInvalidator::phase`), `src/view.rs` (render/reuse counts),
+`src/window/a11y.rs`. Exercised by `real_use_frame_distribution` in
+`crates/diri-app/src/root.rs`.
+
+## Sprite sort by index
+
+`Scene::finish` stable-sorted the monochrome, subpixel and polychrome sprite
+vectors by `(order, tile_id)` with `sort_by_key`, moving each 100+ byte
+sprite through every merge pass; with a few terminals on screen that is tens
+of thousands of glyph sprites per frame (11% of `Window::draw` in a sample of
+the installed app). `sort_sprites` sorts `(key, index)` pairs instead, which
+breaks ties by position exactly as the stable sort did, then applies the
+permutation in place along its cycles, moving each sprite once; a frame
+already in order moves nothing. The pairs live in a reused `sort_keys`
+scratch that `release_idle_capacity` accounts for and shrinks with the rest.
+Draw order, and therefore pixels, are unchanged. Test:
+`the_sprite_sort_matches_a_stable_sort_by_key` in
+`crates/diri-app/src/gpui_view_cache_tests.rs`. Re-apply on a GPUI bump by
+replacing the three sprite `sort_by_key` calls in `Scene::finish`.

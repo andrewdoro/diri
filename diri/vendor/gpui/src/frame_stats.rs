@@ -84,7 +84,8 @@ impl FrameStatsBuilder {
         let Some(started) = self.started else {
             return FrameStats::default();
         };
-        let span = |from: Instant, to: Option<Instant>| to.unwrap_or(now).saturating_duration_since(from);
+        let span =
+            |from: Instant, to: Option<Instant>| to.unwrap_or(now).saturating_duration_since(from);
         let laid_out = self.laid_out.unwrap_or(now);
         let prepainted = self.prepainted.unwrap_or(now).max(laid_out);
         let painted = self.painted.unwrap_or(now).max(prepainted);

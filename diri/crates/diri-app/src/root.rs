@@ -5596,12 +5596,37 @@ mod tests {
     /// A screen of agent-like TUI content: coloured prose, a boxed composer,
     /// a status line with a spinner. `phase` scrolls the prose.
     #[cfg(target_os = "macos")]
-    fn real_use_screen_rows(cols: u16, rows: u16, phase: usize) -> Vec<Vec<diri_proto::grid::GridCell>> {
+    fn real_use_screen_rows(
+        cols: u16,
+        rows: u16,
+        phase: usize,
+    ) -> Vec<Vec<diri_proto::grid::GridCell>> {
         use diri_proto::grid::{GridCell, TermColor, TermStyle};
         const WORDS: [&str; 24] = [
-            "Reading", "crates/diri-app/src/root.rs", "fn", "render(&mut", "self)", "->", "impl",
-            "IntoElement", "the", "terminal", "pane", "is", "cached;", "updated", "3", "files",
-            "(+42", "-7)", "cargo", "test", "--release", "passed", "Ok(())", "✓",
+            "Reading",
+            "crates/diri-app/src/root.rs",
+            "fn",
+            "render(&mut",
+            "self)",
+            "->",
+            "impl",
+            "IntoElement",
+            "the",
+            "terminal",
+            "pane",
+            "is",
+            "cached;",
+            "updated",
+            "3",
+            "files",
+            "(+42",
+            "-7)",
+            "cargo",
+            "test",
+            "--release",
+            "passed",
+            "Ok(())",
+            "✓",
         ];
         let colors = [
             TermColor::Default,
@@ -5619,13 +5644,22 @@ mod tests {
             while cells.len() + 1 < cols.saturating_sub(4) {
                 let text = WORDS[word % WORDS.len()];
                 let color = colors[(word / 3) % colors.len()];
-                let style = if word % 11 == 0 { TermStyle::BOLD } else { TermStyle::empty() };
+                let style = if word.is_multiple_of(11) {
+                    TermStyle::BOLD
+                } else {
+                    TermStyle::empty()
+                };
                 for character in text.chars() {
-                    cells.push(GridCell::new(character as u32, color, TermColor::DefaultInverted, style));
+                    cells.push(GridCell::new(
+                        character as u32,
+                        color,
+                        TermColor::DefaultInverted,
+                        style,
+                    ));
                 }
                 cells.push(GridCell::BLANK);
                 word = word.wrapping_mul(31).wrapping_add(7) % 997;
-                if word % 9 == 0 {
+                if word.is_multiple_of(9) {
                     break;
                 }
             }
@@ -5637,9 +5671,26 @@ mod tests {
             screen.push(text_row(row + phase));
         }
         let border = |left: char, fill: char, right: char| {
-            let mut cells = vec![GridCell::new(left as u32, TermColor::Ansi(8), TermColor::DefaultInverted, TermStyle::empty())];
-            cells.extend((2..cols).map(|_| GridCell::new(fill as u32, TermColor::Ansi(8), TermColor::DefaultInverted, TermStyle::empty())));
-            cells.push(GridCell::new(right as u32, TermColor::Ansi(8), TermColor::DefaultInverted, TermStyle::empty()));
+            let mut cells = vec![GridCell::new(
+                left as u32,
+                TermColor::Ansi(8),
+                TermColor::DefaultInverted,
+                TermStyle::empty(),
+            )];
+            cells.extend((2..cols).map(|_| {
+                GridCell::new(
+                    fill as u32,
+                    TermColor::Ansi(8),
+                    TermColor::DefaultInverted,
+                    TermStyle::empty(),
+                )
+            }));
+            cells.push(GridCell::new(
+                right as u32,
+                TermColor::Ansi(8),
+                TermColor::DefaultInverted,
+                TermStyle::empty(),
+            ));
             cells
         };
         screen.push(vec![GridCell::BLANK; cols]);
@@ -5669,7 +5720,12 @@ mod tests {
         let mut cells: Vec<GridCell> = text
             .chars()
             .map(|character| {
-                GridCell::new(character as u32, TermColor::Rgb(215, 119, 87), TermColor::DefaultInverted, TermStyle::empty())
+                GridCell::new(
+                    character as u32,
+                    TermColor::Rgb(215, 119, 87),
+                    TermColor::DefaultInverted,
+                    TermStyle::empty(),
+                )
             })
             .collect();
         cells.resize(cols, GridCell::BLANK);
@@ -5679,13 +5735,13 @@ mod tests {
 
     /// Real sessions carry their pull requests: a description, CI checks and
     /// the review discussion. Every third session gets one to three. The
-    /// sizes are not measured from a real fleet; they are chosen so that row
-    /// comparison takes about the share of a frame (≈8% of `Window::draw`)
-    /// that a sample of the installed app attributed to it.
+    /// sizes are illustrative, not measured from a real fleet: here row
+    /// comparison is under 1% of `Window::draw`, where a sample of the
+    /// installed app put it at 8%.
     #[cfg(target_os = "macos")]
     fn real_use_pull_requests(sessions: &mut [diri_proto::SessionRecord]) {
         for (index, session) in sessions.iter_mut().enumerate() {
-            if index % 3 != 0 {
+            if !index.is_multiple_of(3) {
                 continue;
             }
             let prs = (0..1 + index % 3)
@@ -5851,14 +5907,21 @@ mod tests {
                     let (cols, rows) = if cols < 20 || rows < 10 {
                         // Not attached, so never sized: fill the pane at
                         // Menlo 13's cell size.
-                        terminal.geometry_for_test().0.map_or((120, 40), |viewport| {
-                            ((viewport.width / 7.83) as u16, ((viewport.height - 44.0) / 16.0) as u16)
-                        })
+                        terminal
+                            .geometry_for_test()
+                            .0
+                            .map_or((120, 40), |viewport| {
+                                (
+                                    (viewport.width / 7.83) as u16,
+                                    ((viewport.height - 44.0) / 16.0) as u16,
+                                )
+                            })
                     } else {
                         (cols, rows)
                     };
                     let mut grid = diri_term::buffer::GridBuffer::new(cols, rows);
-                    for (row, cells) in real_use_screen_rows(cols, rows, 0).into_iter().enumerate() {
+                    for (row, cells) in real_use_screen_rows(cols, rows, 0).into_iter().enumerate()
+                    {
                         let start = row * usize::from(cols);
                         for (col, cell) in cells.into_iter().enumerate() {
                             grid.cells[start + col] = cell;
@@ -5871,23 +5934,30 @@ mod tests {
         }
         cx.run_until_parked();
         if a11y {
-            cx.update_window(window, |_, window, _| window.set_accessibility_active_for_test(true))
-                .unwrap();
+            cx.update_window(window, |_, window, _| {
+                window.set_accessibility_active_for_test(true)
+            })
+            .unwrap();
             cx.run_until_parked();
         }
         let sizes: Vec<(u16, u16)> = cx.update(|cx| {
             terminals
                 .iter()
-                .map(|terminal| terminal.read(cx).selected_grid_size_for_test().unwrap_or((120, 40)))
+                .map(|terminal| {
+                    terminal
+                        .read(cx)
+                        .selected_grid_size_for_test()
+                        .unwrap_or((120, 40))
+                })
                 .collect()
         });
         // (period in 120 Hz ticks, what happens)
         let step = |cx: &mut HeadlessAppContext, tick: usize| -> bool {
-            let stream = tick % 4 == 0;
-            let spinner_b = tick % 12 == 0;
-            let spinner_c = tick % 15 == 0;
-            let activity = tick % 15 == 0;
-            let publication = tick % 24 == 0;
+            let stream = tick.is_multiple_of(4);
+            let spinner_b = tick.is_multiple_of(12);
+            let spinner_c = tick.is_multiple_of(15);
+            let activity = tick.is_multiple_of(15);
+            let publication = tick.is_multiple_of(24);
             if !(stream || spinner_b || spinner_c || activity || publication) {
                 return false;
             }
@@ -5897,7 +5967,11 @@ mod tests {
                     let screen = real_use_screen_rows(cols, rows, tick / 4);
                     terminals[0].update(cx, |terminal, cx| {
                         terminal.land_rows_for_test(
-                            screen.into_iter().enumerate().map(|(row, cells)| (row as u16, cells)).collect(),
+                            screen
+                                .into_iter()
+                                .enumerate()
+                                .map(|(row, cells)| (row as u16, cells))
+                                .collect(),
                             (4, rows.saturating_sub(4)),
                             window,
                             cx,
@@ -5919,7 +5993,9 @@ mod tests {
                     }
                 }
                 if activity {
-                    sidebar.update(cx, |sidebar, cx| sidebar.advance_activity_frame_for_test(cx));
+                    sidebar.update(cx, |sidebar, cx| {
+                        sidebar.advance_activity_frame_for_test(cx)
+                    });
                 }
                 if publication {
                     sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
@@ -5954,7 +6030,9 @@ mod tests {
         walls.sort();
         draws.sort();
         let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
-        let pick = |samples: &[Duration], q: f64| ms(samples[((samples.len() - 1) as f64 * q).round() as usize]);
+        let pick = |samples: &[Duration], q: f64| {
+            ms(samples[((samples.len() - 1) as f64 * q).round() as usize])
+        };
         let mean = |f: &dyn Fn(&gpui::FrameStats) -> f64| {
             frames.iter().map(|(_, stats)| f(stats)).sum::<f64>() / n as f64
         };

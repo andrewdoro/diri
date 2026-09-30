@@ -351,9 +351,8 @@ fn the_sprite_sort_matches_a_stable_sort_by_key() {
     };
     for len in [0usize, 1, 5, 31, 32, 33, 100, 1_000, 20_000] {
         for distinct in [1u64, 3, 40, 1 << 40] {
-            let items: Vec<(u64, usize)> = (0..len)
-                .map(|index| (next() % distinct, index))
-                .collect();
+            let items: Vec<(u64, usize)> =
+                (0..len).map(|index| (next() % distinct, index)).collect();
             let mut expected = items.clone();
             expected.sort_by_key(|item| item.0);
             let mut sorted = items.clone();
@@ -361,7 +360,8 @@ fn the_sprite_sort_matches_a_stable_sort_by_key() {
             assert_eq!(sorted, expected, "len {len}, {distinct} distinct keys");
         }
         // Already in order: nothing moves.
-        let mut ordered: Vec<(u64, usize)> = (0..len).map(|index| (index as u64 / 3, index)).collect();
+        let mut ordered: Vec<(u64, usize)> =
+            (0..len).map(|index| (index as u64 / 3, index)).collect();
         let expected = ordered.clone();
         gpui::sort_sprites_for_test(&mut ordered, |item| item.0);
         assert_eq!(ordered, expected);

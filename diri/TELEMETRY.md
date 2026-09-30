@@ -92,7 +92,15 @@ held, remote, hibernated, working, needs_input`), `clients` (open control
 and data connections) and `attached` (terminal attachments, previews
 excluded). `metrics` carries counters `rpc.calls, rpc.errors,
 engine.connections, engine.accept_errors, attach.reseeds, remote.delta_gaps,
-ssh.commands, ssh.channels` and timings `rpc, attach.seed, ssh.command`.
+ssh.commands, ssh.channels` and timings `rpc, attach.seed, ssh.command`,
+plus the Engine's share of a keystroke's echo (first input of a burst, local
+sessions, ≤ 2 s): `input.echo.engine` (input written to the PTY or Holder →
+the first output the child produced after it: the Holder hop and the agent's
+own reaction time), the same per agent class as
+`input.echo.engine.<class>` (`claude`, `codex`, `cursor`, `gemini`, `shell`,
+`other`; never the raw agent id) and `input.echo.publish` (that output → the
+first grid frame queued to attached clients after it: the Engine's batching
+and coalescing).
 
 `modes` fields are `{mouse: "off"|"1000"|"1002"|"1003"|"unknown", sgr,
 alt_screen, bracketed_paste, app_cursor}` from the Engine's own emulator. The
@@ -234,6 +242,30 @@ of a main window), `term.paint` (one terminal element's prepaint + paint),
 `rpc.disconnected`, `pane.reseed`, `pane.attach_retries`,
 `pane.input_rejected`.
 
+Frame breakdown, one set per `ui.frame` sample: timings `ui.frame.cpu` (the
+main thread's CPU time over the same span; far below `ui.frame` means the
+frame waited on a busy Mac rather than computed), `ui.frame.layout` (GPUI:
+root and uncached renders plus layout requests), `ui.frame.prepaint` (Taffy
+layout, cached views that missed, element prepaint), `ui.frame.paint` (scene
+building up to the probe), `ui.frame.terminals` (terminal paints within the
+frame) and, on frames with assistive technology attached, `ui.frame.a11y`
+(the previous frame's accessibility-tree update); counters
+`ui.frame.views_rendered`, `ui.frame.views_reused` (cached views replayed),
+`ui.frame.terminal_paints`, `ui.frame.shape_misses` (terminal text-shaping
+cache misses) and `ui.frame.a11y_frames`. Divide a counter by `ui.frame.n`
+for a per-frame mean. With assistive technology attached (VoiceOver, and
+utilities that read other apps' windows: window managers, dictation, text
+expanders), GPUI re-renders every cached view nested in one that
+re-renders, so `views_rendered` per frame rises.
+
+Keystroke hops, same keystrokes as `input.echo`: `input.echo.transport`
+(input queued → the first grid frame after it reached the pane's transport
+task: socket, Engine, Holder, PTY and the agent), `input.echo.apply` (that
+frame → applied on the main thread), `input.echo.paint` (applied → the
+terminal painted it) and `input.echo.<class>` (input queued → painted, per
+agent class as above). `transport` minus the Engine's
+`input.echo.engine` + `input.echo.publish` is the sockets and the Holder.
+
 **Stall watchdog:** a background thread posts a ping to the main thread once
 a second (every 5 s while diri is not frontmost); the answer's latency is the
 stall. Idle cost is one wakeup per interval per side and no main-thread timer.
@@ -248,7 +280,7 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `app.sleep` / `app.wake` | info | | gaps that are sleep, not hangs; reconnect storms after wake |
 | `app.quit` | info | `uptime_s, windows_main, windows_opened` | clean exit vs crash (a timeline that just stops) |
 | `window.open` / `window.close` | info (main), debug (floating) | `kind` (`main`\|`floating`), `window`, `lived_s`, `open` | window churn vs RSS growth (closed-window leaks) |
-| `ui.frame` → `ui.slow_frame` | warn | `ms, window, surface` (`workbench`\|`settings`\|`palette`\|`launcher`), `workspace` | "diri is slow/janky"; frame ≥ 50 ms |
+| `ui.frame` → `ui.slow_frame` | warn (≥ 50 ms); debug (≥ 8.3 ms, at most one per 30 s) | `ms, cpu_ms, active, window, surface` (`workbench`\|`settings`\|`palette`\|`launcher`), `workspace, layout_ms, prepaint_ms, paint_ms, views, reused, terminals, terminal_ms, shape_misses, windows, a11y` | "diri is slow/janky"; which phase, how many views and terminals, whether assistive technology was attached, and whether the main thread was computing (`cpu_ms` ≈ `ms`) or waiting |
 | `ui.stall` | warn (1–3 s), incident (≥ 3 s) | `ms, ongoing, active` | beachballs, hangs; `ongoing=true` is written at 5 s while still stuck |
 | `ui.action` | debug | `action` (GPUI action name), `source` (`shortcut`\|`palette`) | what the user did just before a failure |
 | `ui.toast` | info | `title` (static toast title) | errors the user was shown ("Terminal", "Target unavailable", …) |
