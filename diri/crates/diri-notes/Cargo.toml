@@ -10,6 +10,9 @@ diri-proto.workspace = true
 getrandom.workspace = true
 unicode-segmentation.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true

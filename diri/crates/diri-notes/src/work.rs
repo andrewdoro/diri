@@ -320,19 +320,87 @@ pub fn append_todo_update(
     if !matches!(block.kind, BlockKind::Todo { .. }) {
         return None;
     }
+    // Under its own to-do the agent's name is enough; the to-do is its title.
+    let label = label.split(':').next().unwrap_or(label).trim();
     let indent = (block.indent + 1).min(MAX_INDENT);
     let at = children(&note.doc.blocks, todo).end;
+    let (head, details) = update_lines(text);
     let mut line = Block::new(0, BlockKind::Bullet, "");
     let target = MentionTarget::Session(session_id.to_owned());
     line.replace(0..0, label, &[]);
     line.add_mark(0..label.len(), crate::doc::Style::Link(target.url()));
-    let body = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let start = line.text.len();
-    line.replace(start..start, &format!(" {date} {body}"), &[]);
+    let stamp = if date.is_empty() {
+        String::new()
+    } else {
+        format!(" · {date}")
+    };
+    line.replace(start..start, &format!("{stamp} — {head}"), &[]);
     line.indent = indent;
     line.id = note.doc.fresh_id();
     note.doc.blocks.insert(at, line);
+    for (offset, detail) in details.iter().enumerate() {
+        let (text, marks) = crate::markdown::parse_inline(detail);
+        let mut child = Block::new(0, BlockKind::Bullet, text);
+        child.marks = marks;
+        child.normalize();
+        child.indent = (indent + 1).min(MAX_INDENT);
+        child.id = note.doc.fresh_id();
+        note.doc.blocks.insert(at + 1 + offset, child);
+    }
     Some(at)
+}
+
+#[cfg(test)]
+mod update_lines_tests {
+    #[test]
+    fn a_report_with_a_list_becomes_a_headline_and_points() {
+        let (head, details) = super::update_lines(
+            "Done: there are 3 docs:\n\n- faq.md: how to cancel\n- pricing.md: $12/mo\n2. roadmap.md: a stub",
+        );
+        assert_eq!(head, "Done: there are 3 docs:");
+        assert_eq!(
+            details,
+            [
+                "faq.md: how to cancel",
+                "pricing.md: $12/mo",
+                "roadmap.md: a stub"
+            ]
+        );
+    }
+}
+
+/// Splits an agent's report into its headline and its detail lines, so a
+/// multi-line result reads as a bullet with nested points instead of one
+/// run-on line. List markers on detail lines are dropped (they become
+/// bullets); blank lines are skipped.
+pub fn update_lines(text: &str) -> (String, Vec<String>) {
+    let mut head: Vec<String> = Vec::new();
+    let mut details = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let item = ["- ", "* ", "+ "]
+            .iter()
+            .find_map(|marker| line.strip_prefix(marker))
+            .or_else(|| {
+                let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+                (digits > 0)
+                    .then(|| line[digits..].strip_prefix(". "))
+                    .flatten()
+            });
+        match item {
+            Some(item) => details.push(item.trim().to_owned()),
+            None if details.is_empty() => head.push(line.to_owned()),
+            None => details.push(line.to_owned()),
+        }
+    }
+    if head.is_empty() && !details.is_empty() {
+        head.push(details.remove(0));
+    }
+    (head.join(" "), details)
 }
 
 // ---------------------------------------------------------------------------
@@ -389,20 +457,38 @@ pub fn mentions(blocks: &[Block], todo: usize) -> Vec<MentionTarget> {
     out
 }
 
-fn context_blocks(blocks: &[Block], todo: usize) -> Vec<&Block> {
+/// Splits a to-do's children into the person's context and its agents'
+/// updates. An update's nested lines (details from a multi-line report)
+/// belong to the update, not to the context.
+fn partition(blocks: &[Block], todo: usize) -> (Vec<&Block>, Vec<&Block>) {
     let own = blocks.get(todo).map(sessions).unwrap_or_default();
-    blocks[children(blocks, todo)]
-        .iter()
-        .filter(|child| !is_update(child, &own))
-        .collect()
+    let mut context = Vec::new();
+    let mut updates = Vec::new();
+    let mut inside_update: Option<u8> = None;
+    for child in &blocks[children(blocks, todo)] {
+        if let Some(depth) = inside_update {
+            if child.indent > depth {
+                updates.push(child);
+                continue;
+            }
+            inside_update = None;
+        }
+        if is_update(child, &own) {
+            inside_update = Some(child.indent);
+            updates.push(child);
+        } else {
+            context.push(child);
+        }
+    }
+    (context, updates)
+}
+
+fn context_blocks(blocks: &[Block], todo: usize) -> Vec<&Block> {
+    partition(blocks, todo).0
 }
 
 fn update_blocks(blocks: &[Block], todo: usize) -> Vec<&Block> {
-    let own = blocks.get(todo).map(sessions).unwrap_or_default();
-    blocks[children(blocks, todo)]
-        .iter()
-        .filter(|child| is_update(child, &own))
-        .collect()
+    partition(blocks, todo).1
 }
 
 /// Builds the prompt for an agent started from the to-do at `todo` (a
@@ -847,7 +933,7 @@ mod tests {
             "{}",
             brief.prompt
         );
-        assert!(brief.prompt.contains("An earlier attempt reported:\n- [@Claude](diri://session/s_a) 2026-09-30 Drafted 1 of 3"), "{}", brief.prompt);
+        assert!(brief.prompt.contains("An earlier attempt reported:\n- [@Claude](diri://session/s_a) · 2026-09-30 — Drafted 1 of 3"), "{}", brief.prompt);
         assert!(
             brief
                 .prompt
@@ -906,7 +992,7 @@ mod tests {
         let source = note.to_markdown();
         assert!(
             source.contains(
-                "  - Voice like [@Brand voice](diri://note/n-voice)\n  - [@Claude: Draft](diri://session/s_a) 14:02 Drafted post 1\n  - [@Claude: Draft](diri://session/s_a) 14:09 All three done\n- [ ] Book the venue"
+                "  - Voice like [@Brand voice](diri://note/n-voice)\n  - [@Claude](diri://session/s_a) · 14:02 — Drafted post 1\n  - [@Claude](diri://session/s_a) · 14:09 — All three done\n- [ ] Book the venue"
             ),
             "{source}"
         );

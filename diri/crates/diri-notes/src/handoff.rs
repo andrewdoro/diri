@@ -183,17 +183,70 @@ pub fn append_update(
         append_markdown(note, &format!("## {UPDATES_HEADING}"));
     }
     let author = chip_markdown(label, &MentionTarget::Session(session_id.to_owned()));
-    let body = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (head, details) = crate::work::update_lines(text);
     let mut line = Block::new(0, BlockKind::Bullet, "");
-    line.text = format!("{date} {body}");
+    line.text = if date.is_empty() {
+        format!("— {head}")
+    } else {
+        format!("· {date} — {head}")
+    };
     let escaped = markdown::write_inline(&line, false);
-    append_markdown(note, &format!("- {author} {escaped}"));
+    let mut markdown_text = format!("- {author} {escaped}");
+    for detail in details {
+        markdown_text.push_str(&format!("\n  - {detail}"));
+    }
+    append_markdown(note, &markdown_text);
     UpdatePlace::Updates
 }
 
 /// Today's date for entries, e.g. `2026-09-30`.
 pub fn entry_date() -> String {
     crate::history::describe_time(crate::history::now_ms())[..10].to_owned()
+}
+
+/// When an agent's entry was written, the way a person reads it in a note:
+/// `Sep 30 22:02`, in this Mac's local time.
+pub fn entry_stamp() -> String {
+    stamp_for(crate::history::now_ms() / 1000)
+}
+
+fn stamp_for(unix: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (month, day, hour, minute) = local_parts(unix);
+    format!(
+        "{} {day} {hour:02}:{minute:02}",
+        MONTHS[(month as usize).saturating_sub(1).min(11)]
+    )
+}
+
+#[cfg(unix)]
+fn local_parts(unix: u64) -> (u32, u32, u32, u32) {
+    let time = unix as libc::time_t;
+    // SAFETY: localtime_r writes only into `tm`, which we own.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ok = unsafe { !libc::localtime_r(&time, &mut tm).is_null() };
+    if ok {
+        (
+            (tm.tm_mon + 1) as u32,
+            tm.tm_mday as u32,
+            tm.tm_hour as u32,
+            tm.tm_min as u32,
+        )
+    } else {
+        utc_parts(unix)
+    }
+}
+
+#[cfg(not(unix))]
+fn local_parts(unix: u64) -> (u32, u32, u32, u32) {
+    utc_parts(unix)
+}
+
+fn utc_parts(unix: u64) -> (u32, u32, u32, u32) {
+    let (_, month, day, hour, minute, _) = crate::store::civil(unix);
+    (month, day, hour, minute)
 }
 
 /// A session a note mentions, as the handoff prompt describes it.
@@ -374,7 +427,10 @@ mod tests {
             .expect(&source);
         let second = source.find("Done: PR #600").expect(&source);
         assert!(first < second);
-        assert!(source.contains("- [@Claude](diri://session/s_c) 2026-09-30 14:02 Found"));
+        assert!(
+            source.contains("- [@Claude](diri://session/s_c) · 2026-09-30 14:02 — Found"),
+            "{source}"
+        );
     }
 
     #[test]

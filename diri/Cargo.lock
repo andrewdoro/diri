@@ -1640,6 +1640,7 @@ version = "0.1.0"
 dependencies = [
  "diri-proto",
  "getrandom 0.4.3",
+ "libc",
  "serde_json",
  "tempfile",
  "unicode-segmentation",

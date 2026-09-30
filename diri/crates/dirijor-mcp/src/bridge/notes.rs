@@ -398,14 +398,14 @@ impl Bridge {
                             |r| {
                                 (
                                     mention::session_label(
-                                        short_label(r.effective_kind().id()),
+                                        &mention::agent_display_name(r.effective_kind().id()),
                                         &r.title,
                                     ),
                                     r.id.0.clone(),
                                 )
                             },
                         );
-                        let date = handoff::entry_date();
+                        let date = handoff::entry_stamp();
                         // A named to-do takes it; otherwise append_update files
                         // it under the caller's own to-do, else in Updates.
                         let placed = index.and_then(|todo| {
@@ -771,21 +771,23 @@ impl Bridge {
             .as_deref()
             .ok_or_else(|| format!("note session {} has no note file", note.id.0))?;
         let store = self.note_store()?;
-        let label =
-            mention::session_label(short_label(caller.effective_kind().id()), &caller.title);
+        let label = mention::session_label(
+            &mention::agent_display_name(caller.effective_kind().id()),
+            &caller.title,
+        );
         let mut text = if status == "update" {
             summary.to_owned()
         } else {
-            format!("{status}: {summary}")
+            let mut word = status.to_owned();
+            if let Some(first) = word.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            format!("{word}: {summary}")
         };
         if !artifacts.is_empty() {
             text.push_str(&format!(" ({})", artifacts.join(", ")));
         }
-        let date = diri_notes::store::format_timestamp(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
-        );
+        let date = handoff::entry_stamp();
         let mut place = handoff::UpdatePlace::Updates;
         store
             .update(note_id, &Author::Session(caller.id.0.clone()), |doc| {
@@ -1160,7 +1162,7 @@ mod tests {
         assert!(source.contains("## Updates"), "{source}");
         assert!(
             source.contains("](diri://session/child)")
-                && source.contains("done: Fixed the flicker (PR #600)"),
+                && source.contains("Done: Fixed the flicker (PR #600)"),
             "{source}"
         );
     }
@@ -1327,10 +1329,10 @@ mod tests {
             .call("write_note", &json!({"note": "origin", "todo": "flights", "checked": true, "entry": "Booked for the 12th."}))
             .unwrap();
         let text = store.load(&note_id).unwrap().to_markdown();
-        assert!(text.contains("- [ ] Find the venue [@codex: child](diri://session/child)\n  - [@codex: child](diri://session/child) "), "{text}");
+        assert!(text.contains("- [ ] Find the venue [@codex: child](diri://session/child)\n  - [@Codex](diri://session/child) "), "{text}");
         assert!(text.contains("Decision: the Hall, 300 seats."), "{text}");
         assert!(
-            text.contains("- [x] Book flights\n  - [@codex: child](diri://session/child) "),
+            text.contains("- [x] Book flights\n  - [@Codex](diri://session/child) "),
             "{text}"
         );
         let long = "word ".repeat(200);
