@@ -92,7 +92,9 @@ held, remote, hibernated, working, needs_input`), `clients` (open control
 and data connections) and `attached` (terminal attachments, previews
 excluded). `metrics` carries counters `rpc.calls, rpc.errors,
 engine.connections, engine.accept_errors, attach.reseeds, remote.delta_gaps,
-ssh.commands, ssh.channels` and timings `rpc, attach.seed, ssh.command`.
+ssh.commands, ssh.channels, hook.queued` (hook reports answered before a busy
+Registry was free, applied in order by the hook applier) and timings `rpc,
+attach.seed, ssh.command`.
 
 `modes` fields are `{mouse: "off"|"1000"|"1002"|"1003"|"unknown", sgr,
 alt_screen, bracketed_paste, app_cursor}` from the Engine's own emulator. The
@@ -181,7 +183,7 @@ recorded by the Engine, not the Holder.
 | `remote.helper_error` | error | `session, code, fatal` | structured Helper errors (stale epoch, wrong incarnation, ...) |
 | `remote.connection_fatal` | error | `session, reconnects` | protocol violations that fail the transport closed |
 | `remote.uncertain_input` | error | `session` | input whose delivery could not be proven; the session fails closed |
-| `remote.helper_ready` | info | `host, path: cached\|bootstrap\|reinstall, target, protocol, ms` | bootstrap and probe latency, artifact selection |
+| `remote.helper_ready` | info | `host, path: cached\|fused\|bootstrap\|reinstall, target, protocol, ms` | bootstrap and probe latency, artifact selection |
 | `remote.helper_failed` | incident | `host, forced, io, ms` | bootstrap failures (only structured I/O facts; never remote output) |
 | `remote.helper_upload` | info | `host, target, bytes, ok, ms` | Helper uploads |
 | `remote.persistence` | info | `host, capability: native-detach\|user-supervisor\|non-persistent` | persistence probe outcome |

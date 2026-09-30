@@ -1,5 +1,112 @@
 # diri performance record
 
+## Agent hooks and remote usage polls (2026-09-30)
+
+Real telemetry (4.7 h of the author's 0.8.10 use, aggregates only): 1,928
+`hook.report`s and 2,844 `client.hello`s (one `dirijor hook` process and
+Engine connection per Claude callback, 87% of them Pre/PostToolUse); six slow
+`hook.report`s at 263–461 ms, **each** coinciding with a 530–556 ms
+`session.remove`; `host.usage` 57 calls (the App's five-minute poll, one host)
+at avg 1.15 s / max 2.6 s, and 119 `ssh.command`s at p50 500 ms — two per poll:
+the exact-build Helper probe (`remote.helper_ready path=cached`, p50 733 ms)
+and then the `usage` RPC.
+
+Findings:
+
+- `session.remove` holds the Registry through `terminate`, where the Holder
+  sends TERM and waits up to 500 ms for the whole tree before KILL. The
+  wrapper's exec'd interactive shell survives TERM, so every close takes
+  ~550 ms. Claude runs its SessionEnd hook on TERM; `hook.report` waited on the
+  Registry lock, so the hook never finished before the KILL (its SessionEnd was
+  lost), and any other Agent's hook in that window stalled that Agent too.
+- Uncontended, the Engine answers Hello in ~0.02 ms and `hook.report` in
+  0.3–0.5 ms p50 (p95 5–10 ms when the debounced persist ran inline under the
+  lock). The rest of a ~9 ms hook is `dirijor` process spawn/exec: `dirijor`
+  retires ~20 M instructions, a trivial Rust `main` ~15 M, `/usr/bin/true`
+  ~8 M. Dropping Hello would save ~0.02 ms and break the identity check, so it
+  stays.
+- The CLI read at most 1 MiB of hook stdin; a larger PostToolUse (a Read of a
+  big file) became `{"raw": ...}`, so the report was dropped and the recovery
+  seed lost its conversation id. Every Pre/PostToolUse also re-encoded
+  `tool_input`/`tool_response` to the Engine, which never reads them there.
+- A usage poll ran two login shells on the host (account layer + `~` layer)
+  for three variables (`HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`).
+
+Changes:
+
+- `hook.report` applies inline only when the Registry is free and nothing is
+  queued; otherwise it queues to one `diri-hook-applier` thread (bounded
+  1,024, blocking backpressure, never a drop) and answers at once. Order per
+  Agent is preserved (the inline path cannot overtake a queued report). The
+  Registry write moves from `persist()` (inline fsync once 500 ms have passed)
+  to `persist_deferred()` (the flusher, within the same 500 ms bound); the
+  CLI still writes the lifecycle seed to the recovery store before delivery.
+  New counter `hook.queued`.
+- `dirijor hook` reads up to 8 MiB and forwards neither `tool_response` nor,
+  except for PermissionRequest (the one event whose input the Engine
+  summarizes), `tool_input`.
+- A warm `host.usage` is one SSH command: `probe` (stdin closed) and, only if
+  it exits 0, `exec usage` in the same `ssh -T` channel; the probe line is
+  verified exactly like the separate probe before the response is accepted,
+  and anything unverifiable takes the full bootstrap path (`path=fused` in
+  `remote.helper_ready`).
+- The Helper caches those three login-environment values in owner-only
+  `usage-v1/login-environment.json`, valid while the account shell, HOME, the
+  stat stamps of 27 standard shell startup files and a one-hour age match.
+
+### Measurements
+
+Apple M4 Max, macOS 27.0, release builds, load average 6–17. Base is
+`ab2b715e` (origin/main).
+
+`scripts/hook-bench.py <bin-dir> --pad 800` (private Engine, 40 Claude
+sessions, 1.1 MB state.json, 400 `dirijor hook` processes, wall = fork to
+exit; base and branch alternated 3× each, ranges):
+
+| | Base | Branch |
+| --- | ---: | ---: |
+| Hook wall p50 / p95 | 8.8–9.2 / 13.9–14.8 ms | 9.2–9.6 / 14.8–15.5 ms |
+| Hook wall p99 | 17.2–22.8 ms | 17.4–23.4 ms |
+| Engine `hook.report` reply p50 / p95 (`--phases`, 2×) | 0.33–0.50 / 5.5–9.8 ms | 0.013–0.017 / 0.027–0.034 ms |
+| Engine Hello p50 | 0.020–0.024 ms | 0.018–0.023 ms |
+
+Same, with 8 sessions closed during the run (`--bg-remove 8`, 600 hooks, 2×
+each):
+
+| | Base | Branch |
+| --- | ---: | ---: |
+| Hook wall p99 / max | 549–558 / 566–573 ms | 16.2–16.4 / 23–27 ms |
+| Closing Agent's SessionEnd hook completed | 0 of 6 (killed) | 6 of 6 (8–114 ms) |
+| `session.remove` | 543–569 ms | 550–593 ms (unchanged: TERM escalation) |
+
+A re-run of `scripts/hook-bench.py` at load average 300–400 reproduced it:
+hook wall p99 564 ms (base) vs 27 ms (branch).
+
+`cargo test --release -p diri-remote --test usage_bench -- --ignored
+--nocapture` (fake `ssh`, 400 Claude + 100 Codex transcripts × 200 lines,
+Helper preinstalled; remote CPU is every child's user+sys; five unchanged
+polls, then one append; `USAGE_BENCH_RC_SLEEP=0.15` puts `sleep 0.15` in the
+shell startup files):
+
+| | Base | Branch |
+| --- | ---: | ---: |
+| SSH commands per poll | 2 | 1 |
+| Warm poll, bare shell: wall / remote CPU | 85–106 / 48–58 ms | 38–40 / 25–26 ms |
+| Warm poll, 150 ms startup files: wall / remote CPU | 390–402 / 48–53 ms | 53–65 / 29–38 ms |
+| Poll after an append | 90–391 ms | 49–64 ms |
+| Cold poll (first scan) | 277–597 ms | 291–624 ms |
+
+Totals are identical between base and branch and between cold and warm polls
+(the bench asserts warm = cold and append = cold + 7 tokens).
+
+Not claimed: SSH round-trip time. The fixture has none; on the real host each
+`ssh.command` was ~0.5 s (a new master connection per poll, since the
+five-minute poll outlives `ControlPersist=60`), so the removed round trip is
+the larger real saving. Not changed: the five-minute App poll itself (the App
+polls even with the Usage page closed; left to the App), `session.remove`
+holding the Registry through the 500 ms TERM escalation (hooks no longer wait
+on it; other Registry users still do), and process spawn cost per hook.
+
 ## Cheap column changes: deferred history reflow (2026-09-29)
 
 #561 made a drag stop blocking other sessions, but each column change still

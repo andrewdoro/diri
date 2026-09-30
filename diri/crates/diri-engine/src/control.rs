@@ -28,6 +28,7 @@ mod account_handoff;
 mod account_switch;
 mod claude_accounts;
 mod codex_accounts;
+mod hook_queue;
 mod message_delivery;
 mod operations;
 mod orchestration;
@@ -76,6 +77,7 @@ pub struct ControlServer {
     account_operations: std::sync::RwLock<()>,
     session_operations: Mutex<std::collections::HashSet<String>>,
     agent_scans: Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
+    hook_reports: hook_queue::HookQueue,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -184,6 +186,7 @@ impl ControlServer {
             account_operations: std::sync::RwLock::new(()),
             session_operations: Mutex::new(std::collections::HashSet::new()),
             agent_scans: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            hook_reports: hook_queue::HookQueue::new(),
         }
     }
 
@@ -2635,15 +2638,19 @@ impl ControlServer {
             return Ok(json!({}));
         };
         let session_end = p.kind == "claude-hook" && p.event.as_deref() == Some("SessionEnd");
-        let mut registry = self.registry.lock().map_err(poisoned)?;
-        if session_end && let Some(session) = registry.get(&session_id.0) {
-            session.note_agent_ended();
-        }
-        let changed = registry.apply_hook_report(&session_id.0, signal, &meta);
-        if changed {
-            let _ = registry.persist();
-        }
-        self.publish_updated(&registry, &session_id.0);
+        // Never wait on the Registry here: the Agent is blocked on this reply.
+        self.hook_reports
+            .submit(
+                &self.registry,
+                &self.events,
+                hook_queue::HookReport {
+                    session_id: session_id.0,
+                    signal,
+                    meta,
+                    session_end,
+                },
+            )
+            .map_err(poisoned)?;
         Ok(json!({}))
     }
 
@@ -6283,6 +6290,79 @@ mod tests {
                 "callback from {thread}"
             );
         }
+    }
+
+    /// `session.remove` holds the Registry through the Holder's TERM→KILL
+    /// escalation while a closing Claude waits on its own SessionEnd hook.
+    /// The hook must be answered at once and still land, in order.
+    #[test]
+    fn a_hook_report_never_waits_for_a_busy_registry_and_keeps_order() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        registry
+            .lock()
+            .expect("registry")
+            .insert_record(test_record("s_hook"));
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.path().join("daemon.sock"),
+        ));
+        fn prompt(uuid: &str, prompt: &str) -> Option<JsonValue> {
+            Some(json!({
+                "kind": "claude-hook", "dirijorSessionID": "s_hook", "event": "UserPromptSubmit",
+                "payload": {"session_id": uuid, "hook_event_name": "UserPromptSubmit", "prompt": prompt},
+            }))
+        }
+        let busy = registry.lock().expect("registry");
+        let (answered, replies) = std::sync::mpsc::channel();
+        let agent = {
+            let server = Arc::clone(&server);
+            std::thread::spawn(move || {
+                for (uuid, text) in [("uuid-1", "first prompt"), ("uuid-2", "second prompt")] {
+                    ok_of(call(&server, "hook.report", prompt(uuid, text)));
+                }
+                answered.send(()).unwrap();
+            })
+        };
+        assert!(
+            replies.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "hook.report waited for the busy Registry"
+        );
+        drop(busy);
+        agent.join().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let record = loop {
+            let record = registry.lock().unwrap().record("s_hook").unwrap();
+            if record.agent_session_id.as_deref() == Some("uuid-2")
+                || std::time::Instant::now() > deadline
+            {
+                break record;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        // Applied in callback order: the first prompt titled the placeholder,
+        // the second report's identity is the latest.
+        assert_eq!(record.agent_session_id.as_deref(), Some("uuid-2"));
+        assert_eq!(record.title, "first prompt");
+        // Drained: the next report applies inline, before its reply.
+        ok_of(call(
+            &server,
+            "hook.report",
+            prompt("uuid-3", "third prompt"),
+        ));
+        assert_eq!(
+            registry
+                .lock()
+                .unwrap()
+                .record("s_hook")
+                .unwrap()
+                .agent_session_id
+                .as_deref(),
+            Some("uuid-3")
+        );
     }
 
     #[test]
