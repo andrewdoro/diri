@@ -112,10 +112,19 @@ pub enum IconName {
     Unarchive,
     Warning,
     Worktree,
+    Text,
+    Heading1,
+    Heading2,
+    Heading3,
+    BulletList,
+    NumberedList,
+    Todo,
+    Quote,
+    Divider,
 }
 
 impl IconName {
-    pub const ALL: [Self; 66] = [
+    pub const ALL: [Self; 75] = [
         Self::Account,
         Self::Activity,
         Self::Archive,
@@ -182,6 +191,15 @@ impl IconName {
         Self::Unarchive,
         Self::Warning,
         Self::Worktree,
+        Self::Text,
+        Self::Heading1,
+        Self::Heading2,
+        Self::Heading3,
+        Self::BulletList,
+        Self::NumberedList,
+        Self::Todo,
+        Self::Quote,
+        Self::Divider,
     ];
 
     pub const fn asset_path(self) -> &'static str {
@@ -252,6 +270,15 @@ impl IconName {
             Self::Unarchive => "icons/unarchive.svg",
             Self::Warning => "icons/warning.svg",
             Self::Worktree => "icons/worktree.svg",
+            Self::Text => "icons/text.svg",
+            Self::Heading1 => "icons/heading-1.svg",
+            Self::Heading2 => "icons/heading-2.svg",
+            Self::Heading3 => "icons/heading-3.svg",
+            Self::BulletList => "icons/bullet-list.svg",
+            Self::NumberedList => "icons/numbered-list.svg",
+            Self::Todo => "icons/todo.svg",
+            Self::Quote => "icons/quote.svg",
+            Self::Divider => "icons/divider.svg",
         }
     }
 
@@ -328,6 +355,15 @@ impl IconName {
             "tray.and.arrow.up.fill" => Self::Unarchive,
             "exclamationmark.triangle" => Self::Warning,
             "point.3.filled.connected.trianglepath.dotted" => Self::Worktree,
+            "textformat" => Self::Text,
+            "textformat.h1" => Self::Heading1,
+            "textformat.h2" => Self::Heading2,
+            "textformat.h3" => Self::Heading3,
+            "list.bullet" => Self::BulletList,
+            "list.number" => Self::NumberedList,
+            "checkmark.square" => Self::Todo,
+            "text.quote" => Self::Quote,
+            "divider" => Self::Divider,
             _ => return None,
         })
     }
@@ -394,6 +430,15 @@ fn embedded_svg(path: &str) -> Option<&'static [u8]> {
         "icons/working-6.svg" => include_bytes!("../assets/icons/working-6.svg"),
         "icons/working-7.svg" => include_bytes!("../assets/icons/working-7.svg"),
 
+        "icons/text.svg" => include_bytes!("../assets/icons/text.svg"),
+        "icons/heading-1.svg" => include_bytes!("../assets/icons/heading-1.svg"),
+        "icons/heading-2.svg" => include_bytes!("../assets/icons/heading-2.svg"),
+        "icons/heading-3.svg" => include_bytes!("../assets/icons/heading-3.svg"),
+        "icons/bullet-list.svg" => include_bytes!("../assets/icons/bullet-list.svg"),
+        "icons/numbered-list.svg" => include_bytes!("../assets/icons/numbered-list.svg"),
+        "icons/todo.svg" => include_bytes!("../assets/icons/todo.svg"),
+        "icons/quote.svg" => include_bytes!("../assets/icons/quote.svg"),
+        "icons/divider.svg" => include_bytes!("../assets/icons/divider.svg"),
         "icons/account.svg" => include_bytes!("../assets/icons/account.svg"),
         "icons/activity.svg" => include_bytes!("../assets/icons/activity.svg"),
         "icons/archive.svg" => include_bytes!("../assets/icons/archive.svg"),

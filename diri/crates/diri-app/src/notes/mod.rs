@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use diri_notes::edit::Editor;
 use diri_notes::markdown::FrontMatter;
+use diri_notes::mention::{self as mentions, Candidate, MentionTarget};
 use diri_notes::store::{self, Note, NoteStore};
 use diri_proto::SessionId;
 use diri_ui::SemanticColors;
@@ -25,7 +26,7 @@ use gpui::{
 };
 
 use crate::store::StoreRuntime;
-use editor_view::{EditorEvent, NoteEditorView};
+use editor_view::{EditorEvent, MentionDirectory, MentionEntry, NoteEditorView};
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(350);
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(120);
@@ -63,6 +64,8 @@ pub(crate) struct NotePane {
     save_task: Task<()>,
     _watch_task: Task<()>,
     _watcher: Option<notify::RecommendedWatcher>,
+    /// Keeps mention chips' session status and the `@` menu live.
+    _sessions_task: Task<()>,
     error: Option<SharedString>,
     /// Fixture palette; live panes follow the store's theme.
     colors_override: Option<SemanticColors>,
@@ -80,6 +83,9 @@ impl Focusable for NotePane {
 pub(crate) enum NotePaneEvent {
     /// Escape with nothing left to dismiss in the editor.
     Dismiss,
+    /// A mention chip was clicked: show that session (an agent, a
+    /// terminal, or another note).
+    Reveal(SessionId),
 }
 
 impl gpui::EventEmitter<NotePaneEvent> for NotePane {}
@@ -104,6 +110,11 @@ impl NotePane {
             (Some(store), true) => Self::watch(store, cx),
             _ => (None, Task::ready(())),
         };
+        let sessions_task = if watch {
+            Self::follow_sessions(&runtime, cx)
+        } else {
+            Task::ready(())
+        };
         Self {
             runtime,
             store,
@@ -113,6 +124,7 @@ impl NotePane {
             save_task: Task::ready(()),
             _watch_task: watch_task,
             _watcher: watcher,
+            _sessions_task: sessions_task,
             error: None,
             colors_override: None,
         }
@@ -122,6 +134,14 @@ impl NotePane {
         self.colors_override.unwrap_or_else(|| {
             crate::app_theme::colors_in(&self.runtime.store.read().expect("store"))
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn editor_for_test(&self) -> Option<Entity<NoteEditorView>> {
+        match &self.state {
+            PaneState::Open(open) => Some(open.editor.clone()),
+            _ => None,
+        }
     }
 
     /// Focus the editor the next time a note is shown (a new note, a click).
@@ -181,6 +201,7 @@ impl NotePane {
                 this.save(cx);
                 cx.emit(NotePaneEvent::Dismiss);
             }
+            EditorEvent::OpenMention(target) => this.open_mention(target, cx),
         });
         let synced_title = self
             .runtime
@@ -201,7 +222,66 @@ impl NotePane {
             synced_title,
             _subscription: subscription,
         });
+        self.push_mentions(cx);
         cx.notify();
+    }
+
+    fn follow_sessions(runtime: &Arc<StoreRuntime>, cx: &mut Context<Self>) -> Task<()> {
+        let mut changes = runtime.changes();
+        cx.spawn(async move |this, cx| {
+            loop {
+                match changes.recv().await {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if this.update(cx, |this, cx| this.push_mentions(cx)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        })
+    }
+
+    /// Everything the open note can mention, rebuilt from the session store.
+    pub(crate) fn mention_directory(&self) -> MentionDirectory {
+        let open = match &self.state {
+            PaneState::Open(open) => Some(open.session.clone()),
+            _ => None,
+        };
+        let store = self.runtime.store.read().expect("store");
+        let entries = mention_entries(&store, open.as_ref());
+        MentionDirectory { entries }
+    }
+
+    /// Hands the open editor a fresh directory; a no-op when nothing changed.
+    pub(crate) fn push_mentions(&mut self, cx: &mut Context<Self>) {
+        let PaneState::Open(open) = &self.state else {
+            return;
+        };
+        let editor = open.editor.clone();
+        let directory = self.mention_directory();
+        editor.update(cx, |view, cx| view.set_mentions(directory, cx));
+    }
+
+    fn open_mention(&mut self, target: &MentionTarget, cx: &mut Context<Self>) {
+        let session = {
+            let store = self.runtime.store.read().expect("store");
+            match target {
+                MentionTarget::Session(id) => {
+                    let id = SessionId::new(id.clone());
+                    store.sessions().contains_key(&id).then_some(id)
+                }
+                MentionTarget::Note(note) => store
+                    .sessions()
+                    .values()
+                    .find(|s| s.is_note() && s.note_id.as_deref() == Some(note))
+                    .map(|s| s.id.clone()),
+            }
+        };
+        if let Some(session) = session {
+            self.save(cx);
+            cx.emit(NotePaneEvent::Reveal(session));
+        }
     }
 
     fn watch(
@@ -365,4 +445,72 @@ impl Render for NotePane {
             )
         })
     }
+}
+
+/// Live sessions first (most recently active), then notes, each as the
+/// `@` menu offers it. Notes are Sessions too; they are mentioned by their
+/// file id so the link survives the Session being archived and restored.
+fn mention_entries(
+    store: &crate::store::SessionStore,
+    open: Option<&SessionId>,
+) -> Vec<MentionEntry> {
+    let mut records: Vec<_> = store
+        .sessions()
+        .values()
+        .filter(|s| !s.is_archived() && Some(&s.id) != open)
+        .collect();
+    records.sort_by(|a, b| b.updated_at.0.total_cmp(&a.updated_at.0));
+    let project_of = |record: &diri_proto::SessionRecord| {
+        store
+            .projects()
+            .get(&record.project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    };
+    let (notes, sessions): (Vec<_>, Vec<_>) = records.into_iter().partition(|s| s.is_note());
+    let mut entries: Vec<MentionEntry> = sessions
+        .into_iter()
+        .map(|session| {
+            let kind = session.effective_kind();
+            let agent = crate::notifications::display_name(kind, store.agent_descriptor(kind));
+            let title = crate::switcher::display_title_str(session);
+            let project = project_of(session);
+            let detail = match (&session.host, project.is_empty()) {
+                (Some(host), false) => format!("{project} · {host}"),
+                (Some(host), true) => host.clone(),
+                (None, false) => project.clone(),
+                (None, true) => {
+                    crate::quick_open::home_relative(std::path::Path::new(&session.cwd))
+                }
+            };
+            MentionEntry {
+                candidate: Candidate {
+                    target: MentionTarget::Session(session.id.0.clone()),
+                    label: mentions::session_label(agent, title),
+                    keywords: format!(
+                        "{agent} {project} {}",
+                        session.git_branch.as_deref().unwrap_or("")
+                    ),
+                },
+                agent: Some(crate::session_presentation::ui_agent_kind(kind)),
+                status: Some(crate::session_presentation::status_state(session, false)),
+                detail: detail.into(),
+            }
+        })
+        .collect();
+    entries.extend(notes.into_iter().filter_map(|note| {
+        let id = note.note_id.clone()?;
+        let project = project_of(note);
+        Some(MentionEntry {
+            candidate: Candidate {
+                target: MentionTarget::Note(id),
+                label: mentions::note_label(&note.title),
+                keywords: format!("note {project}"),
+            },
+            agent: None,
+            status: None,
+            detail: project.into(),
+        })
+    }));
+    entries
 }

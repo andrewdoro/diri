@@ -13,6 +13,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::doc::{Block, BlockKind, Document, MAX_INDENT, Mark, Style, floor_boundary};
 use crate::markdown;
+use crate::mention::{self, MentionTarget};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos {
@@ -274,11 +275,19 @@ impl Editor {
                         pos
                     };
                 }
-                let offset = if granularity == Granularity::Grapheme {
+                let mut offset = if granularity == Granularity::Grapheme {
                     grapheme_step(text, pos.offset, forward)
                 } else {
                     word_step(text, pos.offset, forward)
                 };
+                // A mention chip is one unit: the caret never rests inside it.
+                if let Some(chip) = mention::at(&self.blocks[pos.block], offset, false) {
+                    offset = if forward {
+                        chip.range.end
+                    } else {
+                        chip.range.start
+                    };
+                }
                 Pos::new(pos.block, offset)
             }
         }
@@ -593,8 +602,9 @@ impl Editor {
                 Granularity::Word => word_step(text, pos.offset, false),
                 _ => 0,
             };
-            self.blocks[pos.block].replace(start..pos.offset, "", &[]);
-            self.selection = Selection::caret(Pos::new(pos.block, start));
+            let range = self.whole_mentions(pos.block, start..pos.offset);
+            self.blocks[pos.block].replace(range.clone(), "", &[]);
+            self.selection = Selection::caret(Pos::new(pos.block, range.start));
             self.changed();
             return;
         }
@@ -656,7 +666,9 @@ impl Editor {
                 Granularity::Word => word_step(text, pos.offset, true),
                 _ => len,
             };
-            self.blocks[pos.block].replace(pos.offset..end, "", &[]);
+            let range = self.whole_mentions(pos.block, pos.offset..end);
+            self.blocks[pos.block].replace(range.clone(), "", &[]);
+            self.selection = Selection::caret(Pos::new(pos.block, range.start));
             self.changed();
             return;
         }
@@ -665,6 +677,48 @@ impl Editor {
         }
         self.checkpoint(EditKind::Other, now_ms);
         self.merge_into_previous(pos.block + 1);
+        self.changed();
+    }
+
+    /// Grows `range` to swallow every mention chip it touches, so deleting
+    /// one character of a chip deletes the whole chip.
+    fn whole_mentions(&self, block: usize, range: Range<usize>) -> Range<usize> {
+        let mut range = range;
+        for chip in mention::in_block(&self.blocks[block]) {
+            let touches = chip.range.start < range.end && range.start < chip.range.end;
+            if touches {
+                range = range.start.min(chip.range.start)..range.end.max(chip.range.end);
+            }
+        }
+        range
+    }
+
+    /// Replaces `range` of the caret's block — the typed `@query` — with a
+    /// mention chip linking to `target`, followed by a space.
+    pub fn insert_mention(
+        &mut self,
+        range: Range<usize>,
+        target: &MentionTarget,
+        label: &str,
+        now_ms: u64,
+    ) {
+        let index = self.selection.head.block;
+        if matches!(self.blocks[index].kind, BlockKind::Title | BlockKind::Code) || label.is_empty()
+        {
+            return;
+        }
+        self.checkpoint(EditKind::Other, now_ms);
+        let block = &mut self.blocks[index];
+        let range = block.clamp(range);
+        let label = label.replace('\n', " ");
+        block.replace(range.clone(), &label, &[]);
+        let end = range.start + label.len();
+        block.add_mark(range.start..end, Style::Link(target.url()));
+        if !block.text[end..].starts_with(' ') {
+            block.replace(end..end, " ", &[]);
+        }
+        self.selection = Selection::caret(Pos::new(index, end + 1));
+        self.pending = None;
         self.changed();
     }
 
@@ -1435,5 +1489,76 @@ mod tests {
         assert_eq!(word_step("hello, world", 5, true), 12);
         assert_eq!(word_step("hello, world", 12, false), 7);
         assert_eq!(word_step("hello, world", 7, false), 0);
+    }
+
+    fn mention_editor() -> Editor {
+        let mut e = editor("# T\n\nping");
+        e.set_caret(Pos::new(1, 4));
+        type_str(&mut e, " @cod");
+        e
+    }
+
+    #[test]
+    fn inserting_a_mention_replaces_the_query_with_a_linked_chip() {
+        let mut e = mention_editor();
+        let target = MentionTarget::Session("s_1".into());
+        e.insert_mention(5..9, &target, "@Codex: fix resize", 0);
+        let block = e.block(1);
+        assert_eq!(block.text, "ping @Codex: fix resize ");
+        assert_eq!(
+            block.marks,
+            vec![Mark {
+                range: 5..23,
+                style: Style::Link("diri://session/s_1".into())
+            }]
+        );
+        assert_eq!(e.selection, Selection::caret(Pos::new(1, 24)));
+        // Text typed after the chip is not part of it.
+        type_str(&mut e, "ok");
+        assert_eq!(e.block(1).marks[0].range, 5..23);
+        assert_eq!(
+            markdown::write_inline(e.block(1), true),
+            "ping [@Codex: fix resize](diri://session/s_1) ok"
+        );
+        assert!(e.undo());
+        assert!(e.undo());
+        assert_eq!(e.block(1).text, "ping @cod");
+    }
+
+    #[test]
+    fn a_mention_chip_deletes_and_steps_as_one_unit() {
+        let mut e = mention_editor();
+        let target = MentionTarget::Note("n-1".into());
+        e.insert_mention(5..9, &target, "@Plan", 0);
+        assert_eq!(e.block(1).text, "ping @Plan ");
+        // Arrowing left from after the space jumps over the whole chip.
+        e.move_horizontal(false, Granularity::Grapheme, false);
+        assert_eq!(e.selection.head, Pos::new(1, 10));
+        e.move_horizontal(false, Granularity::Grapheme, false);
+        assert_eq!(e.selection.head, Pos::new(1, 5));
+        e.move_horizontal(true, Granularity::Grapheme, false);
+        assert_eq!(e.selection.head, Pos::new(1, 10));
+        e.backspace(Granularity::Grapheme, 0);
+        assert_eq!(e.block(1).text, "ping  ");
+        assert!(e.block(1).marks.is_empty());
+        assert!(e.document().mentions().is_empty());
+
+        let mut e = mention_editor();
+        e.insert_mention(5..9, &target, "@Plan", 0);
+        e.set_caret(Pos::new(1, 5));
+        e.delete_forward(Granularity::Grapheme, 0);
+        assert_eq!(e.block(1).text, "ping  ");
+        assert_eq!(e.selection.head, Pos::new(1, 5));
+    }
+
+    #[test]
+    fn mentions_are_refused_in_titles_and_code() {
+        let mut e = editor("# T\n\n```\n@x\n```\n");
+        e.set_caret(Pos::new(0, 1));
+        e.insert_mention(0..1, &MentionTarget::Note("n".into()), "@n", 0);
+        assert_eq!(e.title(), "T");
+        e.set_caret(Pos::new(1, 2));
+        e.insert_mention(0..2, &MentionTarget::Note("n".into()), "@n", 0);
+        assert_eq!(e.block(1).text, "@x");
     }
 }

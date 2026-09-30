@@ -2,23 +2,37 @@
 //!
 //! Behaviour lives in `diri_notes::edit::Editor`; this view adds what needs
 //! pixels — text layout, hit testing, vertical motion, IME, the caret and
-//! selection, checkboxes, and the `/` block menu. Each frame records one
-//! `TextLayout` per block, and pointer/motion code reads those layouts back.
+//! selection, checkboxes, the `/` block menu, and `@` mentions. Each frame
+//! records one `TextLayout` per block, and pointer/motion code reads those
+//! layouts back.
+//!
+//! The view is layout-agnostic: it fills whatever box its host gives it and
+//! centres a [`MEASURE`]-wide column inside, so the same entity works in the
+//! Notes window and as a main-window content view in place of a terminal.
+//! Hosts talk to it only through [`EditorEvent`], [`NoteEditorView::reload`],
+//! [`NoteEditorView::set_colors`], and [`NoteEditorView::set_mentions`].
 
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use diri_notes::doc::{Block, BlockKind, Style};
 use diri_notes::edit::{Editor, Granularity, Pos, Selection, Turn};
-use diri_ui::{Palette, SemanticColors};
+use diri_notes::mention::{self, Candidate, MentionTarget};
+use diri_ui::{
+    AgentKind as UiAgentKind, AgentLogo, Ink, Palette, SemanticColors, StatusGlyph, StatusState,
+    Typo,
+};
 use gpui::{
-    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight,
+    Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight,
     HighlightStyle, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Point, Render, ScrollHandle, SharedString, StrikethroughStyle, StyledText, Task, TextLayout,
     UTF16Selection, UnderlineStyle, Window, actions, anchored, canvas, deferred, div, fill, point,
     prelude::*, px, size,
 };
+
+use crate::floating;
 
 pub(crate) const EDITOR_CONTEXT: &str = "DiriNoteEditor";
 
@@ -82,6 +96,17 @@ actions!(
     ]
 );
 
+// Turn-into shortcuts, shared by the keymap and the `/` menu that prints them.
+const KEY_TURN_PARAGRAPH: &str = "cmd-alt-0";
+const KEY_TURN_H1: &str = "cmd-alt-1";
+const KEY_TURN_H2: &str = "cmd-alt-2";
+const KEY_TURN_H3: &str = "cmd-alt-3";
+const KEY_TURN_BULLET: &str = "cmd-shift-8";
+const KEY_TURN_NUMBERED: &str = "cmd-shift-7";
+const KEY_TURN_TODO: &str = "cmd-shift-9";
+const KEY_TURN_QUOTE: &str = "cmd-alt-q";
+const KEY_TURN_CODE: &str = "cmd-alt-c";
+
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     let c = Some(EDITOR_CONTEXT);
     vec![
@@ -136,15 +161,15 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-x", Strike, c),
         KeyBinding::new("cmd-k", Link, c),
         KeyBinding::new("cmd-enter", ToggleTodo, c),
-        KeyBinding::new("cmd-alt-0", TurnParagraph, c),
-        KeyBinding::new("cmd-alt-1", TurnHeading1, c),
-        KeyBinding::new("cmd-alt-2", TurnHeading2, c),
-        KeyBinding::new("cmd-alt-3", TurnHeading3, c),
-        KeyBinding::new("cmd-shift-8", TurnBullet, c),
-        KeyBinding::new("cmd-shift-7", TurnNumbered, c),
-        KeyBinding::new("cmd-shift-9", TurnTodo, c),
-        KeyBinding::new("cmd-alt-q", TurnQuote, c),
-        KeyBinding::new("cmd-alt-c", TurnCode, c),
+        KeyBinding::new(KEY_TURN_PARAGRAPH, TurnParagraph, c),
+        KeyBinding::new(KEY_TURN_H1, TurnHeading1, c),
+        KeyBinding::new(KEY_TURN_H2, TurnHeading2, c),
+        KeyBinding::new(KEY_TURN_H3, TurnHeading3, c),
+        KeyBinding::new(KEY_TURN_BULLET, TurnBullet, c),
+        KeyBinding::new(KEY_TURN_NUMBERED, TurnNumbered, c),
+        KeyBinding::new(KEY_TURN_TODO, TurnTodo, c),
+        KeyBinding::new(KEY_TURN_QUOTE, TurnQuote, c),
+        KeyBinding::new(KEY_TURN_CODE, TurnCode, c),
         KeyBinding::new("alt-shift-up", MoveBlockUp, c),
         KeyBinding::new("alt-shift-down", MoveBlockDown, c),
         KeyBinding::new("escape", Escape, c),
@@ -155,98 +180,159 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
 pub(crate) enum EditorEvent {
     /// The note's content changed and should be saved.
     Changed,
-    /// Escape with nothing to dismiss: hand focus back to the list.
+    /// Escape with nothing to dismiss: the host takes focus back.
     Dismiss,
+    /// A mention chip was clicked: the host reveals that session or note.
+    OpenMention(MentionTarget),
+}
+
+/// One thing the `@` menu offers, with what its chip needs to stay live.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MentionEntry {
+    pub(crate) candidate: Candidate,
+    /// The agent behind a session; `None` for notes.
+    pub(crate) agent: Option<UiAgentKind>,
+    pub(crate) status: Option<StatusState>,
+    /// A quiet second line: the project, or "Note".
+    pub(crate) detail: SharedString,
+}
+
+/// Everything mentionable right now, most recent first. The host rebuilds it
+/// from the session store and the note list and hands it to the editor; the
+/// editor never reaches into either.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct MentionDirectory {
+    pub(crate) entries: Vec<MentionEntry>,
+}
+
+impl MentionDirectory {
+    fn find(&self, target: &MentionTarget) -> Option<&MentionEntry> {
+        self.entries.iter().find(|e| &e.candidate.target == target)
+    }
+
+    fn candidates(&self) -> Vec<Candidate> {
+        self.entries.iter().map(|e| e.candidate.clone()).collect()
+    }
+}
+
+/// How many rows the `@` menu shows at most.
+const MENTION_LIMIT: usize = 8;
+/// A query this long without a match is prose, not a mention.
+const MENTION_QUERY_MAX: usize = 40;
+
+struct MentionMenu {
+    block_id: u64,
+    /// Byte offset of the `@`.
+    at: usize,
+    selected: usize,
 }
 
 const CARET_BLINK: Duration = Duration::from_millis(530);
 const MARKER_WIDTH: f32 = 26.0;
 const INDENT_STEP: f32 = 24.0;
 pub(crate) const MEASURE: f32 = 700.0;
+/// Mention chips grow this far past their text on each side.
+const CHIP_PAD_X: f32 = 3.0;
+const CHIP_DOT: f32 = 7.0;
 
 /// The notes accent: Diri's ember, shared with the brand mark.
 pub(crate) fn accent() -> gpui::Rgba {
     Palette::CLAY
 }
 
+/// One row of the `/` menu: a block kind, its glyph, and the key equivalent
+/// that turns the current block into it, printed like a native menu's.
 #[derive(Clone, Copy)]
 struct SlashItem {
     label: &'static str,
-    hint: &'static str,
-    glyph: &'static str,
+    icon: &'static str,
+    keys: Option<&'static str>,
     turn: Turn,
+    /// Rows in different groups are divided by a separator: text, lists,
+    /// then blocks that set content apart.
+    group: u8,
     keywords: &'static str,
 }
 
 const SLASH_ITEMS: &[SlashItem] = &[
     SlashItem {
         label: "Text",
-        hint: "⌥⌘0",
-        glyph: "Aa",
+        icon: "textformat",
+        keys: Some(KEY_TURN_PARAGRAPH),
         turn: Turn::Kind(BlockKind::Paragraph),
+        group: 0,
         keywords: "text paragraph plain",
     },
     SlashItem {
         label: "Heading 1",
-        hint: "#",
-        glyph: "H1",
+        icon: "textformat.h1",
+        keys: Some(KEY_TURN_H1),
         turn: Turn::Kind(BlockKind::Heading(1)),
+        group: 0,
         keywords: "heading h1 title big",
     },
     SlashItem {
         label: "Heading 2",
-        hint: "##",
-        glyph: "H2",
+        icon: "textformat.h2",
+        keys: Some(KEY_TURN_H2),
         turn: Turn::Kind(BlockKind::Heading(2)),
+        group: 0,
         keywords: "heading h2 subtitle",
     },
     SlashItem {
         label: "Heading 3",
-        hint: "###",
-        glyph: "H3",
+        icon: "textformat.h3",
+        keys: Some(KEY_TURN_H3),
         turn: Turn::Kind(BlockKind::Heading(3)),
+        group: 0,
         keywords: "heading h3 small",
     },
     SlashItem {
         label: "To-do",
-        hint: "[]",
-        glyph: "☐",
+        icon: "checkmark.square",
+        keys: Some(KEY_TURN_TODO),
         turn: Turn::Kind(BlockKind::Todo { checked: false }),
+        group: 1,
         keywords: "todo task checkbox check list",
     },
     SlashItem {
         label: "Bulleted list",
-        hint: "-",
-        glyph: "•",
+        icon: "list.bullet",
+        keys: Some(KEY_TURN_BULLET),
         turn: Turn::Kind(BlockKind::Bullet),
+        group: 1,
         keywords: "bullet list unordered",
     },
     SlashItem {
         label: "Numbered list",
-        hint: "1.",
-        glyph: "1.",
+        icon: "list.number",
+        keys: Some(KEY_TURN_NUMBERED),
         turn: Turn::Kind(BlockKind::Numbered),
+        group: 1,
         keywords: "numbered list ordered",
     },
     SlashItem {
         label: "Quote",
-        hint: ">",
-        glyph: "“",
+        icon: "text.quote",
+        keys: Some(KEY_TURN_QUOTE),
         turn: Turn::Kind(BlockKind::Quote),
+        group: 2,
         keywords: "quote blockquote citation",
     },
     SlashItem {
         label: "Code",
-        hint: "```",
-        glyph: "{}",
+        icon: "chevron.left.forwardslash.chevron.right",
+        keys: Some(KEY_TURN_CODE),
         turn: Turn::Kind(BlockKind::Code),
+        group: 2,
         keywords: "code snippet monospace",
     },
     SlashItem {
         label: "Divider",
-        hint: "---",
-        glyph: "—",
+        icon: "divider",
+        keys: None,
         turn: Turn::Divider,
+        group: 2,
         keywords: "divider rule line separator",
     },
 ];
@@ -276,6 +362,8 @@ pub(crate) struct NoteEditorView {
     blink_epoch: usize,
     _blink: Task<()>,
     slash: Option<SlashMenu>,
+    mention: Option<MentionMenu>,
+    mentions: Rc<MentionDirectory>,
     caret_bounds: Option<Bounds<Pixels>>,
     /// Checkboxes ticked this session, for their pop animation.
     ticked: Vec<(u64, Instant)>,
@@ -314,6 +402,8 @@ impl NoteEditorView {
             blink_epoch: 0,
             _blink: Task::ready(()),
             slash: None,
+            mention: None,
+            mentions: Rc::default(),
             caret_bounds: None,
             ticked: Vec::new(),
             link_hint: None,
@@ -324,12 +414,24 @@ impl NoteEditorView {
         self.colors = colors;
     }
 
+    /// Replaces what `@` offers and what chips show. Cheap when unchanged,
+    /// so hosts may call it on every store change.
+    pub(crate) fn set_mentions(&mut self, directory: MentionDirectory, cx: &mut Context<Self>) {
+        if *self.mentions == directory {
+            return;
+        }
+        self.mentions = Rc::new(directory);
+        self.sync_mention();
+        cx.notify();
+    }
+
     /// Replaces the content after an outside change, keeping the caret close.
     pub(crate) fn reload(&mut self, editor: Editor, cx: &mut Context<Self>) {
         let selection = self.editor.selection;
         self.editor = editor;
         self.editor.set_selection(selection);
         self.slash = None;
+        self.mention = None;
         self.marked = None;
         cx.notify();
     }
@@ -347,6 +449,7 @@ impl NoteEditorView {
         self.goal_x = None;
         self.marked = None;
         self.sync_slash();
+        self.sync_mention();
         self.touched(cx);
         cx.emit(EditorEvent::Changed);
     }
@@ -354,6 +457,7 @@ impl NoteEditorView {
     fn moved(&mut self, cx: &mut Context<Self>) {
         self.marked = None;
         self.sync_slash();
+        self.sync_mention();
         self.touched(cx);
     }
 
@@ -596,6 +700,126 @@ impl NoteEditorView {
     }
 
     // -----------------------------------------------------------------------
+    // Mention menu
+
+    fn sync_mention(&mut self) {
+        let Some(menu) = &self.mention else { return };
+        let head = self.editor.selection.head;
+        let block = self.editor.block(head.block);
+        let valid = self.editor.selection.is_collapsed()
+            && block.id == menu.block_id
+            && head.offset > menu.at
+            && block.text.get(menu.at..menu.at + 1) == Some("@")
+            // Typing into an existing chip is editing, not mentioning.
+            && mention::at(block, menu.at + 1, false).is_none();
+        if !valid {
+            self.mention = None;
+            return;
+        }
+        let query = self.mention_query();
+        let matches = self.mention_matches().len();
+        if query.len() > MENTION_QUERY_MAX
+            || query.contains('\n')
+            || query.starts_with(' ')
+            || (matches == 0 && query.ends_with("  "))
+        {
+            self.mention = None;
+            return;
+        }
+        if let Some(menu) = &mut self.mention {
+            menu.selected = menu.selected.min(matches.saturating_sub(1));
+        }
+    }
+
+    fn mention_query(&self) -> String {
+        let Some(menu) = &self.mention else {
+            return String::new();
+        };
+        let head = self.editor.selection.head;
+        self.editor
+            .block(head.block)
+            .text
+            .get(menu.at + 1..head.offset)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[cfg(test)]
+    pub(super) fn mention_open(&self) -> bool {
+        self.mention.is_some()
+    }
+
+    pub(super) fn mention_matches(&self) -> Vec<MentionEntry> {
+        let candidates = self.mentions.candidates();
+        mention::rank(&self.mention_query(), &candidates, MENTION_LIMIT)
+            .into_iter()
+            .filter_map(|c| self.mentions.find(&c.target).cloned())
+            .collect()
+    }
+
+    fn maybe_open_mention(&mut self) {
+        let head = self.editor.selection.head;
+        let block = self.editor.block(head.block);
+        if matches!(block.kind, BlockKind::Title | BlockKind::Code) || head.offset == 0 {
+            return;
+        }
+        let at = head.offset - 1;
+        if block.text.get(at..head.offset) != Some("@") {
+            return;
+        }
+        // `me@host` is an address, not a mention.
+        let before = block.text[..at].chars().next_back();
+        if before.is_some_and(|c| !c.is_whitespace() && !"([{\"'".contains(c)) {
+            return;
+        }
+        self.mention = Some(MentionMenu {
+            block_id: block.id,
+            at,
+            selected: 0,
+        });
+    }
+
+    fn apply_mention(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(entry) = self.mention_matches().get(index).cloned() else {
+            self.mention = None;
+            cx.notify();
+            return;
+        };
+        let Some(menu) = self.mention.take() else {
+            return;
+        };
+        let head = self.editor.selection.head;
+        self.editor.insert_mention(
+            menu.at..head.offset,
+            &entry.candidate.target,
+            &entry.candidate.label,
+            now_ms(),
+        );
+        self.edited(cx);
+    }
+
+    /// The mention chip under a window point, if any.
+    fn chip_at(&self, at: Point<Pixels>) -> Option<MentionTarget> {
+        for (index, block) in self.editor.blocks().iter().enumerate() {
+            let chips = mention::in_block(block);
+            if chips.is_empty() {
+                continue;
+            }
+            let layout = self.layout(index)?;
+            for chip in chips {
+                let text = &block.text;
+                let hit = chip_rects(layout, text, chip.range.clone())
+                    .iter()
+                    .any(|rect| rect.dilate(px(CHIP_PAD_X)).contains(&at));
+                if hit {
+                    return Some(chip.target);
+                }
+            }
+        }
+        None
+    }
+
+    // -----------------------------------------------------------------------
     // Actions
 
     fn run(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Editor, u64)) {
@@ -640,6 +864,11 @@ impl NoteEditorView {
     }
 
     pub(crate) fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.mention {
+            let selected = menu.selected;
+            self.apply_mention(selected, cx);
+            return;
+        }
         if let Some(menu) = &self.slash {
             let selected = menu.selected;
             self.apply_slash(selected, cx);
@@ -652,7 +881,12 @@ impl NoteEditorView {
         self.run(cx, |e, now| e.soft_break(now));
     }
 
-    fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.mention {
+            let selected = menu.selected;
+            self.apply_mention(selected, cx);
+            return;
+        }
         if let Some(menu) = &self.slash {
             let selected = menu.selected;
             self.apply_slash(selected, cx);
@@ -741,7 +975,19 @@ impl NoteEditorView {
         self.line_edge(true, true, cx);
     }
 
-    fn vertical(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
+    pub(super) fn vertical(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
+        if !extend && self.mention.is_some() {
+            let count = self.mention_matches().len().max(1);
+            if let Some(menu) = &mut self.mention {
+                menu.selected = if down {
+                    (menu.selected + 1) % count
+                } else {
+                    (menu.selected + count - 1) % count
+                };
+            }
+            cx.notify();
+            return;
+        }
         let count = self.slash_matches().len().max(1);
         if !extend && let Some(menu) = &mut self.slash {
             menu.selected = if down {
@@ -768,6 +1014,7 @@ impl NoteEditorView {
         }
         self.marked = None;
         self.sync_slash();
+        self.sync_mention();
         self.touched(cx);
     }
 
@@ -933,7 +1180,7 @@ impl NoteEditorView {
     }
 
     fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
-        if self.slash.take().is_some() {
+        if self.slash.take().is_some() || self.mention.take().is_some() {
             cx.notify();
             return;
         }
@@ -980,6 +1227,15 @@ impl NoteEditorView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
+        if event.click_count == 1
+            && !event.modifiers.shift
+            && let Some(target) = self.chip_at(event.position)
+        {
+            self.mention = None;
+            self.slash = None;
+            cx.emit(EditorEvent::OpenMention(target));
+            return;
+        }
         let Some(pos) = self.hit(event.position) else {
             return;
         };
@@ -1012,6 +1268,7 @@ impl NoteEditorView {
             }
         }
         self.slash = None;
+        self.mention = None;
         self.moved(cx);
     }
 
@@ -1143,9 +1400,13 @@ impl EntityInputHandler for NoteEditorView {
         }
         self.marked = None;
         let was_slash_open = self.slash.is_some();
+        let was_mention_open = self.mention.is_some();
         self.editor.insert_text(text, now_ms());
         if text == "/" && !was_slash_open {
             self.maybe_open_slash();
+        }
+        if text == "@" && !was_mention_open && !was_slash_open {
+            self.maybe_open_mention();
         }
         self.edited(cx);
     }
@@ -1324,10 +1585,15 @@ fn highlights(
         return Vec::new();
     }
     let text = &block.text;
+    let chips = mention::in_block(block);
     let mut cuts: Vec<usize> = vec![0, text.len()];
     for mark in &block.marks {
         cuts.push(mark.range.start);
         cuts.push(mark.range.end);
+    }
+    // The chip's `@` is its own run: a session paints its status dot there.
+    for chip in &chips {
+        cuts.push((chip.range.start + 1).min(chip.range.end));
     }
     cuts.sort_unstable();
     cuts.dedup();
@@ -1365,6 +1631,12 @@ fn highlights(
                         style.color = Some(accent().into());
                     }
                 }
+                Style::Link(url) if MentionTarget::parse(url).is_some() => {
+                    style.font_weight = Some(FontWeight::MEDIUM);
+                    if !faded {
+                        style.color = Some(colors.primary.into());
+                    }
+                }
                 Style::Link(_) => {
                     if !faded {
                         style.color = Some(accent().into());
@@ -1377,9 +1649,38 @@ fn highlights(
                 }
             }
         }
+        // Highlight colors blend over the base, so only `fade_out` can hide
+        // the session `@` under its status dot.
+        if let Some(chip) = chips.iter().find(|c| c.range.start == a) {
+            style.fade_out = Some(match chip.target {
+                MentionTarget::Session(_) => 1.0,
+                MentionTarget::Note(_) => 0.55,
+            });
+        }
         out.push((a..b, style));
     }
     out
+}
+
+/// A session's live status as one ink, for the dot at the head of its chip.
+fn status_ink(agent: UiAgentKind, state: StatusState, colors: SemanticColors) -> gpui::Rgba {
+    match state {
+        StatusState::Working => Ink::working(agent, colors),
+        StatusState::NeedsInput { destructive: false } => Ink::on_surface(Ink::ATTENTION, colors),
+        StatusState::NeedsInput { destructive: true } => Ink::on_surface(Ink::DANGER, colors),
+        StatusState::DoneUnseen => Ink::on_surface(Ink::FRESH, colors),
+        StatusState::IdleSeen => colors.secondary,
+        StatusState::None | StatusState::Hibernated => colors.tertiary,
+    }
+}
+
+/// What one chip paints behind its text.
+struct ChipPaint {
+    block: usize,
+    text: String,
+    range: Range<usize>,
+    /// Session chips: the status dot's ink, hollow when the session is gone.
+    dot: Option<(gpui::Rgba, bool)>,
 }
 
 trait AlphaExt {
@@ -1546,6 +1847,79 @@ impl Render for NoteEditorView {
         self.layout_revision = self.editor.revision;
         self.layout_count = self.editor.blocks().len();
 
+        let mut chips = Vec::new();
+        for (index, block) in self.editor.blocks().iter().enumerate() {
+            for chip in mention::in_block(block) {
+                let dot = match &chip.target {
+                    MentionTarget::Note(_) => None,
+                    MentionTarget::Session(_) => Some(
+                        match self
+                            .mentions
+                            .find(&chip.target)
+                            .and_then(|e| e.agent.zip(e.status))
+                        {
+                            Some((agent, state)) => (status_ink(agent, state, colors), false),
+                            None => (colors.tertiary, true),
+                        },
+                    ),
+                };
+                chips.push(ChipPaint {
+                    block: index,
+                    text: block.text.clone(),
+                    range: chip.range,
+                    dot,
+                });
+            }
+        }
+        let chip_layouts = layouts.clone();
+        let chip_fill = colors.primary.alpha(0.07);
+        let chip_border = colors.primary.alpha(0.1);
+        let chip_backdrop = canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                for chip in &chips {
+                    let Some(layout) = chip_layouts.get(chip.block) else {
+                        continue;
+                    };
+                    for rect in chip_rects(layout, &chip.text, chip.range.clone()) {
+                        let rect = Bounds::from_corners(
+                            point(rect.left() - px(CHIP_PAD_X), rect.top() + px(1.0)),
+                            point(rect.right() + px(CHIP_PAD_X), rect.bottom() - px(1.0)),
+                        );
+                        window.paint_quad(
+                            fill(rect, chip_fill)
+                                .corner_radii(px(5.0))
+                                .border_widths(px(0.5))
+                                .border_color(chip_border),
+                        );
+                    }
+                    let Some((ink, hollow)) = chip.dot else {
+                        continue;
+                    };
+                    let Some(at) = char_rect(layout, &chip.text, chip.range.start) else {
+                        continue;
+                    };
+                    let center = at.center();
+                    let dot = Bounds::new(
+                        point(center.x - px(CHIP_DOT / 2.0), center.y - px(CHIP_DOT / 2.0)),
+                        size(px(CHIP_DOT), px(CHIP_DOT)),
+                    );
+                    let quad = if hollow {
+                        fill(dot, gpui::transparent_black())
+                            .border_widths(px(1.25))
+                            .border_color(ink)
+                    } else {
+                        fill(dot, ink)
+                    };
+                    window.paint_quad(quad.corner_radii(px(CHIP_DOT / 2.0)));
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+
         let entity = cx.entity();
         let selection = self.editor.selection;
         let caret_on = focused && self.caret_visible && self.marked.is_none()
@@ -1618,7 +1992,32 @@ impl Render for NoteEditorView {
         .left_0()
         .size_full();
 
-        let slash_menu = self.render_slash(cx);
+        let slash_menu = if self.slash.is_some() {
+            let height = self.slash_menu_height();
+            self.host_menu(
+                SLASH_MENU,
+                Self::slash_menu_rows,
+                SLASH_MENU_WIDTH,
+                height,
+                window,
+                cx,
+            )
+        } else {
+            None
+        };
+        let mention_menu = if self.mention.is_some() {
+            let height = self.mention_menu_height();
+            self.host_menu(
+                MENTION_MENU,
+                Self::mention_menu_rows,
+                MENTION_MENU_WIDTH,
+                height,
+                window,
+                cx,
+            )
+        } else {
+            None
+        };
         let hint = self.link_hint.clone().map(|hint| {
             div()
                 .absolute()
@@ -1723,12 +2122,14 @@ impl Render for NoteEditorView {
                                     .relative()
                                     .w_full()
                                     .max_w(px(MEASURE))
+                                    .child(chip_backdrop)
                                     .child(column)
                                     .child(overlay),
                             ),
                     ),
             )
             .children(slash_menu)
+            .children(mention_menu)
             .children(hint)
     }
 }
@@ -1837,92 +2238,363 @@ impl NoteEditorView {
         }
     }
 
-    fn render_slash(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let menu = self.slash.as_ref()?;
+    // -----------------------------------------------------------------------
+    // Menus
+    //
+    // The `/` and `@` menus are diri menus: `floating` hosts them in a blurred
+    // panel window under the glass material and in the window otherwise,
+    // their rows share the New Agent menu's shape, and the keyboard never
+    // leaves the editor.
+
+    /// Mounts `target`'s menu at the caret for this frame, with a scrim that
+    /// turns a click anywhere else into a dismissal.
+    fn host_menu(
+        &mut self,
+        target: floating::Target<Self>,
+        rows: fn(&mut Self, &mut Context<Self>) -> Option<gpui::Div>,
+        width: f32,
+        height: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let caret = self.caret_bounds?;
+        let viewport = window.viewport_size();
+        let (position, anchor) = menu_placement(caret, viewport.height, height);
+        let dismiss = move |this: &mut Self,
+                            _: &MouseDownEvent,
+                            window: &mut Window,
+                            cx: &mut Context<Self>| {
+            (target.dismiss)(this, window, cx);
+        };
+        let scrim = deferred(
+            anchored().position(point(px(0.0), px(0.0))).child(
+                div()
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, cx.listener(dismiss))
+                    .on_mouse_down(MouseButton::Right, cx.listener(dismiss)),
+            ),
+        )
+        .with_priority(1);
+        let host = div().absolute().inset_0();
+        if floating::uses_panels(false, self.colors, cx) {
+            let probe = (target.content)(self, cx)?;
+            let panel = floating::host_element(
+                target,
+                probe,
+                width,
+                position,
+                anchor,
+                MENU_MARGIN,
+                window,
+                cx,
+            );
+            return Some(host.child(panel).child(scrim).into_any_element());
+        }
+        // In the window the menu is the same floating surface every other
+        // in-window diri menu uses, with its shadow and entry motion.
+        let content = diri_ui::FloatingSurface::new(
+            self.colors,
+            div().w(px(width)).overflow_hidden().child(rows(self, cx)?),
+        )
+        .radius(floating::MENU_RADIUS);
+        Some(
+            host.child(scrim)
+                .child(
+                    deferred(
+                        anchored()
+                            .anchor(anchor)
+                            .position(position)
+                            .snap_to_window_with_margin(px(MENU_MARGIN))
+                            .child(div().occlude().child(content)),
+                    )
+                    .with_priority(2),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn slash_menu_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.slash_menu_rows(cx)?;
+        Some(
+            floating::surface(self.colors, floating::MENU_RADIUS, SLASH_MENU_WIDTH, rows)
+                .into_any_element(),
+        )
+    }
+
+    fn slash_menu_rows(&mut self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let selected = self.slash.as_ref()?.selected;
         let colors = self.colors;
         let matches = self.slash_matches();
-        let selected = menu.selected;
-        let mut list = div()
-            .w(px(250.0))
-            .py(px(6.0))
-            .rounded(px(12.0))
-            .bg(colors.floating_fill())
-            .border_1()
-            .border_color(colors.primary.alpha(0.08))
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .font_family(crate::fonts::ui_family());
+        let mut list = div().flex().flex_col().py(px(floating::MENU_PADDING_Y));
         if matches.is_empty() {
-            list = list.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .text_size(px(13.0))
-                    .text_color(colors.tertiary)
-                    .child("No matching blocks"),
-            );
+            list = list.child(menu_empty("No matching blocks", colors));
         }
+        let mut group = None;
         for (i, item) in matches.iter().enumerate() {
-            let active = i == selected;
-            list = list.child(
-                div()
-                    .id(("slash", i))
-                    .mx(px(6.0))
-                    .px(px(8.0))
-                    .h(px(34.0))
-                    .rounded(px(7.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .when(active, |el| el.bg(accent().alpha(0.14)))
-                    .hover(|el| el.bg(colors.primary.alpha(0.06)))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.apply_slash(i, cx);
-                        }),
-                    )
-                    .child(
-                        div()
-                            .size(px(24.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(colors.primary.alpha(0.1))
-                            .bg(colors.background.alpha(0.6))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(if active { accent() } else { colors.secondary })
-                            .child(item.glyph),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(13.0))
-                            .text_color(colors.primary)
-                            .child(item.label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(colors.tertiary)
-                            .child(item.hint),
-                    ),
-            );
+            if group.is_some_and(|g| g != item.group) {
+                list = list.child(floating::menu_separator(colors));
+            }
+            group = Some(item.group);
+            let row = floating::menu_row(
+                ("note-slash-row", i),
+                crate::icons::sf_symbol(item.icon, MENU_ICON, colors.secondary),
+                colors,
+                i == selected,
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.hover_menu_row(i, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.apply_slash(i, cx);
+                }),
+            )
+            .child(menu_label(item.label, colors))
+            .when_some(item.keys, |row, keys| {
+                row.child(floating::menu_shortcut(
+                    crate::commands::keystroke_label(keys),
+                    colors,
+                ))
+            });
+            list = list.child(row);
         }
-        Some(deferred(
-            anchored()
-                .position(point(caret.left() - px(8.0), caret.bottom() + px(6.0)))
-                .snap_to_window_with_margin(px(8.0))
-                .child(list),
-        ))
+        Some(list)
     }
+
+    /// The pointer resting on a row selects it: hover and the arrow keys
+    /// move one highlight, so a menu never shows two lit rows.
+    pub(super) fn hover_menu_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let selected = if let Some(menu) = &mut self.slash {
+            &mut menu.selected
+        } else if let Some(menu) = &mut self.mention {
+            &mut menu.selected
+        } else {
+            return;
+        };
+        if *selected != index {
+            *selected = index;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn menu_selected(&self) -> Option<usize> {
+        self.slash
+            .as_ref()
+            .map(|m| m.selected)
+            .or(self.mention.as_ref().map(|m| m.selected))
+    }
+
+    fn slash_menu_height(&self) -> f32 {
+        let matches = self.slash_matches();
+        let separators = matches
+            .windows(2)
+            .filter(|pair| pair[0].group != pair[1].group)
+            .count();
+        menu_height(matches.len().max(1), separators)
+    }
+
+    fn mention_menu_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.mention_menu_rows(cx)?;
+        Some(
+            floating::surface(self.colors, floating::MENU_RADIUS, MENTION_MENU_WIDTH, rows)
+                .into_any_element(),
+        )
+    }
+
+    fn mention_menu_rows(&mut self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let selected = self.mention.as_ref()?.selected;
+        let colors = self.colors;
+        let matches = self.mention_matches();
+        let mut list = div().flex().flex_col().py(px(floating::MENU_PADDING_Y));
+        if matches.is_empty() {
+            list = list.child(menu_empty(
+                if self.mentions.entries.is_empty() {
+                    "No sessions or notes to mention"
+                } else {
+                    "No matching sessions or notes"
+                },
+                colors,
+            ));
+        }
+        for (i, entry) in matches.iter().enumerate() {
+            // Sessions lead; notes follow below a separator.
+            if i > 0 && entry.agent.is_none() && matches[i - 1].agent.is_some() {
+                list = list.child(floating::menu_separator(colors));
+            }
+            // A session's mark wears its status the way its sidebar row does.
+            let icon = match (entry.agent, entry.status) {
+                // Agents wear their status the way their sidebar rows do,
+                // drawn at the New Agent menu's mark size.
+                (Some(agent), Some(state)) if agent != UiAgentKind::Shell => {
+                    StatusGlyph::new(agent, state, MENU_STATUS_MARK, colors).rendered_mark()
+                }
+                (Some(agent), _) => AgentLogo::new(agent, MENU_LOGO, colors)
+                    .badged(false)
+                    .into_any_element(),
+                (None, _) => crate::icons::sf_symbol("doc.text", MENU_ICON, colors.secondary),
+            };
+            let title = entry.candidate.label.trim_start_matches('@').to_owned();
+            let row = floating::menu_row(("note-mention-row", i), icon, colors, i == selected)
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        this.hover_menu_row(i, cx);
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.apply_mention(i, cx);
+                    }),
+                )
+                .child(menu_label(title, colors))
+                .when(!entry.detail.is_empty(), |row| {
+                    row.child(
+                        floating::menu_shortcut(entry.detail.clone(), colors)
+                            .max_w(px(120.0))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis(),
+                    )
+                });
+            list = list.child(row);
+        }
+        Some(list)
+    }
+
+    fn mention_menu_height(&self) -> f32 {
+        let matches = self.mention_matches();
+        let separators = matches
+            .windows(2)
+            .filter(|pair| pair[0].agent.is_some() && pair[1].agent.is_none())
+            .count();
+        menu_height(matches.len().max(1), separators)
+    }
+}
+
+const SLASH_MENU: floating::Target<NoteEditorView> = floating::Target {
+    key: "note-slash-menu",
+    radius: floating::MENU_RADIUS,
+    content: NoteEditorView::slash_menu_content,
+    dismiss: |this, _, cx| {
+        this.slash = None;
+        cx.notify();
+    },
+};
+
+const MENTION_MENU: floating::Target<NoteEditorView> = floating::Target {
+    key: "note-mention-menu",
+    radius: floating::MENU_RADIUS,
+    content: NoteEditorView::mention_menu_content,
+    dismiss: |this, _, cx| {
+        this.mention = None;
+        cx.notify();
+    },
+};
+
+const SLASH_MENU_WIDTH: f32 = 240.0;
+const MENTION_MENU_WIDTH: f32 = 340.0;
+/// Glyphs and agent marks at the New Agent menu's sizes.
+const MENU_ICON: f32 = 13.0;
+const MENU_LOGO: f32 = 20.0;
+/// A status mark is inset 0.08 where a bare logo is inset 0.28; this size
+/// draws the mark exactly as large as the New Agent menu's 20 pt logos.
+const MENU_STATUS_MARK: f32 = MENU_LOGO * (1.0 - 2.0 * 0.28) / (1.0 - 2.0 * 0.08);
+const MENU_GAP: f32 = 6.0;
+const MENU_MARGIN: f32 = 8.0;
+/// A separator's hairline plus its padding.
+const MENU_SEPARATOR_HEIGHT: f32 = 9.0;
+
+fn menu_height(rows: usize, separators: usize) -> f32 {
+    2.0 * floating::MENU_PADDING_Y
+        + rows as f32 * floating::MENU_ROW_HEIGHT
+        + separators as f32 * MENU_SEPARATOR_HEIGHT
+        + 2.0
+}
+
+fn menu_label(label: impl Into<SharedString>, colors: SemanticColors) -> gpui::Div {
+    div()
+        .min_w_0()
+        .flex_1()
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_ellipsis()
+        .text_size(px(Typo::ROW.size))
+        .text_color(colors.primary)
+        .child(label.into())
+}
+
+fn menu_empty(text: &'static str, colors: SemanticColors) -> gpui::Div {
+    div()
+        .h(px(floating::MENU_ROW_HEIGHT))
+        .px(px(floating::MENU_ROW_MARGIN + floating::MENU_ROW_INSET))
+        .flex()
+        .items_center()
+        .text_size(px(Typo::ROW.size))
+        .text_color(colors.tertiary)
+        .child(text)
+}
+
+/// A caret menu opens below the line, or above it when the window has no
+/// room below, never on top of the text being typed.
+fn menu_placement(
+    caret: Bounds<Pixels>,
+    viewport: Pixels,
+    height: f32,
+) -> (Point<Pixels>, gpui::Anchor) {
+    let left = caret.left() - px(floating::MENU_ROW_MARGIN + floating::MENU_ROW_INSET);
+    let room = px(MENU_GAP + height + MENU_MARGIN);
+    let below = caret.bottom() + room <= viewport || caret.top() - room < px(0.0);
+    if below {
+        (
+            point(left, caret.bottom() + px(MENU_GAP)),
+            gpui::Anchor::TopLeft,
+        )
+    } else {
+        (
+            point(left, caret.top() - px(MENU_GAP)),
+            gpui::Anchor::BottomLeft,
+        )
+    }
+}
+
+/// Where one character sits, or `None` for a space that wrapped away.
+/// A wrap boundary index resolves to the end of the earlier line, so a
+/// character that opens a line is recovered from its right edge.
+fn char_rect(layout: &TextLayout, text: &str, at: usize) -> Option<Bounds<Pixels>> {
+    let next = text[at..].chars().next().map_or(at, |c| at + c.len_utf8());
+    let from = layout.position_for_index(at)?;
+    let to = layout.position_for_index(next)?;
+    let line = layout.line_height();
+    if to.y == from.y {
+        return Some(Bounds::from_corners(from, point(to.x, from.y + line)));
+    }
+    let left = layout.bounds().left();
+    (to.x > left + px(0.5))
+        .then(|| Bounds::from_corners(point(left, to.y), point(to.x, to.y + line)))
+}
+
+/// One rectangle per visual line a chip covers, hugging its glyphs (unlike
+/// selection rects, which run to the margin).
+fn chip_rects(layout: &TextLayout, text: &str, range: Range<usize>) -> Vec<Bounds<Pixels>> {
+    let mut rects: Vec<Bounds<Pixels>> = Vec::new();
+    for (i, _) in text[range.clone()].char_indices() {
+        let Some(rect) = char_rect(layout, text, range.start + i) else {
+            continue;
+        };
+        match rects.last_mut() {
+            Some(last) if last.top() == rect.top() => *last = last.union(&rect),
+            _ => rects.push(rect),
+        }
+    }
+    rects
 }
 
 fn selection_rects(

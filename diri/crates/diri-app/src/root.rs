@@ -553,6 +553,9 @@ impl RootView {
                 TerminalPaneEvent::ExternalDropFeedback { message } => {
                     this.show_quote_feedback("Dropped files", message.clone(), cx);
                 }
+                TerminalPaneEvent::RevealSession(id) => {
+                    this.open_workspace_launch_session(id.clone(), window, cx);
+                }
             })
             .detach();
         }
@@ -1534,6 +1537,9 @@ impl RootView {
                                 cx,
                             )
                         }),
+                        crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
+                            TerminalPaneEvent::RevealSession(id),
+                        ) => this.open_workspace_launch_session(id.clone(), window, cx),
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
                             TerminalPaneEvent::OpenFileReference { reference, cwd, .. },
                         ) => {
@@ -9189,21 +9195,98 @@ mod tests {
                 .unwrap();
         }
         let runtime = Arc::clone(&services.store);
+        let note_pane = std::rc::Rc::new(std::cell::RefCell::new(None));
         let window = cx
-            .open_window(size(px(1240.0), px(780.0)), |window, cx| {
-                cx.new(|cx| {
-                    let root = RootView::new(services, false, PreviewScenario::Empty, window, cx);
-                    let pane = cx.new(|cx| {
-                        crate::notes::NotePane::with_store(runtime, Some(note_store), false, cx)
-                    });
-                    if let Some(terminal) = &root.terminal {
-                        terminal.update(cx, |terminal, _| terminal.set_note_pane_for_test(pane));
-                    }
-                    root
-                })
+            .open_window(size(px(1240.0), px(780.0)), {
+                let note_pane = note_pane.clone();
+                move |window, cx| {
+                    cx.new(|cx| {
+                        let root =
+                            RootView::new(services, false, PreviewScenario::Empty, window, cx);
+                        let pane = cx.new(|cx| {
+                            crate::notes::NotePane::with_store(runtime, Some(note_store), false, cx)
+                        });
+                        *note_pane.borrow_mut() = Some(pane.clone());
+                        if let Some(terminal) = &root.terminal {
+                            terminal
+                                .update(cx, |terminal, _| terminal.set_note_pane_for_test(pane));
+                        }
+                        root
+                    })
+                }
             })
             .unwrap();
         cx.run_until_parked();
+        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips` types into the note:
+        // mention chips beside a to-do, then the `/` or `@` menu open at the
+        // caret, to judge the menus beside the rest of diri's chrome.
+        if let Ok(scene) = std::env::var("DIRI_VISUAL_NOTE_MENU") {
+            let pane = note_pane.borrow().clone().expect("note pane");
+            let editor = cx
+                .update(|cx| pane.read(cx).editor_for_test())
+                .expect("open note editor");
+            cx.update_window(window.into(), |_, window, cx| {
+                use diri_notes::edit::Pos;
+                use diri_notes::mention::MentionTarget;
+                use gpui::EntityInputHandler as _;
+                editor.update(cx, |view, cx| {
+                    view.set_mentions(
+                        crate::notes::editor_view::MentionDirectory {
+                            entries: crate::notes::tests::fixture_mentions(),
+                        },
+                        cx,
+                    );
+                    let row = view
+                        .editor
+                        .blocks()
+                        .iter()
+                        .position(|b| b.text.starts_with("Agents can"))
+                        .expect("fixture to-do");
+                    let end = view.editor.block(row).text.len();
+                    view.editor.set_caret(Pos::new(row, end));
+                    view.replace_text_in_range(None, " — waiting on ", window, cx);
+                    let at = view.editor.selection.head.offset;
+                    view.editor.insert_mention(
+                        at..at,
+                        &MentionTarget::Session("s_codex".into()),
+                        "@Codex: fix resize flicker",
+                        0,
+                    );
+                    view.replace_text_in_range(None, "and ", window, cx);
+                    let at = view.editor.selection.head.offset;
+                    view.editor.insert_mention(
+                        at..at,
+                        &MentionTarget::Note("n-q4".into()),
+                        "@Q4 campaign brief",
+                        0,
+                    );
+                    let quick = view
+                        .editor
+                        .blocks()
+                        .iter()
+                        .position(|b| b.text.starts_with("Quick capture"))
+                        .expect("fixture to-do");
+                    let end = view.editor.block(quick).text.len();
+                    view.editor.set_caret(Pos::new(quick, end));
+                    match scene.as_str() {
+                        "slash" => {
+                            view.editor.enter(0);
+                            view.editor
+                                .backspace(diri_notes::edit::Granularity::Grapheme, 0);
+                            view.replace_text_in_range(None, "/", window, cx);
+                        }
+                        "mention" => {
+                            view.replace_text_in_range(None, " — ask ", window, cx);
+                            view.replace_text_in_range(None, "@", window, cx);
+                        }
+                        _ => {}
+                    }
+                    cx.notify();
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
         for _ in 0..3 {
             cx.update_window(window.into(), |_, window, _| window.refresh())
                 .unwrap();

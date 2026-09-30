@@ -1338,6 +1338,12 @@ fn platform_shortcut_label(label: &str) -> String {
     modifiers.join("+")
 }
 
+/// How a native menu prints a keymap source such as `"cmd-alt-1"`: `⌥⌘1`.
+pub(crate) fn keystroke_label(source: &str) -> String {
+    Keystroke::parse(source)
+        .map_or_else(|_| source.to_owned(), |k| shortcut_label_for_keystroke(&k))
+}
+
 #[cfg(target_os = "macos")]
 fn shortcut_label_for_keystroke(keystroke: &Keystroke) -> String {
     let mut label = String::new();

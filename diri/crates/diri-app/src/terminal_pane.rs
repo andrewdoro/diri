@@ -133,6 +133,8 @@ pub enum TerminalPaneEvent {
     ExternalDropFeedback {
         message: String,
     },
+    /// A note's mention chip asked to show another Session.
+    RevealSession(SessionId),
 }
 
 #[path = "session_links.rs"]
@@ -2566,6 +2568,9 @@ impl TerminalPane {
             // sidebar, where ↑/↓ move between notes and sessions alike.
             crate::notes::NotePaneEvent::Dismiss => {
                 window.dispatch_action(Box::new(crate::commands::FocusSidebar), cx);
+            }
+            crate::notes::NotePaneEvent::Reveal(id) => {
+                cx.emit(TerminalPaneEvent::RevealSession(id.clone()));
             }
         })
         .detach();
