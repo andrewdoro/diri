@@ -24,7 +24,7 @@ use crate::floating;
 use crate::icons::sf_symbol;
 
 /// The keyboard shortcut that starts work from the to-do at the caret.
-pub(crate) const START_SHORTCUT: &str = "⌥⌘↩";
+pub(crate) const START_SHORTCUT: &str = "⌃⌘↩";
 const PANEL_WIDTH: f32 = 440.0;
 const TICK_WIDTH: f32 = 280.0;
 const PREVIEW_HEIGHT: f32 = 200.0;
@@ -88,14 +88,9 @@ enum Pending {
 #[derive(Default)]
 pub(crate) struct WorkView {
     facts: HashMap<String, SessionFacts>,
-    /// Folds the person chose; to-dos without an entry use the default
-    /// (folded once work started).
-    folds: HashMap<BlockId, bool>,
     pending: HashMap<BlockId, Pending>,
     start: Option<StartPanel>,
     tick: Option<TickPanel>,
-    /// Per editor block, from the last frame: hidden inside a folded to-do.
-    hidden: Vec<bool>,
 }
 
 impl WorkView {
@@ -135,40 +130,7 @@ impl WorkView {
         }
     }
 
-    fn folded(&self, block: &Block) -> bool {
-        self.folds.get(&block.id).copied().unwrap_or_else(|| {
-            !work::sessions(block).is_empty() || self.pending.contains_key(&block.id)
-        })
-    }
-
-    /// Recomputes which blocks sit inside a folded to-do. A folded to-do
-    /// whose children hold the caret opens, so the caret is never hidden.
-    pub(crate) fn layout_folds(&mut self, blocks: &[Block], caret: Pos) {
-        let mut hidden = vec![false; blocks.len()];
-        let mut index = 0;
-        while index < blocks.len() {
-            let block = &blocks[index];
-            let children = work::children(blocks, index);
-            if matches!(block.kind, BlockKind::Todo { .. })
-                && !children.is_empty()
-                && self.folded(block)
-            {
-                if children.contains(&caret.block) {
-                    self.folds.insert(block.id, false);
-                } else {
-                    for flag in &mut hidden[children.clone()] {
-                        *flag = true;
-                    }
-                    index = children.end;
-                    continue;
-                }
-            }
-            index += 1;
-        }
-        self.hidden = hidden;
-    }
-
-    /// Carries fold and start state across a reload, which renumbers
+    /// Carries start state across a reload, which renumbers
     /// blocks: each to-do is found again by its text, nearest first.
     pub(crate) fn remap(&mut self, old: &[Block], new: &[Block]) {
         let find = |id: BlockId| -> Option<BlockId> {
@@ -182,10 +144,6 @@ impl WorkView {
                 .min_by_key(|(index, _)| index.abs_diff(from))
                 .map(|(_, b)| b.id)
         };
-        self.folds = std::mem::take(&mut self.folds)
-            .into_iter()
-            .filter_map(|(id, folded)| Some((find(id)?, folded)))
-            .collect();
         self.pending = std::mem::take(&mut self.pending)
             .into_iter()
             .filter_map(|(id, pending)| Some((find(id)?, pending)))
@@ -202,10 +160,6 @@ impl WorkView {
                 None => self.tick = None,
             }
         }
-    }
-
-    pub(crate) fn is_hidden(&self, index: usize) -> bool {
-        self.hidden.get(index).copied().unwrap_or(false)
     }
 
     pub(crate) fn panel_open(&self) -> bool {
@@ -297,6 +251,12 @@ impl NoteEditorView {
         self.work
             .pending
             .insert(block, Pending::Starting { ticket, label });
+        // Once work starts its context folds away under the to-do.
+        if let Some(index) = self.block_index(block)
+            && self.editor.has_children(index)
+        {
+            self.set_folded(index, true, cx);
+        }
         cx.notify();
     }
 
@@ -401,15 +361,6 @@ impl NoteEditorView {
         false
     }
 
-    fn toggle_fold(&mut self, block: BlockId, cx: &mut Context<Self>) {
-        let Some(index) = self.block_index(block) else {
-            return;
-        };
-        let folded = self.work.folded(self.editor.block(index));
-        self.work.folds.insert(block, !folded);
-        cx.notify();
-    }
-
     /// Puts the caret on the to-do that links `session`, unfolded, and
     /// scrolls to it: the way back from a session to its work item.
     pub(crate) fn reveal_session(&mut self, session: &str, cx: &mut Context<Self>) -> bool {
@@ -418,59 +369,12 @@ impl NoteEditorView {
         };
         let end = self.editor.block(index).text.len();
         self.editor.set_caret(Pos::new(index, end));
-        self.touched_for_work(cx);
+        self.moved(cx);
         true
     }
 
     // -----------------------------------------------------------------------
     // Pixels
-
-    /// The disclosure triangle left of a to-do's checkbox, when it has
-    /// children to fold.
-    pub(super) fn work_disclosure(
-        &self,
-        index: usize,
-        block: &Block,
-        line: f32,
-        colors: SemanticColors,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !matches!(block.kind, BlockKind::Todo { .. })
-            || work::children(self.editor.blocks(), index).is_empty()
-        {
-            return None;
-        }
-        let id = block.id;
-        let folded = self.work.folded(block);
-        Some(
-            div()
-                .id(("todo-fold", id))
-                .absolute()
-                .left(px(-20.0))
-                .top_0()
-                .h(px(line))
-                .w(px(16.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .hover(|el| el.bg(colors.primary.alpha(0.06)))
-                .child(sf_symbol(
-                    if folded { "chevron.right" } else { "chevron.down" },
-                    10.0,
-                    colors.tertiary,
-                ))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.toggle_fold(id, cx);
-                    }),
-                )
-                .into_any_element(),
-        )
-    }
 
     /// The quiet Start affordance in the margin right of an unstarted to-do.
     /// It shows while the row is hovered or holds the caret.
