@@ -26,6 +26,12 @@ impl Method {
     pub const TASK_ANSWER: &'static str = "task.answer";
     pub const TASK_CANCEL: &'static str = "task.cancel";
     pub const TASK_LIST: &'static str = "task.list";
+    pub const SCHEDULE_CREATE: &'static str = "schedule.create";
+    pub const SCHEDULE_UPDATE: &'static str = "schedule.update";
+    pub const SCHEDULE_DELETE: &'static str = "schedule.delete";
+    pub const SCHEDULE_LIST: &'static str = "schedule.list";
+    /// Starts one run now without moving the schedule's next due time.
+    pub const SCHEDULE_RUN_NOW: &'static str = "schedule.run_now";
     pub const SESSION_SPAWN: &'static str = "session.spawn";
     pub const SESSION_LIST: &'static str = "session.list";
     pub const SESSION_KILL: &'static str = "session.kill";

@@ -61,6 +61,7 @@ mod preview_mux;
 pub mod pty;
 pub mod registry;
 pub mod remote;
+pub mod schedule;
 pub mod screen;
 pub mod session;
 pub mod session_files;

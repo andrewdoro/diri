@@ -32,6 +32,7 @@ mod hook_queue;
 mod message_delivery;
 mod operations;
 mod orchestration;
+mod schedules;
 mod tasks;
 mod workspaces;
 
@@ -78,6 +79,7 @@ pub struct ControlServer {
     session_operations: Mutex<std::collections::HashSet<String>>,
     agent_scans: Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
     hook_reports: hook_queue::HookQueue,
+    scheduler: schedules::Scheduler,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -187,6 +189,7 @@ impl ControlServer {
             session_operations: Mutex::new(std::collections::HashSet::new()),
             agent_scans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             hook_reports: hook_queue::HookQueue::new(),
+            scheduler: schedules::Scheduler::default(),
         }
     }
 
@@ -880,6 +883,11 @@ impl ControlServer {
             Method::TASK_ANSWER => self.task_answer(params),
             Method::TASK_CANCEL => self.task_cancel(params),
             Method::TASK_LIST => self.task_list(params),
+            Method::SCHEDULE_CREATE => self.schedule_create(params),
+            Method::SCHEDULE_UPDATE => self.schedule_update(params),
+            Method::SCHEDULE_DELETE => self.schedule_delete(params),
+            Method::SCHEDULE_LIST => self.schedule_list(),
+            Method::SCHEDULE_RUN_NOW => self.schedule_run_now(params),
             Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),
             Method::SESSION_DELIVER_MESSAGE => self.session_deliver_message(params),
             Method::SESSION_SEND_KEY => self.session_send_key(params),
@@ -3805,7 +3813,9 @@ impl ControlServer {
                     let Ok(mut registry) = server.registry.lock() else {
                         return;
                     };
-                    let live_sessions = registry.live_count();
+                    // An enabled schedule is work the Engine must stay up for.
+                    let live_sessions =
+                        registry.live_count() + server.scheduler.enabled_count();
                     if !watch.observe(live_sessions, connections, Instant::now(), grace) {
                         continue;
                     }
