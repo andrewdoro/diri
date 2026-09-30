@@ -5035,7 +5035,7 @@ impl Render for RootView {
                 this.run_command(CommandId::NewNote, window, cx);
             }))
             .on_action(
-                cx.listener(|this, _: &crate::commands::ShowTodos, window, cx| {
+                cx.listener(|this, _: &ShowTodos, window, cx| {
                     this.run_command(CommandId::ShowTodos, window, cx);
                 }),
             )
