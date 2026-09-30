@@ -627,3 +627,108 @@ fn the_link_panel_edits_links_through_its_own_field(cx: &mut gpui::TestAppContex
         "{text}"
     );
 }
+
+/// A small bar chart, the kind of picture a PM pastes into a note.
+pub(crate) fn chart_png(width: u32, height: u32) -> Vec<u8> {
+    let bars = [0.35f32, 0.55, 0.48, 0.72, 0.9];
+    let image = image::RgbaImage::from_fn(width, height, |x, y| {
+        let slot = width / bars.len() as u32;
+        let bar = (x / slot) as usize;
+        let inset = slot / 5;
+        let top = height as f32 * (1.0 - bars[bar.min(bars.len() - 1)] * 0.85);
+        if x % slot > inset && x % slot < slot - inset && (y as f32) >= top {
+            image::Rgba([217, 119, 87, 255])
+        } else {
+            image::Rgba([246, 244, 239, 255])
+        }
+    });
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encode png");
+    bytes
+}
+
+#[gpui::test]
+fn pasted_and_dropped_pictures_become_image_blocks(cx: &mut gpui::TestAppContext) {
+    use diri_notes::doc::BlockKind;
+    let (dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    let png = chart_png(40, 20);
+    cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(
+        gpui::ImageFormat::Png,
+        png.clone(),
+    )));
+    let picture = dir.path().join("Q3 funnel.png");
+    std::fs::write(&picture, &png).unwrap();
+    let not_a_picture = dir.path().join("notes.txt");
+    std::fs::write(&not_a_picture, "hi").unwrap();
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        view.paste(&editor_view::Paste, window, cx);
+        // A Finder drop of the same bytes reuses the stored file.
+        let inserted =
+            view.insert_image_files(&[picture.clone(), not_a_picture.clone()], "drop", cx);
+        assert_eq!(inserted, 1, "only pictures are taken in");
+        let images: Vec<&diri_notes::doc::Block> = view
+            .editor
+            .blocks()
+            .iter()
+            .filter(|b| b.kind == BlockKind::Image)
+            .collect();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].src, images[1].src, "content-addressed");
+    });
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    let src = format!("assets/{id}/");
+    assert_eq!(text.matches(&format!("![]({src}")).count(), 2, "{text}");
+    let stored = std::fs::read_dir(store.dir().join("assets").join(&id))
+        .unwrap()
+        .count();
+    assert_eq!(stored, 1);
+}
+
+#[gpui::test]
+fn a_callout_glyph_cycles_its_tone(cx: &mut gpui::TestAppContext) {
+    use diri_notes::doc::{BlockKind, Tone};
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        view.replace_text_in_range(None, "/", window, cx);
+        for ch in "callout".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+        view.newline(&editor_view::Newline, window, cx);
+        for ch in "Budget is capped".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+        let block = view.editor.block(last).clone();
+        assert_eq!(block.kind, BlockKind::Callout(Tone::Note));
+        view.cycle_callout(block.id, cx);
+        view.cycle_callout(block.id, cx);
+        view.cycle_callout(block.id, cx);
+        assert_eq!(
+            view.editor.block(last).kind,
+            BlockKind::Callout(Tone::Warning)
+        );
+    });
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(
+        text.ends_with("> [!WARNING]\n> Budget is capped\n"),
+        "{text}"
+    );
+}

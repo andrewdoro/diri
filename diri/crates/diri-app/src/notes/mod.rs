@@ -245,8 +245,15 @@ impl NotePane {
         };
         let note = store::parse_note(&source);
         let colors = self.colors();
+        let assets = self.store.clone().map(|store| editor_view::AssetHome {
+            store,
+            note_id: note_id.to_owned(),
+        });
         let editor = cx.new(|cx| {
             let mut view = NoteEditorView::new(Editor::new(&note.doc), colors, cx);
+            if let Some(assets) = assets {
+                view.set_asset_home(assets);
+            }
             view.fold_started_work();
             view
         });

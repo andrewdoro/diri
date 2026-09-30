@@ -304,6 +304,9 @@ note ids.
 | `notes.link_editor.opened` | info | | ⌘K panel use |
 | `notes.link.set` | info | `kind` (`notion`\|`google`\|`linear`\|`hubspot`\|`figma`\|`slack`\|`github`\|`dashboard`\|`mention`\|`web`) | which tools people link, to decide which chips matter |
 | `notes.link.removed` | info | | links taken back out |
+| `notes.image.added` | info | `kind` (`paste`\|`drop`\|`picker`) | how pictures get into notes |
+| `notes.image.failed` | info | `kind` (as above) | pictures refused (format, size, write) |
+| `notes.callout.added` | info | | callout use |
 
 ## Upload
 

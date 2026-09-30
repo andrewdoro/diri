@@ -131,10 +131,12 @@ pub enum IconName {
     Figma,
     Slack,
     GitHub,
+    Image,
+    Info,
 }
 
 impl IconName {
-    pub const ALL: [Self; 85] = [
+    pub const ALL: [Self; 87] = [
         Self::Account,
         Self::Activity,
         Self::Archive,
@@ -220,6 +222,8 @@ impl IconName {
         Self::Figma,
         Self::Slack,
         Self::GitHub,
+        Self::Image,
+        Self::Info,
     ];
 
     pub const fn asset_path(self) -> &'static str {
@@ -309,6 +313,8 @@ impl IconName {
             Self::Figma => "icons/figma.svg",
             Self::Slack => "icons/slack.svg",
             Self::GitHub => "icons/github.svg",
+            Self::Image => "icons/image.svg",
+            Self::Info => "icons/info.svg",
         }
     }
 
@@ -404,6 +410,8 @@ impl IconName {
             "figma" => Self::Figma,
             "slack" => Self::Slack,
             "github" => Self::GitHub,
+            "photo" => Self::Image,
+            "info.circle" => Self::Info,
             _ => return None,
         })
     }
@@ -489,6 +497,8 @@ fn embedded_svg(path: &str) -> Option<&'static [u8]> {
         "icons/figma.svg" => include_bytes!("../assets/icons/figma.svg"),
         "icons/slack.svg" => include_bytes!("../assets/icons/slack.svg"),
         "icons/github.svg" => include_bytes!("../assets/icons/github.svg"),
+        "icons/image.svg" => include_bytes!("../assets/icons/image.svg"),
+        "icons/info.svg" => include_bytes!("../assets/icons/info.svg"),
         "icons/account.svg" => include_bytes!("../assets/icons/account.svg"),
         "icons/activity.svg" => include_bytes!("../assets/icons/activity.svg"),
         "icons/archive.svg" => include_bytes!("../assets/icons/archive.svg"),

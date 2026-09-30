@@ -16,11 +16,12 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use diri_notes::doc::{Block, BlockKind, Mark, Style};
+use diri_notes::doc::{Block, BlockKind, Mark, Style, Tone};
 use diri_notes::edit::{Editor, Granularity, Pos, Selection, Turn};
 use diri_notes::mention::{self, Candidate, MentionTarget};
 use diri_ui::{
-    AgentKind as UiAgentKind, AgentLogo, Palette, SemanticColors, StatusGlyph, StatusState, Typo,
+    AgentKind as UiAgentKind, AgentLogo, Ink, Palette, SemanticColors, StatusGlyph, StatusState,
+    Typo,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, ElementInputHandler,
@@ -229,6 +230,19 @@ const MENTION_LIMIT: usize = 8;
 /// A query this long without a match is prose, not a mention.
 const MENTION_QUERY_MAX: usize = 40;
 
+/// Each image block's on-screen bounds, written while painting and read by
+/// hit testing.
+type ImageRects = Rc<std::cell::RefCell<Vec<(usize, Bounds<Pixels>)>>>;
+
+/// Where a note's pictures live: the store that writes them and the note
+/// they belong to. Set by the host; without it paste and drop insert no
+/// images and relative images do not resolve.
+#[derive(Clone)]
+pub(crate) struct AssetHome {
+    pub(crate) store: std::sync::Arc<diri_notes::store::NoteStore>,
+    pub(crate) note_id: String,
+}
+
 /// The ⌘K panel: a URL field over the selection or the link at the caret,
 /// and what Return does with it.
 struct LinkEditor {
@@ -276,12 +290,19 @@ pub(crate) fn accent() -> gpui::Rgba {
 
 /// One row of the `/` menu: a block kind, its glyph, and the key equivalent
 /// that turns the current block into it, printed like a native menu's.
+#[derive(Clone, Copy, PartialEq)]
+enum SlashAction {
+    Turn(Turn),
+    /// Pick picture files and insert them.
+    Image,
+}
+
 #[derive(Clone, Copy)]
 struct SlashItem {
     label: &'static str,
     icon: &'static str,
     keys: Option<&'static str>,
-    turn: Turn,
+    action: SlashAction,
     /// Rows in different groups are divided by a separator: text, lists,
     /// then blocks that set content apart.
     group: u8,
@@ -293,7 +314,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Text",
         icon: "textformat",
         keys: Some(KEY_TURN_PARAGRAPH),
-        turn: Turn::Kind(BlockKind::Paragraph),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Paragraph)),
         group: 0,
         keywords: "text paragraph plain",
     },
@@ -301,7 +322,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Heading 1",
         icon: "textformat.h1",
         keys: Some(KEY_TURN_H1),
-        turn: Turn::Kind(BlockKind::Heading(1)),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Heading(1))),
         group: 0,
         keywords: "heading h1 title big",
     },
@@ -309,7 +330,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Heading 2",
         icon: "textformat.h2",
         keys: Some(KEY_TURN_H2),
-        turn: Turn::Kind(BlockKind::Heading(2)),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Heading(2))),
         group: 0,
         keywords: "heading h2 subtitle",
     },
@@ -317,7 +338,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Heading 3",
         icon: "textformat.h3",
         keys: Some(KEY_TURN_H3),
-        turn: Turn::Kind(BlockKind::Heading(3)),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Heading(3))),
         group: 0,
         keywords: "heading h3 small",
     },
@@ -325,7 +346,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "To-do",
         icon: "checkmark.square",
         keys: Some(KEY_TURN_TODO),
-        turn: Turn::Kind(BlockKind::Todo { checked: false }),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Todo { checked: false })),
         group: 1,
         keywords: "todo task checkbox check list",
     },
@@ -333,7 +354,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Bulleted list",
         icon: "list.bullet",
         keys: Some(KEY_TURN_BULLET),
-        turn: Turn::Kind(BlockKind::Bullet),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Bullet)),
         group: 1,
         keywords: "bullet list unordered",
     },
@@ -341,7 +362,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Numbered list",
         icon: "list.number",
         keys: Some(KEY_TURN_NUMBERED),
-        turn: Turn::Kind(BlockKind::Numbered),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Numbered)),
         group: 1,
         keywords: "numbered list ordered",
     },
@@ -349,7 +370,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Quote",
         icon: "text.quote",
         keys: Some(KEY_TURN_QUOTE),
-        turn: Turn::Kind(BlockKind::Quote),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Quote)),
         group: 2,
         keywords: "quote blockquote citation",
     },
@@ -357,17 +378,33 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Code",
         icon: "chevron.left.forwardslash.chevron.right",
         keys: Some(KEY_TURN_CODE),
-        turn: Turn::Kind(BlockKind::Code),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Code)),
         group: 2,
         keywords: "code snippet monospace",
+    },
+    SlashItem {
+        label: "Callout",
+        icon: "info.circle",
+        keys: None,
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Callout(Tone::Note))),
+        group: 2,
+        keywords: "callout note tip important warning caution aside info alert",
     },
     SlashItem {
         label: "Divider",
         icon: "divider",
         keys: None,
-        turn: Turn::Divider,
+        action: SlashAction::Turn(Turn::Divider),
         group: 2,
         keywords: "divider rule line separator",
+    },
+    SlashItem {
+        label: "Image",
+        icon: "photo",
+        keys: None,
+        action: SlashAction::Image,
+        group: 3,
+        keywords: "image picture photo screenshot upload",
     },
 ];
 
@@ -401,6 +438,13 @@ pub(crate) struct NoteEditorView {
     mention: Option<MentionMenu>,
     link_editor: Option<LinkEditor>,
     mentions: Rc<MentionDirectory>,
+    assets: Option<AssetHome>,
+    /// Each image's on-screen bounds from the last paint, for clicks.
+    image_rects: ImageRects,
+    /// Pixel sizes read from picture headers, so an image lays out at its
+    /// final size before it loads.
+    image_sizes:
+        std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, Option<(u32, u32)>>>,
     caret_bounds: Option<Bounds<Pixels>>,
     /// Checkboxes ticked this session, for their pop animation.
     ticked: Vec<(u64, Instant)>,
@@ -444,6 +488,9 @@ impl NoteEditorView {
             mention: None,
             link_editor: None,
             mentions: Rc::default(),
+            assets: None,
+            image_rects: Rc::default(),
+            image_sizes: Default::default(),
             caret_bounds: None,
             ticked: Vec::new(),
             work: super::work_item::WorkView::default(),
@@ -463,6 +510,11 @@ impl NoteEditorView {
 
     pub(crate) fn set_colors(&mut self, colors: SemanticColors) {
         self.colors = colors;
+    }
+
+    /// Where this note's pictures are saved and resolved from.
+    pub(crate) fn set_asset_home(&mut self, home: AssetHome) {
+        self.assets = Some(home);
     }
 
     /// What `@` offers and what chips read their live status from.
@@ -622,6 +674,15 @@ impl NoteEditorView {
     }
 
     fn hit(&self, at: Point<Pixels>) -> Option<Pos> {
+        // A click anywhere on a picture selects it.
+        if let Some((index, _)) = self
+            .image_rects
+            .borrow()
+            .iter()
+            .find(|(_, bounds)| bounds.contains(&at))
+        {
+            return Some(Pos::new(*index, 0));
+        }
         let point_at = at;
         let hidden = self.editor.hidden();
         let mut chosen = None;
@@ -814,8 +875,93 @@ impl NoteEditorView {
             head,
         });
         self.editor.delete_selection(now);
-        self.editor.turn_into(item.turn, now);
+        match item.action {
+            SlashAction::Turn(turn) => {
+                if let Turn::Kind(BlockKind::Callout(_)) = turn {
+                    crate::telemetry::notes_event("notes.callout.added", "");
+                }
+                self.editor.turn_into(turn, now);
+            }
+            SlashAction::Image => self.pick_images(cx),
+        }
         self.edited(cx);
+    }
+
+    /// `/image`: a native Open panel for pictures, inserted at the caret.
+    fn pick_images(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Insert".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.insert_image_files(&paths, "picker", cx));
+        })
+        .detach();
+    }
+
+    /// Copies picture files into the note's assets and inserts them after
+    /// the caret, in order. Anything that is not a picture is skipped.
+    pub(crate) fn insert_image_files(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let Some(home) = self.assets.clone() else {
+            return 0;
+        };
+        let mut inserted = 0;
+        for path in paths.iter().filter(|p| diri_notes::store::is_image_path(p)) {
+            match home.store.import_asset(&home.note_id, path) {
+                Ok(src) => {
+                    self.editor.insert_image(&src, "", now_ms());
+                    inserted += 1;
+                }
+                Err(_) => crate::telemetry::notes_event("notes.image.failed", source),
+            }
+        }
+        if inserted > 0 {
+            crate::telemetry::notes_event("notes.image.added", source);
+            self.edited(cx);
+        }
+        inserted
+    }
+
+    /// A picture on the pasteboard (a screenshot, an image copied from a
+    /// browser) becomes an image in the note.
+    fn paste_image(&mut self, image: &gpui::Image, cx: &mut Context<Self>) -> bool {
+        let Some(home) = self.assets.clone() else {
+            return false;
+        };
+        let extension = match image.format {
+            gpui::ImageFormat::Png => "png",
+            gpui::ImageFormat::Jpeg => "jpg",
+            gpui::ImageFormat::Webp => "webp",
+            gpui::ImageFormat::Gif => "gif",
+            gpui::ImageFormat::Svg => "svg",
+            gpui::ImageFormat::Bmp => "bmp",
+            gpui::ImageFormat::Tiff => "tiff",
+            _ => return false,
+        };
+        match home
+            .store
+            .save_asset(&home.note_id, &image.bytes, extension)
+        {
+            Ok(src) => {
+                self.run(cx, |e, now| e.insert_image(&src, "", now));
+                crate::telemetry::notes_event("notes.image.added", "paste");
+                true
+            }
+            Err(_) => {
+                crate::telemetry::notes_event("notes.image.failed", "paste");
+                false
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1193,8 +1339,32 @@ impl NoteEditorView {
         self.run(cx, |e, now| e.delete_selection(now));
     }
 
-    fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+    pub(super) fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        let image = item.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::Image(image) => Some(image.clone()),
+            _ => None,
+        });
+        if let Some(image) = image
+            && self.paste_image(&image, cx)
+        {
+            return;
+        }
+        let files: Vec<std::path::PathBuf> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                gpui::ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if !files.is_empty() && self.insert_image_files(&files, "paste", cx) > 0 {
+            return;
+        }
+        let Some(text) = item.text() else {
             return;
         };
         // Pasting a URL over a selection links it, as Notion and Bear do.
@@ -1911,7 +2081,50 @@ fn look(kind: BlockKind) -> BlockLook {
             bottom: 10.0,
             ..body
         },
+        BlockKind::Image | BlockKind::Callout(_) => BlockLook {
+            top: 8.0,
+            bottom: 8.0,
+            ..body
+        },
         _ => body,
+    }
+}
+
+/// Pictures never grow taller than this; wider ones fit the column.
+const IMAGE_MAX_HEIGHT: f32 = 480.0;
+/// The ring around an image: padding plus border on each side.
+const IMAGE_RING: f32 = 5.0;
+
+/// A picture's size in the note: its natural size in points (pixels over
+/// the display scale), shrunk to fit the column and the height cap, aspect
+/// kept. An unknown size gets a 16:9 frame the width of the column.
+fn image_fit(pixels: Option<(u32, u32)>, scale: f32) -> (f32, f32) {
+    let column = MEASURE - 2.0 * IMAGE_RING;
+    let Some((w, h)) = pixels.filter(|(w, h)| *w > 0 && *h > 0) else {
+        return (column, column * 9.0 / 16.0);
+    };
+    let (w, h) = (w as f32, h as f32);
+    let mut width = (w / scale.max(1.0)).min(column);
+    let mut height = width * h / w;
+    if height > IMAGE_MAX_HEIGHT {
+        height = IMAGE_MAX_HEIGHT;
+        width = height * w / h;
+    }
+    (width.max(1.0), height.max(1.0))
+}
+
+/// A callout tone's glyph and ink: GitHub's alert palette in diri's inks.
+fn callout_look(tone: Tone, colors: SemanticColors) -> (&'static str, gpui::Rgba) {
+    let purple = diri_ui::rgba_f32(0.56, 0.38, 0.93, 1.0);
+    match tone {
+        Tone::Note => ("info.circle", Ink::on_surface(Palette::GEMINI_BLUE, colors)),
+        Tone::Tip => ("sparkle", Ink::on_surface(Ink::FRESH, colors)),
+        Tone::Important => ("bell", Ink::on_surface(purple, colors)),
+        Tone::Warning => (
+            "exclamationmark.triangle",
+            Ink::on_surface(Ink::ATTENTION, colors),
+        ),
+        Tone::Caution => ("xmark.circle", Ink::on_surface(Ink::DANGER, colors)),
     }
 }
 
@@ -1925,6 +2138,7 @@ fn placeholder(kind: BlockKind, only_block: bool) -> &'static str {
         BlockKind::Bullet | BlockKind::Numbered => "List",
         BlockKind::Quote => "Quote",
         BlockKind::Code => "Code",
+        BlockKind::Callout(tone) => tone.label(),
         BlockKind::Paragraph if only_block => "Start writing, or type / for blocks",
         _ => "Type / for blocks",
     }
@@ -2069,6 +2283,7 @@ impl Render for NoteEditorView {
             .retain(|(_, at)| at.elapsed() < Duration::from_millis(600));
 
         self.anchor_work_menu();
+        self.image_rects.borrow_mut().clear();
         let mut layouts = Vec::with_capacity(self.editor.blocks().len());
         let mut shown_all = Vec::with_capacity(self.editor.blocks().len());
         let hidden = self.editor.hidden();
@@ -2076,17 +2291,23 @@ impl Render for NoteEditorView {
         for (index, block) in self.editor.blocks().iter().enumerate() {
             let look = look(block.kind);
             let checked = block.kind == BlockKind::Todo { checked: true };
-            let shown = Shown::of(block);
-            let text: SharedString = if block.text.is_empty() {
+            let shown = if block.kind.is_atomic() {
+                Shown::default()
+            } else {
+                Shown::of(block)
+            };
+            let text: SharedString = if block.text.is_empty() || block.kind.is_atomic() {
                 "\u{200B}".into()
             } else {
                 shown.text.clone().into()
             };
-            let mut styled = StyledText::new(text).with_highlights(if block.text.is_empty() {
-                Vec::new()
-            } else {
-                highlights(block, &shown, colors, checked)
-            });
+            let mut styled = StyledText::new(text).with_highlights(
+                if block.text.is_empty() || block.kind.is_atomic() {
+                    Vec::new()
+                } else {
+                    highlights(block, &shown, colors, checked)
+                },
+            );
             let code_ranges: Vec<(Range<usize>, SharedString)> = block
                 .marks
                 .iter()
@@ -2214,6 +2435,48 @@ impl Render for NoteEditorView {
                                 .child(content.opacity(0.0)),
                         ),
                 ),
+                BlockKind::Image => {
+                    let selected =
+                        focused && self.editor.selection.is_collapsed() && head.block == index;
+                    let scale = window.scale_factor();
+                    row.child(self.image_row(index, block, selected, scale, content, cx))
+                }
+                BlockKind::Callout(tone) => {
+                    let (icon, ink) = callout_look(tone, colors);
+                    let id = block.id;
+                    row.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(10.0))
+                            .px(px(14.0))
+                            .py(px(10.0))
+                            .rounded(px(10.0))
+                            .bg(ink.alpha(0.08))
+                            .border_1()
+                            .border_color(ink.alpha(0.16))
+                            .child(
+                                div()
+                                    .id(("callout-tone", id))
+                                    .flex_none()
+                                    .h(px(look.line))
+                                    .flex()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .child(crate::icons::sf_symbol(icon, 13.0, ink))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.cycle_callout(id, cx);
+                                        }),
+                                    ),
+                            )
+                            .child(content),
+                    )
+                }
                 _ => row.child(content),
             };
             let row = row.children(self.work_accessory(
@@ -2353,6 +2616,8 @@ impl Render for NoteEditorView {
             .map(|b| (b.text.len(), b.text.is_empty()))
             .collect();
         let folded_away = hidden.clone();
+        // A selected image or divider shows as selected, not with a caret.
+        let head_atomic = self.editor.block(selection.head.block).kind.is_atomic();
         let overlay_shown = shown_all;
         let autoscroll = std::mem::take(&mut self.autoscroll);
         let scroll = self.scroll.clone();
@@ -2408,7 +2673,7 @@ impl Render for NoteEditorView {
                     window.paint_quad(fill(*rect, selection_color));
                 }
                 if let Some(caret) = state.caret {
-                    if caret_on && selection.is_collapsed() {
+                    if caret_on && selection.is_collapsed() && !head_atomic {
                         window.paint_quad(fill(caret, caret_color));
                     }
                     if autoscroll {
@@ -2542,6 +2807,13 @@ impl Render for NoteEditorView {
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .drag_over::<gpui::ExternalPaths>(|area, _, _, _| area.bg(accent().alpha(0.04)))
+                    .on_drop(
+                        cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                            cx.stop_propagation();
+                            this.drop_files(paths, window, cx);
+                        }),
+                    )
                     .child(
                         div()
                             .w_full()
@@ -2569,6 +2841,143 @@ impl Render for NoteEditorView {
 }
 
 impl NoteEditorView {
+    /// A picture: the file fitted to the column, a ring while selected, and
+    /// a quiet placeholder when the file is missing or lives on the web.
+    fn image_row(
+        &self,
+        index: usize,
+        block: &Block,
+        selected: bool,
+        scale: f32,
+        content: gpui::Div,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use gpui::StyledImage as _;
+        let colors = self.colors;
+        let _ = cx;
+        let path = self
+            .assets
+            .as_ref()
+            .and_then(|home| home.store.resolve_asset(&block.src));
+        let placeholder = |label: String| {
+            div()
+                .h(px(44.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .rounded(px(8.0))
+                .bg(colors.primary.alpha(0.05))
+                .border_1()
+                .border_color(colors.primary.alpha(0.08))
+                .text_size(px(13.0))
+                .text_color(colors.tertiary)
+                .child(crate::icons::sf_symbol("photo", 13.0, colors.tertiary))
+                .child(label)
+                .into_any_element()
+        };
+        let picture = match path {
+            Some(path) => {
+                let missing = placeholder("This picture's file is missing".into());
+                let missing = std::cell::RefCell::new(Some(missing));
+                let pixels = *self
+                    .image_sizes
+                    .borrow_mut()
+                    .entry(path.clone())
+                    .or_insert_with(|| diri_notes::store::image_size(&path));
+                let (width, height) = image_fit(pixels, scale);
+                gpui::img(path)
+                    .w(px(width))
+                    .h(px(height))
+                    .object_fit(gpui::ObjectFit::Contain)
+                    .rounded(px(8.0))
+                    .with_fallback(move || {
+                        missing
+                            .borrow_mut()
+                            .take()
+                            .unwrap_or_else(|| div().into_any_element())
+                    })
+                    .into_any_element()
+            }
+            None => {
+                let label = if block.src.contains("://") {
+                    format!("Picture on the web · {}", short_url(&block.src))
+                } else {
+                    "This picture's file is missing".to_owned()
+                };
+                placeholder(label)
+            }
+        };
+        let rects = Rc::clone(&self.image_rects);
+        div()
+            .relative()
+            .flex()
+            .flex_row()
+            .items_start()
+            .flex_1()
+            .min_w_0()
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .p(px(3.0))
+                    .rounded(px(11.0))
+                    .border_2()
+                    .border_color(if selected {
+                        accent().alpha(0.7)
+                    } else {
+                        accent().alpha(0.0)
+                    })
+                    .child(picture)
+                    .child(
+                        canvas(
+                            move |bounds, _, _| rects.borrow_mut().push((index, bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .child(content.opacity(0.0)),
+            )
+            .into_any_element()
+    }
+
+    /// Clicking a callout's glyph steps it to the next tone.
+    pub(super) fn cycle_callout(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.editor.blocks().iter().position(|b| b.id == id) else {
+            return;
+        };
+        let BlockKind::Callout(tone) = self.editor.block(index).kind else {
+            return;
+        };
+        let at = Tone::ALL.iter().position(|t| *t == tone).unwrap_or(0);
+        let next = Tone::ALL[(at + 1) % Tone::ALL.len()];
+        self.run(cx, |e, now| {
+            e.set_block_kind(index, BlockKind::Callout(next), now)
+        });
+    }
+
+    /// Pictures dropped from Finder land after the block under the pointer.
+    fn drop_files(
+        &mut self,
+        paths: &gpui::ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pos) = self.hit(window.mouse_position()) {
+            self.editor
+                .set_caret(Pos::new(pos.block, self.text_len(pos.block)));
+        }
+        self.insert_image_files(paths.paths(), "drop", cx);
+    }
+
     /// The fold chevron in the gutter left of a list item with children:
     /// shown while the row is hovered, and always while folded.
     fn disclosure(

@@ -198,6 +198,10 @@ impl Editor {
 
     fn clamp_pos(&self, pos: Pos) -> Pos {
         let block = pos.block.min(self.blocks.len() - 1);
+        // An image or divider is selected whole: its caret has one place.
+        if self.blocks[block].kind.is_atomic() {
+            return Pos::new(block, 0);
+        }
         let text = &self.blocks[block].text;
         Pos::new(block, floor_boundary(text, pos.offset))
     }
@@ -385,13 +389,14 @@ impl Editor {
             }
             Granularity::Block => Pos::new(pos.block, if forward { text.len() } else { 0 }),
             Granularity::Grapheme | Granularity::Word => {
-                if forward && pos.offset >= text.len() {
+                let atomic = self.blocks[pos.block].kind.is_atomic();
+                if forward && (atomic || pos.offset >= text.len()) {
                     return match self.visible_after(pos.block) {
                         Some(next) => Pos::new(next, 0),
                         None => pos,
                     };
                 }
-                if !forward && pos.offset == 0 {
+                if !forward && (atomic || pos.offset == 0) {
                     return match self.visible_before(pos.block) {
                         Some(previous) => Pos::new(previous, self.blocks[previous].text.len()),
                         None => pos,
@@ -620,6 +625,7 @@ impl Editor {
         );
         let styles_before = self.pending.clone();
         self.delete_selection_inner();
+        self.leave_atomic();
         let pos = self.selection.head;
         let block = &mut self.blocks[pos.block];
         let styles = if block.kind == BlockKind::Title || block.kind == BlockKind::Code {
@@ -802,7 +808,7 @@ impl Editor {
         if kind.is_list() && self.blocks[pos.block].indent > 0 {
             self.blocks[pos.block].indent -= 1;
         } else if !matches!(kind, BlockKind::Paragraph) {
-            if kind == BlockKind::Divider {
+            if kind.is_atomic() {
                 self.blocks.remove(pos.block);
                 self.selection = Selection::caret(self.end_of(pos.block - 1));
             } else {
@@ -820,7 +826,7 @@ impl Editor {
 
     fn merge_into_previous(&mut self, index: usize) {
         let previous = index - 1;
-        if self.blocks[previous].kind == BlockKind::Divider {
+        if self.blocks[previous].kind.is_atomic() {
             self.blocks.remove(previous);
             self.selection = Selection::caret(Pos::new(previous, 0));
             return;
@@ -907,6 +913,53 @@ impl Editor {
         self.changed();
     }
 
+    /// With the caret on an image or a divider, typing goes to a paragraph
+    /// right after it (the next one if it is empty, else a new one).
+    fn leave_atomic(&mut self) {
+        let at = self.selection.head.block;
+        if !self.blocks[at].kind.is_atomic() {
+            return;
+        }
+        let next_is_empty = self
+            .blocks
+            .get(at + 1)
+            .is_some_and(|b| b.kind == BlockKind::Paragraph && b.text.is_empty());
+        if next_is_empty {
+            self.selection = Selection::caret(Pos::new(at + 1, 0));
+        } else {
+            self.insert_block_after(at, BlockKind::Paragraph);
+        }
+    }
+
+    /// Inserts an image after the caret's block (or in place of an empty
+    /// paragraph), then leaves the caret on a line below it.
+    pub fn insert_image(&mut self, src: &str, alt: &str, now_ms: u64) {
+        self.checkpoint(EditKind::Other, now_ms);
+        self.delete_selection_inner();
+        let head = self.selection.head.block;
+        let id = self.fresh_id();
+        let image = Block::image(id, src, alt);
+        // An empty line of any kind (a fresh to-do, a bullet) becomes the
+        // image; anything with text keeps it and the image goes below.
+        let replace =
+            head > 0 && !self.blocks[head].kind.is_atomic() && self.blocks[head].text.is_empty();
+        let at = if replace {
+            self.blocks[head] = image;
+            head
+        } else {
+            let at = if head == 0 { 1 } else { head + 1 };
+            self.blocks.insert(at, image);
+            at
+        };
+        self.leave_atomic_from(at);
+        self.changed();
+    }
+
+    fn leave_atomic_from(&mut self, at: usize) {
+        self.selection = Selection::caret(Pos::new(at, 0));
+        self.leave_atomic();
+    }
+
     /// Pastes a bare URL at a collapsed caret as a link: a tool the note
     /// recognises (a Notion page, a Linear issue, a Google Sheet) gets its
     /// readable title, anything else shows the URL itself. In a title or a
@@ -939,6 +992,13 @@ impl Editor {
     pub fn enter(&mut self, now_ms: u64) {
         self.checkpoint(EditKind::Other, now_ms);
         self.delete_selection_inner();
+        if self.blocks[self.selection.head.block].kind.is_atomic() {
+            // Return on a selected image or divider opens a line below it.
+            let at = self.selection.head.block;
+            self.insert_block_after(at, BlockKind::Paragraph);
+            self.changed();
+            return;
+        }
         let pos = self.selection.head;
         let block = &self.blocks[pos.block];
         let kind = block.kind;
@@ -1093,6 +1153,20 @@ impl Editor {
         true
     }
 
+    /// Changes one block's kind in place, as an undoable edit: a callout's
+    /// tone chosen from its glyph, say.
+    pub fn set_block_kind(&mut self, index: usize, kind: BlockKind, now_ms: u64) {
+        let Some(block) = self.blocks.get(index) else {
+            return;
+        };
+        if block.kind == kind || block.kind.is_atomic() || kind.is_atomic() || index == 0 {
+            return;
+        }
+        self.checkpoint(EditKind::Other, now_ms);
+        self.blocks[index].set_kind(kind);
+        self.changed();
+    }
+
     /// Converts every selected block (slash menu, ⌘⌥ shortcuts).
     pub fn turn_into(&mut self, turn: Turn, now_ms: u64) {
         self.checkpoint(EditKind::Other, now_ms);
@@ -1114,6 +1188,10 @@ impl Editor {
             Turn::Kind(kind) => {
                 for index in range {
                     let block = &mut self.blocks[index];
+                    // An image has no text to carry into another kind.
+                    if block.kind == BlockKind::Image {
+                        continue;
+                    }
                     let text = block.text.clone();
                     block.set_kind(kind);
                     if kind == BlockKind::Code {
@@ -1143,7 +1221,7 @@ impl Editor {
                 block.kind = BlockKind::Todo {
                     checked: !all_checked,
                 };
-            } else if !matches!(block.kind, BlockKind::Divider | BlockKind::Title) {
+            } else if !block.kind.is_atomic() && block.kind != BlockKind::Title {
                 let indent = block.indent;
                 block.set_kind(BlockKind::Todo { checked: false });
                 block.indent = indent;
@@ -1424,6 +1502,7 @@ impl Editor {
         if !text.contains('\n') || head_kind == BlockKind::Code {
             self.checkpoint(EditKind::Other, now_ms);
             self.delete_selection_inner();
+            self.leave_atomic();
             let pos = self.selection.head;
             let inserted = if head_kind == BlockKind::Title {
                 text.replace('\n', " ")
@@ -2018,5 +2097,66 @@ mod tests {
         assert!(e.undo());
         assert_eq!(e.link_at(Pos::new(1, 7)).unwrap().2, "https://a.dev");
         assert_eq!(e.link_at(Pos::new(1, 2)), None);
+    }
+
+    #[test]
+    fn images_insert_select_and_step_aside_for_typing() {
+        let mut e = editor("# T\n\nabove\n\nbelow\n");
+        e.set_caret(Pos::new(1, 5));
+        e.insert_image("assets/n/1.png", "chart", 0);
+        assert_eq!(e.block(2).kind, BlockKind::Image);
+        assert_eq!(e.block(2).src, "assets/n/1.png");
+        // The caret lands on a fresh line below the image.
+        assert_eq!(e.selection.head, Pos::new(3, 0));
+        assert_eq!(e.block(3).text, "");
+        assert_eq!(e.block(4).text, "below");
+        // Typing with the image selected goes below it, not into it.
+        e.set_caret(Pos::new(2, 0));
+        type_str(&mut e, "x");
+        assert_eq!(e.block(2).text, "chart");
+        assert_eq!(e.block(3).text, "x");
+        // Backspace on a selected image removes it.
+        e.set_caret(Pos::new(2, 0));
+        e.backspace(Granularity::Grapheme, 0);
+        assert!(e.blocks().iter().all(|b| b.kind != BlockKind::Image));
+        assert!(e.undo());
+        assert_eq!(e.block(2).kind, BlockKind::Image);
+        // Slash-menu conversions skip images.
+        e.set_caret(Pos::new(2, 0));
+        e.turn_into(Turn::Kind(BlockKind::Heading(1)), 0);
+        assert_eq!(e.block(2).kind, BlockKind::Image);
+    }
+
+    #[test]
+    fn an_image_replaces_an_empty_line() {
+        let mut e = editor("# T\n\nabove\n\n&nbsp;\n");
+        let last = e.blocks().len() - 1;
+        e.set_caret(Pos::new(last, 0));
+        e.insert_image("a.png", "", 0);
+        assert_eq!(e.block(last).kind, BlockKind::Image);
+        assert_eq!(e.block(last + 1).kind, BlockKind::Paragraph);
+        assert_eq!(
+            markdown::write(&markdown::FrontMatter::default(), &e.document()),
+            "# T\n\nabove\n\n![](a.png)\n"
+        );
+    }
+
+    #[test]
+    fn callouts_take_soft_breaks_and_leave_on_return() {
+        use crate::doc::Tone;
+        let mut e = editor("# T\n\nheads up\n");
+        e.set_caret(Pos::new(1, 8));
+        e.turn_into(Turn::Kind(BlockKind::Callout(Tone::Warning)), 0);
+        e.soft_break(0);
+        type_str(&mut e, "second line");
+        e.enter(0);
+        type_str(&mut e, "after");
+        assert_eq!(e.block(1).kind, BlockKind::Callout(Tone::Warning));
+        assert_eq!(e.block(1).text, "heads up\nsecond line");
+        assert_eq!(e.block(2).kind, BlockKind::Paragraph);
+        assert_eq!(
+            markdown::write(&markdown::FrontMatter::default(), &e.document()),
+            "# T\n\n> [!WARNING]\n> heads up\n> second line\n\nafter\n"
+        );
     }
 }

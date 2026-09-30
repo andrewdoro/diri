@@ -9530,7 +9530,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
             cx.run_until_parked();
         }
-        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold|links|link-editor` types
+        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold|links|link-editor|media` types
         // into the note:
         // mention chips beside a to-do, then the `/` or `@` menu open at the
         // caret, to judge the menus beside the rest of diri's chrome.
@@ -9583,6 +9583,36 @@ mod tests {
                     let end = view.editor.block(quick).text.len();
                     view.editor.set_caret(Pos::new(quick, end));
                     match scene.as_str() {
+                        "media" => {
+                            // A picture and every callout tone.
+                            let picture = notes_dir.path().join("funnel.png");
+                            std::fs::write(&picture, crate::notes::tests::chart_png(1200, 520))
+                                .expect("fixture picture");
+                            view.editor.enter(0);
+                            view.editor.turn_into(
+                                diri_notes::edit::Turn::Kind(diri_notes::doc::BlockKind::Paragraph),
+                                0,
+                            );
+                            view.insert_image_files(&[picture], "drop", cx);
+                            for (tone, text) in [
+                                (diri_notes::doc::Tone::Tip, "Paste a screenshot straight into a note."),
+                                (diri_notes::doc::Tone::Warning, "Q4 budget is capped at $5k."),
+                            ] {
+                                view.editor.insert_text(text, 0);
+                                view.editor.turn_into(
+                                    diri_notes::edit::Turn::Kind(diri_notes::doc::BlockKind::Callout(tone)),
+                                    0,
+                                );
+                                view.editor.enter(0);
+                            }
+                            let first = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.kind == diri_notes::doc::BlockKind::Image)
+                                .expect("image");
+                            view.editor.set_caret(Pos::new(first, 0));
+                        }
                         "link-editor" => {
                             // ⌘K on "calm" with a Notion URL typed in.
                             let intro = view
