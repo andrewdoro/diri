@@ -18,7 +18,7 @@ pub type UsageSnapshot = diri_usage::transcripts::UsageSnapshot<limits::AccountL
 
 mod remote;
 pub use diri_usage::transcripts::{RemoteUsageSnapshot, RemoteUsageStatus};
-pub(crate) use remote::watch_remote_usage;
+pub(crate) use remote::{RemoteUsageViewer, watch_remote_usage};
 
 pub(crate) use diri_usage::transcripts::timestamp;
 

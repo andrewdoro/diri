@@ -106,10 +106,20 @@ impl Sidebar {
                 cx.emit(SidebarEvent::ProjectLayoutUnavailable);
                 return;
             };
-            if store.edit_workspace(WorkspaceMutation::OpenProjectAgent {
+            let mutation = WorkspaceMutation::OpenProjectAgent {
                 session_id: request.session.clone(),
                 preferred_workspace: request.preferred.clone(),
-            }) {
+            };
+            // Every activation asks again; a placement the Engine already
+            // rejected (a full tab limit) shows the agent without its layout
+            // instead of failing, and toasting, once per click.
+            if store.workspace_edit_rejected(&mutation).is_some() {
+                drop(store);
+                self.workspace_nav.project_agent = None;
+                cx.emit(SidebarEvent::ProjectLayoutUnavailable);
+                return;
+            }
+            if store.edit_workspace(mutation) {
                 self.workspace_nav.project_agent.as_mut().unwrap().revision = Some(next_revision);
             }
             return;
@@ -344,6 +354,52 @@ mod tests {
             assert!(sidebar.store.read().unwrap().workspace_catalog().can_edit());
             sidebar.reconcile_project_agent(cx);
             assert!(sidebar.store.read().unwrap().workspace_catalog().can_edit());
+        });
+    }
+
+    /// Navigation asks for a placement on every activation. Once the Engine
+    /// rejects it (a full tab limit), later activations of the same agent show
+    /// it without its layout and never send the rejected edit again.
+    #[gpui::test]
+    fn a_rejected_agent_placement_is_not_resent_on_every_activation(cx: &mut gpui::TestAppContext) {
+        let (sidebar, cx) =
+            cx.add_window_view(|_, cx| Sidebar::new(None, true, PreviewScenario::Typical, cx));
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.preview = false;
+            let claude = SessionId::new("preview-claude");
+            let codex = SessionId::new("preview-codex");
+            let mut store = sidebar.store.write().unwrap();
+            let project = store.sessions()[&claude].project_id.clone();
+            store.seed_workspace_snapshot_for_test(snapshot(&claude, &project));
+            store.select(codex.clone());
+            drop(store);
+            sidebar.workspace_nav.active = Some(WorkspaceId::new("project-view"));
+            assert!(sidebar.open_selected_project_agent(cx));
+            assert!(!sidebar.store.read().unwrap().workspace_catalog().can_edit());
+            sidebar
+                .store
+                .write()
+                .unwrap()
+                .reject_workspace_edit_for_test("workspace_limit_reached");
+            // The reload the failure asks for returns the unchanged layout.
+            sidebar
+                .store
+                .write()
+                .unwrap()
+                .finish_workspace_refresh_for_test(snapshot(&claude, &project));
+            sidebar.reconcile_project_agent(cx);
+            assert!(sidebar.workspace_nav.project_agent.is_none());
+            for _ in 0..3 {
+                assert!(sidebar.open_selected_project_agent(cx));
+                assert!(
+                    sidebar.workspace_nav.project_agent.is_none(),
+                    "falls back to the agent without a pending placement"
+                );
+                assert!(
+                    sidebar.store.read().unwrap().workspace_catalog().can_edit(),
+                    "no edit went out"
+                );
+            }
         });
     }
 }

@@ -402,6 +402,9 @@ struct Shared {
     terminate_requested: AtomicBool,
     /// The exit was recorded to telemetry; later observers stay quiet.
     exit_recorded: AtomicBool,
+    /// The exit status a `returnToLoginShell` wrapper reported for its agent,
+    /// which the PTY's own exit never carries: the login shell outlives it.
+    agent_exit: Mutex<Option<i32>>,
     /// The latest keystroke whose echo the held pump has not published yet.
     echo_request: Mutex<Option<EchoRequest>>,
 }
@@ -3037,6 +3040,7 @@ fn new_shared(
         launched_at: fresh.then(Instant::now),
         terminate_requested: AtomicBool::new(false),
         exit_recorded: AtomicBool::new(false),
+        agent_exit: Mutex::new(None),
         echo_request: Mutex::new(None),
     })
 }
@@ -4337,6 +4341,9 @@ fn feed_output_batch(
             if screen.has_notifications() {
                 shared.bump_state_version();
             }
+            if let Some(status) = screen.take_agent_exit() {
+                note_agent_exit(shared, status);
+            }
             let after = screen.filled_cells();
             (after < before, after == 0 && before != 0)
         };
@@ -4892,6 +4899,9 @@ fn pump_held(
                 if screen.has_notifications() {
                     shared.bump_state_version();
                 }
+                if let Some(status) = screen.take_agent_exit() {
+                    note_agent_exit(&shared, status);
+                }
                 let replies = screen.take_replies();
                 let observation = if evaluate_now {
                     last_eval_at = Some(Instant::now());
@@ -5052,14 +5062,7 @@ fn set_current_thread_interactive(_interactive: bool) {}
 /// The modes the screen still has on, from the same emulator that reduces
 /// status (a remote session's raw output feeds it too).
 fn terminal_modes_left(shared: &Shared) -> crate::telemetry::LeftModes {
-    let screen = shared.screen.lock().expect("screen");
-    let mouse = screen.mouse_modes();
-    crate::telemetry::LeftModes {
-        mouse: mouse.is_reporting().then_some(mouse),
-        alt_screen: screen.is_alt_screen(),
-        bracketed_paste: screen.bracketed_paste(),
-        app_cursor: screen.keyboard_state().application_cursor_keys,
-    }
+    crate::telemetry::LeftModes::of(&shared.screen.lock().expect("screen"))
 }
 
 /// Records how the child ended, once: `session.exit`, plus an incident when a
@@ -5144,15 +5147,60 @@ fn shell_is_back(
     alive && foreground_pgid == Some(child_pid) && !shell_has_children()
 }
 
+/// Splits a shell's `$?` the way shells encode it: 128 + N is signal N.
+fn split_shell_status(status: i32) -> (Option<i32>, Option<i32>) {
+    match status {
+        129..=192 => (None, Some(status - 128)),
+        _ => (Some(status), None),
+    }
+}
+
+/// The login-shell wrapper reported how its agent ended. Its exit status is
+/// otherwise invisible: the PTY lives on as the shell, so `session.exit`
+/// later carries the shell's status, not the agent's. The early-exit probe
+/// reads the stored status to say why an agent died at startup.
+fn note_agent_exit(shared: &Shared, status: i32) {
+    *shared.agent_exit.lock().expect("agent exit") = Some(status);
+    let (code, signal) = split_shell_status(status);
+    let runtime = shared.launched_at.map(|launched| launched.elapsed());
+    if status == 0 {
+        diri_telemetry::event!(
+            "session.agent_exited",
+            session = diri_telemetry::id(&shared.id),
+            agent = diri_telemetry::id(&shared.agent),
+            source = "wrapper",
+            code = code,
+            runtime_s = runtime.map(|runtime| runtime.as_secs()),
+        );
+    } else {
+        diri_telemetry::warn_event!(
+            "session.agent_exited",
+            session = diri_telemetry::id(&shared.id),
+            agent = diri_telemetry::id(&shared.agent),
+            source = "wrapper",
+            code = code,
+            signal = signal,
+            runtime_s = runtime.map(|runtime| runtime.as_secs()),
+        );
+    }
+}
+
 fn record_returned_to_shell(shared: &Shared, early: bool, source: &'static str) {
     let left = terminal_modes_left(shared);
     let runtime = shared.launched_at.map(|launched| launched.elapsed());
     if early {
+        let (code, signal) = shared
+            .agent_exit
+            .lock()
+            .expect("agent exit")
+            .map_or((None, None), split_shell_status);
         diri_telemetry::incident!(
             "session.early_exit",
             session = diri_telemetry::id(&shared.id),
             agent = diri_telemetry::id(&shared.agent),
             kind = "returned_to_shell",
+            code = code,
+            signal = signal,
             ms = runtime,
             modes = left.fields(),
         );

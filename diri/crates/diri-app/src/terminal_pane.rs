@@ -32,7 +32,7 @@ use diri_proto::{
     SessionStatus,
 };
 use diri_term::buffer::GridBuffer;
-use diri_term::element::{SharedGridBuffer, TerminalElement, TerminalReference};
+use diri_term::element::{ContentPaint, SharedGridBuffer, TerminalElement, TerminalReference};
 use diri_term::find::{
     FindSearchScheduler, FindSnapshot, ReadCompletion, SearchRequest, SearchResult,
     TerminalFindModel,
@@ -554,6 +554,29 @@ struct ResidentTerminal {
 /// was mounted records `pane.blank`: the "session does not render" bug.
 const PANE_BLANK_AFTER: Duration = Duration::from_secs(10);
 
+/// How long a pane suspected blank has to draw the frame it was asked for.
+/// A pane no frame draws in this time is not on screen.
+const PANE_BLANK_REDRAW: Duration = Duration::from_millis(500);
+
+/// What a suspected blank pane looked like when the watchdog fired, kept
+/// until a requested frame shows whether anyone can see it.
+#[derive(Clone, Debug, PartialEq)]
+struct BlankReport {
+    generation: AttachmentGeneration,
+    agent: String,
+    state: &'static str,
+    got_grid: bool,
+    content: bool,
+    frames: u64,
+    ms: Duration,
+    /// The element's paint count once the frame was requested; unchanged
+    /// after [`PANE_BLANK_REDRAW`] means no frame drew the pane.
+    paints: u64,
+    /// The requested frame put the waiting content on screen: nothing had
+    /// asked for it.
+    redrawn: bool,
+}
+
 /// What the flight recorder follows per resident: mount → first grid →
 /// first paint with content, and the check that fires when paint never
 /// comes.
@@ -563,11 +586,17 @@ const PANE_BLANK_AFTER: Duration = Duration::from_secs(10);
 /// is not drawn at all (the selection-following pane while a workspace
 /// workbench covers it, a warm pane of another tab, a window the system
 /// stopped drawing), and such a pane has painted nothing.
+///
+/// The clock starts at the mount or, for a pane nobody drew at mount, at the
+/// frame that first put it on screen: a covered pane that is uncovered a
+/// minute later with its grid long since arrived painted in 0 ms, not in a
+/// minute.
 struct PaneTrace {
     mounted_at: Instant,
     first_grid: Arc<OnceLock<Instant>>,
-    /// Set by the element's first paint with content after this mount.
-    painted: Arc<OnceLock<Instant>>,
+    /// Set by the element's first paint with content after this mount, to
+    /// the recorded `pane.first_paint` duration.
+    painted: Arc<OnceLock<Duration>>,
     /// The element's paint count at mount: an unchanged count later means
     /// the pane was never drawn in between.
     paints_at_mount: u64,
@@ -584,11 +613,12 @@ impl PaneTrace {
         let session = diri_telemetry::id(&id.0);
         let grid = Arc::clone(&first_grid);
         let paint = Arc::clone(&painted);
-        element.on_first_content_paint(Box::new(move |at: Instant| {
-            if paint.set(at).is_err() {
+        element.on_first_content_paint(Box::new(move |paint_at: ContentPaint| {
+            let shown_at = paint_at.shown_at.max(mounted_at);
+            let ms = paint_at.at.saturating_duration_since(shown_at);
+            if paint.set(ms).is_err() {
                 return;
             }
-            let ms = at.saturating_duration_since(mounted_at);
             diri_telemetry::observe("pane.first_paint", ms);
             diri_telemetry::debug_event!(
                 "pane.first_paint",
@@ -597,6 +627,7 @@ impl PaneTrace {
                 grid_ms = grid
                     .get()
                     .map(|grid: &Instant| grid.saturating_duration_since(mounted_at)),
+                shown_ms = shown_at.saturating_duration_since(mounted_at),
                 parked = parked
             );
         }));
@@ -616,6 +647,34 @@ impl PaneTrace {
     /// Whether the element was drawn in any frame since this mount.
     fn drawn_since_mount(&self, element: &TerminalElement) -> bool {
         element.paint_count() != self.paints_at_mount
+    }
+}
+
+/// The mouse and alternate-screen modes `pane.modes` last reported for each
+/// session. Every view attached to a session (the selection pane and a
+/// workspace pane, one set per window) receives the same Modes chunk and sees
+/// the same flip; only the first of them reports it.
+#[derive(Default)]
+struct ModeReports(HashMap<SessionId, (MouseModes, bool)>);
+
+impl ModeReports {
+    fn global() -> std::sync::MutexGuard<'static, Self> {
+        static REPORTS: OnceLock<Mutex<ModeReports>> = OnceLock::new();
+        REPORTS
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether `mouse`/`alt_screen` differ from what was last reported for
+    /// `id`, remembering them when they do.
+    fn changed(&mut self, id: &SessionId, mouse: MouseModes, alt_screen: bool) -> bool {
+        let modes = (mouse, alt_screen);
+        if self.0.get(id) == Some(&modes) {
+            return false;
+        }
+        self.0.insert(id.clone(), modes);
+        true
     }
 }
 
@@ -762,6 +821,9 @@ pub struct TerminalPane {
     observed_selected_id: Option<SessionId>,
     #[cfg(test)]
     input_observer: Option<InputObserver>,
+    /// Every `pane.blank` this pane recorded, for tests.
+    #[cfg(test)]
+    blank_reports: Vec<BlankReport>,
     viewport: Option<TerminalViewport>,
     sidebar_visible: bool,
     inspector_open: bool,
@@ -1016,6 +1078,8 @@ impl TerminalPane {
             observed_selected_id,
             #[cfg(test)]
             input_observer: None,
+            #[cfg(test)]
+            blank_reports: Vec::new(),
             viewport: None,
             sidebar_visible: true,
             inspector_open: false,
@@ -1158,7 +1222,13 @@ impl TerminalPane {
             let blank_id = id.clone();
             let blank_check = cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(PANE_BLANK_AFTER).await;
-                let _ = this.update(cx, |this, _| this.check_blank(&blank_id, generation));
+                let Ok(Some(suspect)) =
+                    this.update(cx, |this, cx| this.suspect_blank(&blank_id, generation, cx))
+                else {
+                    return;
+                };
+                cx.background_executor().timer(PANE_BLANK_REDRAW).await;
+                let _ = this.update(cx, |this, _| this.confirm_blank(&blank_id, suspect));
             });
             let trace = PaneTrace::new(&id, &element, reuse_parked, blank_check);
             self.residents.insert(
@@ -1610,8 +1680,9 @@ impl TerminalPane {
                     return;
                 }
                 if let Some(resident) = self.residents.get_mut(&id) {
-                    if resident.element.mouse_modes() != mouse
-                        || resident.element.alt_screen() != alt_screen
+                    if (resident.element.mouse_modes() != mouse
+                        || resident.element.alt_screen() != alt_screen)
+                        && ModeReports::global().changed(&id, mouse, alt_screen)
                     {
                         // Mode flips are rare (an agent starting or exiting);
                         // one left on after its program exits is how mouse
@@ -1967,24 +2038,29 @@ impl TerminalPane {
 
     /// `PANE_BLANK_AFTER` after a resident mounted: if it is still the
     /// visible one, its session is running, and nothing with content has
-    /// been painted, record why the user is looking at an empty pane.
+    /// been painted, note what the pane looks like and ask for a frame.
     ///
-    /// Never records a paint. A pane that was not drawn at all since the
-    /// mount is not in front of anyone (covered by a workbench, a warm pane
-    /// of another tab, a window the system stopped drawing), so it has no
-    /// blank screen to report either.
-    fn check_blank(&mut self, id: &SessionId, generation: AttachmentGeneration) {
+    /// Never records a paint, and never reports on its own: a pane that was
+    /// drawn at some point since the mount may have been covered since (a
+    /// workbench over the selection pane, a warm pane of another tab, a
+    /// window the system stopped drawing), and such a pane has no blank
+    /// screen in front of anyone. Only the frame requested here tells, in
+    /// [`Self::confirm_blank`].
+    fn suspect_blank(
+        &mut self,
+        id: &SessionId,
+        generation: AttachmentGeneration,
+        cx: &mut Context<Self>,
+    ) -> Option<BlankReport> {
         if self.selected_id().as_ref() != Some(id) {
-            return;
+            return None;
         }
-        let Some(resident) = self.residents.get(id) else {
-            return;
-        };
+        let resident = self.residents.get(id)?;
         if resident.attachment_generation != generation
             || resident.trace.painted()
             || !resident.trace.drawn_since_mount(&resident.element)
         {
-            return;
+            return None;
         }
         let agent = {
             let store = self
@@ -1992,50 +2068,82 @@ impl TerminalPane {
                 .store
                 .read()
                 .expect("session store lock poisoned");
-            let Some(session) = store.sessions().get(id) else {
-                return;
-            };
+            let session = store.sessions().get(id)?;
             if session.is_archived() || matches!(session.status, SessionStatus::Exited(_)) {
-                return;
+                return None;
             }
-            diri_telemetry::id(session.kind.id())
+            session.kind.id().to_string()
         };
         let state = match resident.attachment_state {
             AttachmentState::Attaching => "attaching",
             AttachmentState::Live => "live",
             AttachmentState::Reconnecting => "reconnecting",
         };
-        let stats = resident.element.stats();
-        let got_grid = resident.trace.first_grid.get().is_some();
-        // The pane was drawn, so a screen that has content and was still
-        // never painted with it is a real stall: output landed and nothing
-        // asked for the frame that shows it.
-        let content = resident.element.has_content();
-        if resident.attachment_state == AttachmentState::Live && got_grid && !content {
+        let suspect = BlankReport {
+            generation,
+            agent,
+            state,
+            got_grid: resident.trace.first_grid.get().is_some(),
+            content: resident.element.has_content(),
+            frames: resident.element.stats().frames,
+            ms: resident.trace.mounted_at.elapsed(),
+            paints: resident.element.paint_count(),
+            redrawn: false,
+        };
+        cx.notify();
+        Some(suspect)
+    }
+
+    /// [`PANE_BLANK_REDRAW`] after [`Self::suspect_blank`] asked for a frame:
+    /// if that frame drew the pane, record why the user is looking at an
+    /// empty pane. A pane no frame drew is not on screen, however it was
+    /// drawn before.
+    fn confirm_blank(&mut self, id: &SessionId, mut report: BlankReport) {
+        if self.selected_id().as_ref() != Some(id) {
+            return;
+        }
+        let Some(resident) = self.residents.get(id) else {
+            return;
+        };
+        if resident.attachment_generation != report.generation
+            || resident.element.paint_count() == report.paints
+        {
+            return;
+        }
+        // Content waiting at the check and on screen after one requested
+        // frame is a real stall: output landed and nothing asked for the
+        // frame that shows it.
+        report.redrawn = report.content && resident.trace.painted();
+        let session = diri_telemetry::id(&id.0);
+        let agent = diri_telemetry::id(&report.agent);
+        if report.state == "live" && report.got_grid && !report.content {
             // The Engine sent a screen and it is empty: odd, but a cleared
             // terminal looks the same.
             diri_telemetry::warn_event!(
                 "pane.blank",
-                session = diri_telemetry::id(&id.0),
+                session = session,
                 agent = agent,
-                state = state,
-                got_grid = got_grid,
-                content = content,
-                frames = stats.frames,
-                ms = resident.trace.mounted_at.elapsed()
+                state = report.state,
+                got_grid = report.got_grid,
+                content = report.content,
+                frames = report.frames,
+                ms = report.ms
             );
         } else {
             diri_telemetry::incident!(
                 "pane.blank",
-                session = diri_telemetry::id(&id.0),
+                session = session,
                 agent = agent,
-                state = state,
-                got_grid = got_grid,
-                content = content,
-                frames = stats.frames,
-                ms = resident.trace.mounted_at.elapsed()
+                state = report.state,
+                got_grid = report.got_grid,
+                content = report.content,
+                redrawn = report.redrawn,
+                frames = report.frames,
+                ms = report.ms
             );
         }
+        #[cfg(test)]
+        self.blank_reports.push(report);
     }
 
     fn attachment_is_current(&self, id: &SessionId, generation: AttachmentGeneration) -> bool {
@@ -6157,10 +6265,7 @@ mod tests {
 
     fn first_paint(pane: &TerminalPane, id: &SessionId) -> Option<Duration> {
         let trace = &pane.residents[id].trace;
-        trace
-            .painted
-            .get()
-            .map(|at| at.saturating_duration_since(trace.mounted_at))
+        trace.painted.get().copied()
     }
 
     /// Telemetry had 14 of 57 `pane.first_paint` samples at 10.0 s: the blank
@@ -6201,6 +6306,104 @@ mod tests {
                 first_paint(pane, &id),
                 None,
                 "the watchdog must not report a paint that never happened"
+            );
+        });
+    }
+
+    /// Holds a pane and draws it only while `shown`, like the selection pane
+    /// a workspace workbench covers.
+    struct Coverable {
+        pane: Entity<TerminalPane>,
+        shown: bool,
+    }
+
+    impl Render for Coverable {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let root = div().size_full();
+            if self.shown {
+                root.child(self.pane.clone())
+            } else {
+                root
+            }
+        }
+    }
+
+    /// `pane.blank state=live got_grid=true frames=0` in real telemetry: a
+    /// reopened session was mounted by two panes sharing one grid; the one
+    /// on screen painted it at once, the other got the grid and was never
+    /// drawn with it. A pane drawn once before its screen landed and covered
+    /// since is not blank to anyone: the frame the watchdog asks for never
+    /// draws it, so nothing is reported.
+    #[gpui::test]
+    fn a_pane_covered_after_one_blank_frame_is_not_reported_blank(cx: &mut TestAppContext) {
+        let (runtime, tokio, id, _) = first_paint_fixture();
+        let (view, cx) = cx.add_window_view(move |window, cx| Coverable {
+            pane: cx.new(|cx| TerminalPane::new(runtime, tokio, window, cx)),
+            shown: true,
+        });
+        cx.simulate_resize(gpui::size(px(400.0), px(200.0)));
+        cx.run_until_parked();
+        let pane = view.read_with(cx, |view, _| view.pane.clone());
+        pane.read_with(cx, |pane, _| {
+            let resident = &pane.residents[&id];
+            assert!(resident.trace.drawn_since_mount(&resident.element));
+            assert_eq!(resident.element.stats().frames, 0, "drawn only blank");
+        });
+
+        view.update(cx, |view, cx| {
+            view.shown = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        pane.update(cx, |pane, cx| land_screen(pane, &id, cx));
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(PANE_BLANK_AFTER + PANE_BLANK_REDRAW + Duration::from_secs(1));
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            let resident = &pane.residents[&id];
+            assert!(resident.element.has_content());
+            assert_eq!(first_paint(pane, &id), None);
+            assert_eq!(
+                pane.blank_reports,
+                Vec::new(),
+                "a covered pane is not blank"
+            );
+        });
+    }
+
+    /// The real stall is still caught: a pane on screen whose screen landed
+    /// without anything asking for the frame that shows it is reported with
+    /// `content=true`, and the frame the watchdog asked for draws it.
+    #[gpui::test]
+    fn a_visible_pane_whose_screen_never_drew_is_reported_and_redrawn(cx: &mut TestAppContext) {
+        let (runtime, tokio, id, _) = first_paint_fixture();
+        let (pane, cx) =
+            cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
+        cx.simulate_resize(gpui::size(px(400.0), px(200.0)));
+        cx.run_until_parked();
+        pane.update(cx, |pane, _| {
+            // A screen that lands with no notify: the missed repaint.
+            let mut grid = GridBuffer::new(8, 2);
+            grid.cells[0].scalar = '$' as u32;
+            let resident = &pane.residents[&id];
+            *resident.element.buffer().write().unwrap() = grid;
+            resident.trace.first_grid.get_or_init(Instant::now);
+        });
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| assert_eq!(first_paint(pane, &id), None));
+
+        cx.executor()
+            .advance_clock(PANE_BLANK_AFTER + PANE_BLANK_REDRAW + Duration::from_secs(1));
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            let [report] = pane.blank_reports.as_slice() else {
+                panic!("expected one pane.blank, got {:?}", pane.blank_reports);
+            };
+            assert!(report.content && report.redrawn && report.got_grid);
+            assert!(
+                first_paint(pane, &id).is_some(),
+                "the requested frame drew it"
             );
         });
     }
@@ -6249,6 +6452,84 @@ mod tests {
         pane.read_with(cx, |pane, _| {
             assert!(first_paint(pane, &id).is_some_and(|ms| ms < PANE_BLANK_AFTER));
         });
+    }
+
+    /// 0.8.10 recorded `pane.first_paint` twice for one attach, the second
+    /// ~10 s later, from the selection pane a workbench covered. A pane that
+    /// comes on screen long after its screen arrived paints it at once, and
+    /// the time it spent hidden is not a paint latency.
+    #[gpui::test]
+    fn a_pane_shown_after_its_screen_arrived_times_first_paint_from_showing(
+        cx: &mut TestAppContext,
+    ) {
+        struct Toggle {
+            pane: Entity<TerminalPane>,
+            shown: bool,
+        }
+        impl Render for Toggle {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let root = div().size_full();
+                if self.shown {
+                    root.child(self.pane.clone())
+                } else {
+                    root
+                }
+            }
+        }
+        const HIDDEN: Duration = Duration::from_millis(300);
+        let (runtime, tokio, id, _) = first_paint_fixture();
+        let (toggle, cx) = cx.add_window_view(move |window, cx| Toggle {
+            pane: cx.new(|cx| TerminalPane::new(runtime, tokio, window, cx)),
+            shown: false,
+        });
+        cx.simulate_resize(gpui::size(px(400.0), px(200.0)));
+        let pane = toggle.read_with(cx, |toggle, _| toggle.pane.clone());
+        pane.update(cx, |pane, cx| {
+            pane.reconcile_residency(cx);
+            land_screen(pane, &id, cx);
+        });
+        cx.run_until_parked();
+        // Real time: the element stamps paints with `Instant::now()`.
+        std::thread::sleep(HIDDEN);
+        pane.read_with(cx, |pane, _| assert_eq!(first_paint(pane, &id), None));
+
+        toggle.update(cx, |toggle, cx| {
+            toggle.shown = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let painted = pane
+            .read_with(cx, |pane, _| first_paint(pane, &id))
+            .expect("the first frame that shows the pane paints its screen");
+        assert!(
+            painted < HIDDEN,
+            "first paint {painted:?} counted the time the pane was hidden"
+        );
+    }
+
+    /// Every view attached to a session gets the same Modes chunk: telemetry
+    /// had each `pane.modes` twice in the same millisecond. A flip is
+    /// reported once per session, whichever view sees it first.
+    #[test]
+    fn a_mode_flip_is_reported_once_per_session() {
+        let mut reports = ModeReports::default();
+        let (a, b) = (SessionId::new("modes-a"), SessionId::new("modes-b"));
+        let mouse = MouseModes::new(
+            diri_proto::terminal::MouseTrackingMode::AnyMotion,
+            diri_proto::terminal::MouseEncoding::Sgr,
+        );
+        assert!(reports.changed(&a, mouse, true), "the first view reports");
+        assert!(
+            !reports.changed(&a, mouse, true),
+            "the second view does not"
+        );
+        assert!(
+            reports.changed(&b, mouse, true),
+            "another session is its own"
+        );
+        assert!(reports.changed(&a, MouseModes::OFF, false), "the flip back");
+        assert!(!reports.changed(&a, MouseModes::OFF, false));
+        assert!(reports.changed(&a, mouse, true), "and the next start");
     }
 
     #[gpui::test]

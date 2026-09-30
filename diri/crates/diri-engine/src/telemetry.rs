@@ -116,19 +116,47 @@ pub struct LeftModes {
     pub alt_screen: bool,
     pub bracketed_paste: bool,
     pub app_cursor: bool,
+    /// Kitty keyboard enhancements (CSI > u) still pushed.
+    pub keyboard: bool,
+    /// Focus in/out reporting (DEC 1004).
+    pub focus: bool,
 }
 
 impl LeftModes {
     #[must_use]
-    pub fn any(&self) -> bool {
-        self.mouse.is_some() || self.alt_screen || self.bracketed_paste || self.app_cursor
+    pub fn of(screen: &diri_terminal_state::HeadlessScreen) -> Self {
+        let mouse = screen.mouse_modes();
+        let keyboard = screen.keyboard_state();
+        Self {
+            mouse: mouse.is_reporting().then_some(mouse),
+            alt_screen: screen.is_alt_screen(),
+            bracketed_paste: screen.bracketed_paste(),
+            app_cursor: keyboard.application_cursor_keys,
+            keyboard: keyboard
+                .enhancements
+                .is_some_and(|enhancements| enhancements.bits() != 0),
+            focus: screen.focus_reporting(),
+        }
     }
 
-    /// The modes whose leftovers corrupt what a shell reads: mouse reports
-    /// and paste brackets arrive as keystrokes.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.mouse.is_some()
+            || self.alt_screen
+            || self.bracketed_paste
+            || self.app_cursor
+            || self.keyboard
+            || self.focus
+    }
+
+    /// The modes whose leftovers break the shell that comes back: mouse and
+    /// focus reports and kitty key encodings arrive as keystrokes, and the
+    /// alternate screen hides its scrollback. Bracketed paste and application
+    /// cursor keys are not among them: zsh's line editor turns both on at
+    /// every prompt itself, so a shell prompt always shows them.
     #[must_use]
     pub fn corrupts_input(&self) -> bool {
-        self.mouse.is_some() || self.bracketed_paste
+        self.mouse.is_some() || self.alt_screen || self.keyboard || self.focus
     }
 
     #[must_use]
@@ -147,6 +175,8 @@ impl LeftModes {
             ("alt_screen", Value::from(self.alt_screen)),
             ("bracketed_paste", Value::from(self.bracketed_paste)),
             ("app_cursor", Value::from(self.app_cursor)),
+            ("keyboard", Value::from(self.keyboard)),
+            ("focus", Value::from(self.focus)),
         ])
     }
 }
@@ -175,6 +205,11 @@ pub fn record_rpc(
     }
     diri_telemetry::count("rpc.calls", 1);
     diri_telemetry::observe("rpc", elapsed);
+    // The Agent blocks on this reply once or twice per tool call, so its whole
+    // distribution matters, not only the `rpc.slow` tail.
+    if method == diri_proto::Method::HOOK_REPORT {
+        diri_telemetry::observe("rpc.hook_report", elapsed);
+    }
     // Long polls and waits on the user are slow by design.
     let waits = matches!(
         method,
@@ -439,6 +474,46 @@ mod tests {
         assert_eq!(json["mouse"], "1002");
         assert_eq!(json["sgr"], true);
         assert!(!LeftModes::default().any());
+    }
+
+    /// 0.8.10 reported `session.modes_left_on_exit` for shells whose only
+    /// "leftover" was bracketed paste: zsh re-enables it (and application
+    /// cursor keys) at its own prompt.
+    #[test]
+    fn a_shell_prompts_own_modes_are_not_leftovers() {
+        let prompt = LeftModes {
+            bracketed_paste: true,
+            app_cursor: true,
+            ..LeftModes::default()
+        };
+        assert!(prompt.any());
+        assert!(!prompt.corrupts_input());
+        let mut screen =
+            diri_terminal_state::HeadlessScreen::new_with_keyboard_enhancements(80, 24);
+        // What zsh's line editor prints before each prompt: bracketed paste
+        // and keypad transmit (application cursor keys).
+        screen.feed(b"\x1b[?2004h\x1b[?1h\x1b=% ");
+        assert_eq!(LeftModes::of(&screen), prompt);
+        screen.feed(b"\x1b[?1004h");
+        assert!(LeftModes::of(&screen).corrupts_input());
+        screen.feed(b"\x1b[?1004l\x1b[>1u");
+        assert!(LeftModes::of(&screen).keyboard);
+        for left in [
+            LeftModes {
+                alt_screen: true,
+                ..prompt
+            },
+            LeftModes {
+                keyboard: true,
+                ..prompt
+            },
+            LeftModes {
+                focus: true,
+                ..prompt
+            },
+        ] {
+            assert!(left.corrupts_input(), "{left:?}");
+        }
     }
 
     #[test]

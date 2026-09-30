@@ -14,7 +14,7 @@
 //! see [`scan_progress`].
 
 mod notifications;
-pub use notifications::TerminalNotification;
+pub use notifications::{AGENT_EXIT_OSC, TerminalNotification};
 
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
@@ -507,6 +507,12 @@ impl HeadlessScreen {
         self.notifications.as_mut()?.clipboard.take()
     }
 
+    /// The exit status the login-shell wrapper reported for its agent since
+    /// the last call. See [`notifications::AGENT_EXIT_OSC`].
+    pub fn take_agent_exit(&mut self) -> Option<i32> {
+        self.notifications.as_mut()?.agent_exit.take()
+    }
+
     pub fn take_notifications(&mut self) -> Vec<TerminalNotification> {
         self.notifications
             .as_mut()
@@ -721,6 +727,14 @@ impl HeadlessScreen {
     }
 
     /// The current grid geometry.
+    /// Whether the child asked for focus in/out reports (DEC 1004): left on
+    /// under a shell, every window switch types `^[[I` / `^[[O` at its prompt.
+    pub fn focus_reporting(&self) -> bool {
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::FOCUS_IN_OUT)
+    }
+
     pub fn size(&self) -> (usize, usize) {
         (self.geometry.cols, self.geometry.rows)
     }

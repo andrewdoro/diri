@@ -169,8 +169,10 @@ host rather than repeatedly added. Failed refreshes retain the last successful
 host snapshot and expose its stale status; never-collected hosts are shown as
 unavailable. Removed hosts stop contributing. Local collection does not wait
 for SSH. Remote collection is paced independently of local transcript writes:
-two hosts at a time, every five minutes, with a 45-second scan RPC timeout after bounded
-bootstrap. Background SSH requires `BatchMode=yes` and strict host-key checking;
+two hosts at a time, with a 45-second scan RPC timeout after bounded
+bootstrap. Hosts are polled only while the Usage page is on screen: when it
+opens with data older than five minutes, then every five minutes while it
+stays open; a closed page issues no SSH command. Background SSH requires `BatchMode=yes` and strict host-key checking;
 users authenticate through existing Remote settings. The Helper reuses the
 shared incremental ledger in an owner-only `usage-v1` directory under its state
 root. A stable random usage-store identity deduplicates SSH aliases. The app
