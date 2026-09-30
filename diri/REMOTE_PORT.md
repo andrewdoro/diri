@@ -641,7 +641,10 @@ Wholly unwritten input may
 be replayed after reconnect; a partially written effect is never replayed and
 an uncertain asynchronous delivery fails the session transport explicitly.
 Wheel intent is ephemeral; resize retains the latest pending size. This needs
-no new writer thread or wire version and supports existing Helper builds.
+no new writer thread or wire version and supports existing Helper builds. A
+Holder likewise applies only the last of valid `Resize` frames that arrive
+adjacent in one read, so a burst over SSH costs one PTY resize, reflow and
+Full Snapshot; a malformed `Resize` is still rejected.
 
 A Holder drains at most 64 KiB per owner-loop turn and yields when two
 milliseconds have elapsed between reads. Input, attach writes, and due grid

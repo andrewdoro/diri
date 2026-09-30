@@ -861,6 +861,11 @@ impl DaemonClient {
             .await
     }
 
+    pub async fn mark_unread(&self, session_id: &SessionId) -> Result<(), ClientError> {
+        self.empty(Method::SESSION_MARK_UNREAD, &session_params(session_id))
+            .await
+    }
+
     pub async fn read_diff(
         &self,
         session_id: &SessionId,
@@ -1044,6 +1049,20 @@ impl DaemonClient {
     /// no live session and no other control client still needs it.
     pub async fn shutdown_daemon_if_idle(&self) -> Result<DaemonShutdownIfIdleResult, ClientError> {
         self.no_params(Method::DAEMON_SHUTDOWN_IF_IDLE).await
+    }
+
+    /// Uploads recorded diagnostics now (even with sharing off: the user
+    /// asked). The Engine waits up to 45 s for the upload.
+    pub async fn telemetry_upload_now(
+        &self,
+    ) -> Result<diri_proto::TelemetryUploadNowResult, ClientError> {
+        self.core
+            .request_typed::<EmptyParams, diri_proto::TelemetryUploadNowResult>(
+                Method::TELEMETRY_UPLOAD_NOW,
+                None,
+                Some(Duration::from_secs(60)),
+            )
+            .await
     }
 
     pub async fn account_profiles(&self) -> Result<diri_proto::AgentAccountCatalog, ClientError> {

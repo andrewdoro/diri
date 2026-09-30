@@ -430,6 +430,7 @@ impl WindowWrite<'_> {
             if self.navigation.notification_surface_visible
                 && let Some(id) = session
             {
+                self.canonical.unread_holds.remove(&id);
                 self.canonical.mark_notifications_read(&id);
                 self.canonical.emit(StoreEffect::MarkSeen(id));
             }
@@ -648,7 +649,10 @@ impl WindowWrite<'_> {
             // Install this window's visibility before activation can mark read.
             self.canonical.notification_surface_visible = visible;
             self.canonical.set_active(true);
-            if visible && let Some(id) = self.canonical.focused_window_session.clone() {
+            if visible
+                && let Some(id) = self.canonical.focused_window_session.clone()
+                && self.canonical.reads_passively(&id)
+            {
                 self.canonical.mark_notifications_read(&id);
                 self.canonical.emit(StoreEffect::MarkSeen(id));
             }
@@ -716,6 +720,7 @@ impl WindowWrite<'_> {
         self.sidebar_projection().display_order.clone()
     }
     fn focus_session(&mut self, id: SessionId) {
+        self.canonical.unread_holds.remove(&id);
         self.navigation.revision = self.navigation.revision.wrapping_add(1);
         self.navigation.selected_session_id = Some(id.clone());
         self.navigation
@@ -1386,6 +1391,41 @@ mod tests {
             first.canonical.read().unwrap().closing,
             HashSet::from([ids[0].clone(), terminal_id])
         );
+    }
+
+    #[test]
+    fn window_activation_leaves_a_session_marked_unread_unread() {
+        let fixture =
+            crate::sidebar::SidebarPreviewFixture::make(crate::sidebar::PreviewScenario::Typical);
+        let (mut canonical, mut effects) = SessionStore::headless(fixture.prefs);
+        canonical.hydrate(fixture.list);
+        let ids = canonical
+            .ordered_sessions()
+            .iter()
+            .filter(|s| !s.is_archived())
+            .map(|s| s.id.clone())
+            .take(2)
+            .collect::<Vec<_>>();
+        let window = WindowStore::new(Arc::new(RwLock::new(canonical)), Some(ids[0].clone()));
+        window.write().unwrap().select(ids[0].clone());
+        window.write().unwrap().set_active(true);
+        let mut marks_seen = || {
+            let mut seen = false;
+            while let Ok(effect) = effects.try_recv() {
+                seen |= matches!(effect, StoreEffect::MarkSeen(id) if id == ids[0]);
+            }
+            seen
+        };
+        marks_seen();
+
+        window.write().unwrap().mark_session_unread(ids[0].clone());
+        window.write().unwrap().set_active(false);
+        window.write().unwrap().set_active(true);
+        assert!(!marks_seen(), "activation is not a read");
+
+        window.write().unwrap().select(ids[1].clone());
+        window.write().unwrap().select(ids[0].clone());
+        assert!(marks_seen(), "opening it again is");
     }
 
     #[test]

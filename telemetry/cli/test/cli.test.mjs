@@ -168,6 +168,13 @@ describe("remote commands", () => {
     assert.equal(json.matches[0].install, INSTALL);
   });
 
+  it("budget shows R2 usage against the spend caps", async () => {
+    const { code, stdout } = await run(["budget"]);
+    assert.equal(code, 0);
+    assert.match(stdout, /writes\s+450000 \/ 900000\s+50\.0%/);
+    assert.match(stdout, /stored\s+0\.90 GB \/ 9\.00 GB\s+10\.0%/);
+  });
+
   it("raw prints a batch decompressed", async () => {
     const { stdout } = await run(["raw", stub.batches[0].r2_key]);
     assert.match(stdout.split("\n")[0], /"type":"batch"/);

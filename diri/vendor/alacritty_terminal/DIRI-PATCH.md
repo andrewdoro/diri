@@ -84,6 +84,49 @@ A decoded block used to count at full cell size toward the history budget
 until its rows were recycled. The partially consumed block now counts its
 compressed bytes plus one decompressed index.
 
+## Recycling from recipe bits and spare rows
+
+Encoding a block also records, per row, whether `Row::reset` of that row
+yields only template cells for every template: the row has the block width,
+is not empty, and every cell at or beyond its occupancy is `Cell::default()`
+(then a differing template background resets every cell, and an equal one
+means the default background, whose kept cells already are reset cells).
+Nearly every output line qualifies. Recycling such an oldest row drops it
+without decompressing or indexing its block; rows that do not qualify, or
+blocks at another width after a resize, take the indexed path above. The 64
+recipe bits fit in `Block` without changing its counted size (`start` is now
+a `u32`), so the history budget retains exactly the same rows.
+
+The rows a seal has just encoded are kept as spare allocations for the rows
+that recycling hands back, so a scroll no longer allocates and frees a row.
+A spare row whose reset would keep non-template cells is marked fully
+occupied first; the others reset only the cells they wrote. Spares are
+released at every `bound_history_bytes` (each `HeadlessScreen` settle),
+before stored bytes are measured, so they neither count toward nor outlive
+the history budget, and an idle terminal retains none.
+
+`bound_history_bytes` runs after every read that scrolled. It no longer visits
+every block: the payload term of `history_storage_bytes` is kept current by
+the block pushes and pops at the ends that streaming output uses and is
+recomputed from scratch after any other block change (debug builds assert it
+equals the recomputation), and read caches are only released when a history
+row was read or edited since the last release.
+
+## Line content sources
+
+`Term::damage_content_sources` reports, for full damage, where each screen
+line's cells were at the last `reset_damage`: scrolling (`scroll_up_relative`
+and `scroll_down_relative`, which cover linefeed, reverse index, SU/SD and
+IL/DL) moves the sources with the lines and marks uncovered lines changed,
+instead of forgetting them. Any line damage, and every other full damage,
+still marks lines changed or the sources unknown. `input` leaves its cells to
+cursor damage, so a scroll marks the cursor line first, and full damage marks
+the previous and current cursor lines like the partial damage query does.
+Clearing a wide character's leading spacer on the line above the cursor was
+not damaged at all; it now marks that line changed (renderer damage is
+unchanged). `diri-terminal-state` uses the sources to keep moved rows'
+fingerprints; rendering is unaffected.
+
 ## Printable ASCII input
 
 `Term::input_ascii` (the vendored VTE's `Handler::input_ascii`) writes a run of
@@ -94,7 +137,11 @@ colors, flags and hyperlinks, occupancy and the final cursor/wrap state match.
 Visible-row indexing also has an inlined fast path.
 
 Tests: `ascii_runs_match_per_character_input` (randomized against `input`),
-`recycled_rows_equal_decoded_rows_after_reset`,
+`recycled_rows_equal_decoded_rows_after_reset` (also checks the recipe bits
+and spare-row resets), `streaming_full_history_recycles_without_decoding`,
+`recycle_bits_keep_the_counted_block_size`,
+`random_storage_operations_match_an_uncompressed_sequence` (now with
+recycling and byte bounds), `scrolling_moves_content_sources`,
 `full_history_recycling_matches_dense_storage`,
 `every_cell_attribute_round_trips_through_the_codec` and
 `history_compression_round_trips_arbitrary_bytes`. There is no CI job for this
@@ -107,3 +154,66 @@ cargo --config 'patch.crates-io.vte.path="../vte"' test --features compact-histo
 (Remove the generated `Cargo.lock` afterwards.) While testing this patch, dense
 and compact storage were found to diverge after resizing a full history; that
 difference exists on the base revision too and is not changed here.
+
+## Deferred column changes
+
+A column change decoded, reflowed and re-encoded all compact history whenever
+any history row soft-wrapped: 8 ms per change for 10,000 rows at 160 columns,
+so a window drag kept a core busy. (Hard lines that fit the new width already
+kept their payloads.) History reflow never moves cells across a hard line
+break, and history rows are never the cursor's, so each logical history line
+reflows on its own. `CompactRows::prepare_reflow` now keeps older lines back
+("deferred history", between the blocks and `oldest`) and hands only the
+editable rows (the screen, the newest history and any line ending there) to
+`Grid::resize`'s reflow loops.
+
+- A **greedy** line is one whose eager reflow always yields its content laid
+  out greedily at the new width: rows break where the next cell or wide
+  character does not fit, a wide character that would start in the last
+  column leaves a leading spacer, and the last row is padded with default
+  cells. That holds, whatever widths the line goes through, when its wide
+  characters are whole, a leading spacer only ends a wrapping row and is
+  followed by a wide character, every cell after the content and above each
+  row's occupancy is a default cell, and no continuation row is blank. Such a
+  line is 8 bytes (source rows, content cells), plus skipped cells and
+  wide-character runs when it has them. Its rows at any width are counted
+  from those without decoding, and built from the source payloads when read.
+- Any other line (styled blanks after the content, tabs, broken wide
+  characters) is kept as its rows and reflowed at each column change by
+  `Grid::resize` itself, on a one-line grid, so the result is upstream's.
+  Beyond 256 KiB of such rows the deferred history is reflowed and stored.
+- A soft wrap that is not a row's last cell (it can join lines), a
+  `display_offset` inside deferred history, a width below 2 or a resize
+  without reflow reflow everything eagerly, as before.
+- Reading deferred history builds every row at the current width once, and the
+  next read-cache release stores them as blocks: a history that is read is
+  reflowed once, not per read. Editing a deferred row does the same. Dropping
+  the oldest rows (history limit, byte budget) skips content cells without
+  decoding. Recycling a greedy line's oldest row at full history needs no
+  payload either: it resets to template cells, as a row with recipe bits does.
+- Rows kept back count towards the "viewport filled" and cursor pull-down
+  steps of growing, which take them (newest first, already at the new width)
+  when the reflowed rows are too few. This also fixes the hard-line case:
+  growing used to append blank rows and move the cursor up when merged screen
+  rows outnumbered the editable history rows, where dense storage brings
+  history rows down into the screen.
+
+Tradeoffs: a deferred history keeps its 8-byte line index (80 KB per 10,000
+lines; about 110 KB measured with an ASCII log, 190 KB with every third line
+holding wide characters) until it is read or edited. Its stored bytes, the
+index and eager rows count towards the history byte budget, so a history
+limited by that budget (not by its row limit) can retain different rows after
+a resize than before; a row-limited history retains exactly the same rows.
+There is no wire, checkpoint or protocol change.
+
+Tests: `deferred_reflow_matches_dense_through_random_resizes` (random output
+and resize sequences, compared row by row with dense storage; odd seeds keep
+every line greedy, `DIRI_REFLOW_SEEDS=<n>` fuzzes more),
+`deferred_reflow_matches_eager_compact_reflow_through_random_resizes` (the
+same against compact storage that reflows eagerly, including scrolling with a
+coloured template: dense storage recycles rows beyond its length, whose cells
+such a reset can keep, so it is no oracle there),
+`greedy_lines_stay_greedy_through_any_widths` (arbitrary cells; every scan also
+checks each greedy line against `Grid::resize`),
+`grow_pulls_kept_history_into_the_viewport_like_dense_storage` and
+`column_changes_after_the_first_decode_only_new_history`.

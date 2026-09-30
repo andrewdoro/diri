@@ -518,3 +518,30 @@ fn a_dead_manager_leaves_no_hibernated_agent_behind() {
         "outlived the manager: {survivors:?} of {agent:?}"
     );
 }
+
+#[test]
+fn a_paste_larger_than_one_input_frame_arrives_whole() {
+    let root = holders_dir("paste");
+    let logs = root.join("logs");
+    let paths = HolderPaths::new(&root, "s_paste");
+    let size = diri_engine::holder::protocol::HOLDER_STREAM_MAX_PAYLOAD * 3 / 2;
+    let script = format!("stty -echo -icanon; head -c {size} | wc -c; exec cat");
+    let launch = spec(&paths, &logs, &["/bin/sh", "-c", &script]);
+    let server = std::thread::spawn(move || HolderServer::run(launch));
+    let client = HolderClient::new(paths.socket());
+    wait_until("holder ready", Duration::from_secs(5), || client.is_alive());
+    // Let stty run before the paste lands.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // A 1.5 MiB paste used to be rejected whole by the Holder's frame bound.
+    let paste = b"0123456789abcdef".repeat(size / 16);
+    client.write(&paste).expect("a large paste is delivered");
+    let expected = size.to_string();
+    wait_until("the whole paste read", Duration::from_secs(20), || {
+        String::from_utf8_lossy(&log_bytes(&logs, "s_paste")).contains(&expected)
+    });
+
+    client.kill_tree().expect("kill");
+    let _ = server.join();
+    let _ = std::fs::remove_dir_all(&root);
+}

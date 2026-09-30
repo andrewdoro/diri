@@ -1,6 +1,6 @@
 [package]
 name = "diri-app"
-version = "0.8.8"
+version = "0.8.10"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

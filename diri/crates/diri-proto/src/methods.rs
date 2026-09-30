@@ -23,6 +23,9 @@ impl Method {
     pub const TASK_SUBMIT: &'static str = "task.submit";
     pub const TASK_GET: &'static str = "task.get";
     pub const TASK_REPORT: &'static str = "task.report";
+    pub const TASK_ANSWER: &'static str = "task.answer";
+    pub const TASK_CANCEL: &'static str = "task.cancel";
+    pub const TASK_LIST: &'static str = "task.list";
     pub const SESSION_SPAWN: &'static str = "session.spawn";
     pub const SESSION_LIST: &'static str = "session.list";
     pub const SESSION_KILL: &'static str = "session.kill";
@@ -45,7 +48,11 @@ impl Method {
     pub const SESSION_READ_SCROLLBACK: &'static str = "session.read_scrollback";
     pub const SESSION_READ_SCROLLBACK_CELLS: &'static str = "session.read_scrollback_cells";
     pub const SESSION_READ_DIFF: &'static str = "session.read_diff";
+    pub const SESSION_READ_TRANSCRIPT: &'static str = "session.read_transcript";
     pub const SESSION_MARK_SEEN: &'static str = "session.mark_seen";
+    /// Returns a completed turn to "done · unseen", like marking a chat
+    /// unread. A no-op for a session with no completed turn.
+    pub const SESSION_MARK_UNREAD: &'static str = "session.mark_unread";
     pub const SESSION_HIBERNATE: &'static str = "session.hibernate";
     pub const SESSION_WAKE: &'static str = "session.wake";
     pub const SESSION_ARCHIVE: &'static str = "session.archive";
@@ -68,6 +75,7 @@ impl Method {
     pub const WORKTREE_REMOVE: &'static str = "worktree.remove";
     pub const WORKTREE_SCAN: &'static str = "worktree.scan";
     pub const WORKTREE_OVERVIEW: &'static str = "worktree.overview";
+    pub const WORKTREE_INTEGRATE: &'static str = "worktree.integrate";
     pub const PROJECT_ADD: &'static str = "project.add";
     pub const CLIENT_SET_ACTIVE: &'static str = "client.set_active";
     pub const GOVERNOR_CONFIGURE: &'static str = "governor.configure";
@@ -90,6 +98,7 @@ impl Method {
     pub const DAEMON_PREPARE_SHUTDOWN: &'static str = "daemon.prepare_shutdown";
     pub const DAEMON_SHUTDOWN_IF_IDLE: &'static str = "daemon.shutdown_if_idle";
     pub const DAEMON_SHUTDOWN: &'static str = "daemon.shutdown";
+    pub const TELEMETRY_UPLOAD_NOW: &'static str = "telemetry.upload_now";
 }
 
 /// Event names pushed on subscribed control channels.
@@ -125,7 +134,16 @@ pub struct SessionResourcesEvent {
 pub struct EmptyParams {}
 
 pub type EmptyResult = EmptyParams;
-pub type SessionForkParams = SessionIdParams;
+/// Forks a conversation. `parent` defaults to the source session; an
+/// orchestrator passes itself so the fork joins its own lineage.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionForkParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionId>,
+}
 pub type SessionForkResult = SessionRecord;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -158,6 +176,19 @@ pub struct DaemonShutdownIfIdleResult {
     pub will_exit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Result of a user-requested diagnostics upload. `status` is `sent`,
+/// `up_to_date` (nothing new), `failed` (kept for the next attempt),
+/// `timeout` (still trying) or `unavailable` (uploads not configured).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryUploadNowResult {
+    pub status: String,
+    #[serde(default)]
+    pub batches: u32,
+    #[serde(default)]
+    pub records: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -472,6 +503,7 @@ pub type SessionReadScreenParams = SessionIdParams;
 pub type SessionTerminalTitleParams = SessionIdParams;
 pub type SessionReadScrollbackParams = SessionIdParams;
 pub type SessionMarkSeenParams = SessionIdParams;
+pub type SessionMarkUnreadParams = SessionIdParams;
 pub type SessionHibernateParams = SessionIdParams;
 pub type SessionWakeParams = SessionIdParams;
 pub type SessionArchiveParams = SessionIdParams;
@@ -491,6 +523,7 @@ pub struct SessionReconnectResult {
 
 pub type SessionResumeResult = SessionRecord;
 pub type SessionMarkSeenResult = EmptyResult;
+pub type SessionMarkUnreadResult = EmptyResult;
 pub type SessionHibernateResult = EmptyResult;
 pub type SessionWakeResult = EmptyResult;
 pub type SessionArchiveResult = EmptyResult;
@@ -717,6 +750,74 @@ pub struct SessionReadDiffResult {
     /// daemons omit this, so clients must treat it as advisory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
+}
+
+/// Bounded projection of a local Agent transcript: text turns only, never
+/// tool payloads. `available` is false for kinds or hosts without one.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadTranscriptParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    /// Most recent turns to return; the Engine clamps it to 1–100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct TranscriptTurnRecord {
+    /// `user` or `agent`.
+    pub role: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadTranscriptResult {
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub turns: Vec<TranscriptTurnRecord>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrateStrategy {
+    #[default]
+    Merge,
+    Squash,
+    CherryPick,
+}
+
+/// Brings a source session's committed branch into the target session's
+/// checkout. The target must be clean; conflicts abort and are reported.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeIntegrateParams {
+    #[serde(rename = "sourceSessionID")]
+    pub source_session_id: SessionId,
+    #[serde(rename = "targetSessionID")]
+    pub target_session_id: SessionId,
+    #[serde(default)]
+    pub strategy: IntegrateStrategy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeIntegrateResult {
+    pub integrated: bool,
+    pub source_branch: String,
+    pub target_cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// Commits brought in (zero when already up to date).
+    pub commits: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

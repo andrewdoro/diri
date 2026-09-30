@@ -989,30 +989,8 @@ fn record_helper_outcome(
             host = diri_telemetry::id(&host.id),
             forced = forced,
             io = diri_telemetry::io_error(error),
-            error = diri_telemetry::text(without_remote_output(&error.to_string())),
             ms = elapsed,
         ),
-    }
-}
-
-/// `require_success` appends the remote stderr after the exit status; that
-/// is remote shell output (rc-file noise, banners) and stays out of
-/// telemetry.
-fn without_remote_output(message: &str) -> &str {
-    const MARKER: &str = " failed with ";
-    let Some(start) = message.find(MARKER) else {
-        return message;
-    };
-    // The status prints as `exit status: 255` or `signal: 9 (SIGKILL)`; the
-    // separator after it starts the remote output.
-    let status = start + MARKER.len();
-    let Some(inner) = message[status..].find(": ") else {
-        return message;
-    };
-    let after = status + inner + 2;
-    match message[after..].find(": ") {
-        Some(end) => &message[..after + end],
-        None => message,
     }
 }
 
@@ -1210,18 +1188,6 @@ mod tests {
     use super::*;
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-
-    #[test]
-    fn helper_failures_keep_the_phase_and_status_but_not_remote_output() {
-        assert_eq!(
-            without_remote_output("remote Helper upload failed with exit status: 255: motd"),
-            "remote Helper upload failed with exit status: 255"
-        );
-        assert_eq!(
-            without_remote_output("packaged Helper exceeds 64 MiB"),
-            "packaged Helper exceeds 64 MiB"
-        );
-    }
 
     #[test]
     fn json_line_parser_ignores_bounded_shell_noise() {

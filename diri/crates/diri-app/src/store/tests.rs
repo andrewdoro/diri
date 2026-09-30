@@ -144,6 +144,47 @@ fn selecting_a_session_wakes_its_artifact_refresh_even_when_already_seen() {
 }
 
 #[test]
+fn a_session_marked_unread_stays_unread_until_it_is_opened_again() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "a", 2.0), session("two", "a", 1.0)],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+    store.select(id("one"));
+    drain(&mut effects);
+    let marks_seen = |effects: &[StoreEffect]| {
+        effects
+            .iter()
+            .any(|effect| matches!(effect, StoreEffect::MarkSeen(session) if session == &id("one")))
+    };
+
+    store.mark_session_unread(id("one"));
+    assert!(
+        drain(&mut effects).iter().any(
+            |effect| matches!(effect, StoreEffect::MarkUnread(session) if session == &id("one"))
+        )
+    );
+    // Returning to the app with the session still on screen is not a read.
+    store.set_active(false);
+    store.set_active(true);
+    store.set_notification_surface_visible(false);
+    store.set_notification_surface_visible(true);
+    assert!(!marks_seen(&drain(&mut effects)));
+
+    // Opening it again is.
+    store.select(id("two"));
+    store.select(id("one"));
+    assert!(marks_seen(&drain(&mut effects)));
+    store.set_active(false);
+    store.set_active(true);
+    assert!(marks_seen(&drain(&mut effects)));
+
+    store.mark_session_unread(id("one"));
+    store.mark_session_read(id("one"));
+    assert!(marks_seen(&drain(&mut effects)));
+}
+
+#[test]
 fn archived_selection_and_opening_links_request_fresh_pr_state() {
     let mut archived = session("old", "a", 1.0);
     archived.archived_at = Some(DateMillis(3.0));

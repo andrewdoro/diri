@@ -135,6 +135,58 @@ const OUTPUT_SETTLE: Duration = Duration::from_millis(16);
 /// than the renderer's own frame cadence.
 const OUTPUT_BATCH_CEILING: Duration = Duration::from_millis(8);
 
+/// How long after a keystroke the output that follows it counts as its
+/// answer. A shell's echo lands well under a millisecond after the write and a
+/// Node TUI's repaint within a few; this is a ceiling on how stale an input may
+/// be and still let output skip batching, not a wait.
+const ECHO_WINDOW: Duration = Duration::from_millis(100);
+
+/// Input the held pump owes an immediate publication.
+///
+/// A lone echo is the whole of what a keystroke produces, but a held pump
+/// cannot tell it apart from the first write of a longer burst: the Holder may
+/// have more a moment later. Without this, every echo waited out
+/// [`OUTPUT_BATCH_CEILING`] for the empty poll that proves the burst ended,
+/// which put ~9 ms of pure waiting between every keypress and its character.
+/// Output that answers recent input is published the moment it is parsed,
+/// provided the screen did not lose content doing it, since that is the
+/// half-erased repaint batching exists to hide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EchoRequest {
+    at: Instant,
+    /// The input was an editing key, whose echo legitimately removes cells.
+    erases: bool,
+}
+
+impl EchoRequest {
+    fn for_input(bytes: &[u8], at: Instant) -> Self {
+        // DEL, BS, ^W and ^U: the keys a line editor answers by erasing.
+        let erases = bytes
+            .iter()
+            .any(|byte| matches!(byte, 0x7f | 0x08 | 0x17 | 0x15));
+        Self { at, erases }
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.at) > ECHO_WINDOW
+    }
+
+    /// Whether output that took the screen from `filled_before` to
+    /// `filled_after` filled cells is this input's complete answer. An
+    /// editing key may clear up to one row, the most a line editor erases
+    /// for one keypress; anything else that lost cells is mid-repaint.
+    fn answered_by(
+        &self,
+        now: Instant,
+        filled_before: usize,
+        filled_after: usize,
+        cols: usize,
+    ) -> bool {
+        let allowance = if self.erases { cols } else { 0 };
+        !self.expired(now) && filled_after + allowance >= filled_before
+    }
+}
+
 /// A destructive repaint gets one 60 Hz interval to recover from an erase.
 /// This is deliberately separate from [`OUTPUT_BATCH_CEILING`], so a build log
 /// that continuously adds content still publishes at up to 120 Hz.
@@ -299,6 +351,9 @@ struct Shared {
     prompt_input: Mutex<PromptInputState>,
     log: Mutex<OutputLog>,
     screen: Mutex<HeadlessScreen>,
+    /// The newest size the PTY was given whose emulator reflow has not run
+    /// yet. See [`MirrorResize`].
+    requested_size: Mutex<Option<(u16, u16)>>,
     reducer: Mutex<StatusReducer>,
     /// How the child ended, once known (from `wait` or the exit marker).
     exit: Mutex<Option<Exit>>,
@@ -338,6 +393,8 @@ struct Shared {
     terminate_requested: AtomicBool,
     /// The exit was recorded to telemetry; later observers stay quiet.
     exit_recorded: AtomicBool,
+    /// The latest keystroke whose echo the held pump has not published yet.
+    echo_request: Mutex<Option<EchoRequest>>,
 }
 
 struct RemoteGridState {
@@ -401,6 +458,28 @@ impl RemoteKeyboardProjection {
 }
 
 impl Shared {
+    fn request_echo(&self, bytes: &[u8]) {
+        *self.echo_request.lock().expect("echo request") =
+            Some(EchoRequest::for_input(bytes, Instant::now()));
+    }
+
+    /// Consumes the pending keystroke when `answered` says this output is its
+    /// echo. An expired request is dropped either way.
+    fn take_echo_if(&self, answered: impl FnOnce(&EchoRequest) -> bool) -> bool {
+        let mut request = self.echo_request.lock().expect("echo request");
+        let Some(pending) = *request else {
+            return false;
+        };
+        if answered(&pending) {
+            *request = None;
+            return true;
+        }
+        if pending.expired(Instant::now()) {
+            *request = None;
+        }
+        false
+    }
+
     fn bump_state_version(&self) {
         self.state_version.fetch_add(1, Ordering::SeqCst);
     }
@@ -497,6 +576,7 @@ impl GridWake {
     }
 
     pub(crate) fn notify(&self) {
+        trace_hop!(GridPublished);
         let mut state = self.inner.state.lock().expect("grid wake");
         state.generation = state.generation.saturating_add(1);
         self.inner.changed.notify_all();
@@ -577,6 +657,34 @@ pub struct Session {
     manifest_id: String,
     /// Present while the exec is deferred to the first settled client size.
     deferred: Option<Arc<DeferredLaunch>>,
+}
+
+/// An emulator reflow owed after [`Session::resize_pty`]. Applying it reflows
+/// to the newest size the PTY was given, not necessarily the one that
+/// created it: two resizes racing to the screen lock still leave the mirror
+/// at the PTY's size, and a reflow that finds a newer one already applied
+/// does nothing, so a burst of drag steps reflows once per lock turn rather
+/// than once per step.
+pub(crate) struct MirrorResize {
+    shared: Arc<Shared>,
+}
+
+impl MirrorResize {
+    pub(crate) fn apply(self) {
+        let mut screen = self.shared.screen.lock().expect("screen");
+        let Some((cols, rows)) = self
+            .shared
+            .requested_size
+            .lock()
+            .expect("requested size")
+            .take()
+        else {
+            return;
+        };
+        screen.resize(cols as usize, rows as usize);
+        drop(screen);
+        self.shared.grid_wake.notify();
+    }
 }
 
 /// A history read pinned to this Session's state and remote incarnation.
@@ -1220,7 +1328,6 @@ impl Session {
                 transport = transport,
                 stage = "spawn",
                 io = diri_telemetry::io_error(error),
-                error = diri_telemetry::text(error.to_string()),
                 ms = started.elapsed(),
             ),
         }
@@ -2424,6 +2531,7 @@ impl Session {
         }
         self.shared.note_hot();
         self.shared.grid_wake.prioritize_interactive_changes();
+        self.shared.request_echo(bytes);
         self.write_raw_kind(bytes, true)
     }
 
@@ -2501,6 +2609,7 @@ impl Session {
             // Let the attachment pump interrupt a background coalescing wait
             // instead of making typed input cross an 8 ms frame boundary.
             self.shared.grid_wake.prioritize_interactive_changes();
+            self.shared.request_echo(bytes);
         }
         self.observe_prompt_input(bytes);
         // Typed before the deferred exec: queue for the launch flush, and
@@ -2532,6 +2641,7 @@ impl Session {
             Transport::Held(client) => client.write(bytes).map_err(holder_io_error)?,
             Transport::Remote(client) => client.write(bytes)?,
         }
+        trace_hop!(InputWritten);
         // Match complete key packets: an arrow key or bracketed paste also
         // contains ESC/newlines, but neither proves a submitted response.
         let submits = matches!(
@@ -2672,26 +2782,37 @@ impl Session {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
+        if let Some(reflow) = self.resize_pty(cols, rows)? {
+            reflow.apply();
+        }
+        Ok(())
+    }
+
+    /// Resizes the PTY now and returns the emulator reflow still owed, for
+    /// the caller to run after releasing the Registry lock. The PTY half is
+    /// a syscall or one Holder stream write; the reflow re-wraps up to
+    /// 10,000 history rows and took 8–43 ms per drag step, during which the
+    /// Registry lock used to stall every other session's input.
+    pub(crate) fn resize_pty(&self, cols: u16, rows: u16) -> std::io::Result<Option<MirrorResize>> {
         // Before the deferred exec, the FIRST client size decides the launch
         // geometry — record it and push the exec back so the viewport can
         // settle; the emulator is resized at launch, not per proposal.
         if let Some(deferred) = &self.deferred
             && deferred.propose_size(cols, rows)
         {
-            return Ok(());
+            return Ok(None);
         }
         match &self.transport {
             Transport::Direct(pty) => pty.lock().expect("pty").resize(cols, rows)?,
             Transport::Held(client) => client.resize(cols, rows).map_err(holder_io_error)?,
             Transport::Remote(client) => client.resize(cols, rows)?,
         }
-        self.shared
-            .screen
-            .lock()
-            .expect("screen")
-            .resize(cols as usize, rows as usize);
-        self.shared.grid_wake.notify();
-        Ok(())
+        // Recorded in PTY order: callers resize the PTY under the Registry
+        // lock, so the newest record is always the PTY's current size.
+        *self.shared.requested_size.lock().expect("requested size") = Some((cols, rows));
+        Ok(Some(MirrorResize {
+            shared: Arc::clone(&self.shared),
+        }))
     }
 
     /// Feeds an out-of-band signal — a hook callback, a notify — into the
@@ -2742,7 +2863,7 @@ impl Session {
             return Ok(Exit::Signal(libc::SIGKILL));
         }
         let exit = match &self.transport {
-            Transport::Direct(pty) => pty.lock().expect("pty").terminate(grace)?,
+            Transport::Direct(pty) => terminate_direct(pty, grace)?,
             Transport::Held(client) => {
                 // The holder escalates TERM → KILL itself; wait for the exit
                 // marker to land in the log so the recorded exit is the real
@@ -2888,6 +3009,7 @@ fn new_shared(
             HeadlessScreen::new(spec.pty.cols as usize, spec.pty.rows as usize)
                 .with_notifications(),
         ),
+        requested_size: Mutex::new(None),
         reducer: Mutex::new(reducer),
         exit: Mutex::new(None),
         exited: AtomicBool::new(false),
@@ -2906,6 +3028,7 @@ fn new_shared(
         launched_at: fresh.then(Instant::now),
         terminate_requested: AtomicBool::new(false),
         exit_recorded: AtomicBool::new(false),
+        echo_request: Mutex::new(None),
     })
 }
 
@@ -4053,7 +4176,7 @@ fn pump(
     }
 
     // The stream ended: reap the child and record how it died.
-    let exit = pty.lock().expect("pty").wait().ok();
+    let exit = reap_direct(&shared, &pty, &mut reader, &mut buffer);
     *shared.exit.lock().expect("exit") = exit;
     let (code, signal) = match exit {
         Some(Exit::Code(code)) => (Some(code), None),
@@ -4068,6 +4191,95 @@ fn pump(
     shared.exited.store(true, Ordering::SeqCst);
     record_exit_telemetry(&shared);
     let _ = shared.log.lock().expect("log").flush();
+}
+
+/// Stops a directly owned child: SIGTERM, then SIGKILL after `grace`.
+///
+/// The PTY lock is taken only for each signal and each reap attempt, never
+/// across the wait. The pump needs that lock after every batch of output, and
+/// on macOS a dying session leader is not reapable until the pump has read
+/// what it left in the terminal: holding the lock while waiting for the exit
+/// made the two wait on each other forever, under the Registry lock (#461).
+fn terminate_direct(pty: &Mutex<Pty>, grace: Duration) -> std::io::Result<Exit> {
+    let wait = |timeout: Duration| -> std::io::Result<Option<Exit>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(exit) = pty.lock().expect("pty").try_wait()? {
+                return Ok(Some(exit));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(crate::pty::REAP_POLL_INTERVAL);
+        }
+    };
+    pty.lock().expect("pty").kill_group(libc::SIGTERM)?;
+    if let Some(exit) = wait(grace)? {
+        return Ok(exit);
+    }
+    pty.lock().expect("pty").kill_group(libc::SIGKILL)?;
+    wait(crate::pty::KILL_REAP_TIMEOUT)?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the Agent did not exit after SIGKILL; the session remains tracked",
+        )
+    })
+}
+
+/// Reaps the direct child once the pump has left its loop.
+///
+/// The pump is the terminal's only reader, so it keeps reading (and
+/// discarding) here: a child killed mid-output cannot finish exiting on macOS
+/// until its output has been read. The PTY lock is held only per attempt, so
+/// `terminate` can still signal a child that closed its terminal and lived on.
+/// A stopped session gives up after [`crate::pty::KILL_REAP_TIMEOUT`] instead
+/// of pinning the thread that joins this pump.
+fn reap_direct(
+    shared: &Shared,
+    pty: &Mutex<Pty>,
+    reader: &mut crate::pty::PtyStream,
+    scratch: &mut [u8],
+) -> Option<Exit> {
+    let started = Instant::now();
+    let mut stopped_at = None;
+    let mut open = true;
+    loop {
+        if let Some(exit) = pty.lock().expect("pty").try_wait().ok()? {
+            return Some(exit);
+        }
+        if shared.stop.load(Ordering::SeqCst)
+            && stopped_at.get_or_insert_with(Instant::now).elapsed()
+                >= crate::pty::KILL_REAP_TIMEOUT
+        {
+            return None;
+        }
+        // Prompt while an exit is imminent, then no more than a slow tick for
+        // a child that outlives its terminal.
+        let step = if started.elapsed() < Duration::from_secs(1) {
+            crate::pty::REAP_POLL_INTERVAL
+        } else {
+            TICK_INTERVAL
+        };
+        if !open {
+            std::thread::sleep(step);
+            continue;
+        }
+        open = match reader.wait_readable(step) {
+            Ok(true) => {
+                use std::io::Read;
+                match reader.read(scratch) {
+                    Ok(0) => false,
+                    Ok(_) => true,
+                    Err(error) => matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ),
+                }
+            }
+            Ok(false) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::Interrupted,
+        };
+    }
 }
 
 /// Feeds one batch of PTY output: the read the caller already made, plus every
@@ -4314,6 +4526,9 @@ fn pump_held(
     let mut interactive_qos = false;
     // Set while a repaint is being assembled across more than one log read.
     let mut publish_pending: Option<Instant> = None;
+    // Filled cells when the pending batch opened, so an echo is judged
+    // against the last published screen rather than the previous read.
+    let mut batch_filled: Option<usize> = None;
     // Until the tail is first caught up, bytes are history, not activity:
     // they must render, but not flip a quiet adopted session to Working.
     let mut replaying = true;
@@ -4473,6 +4688,7 @@ fn pump_held(
         };
 
         if chunk.is_empty() {
+            batch_filled = None;
             if publish_pending.take().is_some() {
                 shared.grid_wake.notify();
             }
@@ -4597,6 +4813,7 @@ fn pump_held(
             continue;
         }
 
+        trace_hop!(OutputReceived);
         // A rotation can move the readable floor past us; resynchronize.
         if start > offset && !marker_buffer.is_empty() {
             marker_buffer.clear();
@@ -4653,10 +4870,11 @@ fn pump_held(
             // catches up it runs again, so a settled screen is never stale.
             let evaluate_now = last_eval_at.is_none_or(|at: Instant| at.elapsed() >= EVAL_INTERVAL);
             eval_dirty = !evaluate_now;
-            let (observation, replies) = {
+            let (observation, replies, filled_after, cols) = {
                 let mut screen = shared.screen.lock().expect("screen");
                 let historical_bytes =
                     replay_until.saturating_sub(start).min(output.len() as u64) as usize;
+                batch_filled.get_or_insert(screen.filled_cells());
                 screen.feed_with_history(output, historical_bytes);
                 if screen.has_notifications() {
                     shared.bump_state_version();
@@ -4674,7 +4892,7 @@ fn pump_held(
                 } else {
                     None
                 };
-                (observation, replies)
+                (observation, replies, screen.filled_cells(), screen.size().0)
             };
             // The child is blocked reading the answer to its query, so send it
             // through the holder's input path before publishing anything.
@@ -4694,8 +4912,19 @@ fn pump_held(
                 let _ = client.write(&replies);
             }
             let batch_started = *publish_pending.get_or_insert_with(Instant::now);
-            if caught_up || batch_started.elapsed() >= OUTPUT_BATCH_CEILING {
+            // A keystroke's echo cannot wait for the empty poll that proves
+            // the burst is over; see [`EchoRequest`].
+            let answers_input = !historical
+                && !replaying
+                && batch_filled.is_some_and(|filled_before| {
+                    let now = Instant::now();
+                    shared.take_echo_if(|request| {
+                        request.answered_by(now, filled_before, filled_after, cols)
+                    })
+                });
+            if caught_up || answers_input || batch_started.elapsed() >= OUTPUT_BATCH_CEILING {
                 publish_pending = None;
+                batch_filled = None;
                 shared.grid_wake.notify();
             }
             let now = SystemTime::now();
@@ -4943,13 +5172,13 @@ fn watch_early_return_to_shell(shared: &Arc<Shared>, client: &HolderClient) {
 
 /// Records a deferred launch that never produced a child: the session
 /// reports exit 127, the spawn-failure convention the app already knows.
-fn mark_launch_failed(shared: &Shared, stage: &'static str, error: &dyn std::fmt::Display) {
+fn mark_launch_failed(shared: &Shared, stage: &'static str, error: &crate::holder::HolderError) {
     diri_telemetry::incident!(
         "session.launch_failed",
         session = diri_telemetry::id(&shared.id),
         agent = diri_telemetry::id(&shared.agent),
         stage = stage,
-        error = diri_telemetry::text(error.to_string()),
+        kind = crate::telemetry::holder_error_kind(error),
     );
     // Already reported as a launch failure, not as an early exit.
     shared.exit_recorded.store(true, Ordering::SeqCst);
@@ -5339,6 +5568,83 @@ mod held_foreground_tests {
         assert_eq!(samples, 10);
         // The first frame of a burst is still sampled at once.
         assert!(held_busy_sample_due(None));
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    fn session(temp: &Path) -> Session {
+        let (engine, _) = ManifestEngine::load_dir(&crate::detect::bundled_manifest_dir()).unwrap();
+        let spec = SessionSpec {
+            id: "resize".into(),
+            pty: PtySpec::new(
+                vec!["/bin/sh".into(), "-c".into(), "exec cat".into()],
+                "/tmp",
+            )
+            .env("PATH", "/usr/bin:/bin")
+            .size(80, 24),
+            manifest_id: "shell".into(),
+            authority: Authority::ProcessOnly,
+            logs_dir: temp.to_path_buf(),
+            holder: None,
+            remote: None,
+            defer_launch: false,
+        };
+        Session::spawn(spec, Arc::new(engine)).expect("spawn")
+    }
+
+    #[test]
+    fn the_pty_half_of_a_resize_never_waits_for_the_emulator() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = session(temp.path());
+        // A long reflow in progress: the screen lock is held elsewhere.
+        let screen = Arc::clone(&session.shared);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _screen = screen.screen.lock().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().unwrap();
+        // Callers hold the Registry lock across this half; it must not block
+        // on the screen, or one terminal's reflow stalls every session.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let reflow = session.resize_pty(100, 30).expect("resize");
+                done_tx.send(reflow.is_some()).unwrap();
+            });
+            let owed = done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("resize_pty waited for the emulator");
+            assert!(owed, "a live session owes its emulator the reflow");
+            release_tx.send(()).unwrap();
+        });
+        holder.join().unwrap();
+        assert_eq!(session.screen_size(), (80, 24), "not reflowed yet");
+        let _ = session.terminate(Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_owed_reflow_applies_the_newest_pty_size_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = session(temp.path());
+        let first = session.resize_pty(100, 30).unwrap().expect("owed");
+        let second = session.resize_pty(120, 40).unwrap().expect("owed");
+        // The older reflow wins the lock race but must not leave the
+        // emulator at a size the PTY no longer has.
+        first.apply();
+        assert_eq!(session.screen_size(), (120, 40));
+        // The newer one finds nothing left to do.
+        session.shared.screen.lock().unwrap().resize(90, 20);
+        second.apply();
+        assert_eq!(session.screen_size(), (90, 20), "a spent reflow is a no-op");
+        session.resize(132, 42).unwrap();
+        assert_eq!(session.screen_size(), (132, 42));
+        let _ = session.terminate(Duration::from_secs(2));
     }
 }
 
@@ -6155,5 +6461,52 @@ fi
                 matches!(session.view().status, SessionStatus::Exited(info) if info.code == Some(126))
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod echo_request_tests {
+    use super::*;
+
+    #[test]
+    fn a_typed_key_is_answered_by_output_that_only_adds() {
+        let at = Instant::now();
+        let request = EchoRequest::for_input(b"a", at);
+        assert!(!request.erases);
+        assert!(request.answered_by(at, 10, 11, 80));
+        assert!(request.answered_by(at, 10, 10, 80), "a cursor move alone");
+    }
+
+    #[test]
+    fn output_that_loses_cells_after_a_typed_key_is_a_repaint_in_progress() {
+        let at = Instant::now();
+        let request = EchoRequest::for_input(b"a", at);
+        assert!(!request.answered_by(at, 400, 399, 80));
+        assert!(!request.answered_by(at, 400, 0, 80));
+    }
+
+    #[test]
+    fn an_editing_key_may_erase_up_to_one_row() {
+        let at = Instant::now();
+        for key in [&b"\x7f"[..], b"\x08", b"\x17", b"\x15"] {
+            let request = EchoRequest::for_input(key, at);
+            assert!(request.erases, "{key:?}");
+            assert!(request.answered_by(at, 100, 99, 80), "{key:?}");
+            assert!(request.answered_by(at, 100, 20, 80), "{key:?}");
+            assert!(
+                !request.answered_by(at, 100, 19, 80),
+                "{key:?}: more than a row is a repaint"
+            );
+        }
+    }
+
+    #[test]
+    fn output_long_after_the_key_is_not_its_echo() {
+        let at = Instant::now();
+        let request = EchoRequest::for_input(b"a", at);
+        let late = at + ECHO_WINDOW + Duration::from_millis(1);
+        assert!(request.expired(late));
+        assert!(!request.answered_by(late, 10, 11, 80));
+        assert!(request.answered_by(at + ECHO_WINDOW, 10, 11, 80));
     }
 }

@@ -151,6 +151,17 @@ impl LeftModes {
     }
 }
 
+/// Only the class of a Holder failure, never its subprocess/protocol text.
+pub fn holder_error_kind(error: &crate::holder::HolderError) -> &'static str {
+    use crate::holder::HolderError;
+    match error {
+        HolderError::InvalidRequest(_) => "invalid_request",
+        HolderError::Transport(_) => "transport",
+        HolderError::Rejected(_) => "rejected",
+        HolderError::Launch(_) => "launch",
+    }
+}
+
 /// Records one handled control request: always a count and a timing, an
 /// `rpc.slow` warning past [`SLOW_RPC`], and `rpc.error` for an error reply.
 pub fn record_rpc(
@@ -186,7 +197,6 @@ pub fn record_rpc(
             code = diri_telemetry::id(&error.code),
             ms = elapsed,
             session = session.map(diri_telemetry::id),
-            message = diri_telemetry::text(&error.message),
         );
     }
 }

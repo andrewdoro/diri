@@ -5,7 +5,11 @@
 //! isolation, against the same payload the terminal-benchmark suite uses, so a
 //! change can be judged without rebuilding and restarting the app.
 //!
-//! Usage: feedbench <file> [cols] [rows]
+//! Usage: feedbench <file> [cols] [rows] [only]
+//!
+//! `only` runs a single configuration, so whole-process counters such as
+//! `/usr/bin/time -l` instructions retired describe it: `4k`, `16k`, `64k`,
+//! `whole`, `engine4k` or `engine64k`.
 
 use diri_engine::screen::HeadlessScreen;
 use std::time::Instant;
@@ -56,7 +60,21 @@ fn main() {
     let path = args.next().expect("usage: feedbench <file> [cols] [rows]");
     let cols: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(153);
     let rows: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(39);
+    let only = args.next();
     let data = std::fs::read(&path).expect("read payload");
+    if let Some(only) = only {
+        let (chunk, engine) = match only.as_str() {
+            "4k" => (4 << 10, false),
+            "16k" => (16 << 10, false),
+            "64k" => (64 << 10, false),
+            "whole" => (data.len(), false),
+            "engine4k" => (4 << 10, true),
+            "engine64k" => (64 << 10, true),
+            other => panic!("unknown configuration {other}"),
+        };
+        bench(&only, &data, chunk, cols, rows, engine);
+        return;
+    }
 
     println!(
         "payload {} ({} bytes), grid {cols}x{rows}",

@@ -199,7 +199,7 @@ fn main() {
             eprintln!("dirijord-rs: state load: {error}");
             diri_telemetry::incident!(
                 "engine.state_quarantined",
-                error = diri_telemetry::text(error.to_string()),
+                io = diri_telemetry::io_error(&error),
             );
             false
         }
@@ -393,10 +393,10 @@ fn start_telemetry(home: &Path, state_dir: &Path, exe_dir: &Path) {
     diri_engine::telemetry::set_holder_state_dir(state_dir);
     if let Some(endpoint) = diri_telemetry::upload::endpoint() {
         let meta = diri_engine::telemetry::upload_meta(exe_dir);
-        if let Err(error) =
-            diri_telemetry::upload::Uploader::new(state_dir.to_path_buf(), endpoint, meta).spawn()
+        match diri_telemetry::upload::Uploader::new(state_dir.to_path_buf(), endpoint, meta).spawn()
         {
-            eprintln!("dirijord-rs: telemetry uploader did not start: {error}");
+            Ok(handle) => handle.install(),
+            Err(error) => eprintln!("dirijord-rs: telemetry uploader did not start: {error}"),
         }
     }
     diri_engine::telemetry::crash_reports::spawn_watcher(

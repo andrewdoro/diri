@@ -6,6 +6,7 @@ mod hue_tests;
 mod lineage;
 mod project_picker;
 mod rows;
+mod strip_tabs;
 mod tabs;
 mod titles;
 mod workspaces;
@@ -642,6 +643,11 @@ pub struct Sidebar {
     row_held_hint: f32,
     /// Sessions whose rows this render mounted.
     mounted_row_ids: HashSet<SessionId>,
+    /// Cached views of the horizontal strip's session tabs, by session (see
+    /// `strip_tabs.rs`).
+    strip_tab_views: HashMap<SessionId, Entity<strip_tabs::StripTabView>>,
+    /// Every strip tab renders on the next strip render.
+    tabs_stale: bool,
     _self_observer: Option<gpui::Subscription>,
     /// Project hues for the list being rendered.
     hues: crate::project_hue::ProjectHues,
@@ -836,6 +842,8 @@ impl Sidebar {
             notify_keeps_rows: false,
             row_held_hint: 0.0,
             mounted_row_ids: HashSet::new(),
+            strip_tab_views: HashMap::new(),
+            tabs_stale: true,
             _self_observer: None,
             hues: Default::default(),
             shortcut_ranks: HashMap::new(),
@@ -6098,12 +6106,13 @@ impl Sidebar {
         colors: SemanticColors,
         cx: &mut Context<Self>,
     ) -> PopoverSpec {
-        let (session, pinned, bulk, hosts, migrating) = {
+        let (session, pinned, unread, bulk, hosts, migrating) = {
             let mut store = self.store.write().expect("session store lock poisoned");
             let Some(session) = store.sessions().get(&id).cloned() else {
                 return PopoverSpec::empty();
             };
             let pinned = store.preferences().sidebar_pinned_sessions.contains(&id);
+            let unread = store.notifications().session_unread(&id);
             // The whole multi-selection, when the right-clicked row is part
             // of one (Swift: bulk actions split archive/revive honestly).
             let bulk =
@@ -6114,7 +6123,7 @@ impl Sidebar {
                 };
             let hosts = store.hosts().to_vec();
             let migrating = store.migrating().contains(&id);
-            (session, pinned, bulk, hosts, migrating)
+            (session, pinned, unread, bulk, hosts, migrating)
         };
         let mut content = div().p(px(4.0)).flex().flex_col();
         if bulk.len() > 1 {
@@ -6324,7 +6333,33 @@ impl Sidebar {
                             cx.notify();
                         }
                     }),
-                ))
+                ));
+            if let Some(read) = read_toggle(&session, unread) {
+                content = content.child(menu_row(
+                    if read {
+                        "Mark as Read"
+                    } else {
+                        "Mark as Unread"
+                    },
+                    colors,
+                    cx.listener({
+                        let id = id.clone();
+                        move |this, _, _, cx| {
+                            let mut store =
+                                this.store.write().expect("session store lock poisoned");
+                            if read {
+                                store.mark_session_read(id.clone());
+                            } else {
+                                store.mark_session_unread(id.clone());
+                            }
+                            drop(store);
+                            this.ui.popover = None;
+                            cx.notify();
+                        }
+                    }),
+                ));
+            }
+            content = content
                 .child(menu_row(
                     "Remove from Sidebar",
                     colors,
@@ -7832,6 +7867,36 @@ pub(crate) mod render_probe {
         static ROWS: Cell<usize> = const { Cell::new(0) };
         static RENDERS: Cell<usize> = const { Cell::new(0) };
         static RENDER_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+        static TABS: Cell<usize> = const { Cell::new(0) };
+        static STRIP_RENDERS: Cell<usize> = const { Cell::new(0) };
+        static STRIP_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
+    /// One horizontal-strip session tab built.
+    pub(crate) fn tab_built() {
+        TABS.with(|tabs| tabs.set(tabs.get() + 1));
+    }
+
+    pub(crate) fn strip_finished(elapsed: Duration) {
+        STRIP_RENDERS.with(|renders| renders.set(renders.get() + 1));
+        strip_time(elapsed);
+    }
+
+    /// Strip work done outside the strip's own render call: its cached tabs
+    /// render later in the frame.
+    pub(crate) fn strip_time(elapsed: Duration) {
+        STRIP_TIME.with(|time| time.set(time.get() + elapsed));
+    }
+
+    /// (strip tabs built, strip renders, time inside the strip's render,
+    /// cached tab renders included)
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn take_strip() -> (usize, usize, Duration) {
+        (
+            TABS.with(|tabs| tabs.replace(0)),
+            STRIP_RENDERS.with(|renders| renders.replace(0)),
+            STRIP_TIME.with(|time| time.replace(Duration::ZERO)),
+        )
     }
 
     pub(crate) fn row_built() {
@@ -9266,6 +9331,18 @@ fn lineage_glyph(id: &SessionId, role: LineageRole, colors: SemanticColors) -> A
         .into_any_element()
 }
 
+/// The session menu's read toggle: `Some(true)` offers "Mark as Read" for a
+/// finished turn not yet looked at, `Some(false)` offers "Mark as Unread" for
+/// one already seen. Work in progress and input requests have nothing to read.
+fn read_toggle(session: &diri_proto::SessionRecord, notification_unread: bool) -> Option<bool> {
+    match session.attention() {
+        ProtoAttentionLevel::DoneUnseen => Some(true),
+        ProtoAttentionLevel::IdleSeen if notification_unread => Some(true),
+        ProtoAttentionLevel::IdleSeen => session.last_turn_completed_at.map(|_| false),
+        _ => None,
+    }
+}
+
 /// Unread inbox entries share the completion mark, while active work and
 /// requests for input retain priority. There is never a second unread dot.
 fn sidebar_activity_state(state: StatusState, unread: bool) -> StatusState {
@@ -9896,6 +9973,36 @@ mod tests {
     }
 
     #[test]
+    fn read_toggle_offers_the_opposite_of_the_session_read_state() {
+        let fixture_session = || {
+            let mut session = SidebarPreviewFixture::make(PreviewScenario::Typical)
+                .list
+                .sessions
+                .into_iter()
+                .next()
+                .expect("fixture session");
+            session.kind = diri_proto::AgentKind::CLAUDE_CODE;
+            session.foreground_agent = None;
+            session.attention_state = None;
+            session.status = diri_proto::SessionStatus::Idle;
+            session
+        };
+        let mut done = fixture_session();
+        done.last_turn_completed_at = Some(diri_proto::DateMillis(50.0));
+        done.last_seen_at = Some(diri_proto::DateMillis(40.0));
+        assert_eq!(read_toggle(&done, false), Some(true));
+        done.last_seen_at = Some(diri_proto::DateMillis(60.0));
+        assert_eq!(read_toggle(&done, false), Some(false));
+        assert_eq!(read_toggle(&done, true), Some(true));
+
+        let mut fresh = fixture_session();
+        fresh.last_turn_completed_at = None;
+        assert_eq!(read_toggle(&fresh, false), None);
+        done.status = diri_proto::SessionStatus::Working;
+        assert_eq!(read_toggle(&done, false), None);
+    }
+
+    #[test]
     fn unread_attention_uses_one_mark_without_hiding_work_or_input_requests() {
         assert_eq!(
             sidebar_activity_state(StatusState::IdleSeen, true),
@@ -10368,6 +10475,23 @@ mod tests {
             }
             cx.notify();
         });
+        // The archived row grows into its section on the wall clock. A slow
+        // runner (Linux CI) measured it mid-motion and clicked where its
+        // revive control had been, so wait the motion out and paint the
+        // settled frame before any test reads row bounds.
+        cx.run_until_parked();
+        let motion = crate::sidebar::row_motion::ENTER
+            .max(crate::sidebar::row_motion::EXIT)
+            .max(SECTION_SHIFT_TIME);
+        std::thread::sleep(motion + Duration::from_millis(40));
+        sidebar.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(
+            !sidebar.read_with(cx, |sidebar, _| sidebar
+                .row_motion
+                .is_animating(Instant::now())),
+            "archived rows settle before a test measures them"
+        );
     }
 
     fn assert_drag_source_revived(sidebar: &Entity<Sidebar>, cx: &VisualTestContext) {
@@ -11431,7 +11555,8 @@ mod tests {
     /// `DIRI_VISUAL_GROUPING=recency`, `DIRI_VISUAL_LIGHT=1`,
     /// `DIRI_VISUAL_THEME=<theme id>`, or
     /// `DIRI_VISUAL_POPOVER=none|project|session` to select the state to
-    /// capture (the default opens the grouping menu).
+    /// capture (the default opens the grouping menu), and
+    /// `DIRI_VISUAL_READ=seen|unseen` to finish that session's turn.
     /// `DIRI_VISUAL_BACKDROP=62616e` supplies a fixed RGB backdrop under glass;
     /// headless rendering cannot capture the native desktop blur.
     #[cfg(target_os = "macos")]
@@ -11523,6 +11648,21 @@ mod tests {
                             && session.id == SessionId::new("preview-codex")
                         {
                             session.host = Some("Forge".into());
+                        }
+                        // `DIRI_VISUAL_READ=seen|unseen` finishes the menu's
+                        // session so its Mark as Unread/Read item renders.
+                        if let Ok(read) = std::env::var("DIRI_VISUAL_READ")
+                            && session.id == SessionId::new("preview-codex")
+                        {
+                            session.status = diri_proto::SessionStatus::Idle;
+                            session.attention_state = None;
+                            session.last_turn_completed_at = Some(diri_proto::DateMillis(now));
+                            session.last_seen_at =
+                                Some(diri_proto::DateMillis(if read == "seen" {
+                                    now + 1.0
+                                } else {
+                                    now - 1.0
+                                }));
                         }
                         store.upsert_session(session);
                     }

@@ -208,6 +208,14 @@ export async function startStub() {
       }
       case "/v1/admin/sessions":
         return send(200, { sessions });
+      case "/v1/admin/budget":
+        return send(200, {
+          month: "2026-09",
+          puts: 450000,
+          gets: 12,
+          bytes: 900000000,
+          caps: { puts: 900000, gets: 9000000, bytes: 9000000000 },
+        });
       case "/v1/admin/find": {
         const id = q.get("id");
         const matches = sessions

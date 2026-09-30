@@ -312,10 +312,6 @@ fn record_update(
         ),
         ("ms", diri_telemetry::Value::from(started.elapsed())),
         ("error_kind", diri_telemetry::Value::from(error_kind)),
-        (
-            "error",
-            diri_telemetry::Value::from(error.map(|error| diri_telemetry::text(error.to_string()))),
-        ),
     ];
     // An unsupported build (a `cargo run`) failing to update is expected.
     let severity = match error {

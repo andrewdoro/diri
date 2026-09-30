@@ -4,6 +4,7 @@
 // at, so the index never names a batch that is gone. R2 deletes are free
 // operations; listing the bucket is not, so we walk D1 instead.
 
+import { pruneBudget } from "./budget";
 import { DAY_MS, type Env, retentionDays } from "./env";
 
 /** R2 accepts up to 1000 keys per delete call. */
@@ -38,13 +39,14 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepReport> {
     if (results.length < CHUNK) break;
   }
   const [incidents, sessions] = await env.DB.batch([
-    env.DB.prepare("DELETE FROM incidents WHERE t < ?1").bind(cutoff),
-    env.DB.prepare("DELETE FROM sessions WHERE last_t < ?1").bind(cutoff),
+    env.DB.prepare("DELETE FROM incidents WHERE received_at < ?1").bind(cutoff),
+    env.DB.prepare("DELETE FROM sessions WHERE received_at < ?1").bind(cutoff),
   ]);
   report.incidents = incidents.meta.changes;
   report.sessions = sessions.meta.changes;
   // Installs stay while they have any data; an install silent for the whole
   // retention window has nothing left to investigate.
   await env.DB.prepare("DELETE FROM installs WHERE last_seen < ?1").bind(cutoff).run();
+  await pruneBudget(env, now);
   return report;
 }

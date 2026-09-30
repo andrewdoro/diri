@@ -30,6 +30,7 @@ mod claude_accounts;
 mod codex_accounts;
 mod message_delivery;
 mod operations;
+mod orchestration;
 mod tasks;
 mod workspaces;
 
@@ -610,6 +611,9 @@ impl ControlServer {
                         | Method::HOST_USAGE
                         | Method::HOST_LIST_DIRECTORIES
                         | Method::SESSION_READ_DIFF
+                        | Method::WORKTREE_INTEGRATE
+                        | Method::TASK_ANSWER
+                        | Method::TASK_CANCEL
                         | Method::SESSION_CAPTURE_FIND
                         | Method::SESSION_READ_SCROLLBACK_CELLS
                         | Method::SESSION_KILL
@@ -622,6 +626,7 @@ impl ControlServer {
                         | Method::SESSION_MIGRATE
                         | Method::WORKTREE_OVERVIEW
                         | Method::WORKTREE_CLEANUP
+                        | Method::TELEMETRY_UPLOAD_NOW
                 ) || ((method == Method::AGENT_READINESS
                     || method == Method::AGENT_CONFIGURE)
                     && params
@@ -869,6 +874,9 @@ impl ControlServer {
             Method::TASK_SUBMIT => self.task_submit(params),
             Method::TASK_GET => self.task_get(params),
             Method::TASK_REPORT => self.task_report(params),
+            Method::TASK_ANSWER => self.task_answer(params),
+            Method::TASK_CANCEL => self.task_cancel(params),
+            Method::TASK_LIST => self.task_list(params),
             Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),
             Method::SESSION_DELIVER_MESSAGE => self.session_deliver_message(params),
             Method::SESSION_SEND_KEY => self.session_send_key(params),
@@ -884,6 +892,7 @@ impl ControlServer {
             Method::SESSION_REMOVE => self.session_remove(params),
             Method::SESSION_RENAME => self.session_rename(params),
             Method::SESSION_MARK_SEEN => self.session_mark_seen(params),
+            Method::SESSION_MARK_UNREAD => self.session_mark_unread(params),
             Method::SESSION_ARCHIVE => self.session_archive(params),
             Method::SESSION_UNARCHIVE => self.session_unarchive(params),
             Method::SESSION_HISTORY => self.session_history(),
@@ -921,11 +930,14 @@ impl ControlServer {
             Method::AGENT_CONFIGURE => self.agent_configure(params),
             Method::PROJECT_ADD => self.project_add(params),
             Method::SESSION_READ_DIFF => self.session_read_diff(params),
+            Method::SESSION_READ_TRANSCRIPT => self.session_read_transcript(params),
+            Method::WORKTREE_INTEGRATE => self.worktree_integrate(params),
             Method::SESSION_HIBERNATE => self.session_hibernate(params),
             Method::SESSION_WAKE => self.session_wake(params),
             Method::DAEMON_PREPARE_SHUTDOWN => self.daemon_prepare_shutdown(),
             Method::DAEMON_SHUTDOWN_IF_IDLE => self.daemon_shutdown_if_idle(),
             Method::DAEMON_SHUTDOWN => self.daemon_shutdown(),
+            Method::TELEMETRY_UPLOAD_NOW => telemetry_upload_now(),
             Method::GOVERNOR_CONFIGURE => self.governor_configure(params),
             Method::CLIENT_SET_ACTIVE => self.client_set_active(params),
             other => Err(ControlError::not_found(format!(
@@ -947,7 +959,7 @@ impl ControlServer {
                 .as_ref()
                 .and_then(|value| value.get("build"))
                 .and_then(Value::as_str)
-                .map(diri_telemetry::text),
+                .map(diri_telemetry::id),
             ok = proto == WIRE_VERSION as u64,
         );
         if proto != WIRE_VERSION as u64 {
@@ -2166,13 +2178,20 @@ impl ControlServer {
         let p: diri_proto::ResizeParams = decode(params)?;
         let cols = u16::try_from(p.cols.clamp(2, u16::MAX as i64)).expect("clamped");
         let rows = u16::try_from(p.rows.clamp(2, u16::MAX as i64)).expect("clamped");
-        let registry = self.registry.lock().map_err(poisoned)?;
-        let session = registry
-            .get(&p.session_id.0)
-            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
-        session
-            .resize(cols, rows)
-            .map_err(|error| ControlError::internal(error.to_string()))?;
+        let reflow = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            let session = registry
+                .get(&p.session_id.0)
+                .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+            session
+                .resize_pty(cols, rows)
+                .map_err(|error| ControlError::internal(error.to_string()))?
+        };
+        // The reflow runs after the Registry lock is released; see
+        // `Session::resize_pty`.
+        if let Some(reflow) = reflow {
+            reflow.apply();
+        }
         Ok(json!({}))
     }
 
@@ -2539,6 +2558,20 @@ impl ControlServer {
         registry.persist_deferred();
         self.publish_updated(&registry, &p.session_id.0);
         self.pr_monitor_wake.wake_session(p.session_id.0);
+        Ok(json!({}))
+    }
+
+    fn session_mark_unread(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        if registry
+            .mark_unread(&p.session_id.0)
+            .map_err(io_control_error)?
+        {
+            // An explicit edit, but as small as mark-seen: same deferred write.
+            registry.persist_deferred();
+            self.publish_updated(&registry, &p.session_id.0);
+        }
         Ok(json!({}))
     }
 
@@ -2914,7 +2947,7 @@ impl ControlServer {
         record.project_id = source.project_id.clone();
         record.worktree_path = source.worktree_path.clone();
         record.git_branch = source.git_branch.clone();
-        record.parent = Some(source.id.clone());
+        record.parent = Some(p.parent.clone().unwrap_or_else(|| source.id.clone()));
         record.host = source.host.clone();
         record.remote_persistence = remote_persistence;
         record.title = format!("Fork of {}", source.title);
@@ -4152,6 +4185,40 @@ impl OrphanWatch {
     }
 }
 
+/// Uploads the telemetry spool now at the user's request (Settings, Report a
+/// Problem). Runs as a background request: the upload can take seconds.
+fn telemetry_upload_now() -> Result<JsonValue, ControlError> {
+    use diri_telemetry::upload::UploadNow;
+    let result = match diri_telemetry::upload::upload_now(Duration::from_secs(45)) {
+        UploadNow::Unavailable => diri_proto::TelemetryUploadNowResult {
+            status: "unavailable".into(),
+            ..Default::default()
+        },
+        UploadNow::TimedOut => diri_proto::TelemetryUploadNowResult {
+            status: "timeout".into(),
+            ..Default::default()
+        },
+        UploadNow::Done(report) => diri_proto::TelemetryUploadNowResult {
+            status: if report.failed {
+                "failed"
+            } else if report.batches == 0 {
+                "up_to_date"
+            } else {
+                "sent"
+            }
+            .into(),
+            batches: u32::try_from(report.batches).unwrap_or(u32::MAX),
+            records: report.lines as u64,
+        },
+    };
+    diri_telemetry::event!(
+        "telemetry.upload_now",
+        status = diri_telemetry::id(&result.status),
+        batches = result.batches,
+    );
+    encode(&result)
+}
+
 fn idle_shutdown_refusal(live_sessions: usize, connections: usize) -> Option<&'static str> {
     if live_sessions != 0 {
         Some("live sessions still require the Engine")
@@ -4755,6 +4822,15 @@ mod tests {
     mod find_capture_tests;
     mod reconnect_tests;
     mod send_key_tests;
+
+    #[test]
+    fn telemetry_upload_now_reports_unavailable_without_an_uploader() {
+        // Debug builds and tests never start the uploader.
+        let value = telemetry_upload_now().unwrap();
+        let result: diri_proto::TelemetryUploadNowResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.status, "unavailable");
+        assert_eq!(result.batches, 0);
+    }
 
     #[test]
     fn a_shared_event_frame_is_the_line_control_message_writes() {
@@ -6016,6 +6092,56 @@ mod tests {
         ));
         let list = ok_of(call(&server, "session.list", None));
         assert_eq!(list["sessions"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn mark_unread_returns_a_seen_completion_to_done_unseen() {
+        use diri_proto::{AgentKind, AttentionLevel, DateMillis, SessionRecord};
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let mut finished = test_record("s_done");
+        finished.kind = AgentKind::CLAUDE_CODE;
+        finished.last_turn_completed_at = Some(DateMillis(2_000.0));
+        let mut fresh = test_record("s_fresh");
+        fresh.kind = AgentKind::CLAUDE_CODE;
+        registry.lock().expect("registry").insert_record(finished);
+        registry.lock().expect("registry").insert_record(fresh);
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.path().join("daemon.sock"),
+        ));
+        let attention = |id: &str| {
+            let list = ok_of(call(&server, "session.list", None));
+            let record = list["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|record| record["id"] == id)
+                .cloned()
+                .unwrap();
+            serde_json::from_value::<SessionRecord>(record)
+                .unwrap()
+                .attention()
+        };
+        let params = |id: &str| Some(json!({ "sessionID": id }));
+
+        ok_of(call(&server, "session.mark_seen", params("s_done")));
+        assert_eq!(attention("s_done"), AttentionLevel::IdleSeen);
+        ok_of(call(&server, "session.mark_unread", params("s_done")));
+        assert_eq!(attention("s_done"), AttentionLevel::DoneUnseen);
+        ok_of(call(&server, "session.mark_seen", params("s_done")));
+        assert_eq!(attention("s_done"), AttentionLevel::IdleSeen);
+
+        // No completed turn: nothing to be unread, and nothing changes.
+        ok_of(call(&server, "session.mark_seen", params("s_fresh")));
+        ok_of(call(&server, "session.mark_unread", params("s_fresh")));
+        assert_eq!(attention("s_fresh"), AttentionLevel::IdleSeen);
+
+        let error = err_of(call(&server, "session.mark_unread", params("s_missing")));
+        assert_eq!(error.code, "not_found");
     }
 
     #[test]

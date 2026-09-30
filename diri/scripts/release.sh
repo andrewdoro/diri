@@ -168,7 +168,10 @@ echo "    source commit : $SOURCE_COMMIT"
 CI_LOG_DIR="$CARGO_TARGET_DIR/release-logs"
 mkdir -p "$CI_LOG_DIR"
 BACKGROUND_PIDS=()
-trap 'for pid in "${BACKGROUND_PIDS[@]:-}"; do [ -n "$pid" ] && kill "$pid" 2>/dev/null; done; true' EXIT
+# `|| true` on each kill: this runs under set -e, and a job that already
+# finished makes kill fail, which would abort the trap before the remaining
+# jobs are stopped and turn a successful release into exit 1.
+trap 'for pid in "${BACKGROUND_PIDS[@]:-}"; do if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi; done' EXIT
 
 # Waits for a background step; on failure prints its log and aborts.
 join_background() {

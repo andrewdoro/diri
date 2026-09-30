@@ -6,12 +6,12 @@
 // body, a bad header line, or a size cap. One malformed record is counted
 // and skipped, never a reason to lose the other 49,999.
 //
-// Cost shape: one R2 PUT (the original gzip bytes, stored untouched) and one
-// D1 read + one D1 batch of at most four statements per request. Records are
-// scanned with an anchored regex over the recorder's fixed key order; only
-// error/incident lines are JSON.parse'd, which keeps a 4 MiB batch inside a
-// Worker's CPU budget.
+// Accepted requests make two D1 admission/budget reservations, one per-install
+// count, one R2 PUT, and one D1 index batch of at most four statements. Records
+// are scanned with an anchored regex over the recorder's fixed key order;
+// only error/incident lines and noncanonical records need JSON.parse.
 
+import { reserveIngest, reserveWrite } from "./budget";
 import { type Env, error, json, rateLimitPerHour } from "./env";
 
 export const MAX_COMPRESSED_BYTES = 5 * 1024 * 1024;
@@ -400,8 +400,18 @@ export async function handleIngest(request: Request, env: Env, now = Date.now())
   if (!UUID.test(claimed)) return error(400, "bad_install", "X-Diri-Install must be the install UUID");
   if (!request.body) return error(400, "empty_batch");
 
-  // Before any decompression, R2 write or D1 write: the cheapest check that
-  // turns a looping client away. One indexed COUNT over at most an hour of
+  // Cloudflare supplies this header at the edge. Never use X-Forwarded-For
+  // or the caller's install id as the source throttle key. No IP is persisted.
+  const source = request.headers.get("cf-connecting-ip");
+  if (!source) return error(400, "source_required");
+  if (!env.INGEST_RATE_LIMITER) return error(503, "admission_unavailable");
+  if (!(await env.INGEST_RATE_LIMITER.limit({ key: source })).success) {
+    return error(429, "source_rate_limited");
+  }
+  if (!(await reserveIngest(env, now))) return error(429, "global_rate_limited");
+
+  // Before decompression or an R2 write: an additional fairness check for
+  // looping clients. One indexed COUNT over at most an hour of
   // that install's batches (<= the limit, so a bounded number of rows read).
   const limit = rateLimitPerHour(env);
   const recent = await env.DB.prepare(
@@ -431,6 +441,9 @@ export async function handleIngest(request: Request, env: Env, now = Date.now())
   if (header.install !== claimed) {
     return error(422, "install_mismatch", "header install differs from X-Diri-Install");
   }
+
+  // Spend guard, after validation so only real batches count against it.
+  if (!(await reserveWrite(env, now, gz.byteLength))) return error(429, "budget_exhausted");
 
   const key = objectKey(header.install, header.sent_at);
   await env.BATCHES.put(key, gz, {
@@ -491,27 +504,28 @@ export async function handleIngest(request: Request, env: Env, now = Date.now())
   if (incidents.length > 0) {
     statements.push(
       env.DB.prepare(
-        `INSERT INTO incidents (install, t, seq, proc, pid, kind, sev, session, conv, agent, code, signature, app_version, fields)
+        `INSERT INTO incidents (install, t, seq, proc, pid, kind, sev, session, conv, agent, code, signature, app_version, fields, received_at)
          SELECT j.value ->> '$.install', j.value ->> '$.t', j.value ->> '$.seq', j.value ->> '$.proc',
                 j.value ->> '$.pid', j.value ->> '$.kind', j.value ->> '$.sev', j.value ->> '$.session',
                 j.value ->> '$.conv', j.value ->> '$.agent', j.value ->> '$.code', j.value ->> '$.signature',
-                j.value ->> '$.app_version', j.value ->> '$.fields'
+                j.value ->> '$.app_version', j.value ->> '$.fields', ?2
          FROM json_each(?1) AS j`,
-      ).bind(JSON.stringify(incidents)),
+      ).bind(JSON.stringify(incidents), now),
     );
   }
   if (sessions.length > 0) {
     statements.push(
       env.DB.prepare(
-        `INSERT INTO sessions (install, session, conv, agent, first_t, last_t)
+        `INSERT INTO sessions (install, session, conv, agent, first_t, last_t, received_at)
          SELECT ?1, j.value ->> '$.session', j.value ->> '$.conv', j.value ->> '$.agent',
-                j.value ->> '$.first_t', j.value ->> '$.last_t'
+                j.value ->> '$.first_t', j.value ->> '$.last_t', ?3
          FROM json_each(?2) AS j WHERE true
          ON CONFLICT (install, session, conv) DO UPDATE SET
            agent = coalesce(sessions.agent, excluded.agent),
            first_t = min(sessions.first_t, excluded.first_t),
-           last_t = max(sessions.last_t, excluded.last_t)`,
-      ).bind(header.install, JSON.stringify(sessions)),
+           last_t = max(sessions.last_t, excluded.last_t),
+           received_at = max(sessions.received_at, excluded.received_at)`,
+      ).bind(header.install, JSON.stringify(sessions), now),
     );
   }
   await env.DB.batch(statements);
@@ -528,4 +542,3 @@ export async function handleIngest(request: Request, env: Env, now = Date.now())
     202,
   );
 }
-
