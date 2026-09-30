@@ -81,7 +81,6 @@ const PREVIEW_USAGE: f64 = 4.82;
 // or disclosure control out from under the pointer.
 const SIDEBAR_NAV_ROW_HEIGHT: f32 = 30.0;
 const SIDEBAR_ROW_RADIUS: f32 = 10.0;
-const SIDEBAR_MENU_ROW_RADIUS: f32 = 12.0;
 const SIDEBAR_ACTION_SLOT: f32 = 24.0;
 /// How long a project section takes to slide into its new slot after a live
 /// reorder. Short enough that a fast drag never feels held back, long enough
@@ -9154,13 +9153,13 @@ struct WherePanel<'a> {
     syncing: &'a HashSet<String>,
 }
 
-/// One row shape for everything in the New Agent menu and its panels: the
-/// Agents, the location, Manage Agents, machines and folders all share it,
-/// so the menu reads as one column of rows rather than a form above a list.
-const MENU_ROW_HEIGHT: f32 = 32.0;
-const MENU_ROW_INSET: f32 = 10.0;
-const MENU_ROW_GAP: f32 = 10.0;
-const MENU_ROW_ICON_SLOT: f32 = 22.0;
+// One row shape for everything in the New Agent menu and its panels (the
+// Agents, the location, Manage Agents, machines and folders) and for every
+// other diri menu: see `crate::floating::MENU_ROW_HEIGHT`.
+use crate::floating::{
+    MENU_ROW_GAP, MENU_ROW_HEIGHT, MENU_ROW_ICON_SLOT, MENU_ROW_INSET,
+    MENU_ROW_RADIUS as SIDEBAR_MENU_ROW_RADIUS, menu_separator,
+};
 
 /// A secondary row of the menu: glyph in the icon slot, then whatever the
 /// caller adds (a label, a location, a trailing chevron).
@@ -9190,11 +9189,6 @@ fn menu_action_row(
                 .justify_center()
                 .child(sf_symbol(symbol, 13.0, colors.secondary)),
         )
-}
-
-/// Menu separator with the breathing room a native menu gives one.
-fn menu_separator(colors: SemanticColors) -> Div {
-    div().py(px(4.0)).child(HairlineDivider::horizontal(colors))
 }
 
 /// Secondary-panel header: a back chevron and the panel's title or path.

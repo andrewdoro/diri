@@ -238,3 +238,32 @@ fn at_mentions_insert_session_and_note_links(cx: &mut gpui::TestAppContext) {
         ]
     );
 }
+
+#[gpui::test]
+fn hover_and_arrow_keys_share_one_menu_highlight(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store);
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        view.replace_text_in_range(None, "/", window, cx);
+        assert_eq!(view.menu_selected(), Some(0));
+        view.vertical(true, false, cx);
+        assert_eq!(view.menu_selected(), Some(1));
+        // The pointer takes the same highlight the arrows moved...
+        view.hover_menu_row(4, cx);
+        assert_eq!(view.menu_selected(), Some(4));
+        // ...and the arrows continue from where the pointer left it.
+        view.vertical(true, false, cx);
+        assert_eq!(view.menu_selected(), Some(5));
+        // Enter applies the one highlighted row: Bulleted list.
+        view.newline(&editor_view::Newline, window, cx);
+        assert_eq!(
+            view.editor.block(last).kind,
+            diri_notes::doc::BlockKind::Bullet
+        );
+    });
+}

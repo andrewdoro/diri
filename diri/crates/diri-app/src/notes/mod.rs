@@ -136,6 +136,14 @@ impl NotePane {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn editor_for_test(&self) -> Option<Entity<NoteEditorView>> {
+        match &self.state {
+            PaneState::Open(open) => Some(open.editor.clone()),
+            _ => None,
+        }
+    }
+
     /// Focus the editor the next time a note is shown (a new note, a click).
     pub(crate) fn request_focus(&mut self) {
         self.focus_on_show = true;

@@ -20,16 +20,19 @@ use diri_notes::doc::{Block, BlockKind, Style};
 use diri_notes::edit::{Editor, Granularity, Pos, Selection, Turn};
 use diri_notes::mention::{self, Candidate, MentionTarget};
 use diri_ui::{
-    AgentKind as UiAgentKind, AgentLogo, Icon, IconName, Ink, Palette, SemanticColors, StatusState,
+    AgentKind as UiAgentKind, AgentLogo, Ink, Palette, SemanticColors, StatusGlyph, StatusState,
+    Typo,
 };
 use gpui::{
-    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight,
+    Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight,
     HighlightStyle, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Point, Render, ScrollHandle, SharedString, StrikethroughStyle, StyledText, Task, TextLayout,
     UTF16Selection, UnderlineStyle, Window, actions, anchored, canvas, deferred, div, fill, point,
     prelude::*, px, size,
 };
+
+use crate::floating;
 
 pub(crate) const EDITOR_CONTEXT: &str = "DiriNoteEditor";
 
@@ -93,6 +96,17 @@ actions!(
     ]
 );
 
+// Turn-into shortcuts, shared by the keymap and the `/` menu that prints them.
+const KEY_TURN_PARAGRAPH: &str = "cmd-alt-0";
+const KEY_TURN_H1: &str = "cmd-alt-1";
+const KEY_TURN_H2: &str = "cmd-alt-2";
+const KEY_TURN_H3: &str = "cmd-alt-3";
+const KEY_TURN_BULLET: &str = "cmd-shift-8";
+const KEY_TURN_NUMBERED: &str = "cmd-shift-7";
+const KEY_TURN_TODO: &str = "cmd-shift-9";
+const KEY_TURN_QUOTE: &str = "cmd-alt-q";
+const KEY_TURN_CODE: &str = "cmd-alt-c";
+
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     let c = Some(EDITOR_CONTEXT);
     vec![
@@ -147,15 +161,15 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-x", Strike, c),
         KeyBinding::new("cmd-k", Link, c),
         KeyBinding::new("cmd-enter", ToggleTodo, c),
-        KeyBinding::new("cmd-alt-0", TurnParagraph, c),
-        KeyBinding::new("cmd-alt-1", TurnHeading1, c),
-        KeyBinding::new("cmd-alt-2", TurnHeading2, c),
-        KeyBinding::new("cmd-alt-3", TurnHeading3, c),
-        KeyBinding::new("cmd-shift-8", TurnBullet, c),
-        KeyBinding::new("cmd-shift-7", TurnNumbered, c),
-        KeyBinding::new("cmd-shift-9", TurnTodo, c),
-        KeyBinding::new("cmd-alt-q", TurnQuote, c),
-        KeyBinding::new("cmd-alt-c", TurnCode, c),
+        KeyBinding::new(KEY_TURN_PARAGRAPH, TurnParagraph, c),
+        KeyBinding::new(KEY_TURN_H1, TurnHeading1, c),
+        KeyBinding::new(KEY_TURN_H2, TurnHeading2, c),
+        KeyBinding::new(KEY_TURN_H3, TurnHeading3, c),
+        KeyBinding::new(KEY_TURN_BULLET, TurnBullet, c),
+        KeyBinding::new(KEY_TURN_NUMBERED, TurnNumbered, c),
+        KeyBinding::new(KEY_TURN_TODO, TurnTodo, c),
+        KeyBinding::new(KEY_TURN_QUOTE, TurnQuote, c),
+        KeyBinding::new(KEY_TURN_CODE, TurnCode, c),
         KeyBinding::new("alt-shift-up", MoveBlockUp, c),
         KeyBinding::new("alt-shift-down", MoveBlockDown, c),
         KeyBinding::new("escape", Escape, c),
@@ -226,84 +240,99 @@ pub(crate) fn accent() -> gpui::Rgba {
     Palette::CLAY
 }
 
+/// One row of the `/` menu: a block kind, its glyph, and the key equivalent
+/// that turns the current block into it, printed like a native menu's.
 #[derive(Clone, Copy)]
 struct SlashItem {
     label: &'static str,
-    hint: &'static str,
-    glyph: &'static str,
+    icon: &'static str,
+    keys: Option<&'static str>,
     turn: Turn,
+    /// Rows in different groups are divided by a separator: text, lists,
+    /// then blocks that set content apart.
+    group: u8,
     keywords: &'static str,
 }
 
 const SLASH_ITEMS: &[SlashItem] = &[
     SlashItem {
         label: "Text",
-        hint: "⌥⌘0",
-        glyph: "Aa",
+        icon: "textformat",
+        keys: Some(KEY_TURN_PARAGRAPH),
         turn: Turn::Kind(BlockKind::Paragraph),
+        group: 0,
         keywords: "text paragraph plain",
     },
     SlashItem {
         label: "Heading 1",
-        hint: "#",
-        glyph: "H1",
+        icon: "textformat.h1",
+        keys: Some(KEY_TURN_H1),
         turn: Turn::Kind(BlockKind::Heading(1)),
+        group: 0,
         keywords: "heading h1 title big",
     },
     SlashItem {
         label: "Heading 2",
-        hint: "##",
-        glyph: "H2",
+        icon: "textformat.h2",
+        keys: Some(KEY_TURN_H2),
         turn: Turn::Kind(BlockKind::Heading(2)),
+        group: 0,
         keywords: "heading h2 subtitle",
     },
     SlashItem {
         label: "Heading 3",
-        hint: "###",
-        glyph: "H3",
+        icon: "textformat.h3",
+        keys: Some(KEY_TURN_H3),
         turn: Turn::Kind(BlockKind::Heading(3)),
+        group: 0,
         keywords: "heading h3 small",
     },
     SlashItem {
         label: "To-do",
-        hint: "[]",
-        glyph: "☐",
+        icon: "checkmark.square",
+        keys: Some(KEY_TURN_TODO),
         turn: Turn::Kind(BlockKind::Todo { checked: false }),
+        group: 1,
         keywords: "todo task checkbox check list",
     },
     SlashItem {
         label: "Bulleted list",
-        hint: "-",
-        glyph: "•",
+        icon: "list.bullet",
+        keys: Some(KEY_TURN_BULLET),
         turn: Turn::Kind(BlockKind::Bullet),
+        group: 1,
         keywords: "bullet list unordered",
     },
     SlashItem {
         label: "Numbered list",
-        hint: "1.",
-        glyph: "1.",
+        icon: "list.number",
+        keys: Some(KEY_TURN_NUMBERED),
         turn: Turn::Kind(BlockKind::Numbered),
+        group: 1,
         keywords: "numbered list ordered",
     },
     SlashItem {
         label: "Quote",
-        hint: ">",
-        glyph: "“",
+        icon: "text.quote",
+        keys: Some(KEY_TURN_QUOTE),
         turn: Turn::Kind(BlockKind::Quote),
+        group: 2,
         keywords: "quote blockquote citation",
     },
     SlashItem {
         label: "Code",
-        hint: "```",
-        glyph: "{}",
+        icon: "chevron.left.forwardslash.chevron.right",
+        keys: Some(KEY_TURN_CODE),
         turn: Turn::Kind(BlockKind::Code),
+        group: 2,
         keywords: "code snippet monospace",
     },
     SlashItem {
         label: "Divider",
-        hint: "---",
-        glyph: "—",
+        icon: "divider",
+        keys: None,
         turn: Turn::Divider,
+        group: 2,
         keywords: "divider rule line separator",
     },
 ];
@@ -1963,9 +1992,32 @@ impl Render for NoteEditorView {
         .left_0()
         .size_full();
 
-        let viewport = window.viewport_size().height;
-        let slash_menu = self.render_slash(viewport, cx);
-        let mention_menu = self.render_mention(viewport, cx);
+        let slash_menu = if self.slash.is_some() {
+            let height = self.slash_menu_height();
+            self.host_menu(
+                SLASH_MENU,
+                Self::slash_menu_rows,
+                SLASH_MENU_WIDTH,
+                height,
+                window,
+                cx,
+            )
+        } else {
+            None
+        };
+        let mention_menu = if self.mention.is_some() {
+            let height = self.mention_menu_height();
+            self.host_menu(
+                MENTION_MENU,
+                Self::mention_menu_rows,
+                MENTION_MENU_WIDTH,
+                height,
+                window,
+                cx,
+            )
+        } else {
+            None
+        };
         let hint = self.link_hint.clone().map(|hint| {
             div()
                 .absolute()
@@ -2186,212 +2238,330 @@ impl NoteEditorView {
         }
     }
 
-    fn render_slash(
-        &self,
-        viewport: Pixels,
+    // -----------------------------------------------------------------------
+    // Menus
+    //
+    // The `/` and `@` menus are diri menus: `floating` hosts them in a blurred
+    // panel window under the glass material and in the window otherwise,
+    // their rows share the New Agent menu's shape, and the keyboard never
+    // leaves the editor.
+
+    /// Mounts `target`'s menu at the caret for this frame, with a scrim that
+    /// turns a click anywhere else into a dismissal.
+    fn host_menu(
+        &mut self,
+        target: floating::Target<Self>,
+        rows: fn(&mut Self, &mut Context<Self>) -> Option<gpui::Div>,
+        width: f32,
+        height: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement + use<>> {
-        const ROW: f32 = 34.0;
-        let menu = self.slash.as_ref()?;
+    ) -> Option<AnyElement> {
         let caret = self.caret_bounds?;
+        let viewport = window.viewport_size();
+        let (position, anchor) = menu_placement(caret, viewport.height, height);
+        let dismiss = move |this: &mut Self,
+                            _: &MouseDownEvent,
+                            window: &mut Window,
+                            cx: &mut Context<Self>| {
+            (target.dismiss)(this, window, cx);
+        };
+        let scrim = deferred(
+            anchored().position(point(px(0.0), px(0.0))).child(
+                div()
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, cx.listener(dismiss))
+                    .on_mouse_down(MouseButton::Right, cx.listener(dismiss)),
+            ),
+        )
+        .with_priority(1);
+        let host = div().absolute().inset_0();
+        if floating::uses_panels(false, self.colors, cx) {
+            let probe = (target.content)(self, cx)?;
+            let panel = floating::host_element(
+                target,
+                probe,
+                width,
+                position,
+                anchor,
+                MENU_MARGIN,
+                window,
+                cx,
+            );
+            return Some(host.child(panel).child(scrim).into_any_element());
+        }
+        // In the window the menu is the same floating surface every other
+        // in-window diri menu uses, with its shadow and entry motion.
+        let content = diri_ui::FloatingSurface::new(
+            self.colors,
+            div().w(px(width)).overflow_hidden().child(rows(self, cx)?),
+        )
+        .radius(floating::MENU_RADIUS);
+        Some(
+            host.child(scrim)
+                .child(
+                    deferred(
+                        anchored()
+                            .anchor(anchor)
+                            .position(position)
+                            .snap_to_window_with_margin(px(MENU_MARGIN))
+                            .child(div().occlude().child(content)),
+                    )
+                    .with_priority(2),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn slash_menu_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.slash_menu_rows(cx)?;
+        Some(
+            floating::surface(self.colors, floating::MENU_RADIUS, SLASH_MENU_WIDTH, rows)
+                .into_any_element(),
+        )
+    }
+
+    fn slash_menu_rows(&mut self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let selected = self.slash.as_ref()?.selected;
         let colors = self.colors;
         let matches = self.slash_matches();
-        let selected = menu.selected;
-        let mut list = div()
-            .w(px(250.0))
-            .py(px(6.0))
-            .rounded(px(12.0))
-            .bg(colors.floating_fill())
-            .border_1()
-            .border_color(colors.primary.alpha(0.08))
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .font_family(crate::fonts::ui_family());
+        let mut list = div().flex().flex_col().py(px(floating::MENU_PADDING_Y));
         if matches.is_empty() {
-            list = list.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .text_size(px(13.0))
-                    .text_color(colors.tertiary)
-                    .child("No matching blocks"),
-            );
+            list = list.child(menu_empty("No matching blocks", colors));
         }
+        let mut group = None;
         for (i, item) in matches.iter().enumerate() {
-            let active = i == selected;
-            list = list.child(
-                div()
-                    .id(("slash", i))
-                    .mx(px(6.0))
-                    .px(px(8.0))
-                    .h(px(ROW))
-                    .rounded(px(7.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .when(active, |el| el.bg(accent().alpha(0.14)))
-                    .hover(|el| el.bg(colors.primary.alpha(0.06)))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.apply_slash(i, cx);
-                        }),
-                    )
-                    .child(
-                        div()
-                            .size(px(24.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(colors.primary.alpha(0.1))
-                            .bg(colors.background.alpha(0.6))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(if active { accent() } else { colors.secondary })
-                            .child(item.glyph),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(13.0))
-                            .text_color(colors.primary)
-                            .child(item.label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(colors.tertiary)
-                            .child(item.hint),
-                    ),
-            );
+            if group.is_some_and(|g| g != item.group) {
+                list = list.child(floating::menu_separator(colors));
+            }
+            group = Some(item.group);
+            let row = floating::menu_row(
+                ("note-slash-row", i),
+                crate::icons::sf_symbol(item.icon, MENU_ICON, colors.secondary),
+                colors,
+                i == selected,
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.hover_menu_row(i, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.apply_slash(i, cx);
+                }),
+            )
+            .child(menu_label(item.label, colors))
+            .when_some(item.keys, |row, keys| {
+                row.child(floating::menu_shortcut(
+                    crate::commands::keystroke_label(keys),
+                    colors,
+                ))
+            });
+            list = list.child(row);
         }
-        let rows = matches.len().max(1) as f32;
-        Some(caret_menu(caret, viewport, 12.0 + rows * ROW, list))
+        Some(list)
+    }
+
+    /// The pointer resting on a row selects it: hover and the arrow keys
+    /// move one highlight, so a menu never shows two lit rows.
+    pub(super) fn hover_menu_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let selected = if let Some(menu) = &mut self.slash {
+            &mut menu.selected
+        } else if let Some(menu) = &mut self.mention {
+            &mut menu.selected
+        } else {
+            return;
+        };
+        if *selected != index {
+            *selected = index;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn menu_selected(&self) -> Option<usize> {
+        self.slash
+            .as_ref()
+            .map(|m| m.selected)
+            .or(self.mention.as_ref().map(|m| m.selected))
+    }
+
+    fn slash_menu_height(&self) -> f32 {
+        let matches = self.slash_matches();
+        let separators = matches
+            .windows(2)
+            .filter(|pair| pair[0].group != pair[1].group)
+            .count();
+        menu_height(matches.len().max(1), separators)
+    }
+
+    fn mention_menu_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.mention_menu_rows(cx)?;
+        Some(
+            floating::surface(self.colors, floating::MENU_RADIUS, MENTION_MENU_WIDTH, rows)
+                .into_any_element(),
+        )
+    }
+
+    fn mention_menu_rows(&mut self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let selected = self.mention.as_ref()?.selected;
+        let colors = self.colors;
+        let matches = self.mention_matches();
+        let mut list = div().flex().flex_col().py(px(floating::MENU_PADDING_Y));
+        if matches.is_empty() {
+            list = list.child(menu_empty(
+                if self.mentions.entries.is_empty() {
+                    "No sessions or notes to mention"
+                } else {
+                    "No matching sessions or notes"
+                },
+                colors,
+            ));
+        }
+        for (i, entry) in matches.iter().enumerate() {
+            // Sessions lead; notes follow below a separator.
+            if i > 0 && entry.agent.is_none() && matches[i - 1].agent.is_some() {
+                list = list.child(floating::menu_separator(colors));
+            }
+            // A session's mark wears its status the way its sidebar row does.
+            let icon = match (entry.agent, entry.status) {
+                // Agents wear their status the way their sidebar rows do,
+                // drawn at the New Agent menu's mark size.
+                (Some(agent), Some(state)) if agent != UiAgentKind::Shell => {
+                    StatusGlyph::new(agent, state, MENU_STATUS_MARK, colors).rendered_mark()
+                }
+                (Some(agent), _) => AgentLogo::new(agent, MENU_LOGO, colors)
+                    .badged(false)
+                    .into_any_element(),
+                (None, _) => crate::icons::sf_symbol("doc.text", MENU_ICON, colors.secondary),
+            };
+            let title = entry.candidate.label.trim_start_matches('@').to_owned();
+            let row = floating::menu_row(("note-mention-row", i), icon, colors, i == selected)
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        this.hover_menu_row(i, cx);
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.apply_mention(i, cx);
+                    }),
+                )
+                .child(menu_label(title, colors))
+                .when(!entry.detail.is_empty(), |row| {
+                    row.child(
+                        floating::menu_shortcut(entry.detail.clone(), colors)
+                            .max_w(px(120.0))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis(),
+                    )
+                });
+            list = list.child(row);
+        }
+        Some(list)
+    }
+
+    fn mention_menu_height(&self) -> f32 {
+        let matches = self.mention_matches();
+        let separators = matches
+            .windows(2)
+            .filter(|pair| pair[0].agent.is_some() && pair[1].agent.is_none())
+            .count();
+        menu_height(matches.len().max(1), separators)
     }
 }
 
-impl NoteEditorView {
-    fn render_mention(
-        &self,
-        viewport: Pixels,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement + use<>> {
-        const ROW: f32 = 40.0;
-        let menu = self.mention.as_ref()?;
-        let caret = self.caret_bounds?;
-        let colors = self.colors;
-        let matches = self.mention_matches();
-        let selected = menu.selected;
-        let mut list = div()
-            .w(px(320.0))
-            .py(px(6.0))
-            .rounded(px(12.0))
-            .bg(colors.floating_fill())
-            .border_1()
-            .border_color(colors.primary.alpha(0.08))
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .font_family(crate::fonts::ui_family());
-        if matches.is_empty() {
-            list = list.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .text_size(px(13.0))
-                    .text_color(colors.tertiary)
-                    .child(if self.mentions.entries.is_empty() {
-                        "No sessions or notes to mention"
-                    } else {
-                        "No matching sessions or notes"
-                    }),
-            );
-        }
-        for (i, entry) in matches.iter().enumerate() {
-            let active = i == selected;
-            let icon: gpui::AnyElement = match entry.agent {
-                Some(agent) => AgentLogo::new(agent, 20.0, colors)
-                    .badged(false)
-                    .inset(0.08)
-                    .into_any_element(),
-                None => Icon::new(IconName::File, 15.0, colors.secondary).into_any_element(),
-            };
-            let status = entry.agent.zip(entry.status).map(|(agent, state)| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(px(11.0))
-                    .text_color(colors.tertiary)
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded(px(3.0))
-                            .bg(status_ink(agent, state, colors)),
-                    )
-                    .child(state.label())
-            });
-            let title = entry.candidate.label.trim_start_matches('@').to_owned();
-            list = list.child(
-                div()
-                    .id(("mention", i))
-                    .mx(px(6.0))
-                    .px(px(8.0))
-                    .h(px(ROW))
-                    .rounded(px(7.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .when(active, |el| el.bg(accent().alpha(0.14)))
-                    .hover(|el| el.bg(colors.primary.alpha(0.06)))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.apply_mention(i, cx);
-                        }),
-                    )
-                    .child(
-                        div()
-                            .size(px(24.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .text_color(colors.primary)
-                                    .truncate()
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(colors.tertiary)
-                                    .truncate()
-                                    .child(entry.detail.clone()),
-                            ),
-                    )
-                    .children(status),
-            );
-        }
-        let rows = matches.len().max(1) as f32;
-        Some(caret_menu(caret, viewport, 12.0 + rows * ROW, list))
+const SLASH_MENU: floating::Target<NoteEditorView> = floating::Target {
+    key: "note-slash-menu",
+    radius: floating::MENU_RADIUS,
+    content: NoteEditorView::slash_menu_content,
+    dismiss: |this, _, cx| {
+        this.slash = None;
+        cx.notify();
+    },
+};
+
+const MENTION_MENU: floating::Target<NoteEditorView> = floating::Target {
+    key: "note-mention-menu",
+    radius: floating::MENU_RADIUS,
+    content: NoteEditorView::mention_menu_content,
+    dismiss: |this, _, cx| {
+        this.mention = None;
+        cx.notify();
+    },
+};
+
+const SLASH_MENU_WIDTH: f32 = 240.0;
+const MENTION_MENU_WIDTH: f32 = 340.0;
+/// Glyphs and agent marks at the New Agent menu's sizes.
+const MENU_ICON: f32 = 13.0;
+const MENU_LOGO: f32 = 20.0;
+/// A status mark is inset 0.08 where a bare logo is inset 0.28; this size
+/// draws the mark exactly as large as the New Agent menu's 20 pt logos.
+const MENU_STATUS_MARK: f32 = MENU_LOGO * (1.0 - 2.0 * 0.28) / (1.0 - 2.0 * 0.08);
+const MENU_GAP: f32 = 6.0;
+const MENU_MARGIN: f32 = 8.0;
+/// A separator's hairline plus its padding.
+const MENU_SEPARATOR_HEIGHT: f32 = 9.0;
+
+fn menu_height(rows: usize, separators: usize) -> f32 {
+    2.0 * floating::MENU_PADDING_Y
+        + rows as f32 * floating::MENU_ROW_HEIGHT
+        + separators as f32 * MENU_SEPARATOR_HEIGHT
+        + 2.0
+}
+
+fn menu_label(label: impl Into<SharedString>, colors: SemanticColors) -> gpui::Div {
+    div()
+        .min_w_0()
+        .flex_1()
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_ellipsis()
+        .text_size(px(Typo::ROW.size))
+        .text_color(colors.primary)
+        .child(label.into())
+}
+
+fn menu_empty(text: &'static str, colors: SemanticColors) -> gpui::Div {
+    div()
+        .h(px(floating::MENU_ROW_HEIGHT))
+        .px(px(floating::MENU_ROW_MARGIN + floating::MENU_ROW_INSET))
+        .flex()
+        .items_center()
+        .text_size(px(Typo::ROW.size))
+        .text_color(colors.tertiary)
+        .child(text)
+}
+
+/// A caret menu opens below the line, or above it when the window has no
+/// room below, never on top of the text being typed.
+fn menu_placement(
+    caret: Bounds<Pixels>,
+    viewport: Pixels,
+    height: f32,
+) -> (Point<Pixels>, gpui::Anchor) {
+    let left = caret.left() - px(floating::MENU_ROW_MARGIN + floating::MENU_ROW_INSET);
+    let room = px(MENU_GAP + height + MENU_MARGIN);
+    let below = caret.bottom() + room <= viewport || caret.top() - room < px(0.0);
+    if below {
+        (
+            point(left, caret.bottom() + px(MENU_GAP)),
+            gpui::Anchor::TopLeft,
+        )
+    } else {
+        (
+            point(left, caret.top() - px(MENU_GAP)),
+            gpui::Anchor::BottomLeft,
+        )
     }
 }
 
@@ -2425,28 +2595,6 @@ fn chip_rects(layout: &TextLayout, text: &str, range: Range<usize>) -> Vec<Bound
         }
     }
     rects
-}
-
-/// A caret menu opens below the line, or above it when the window has no
-/// room below — never on top of the text being typed.
-fn caret_menu(
-    caret: Bounds<Pixels>,
-    viewport: Pixels,
-    height: f32,
-    list: impl IntoElement,
-) -> impl IntoElement {
-    const GAP: f32 = 6.0;
-    const MARGIN: f32 = 8.0;
-    let below = caret.bottom() + px(GAP + height + MARGIN) <= viewport
-        || caret.top() - px(GAP + height + MARGIN) < px(0.0);
-    let menu = if below {
-        anchored().position(point(caret.left() - px(8.0), caret.bottom() + px(GAP)))
-    } else {
-        anchored()
-            .anchor(gpui::Anchor::BottomLeft)
-            .position(point(caret.left() - px(8.0), caret.top() - px(GAP)))
-    };
-    deferred(menu.snap_to_window_with_margin(px(MARGIN)).child(list))
 }
 
 fn selection_rects(
