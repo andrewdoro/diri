@@ -106,3 +106,135 @@ fn a_missing_file_shows_an_explanation_not_a_crash(cx: &mut gpui::TestAppContext
         assert!(matches!(pane.state, PaneState::Missing { .. }));
     });
 }
+
+/// Sessions and a note a fixture editor can mention, one session per status
+/// a chip draws.
+pub(crate) fn fixture_mentions() -> Vec<editor_view::MentionEntry> {
+    use diri_notes::mention::{Candidate, MentionTarget, note_label, session_label};
+    use diri_ui::{AgentKind, StatusState};
+    let mut entries: Vec<editor_view::MentionEntry> = [
+        (
+            "s_codex",
+            AgentKind::Codex,
+            "Codex",
+            "fix resize flicker",
+            StatusState::Working,
+            "diri",
+        ),
+        (
+            "s_claude",
+            AgentKind::ClaudeCode,
+            "Claude Code",
+            "draft launch email",
+            StatusState::NeedsInput { destructive: false },
+            "Growth",
+        ),
+        (
+            "s_gemini",
+            AgentKind::Gemini,
+            "Gemini",
+            "release notes draft",
+            StatusState::DoneUnseen,
+            "diri-web",
+        ),
+        (
+            "s_shell",
+            AgentKind::Shell,
+            "Terminal",
+            "cargo test",
+            StatusState::IdleSeen,
+            "~/fun/diri",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(id, agent, name, title, status, detail)| editor_view::MentionEntry {
+            candidate: Candidate {
+                target: MentionTarget::Session(id.into()),
+                label: session_label(name, title),
+                keywords: name.to_lowercase(),
+            },
+            agent: Some(agent),
+            status: Some(status),
+            detail: detail.into(),
+        },
+    )
+    .collect();
+    for (id, title, project) in [
+        ("n-groceries", "Groceries", ""),
+        ("n-q4", "Q4 campaign brief", "Growth"),
+    ] {
+        entries.push(editor_view::MentionEntry {
+            candidate: Candidate {
+                target: MentionTarget::Note(id.into()),
+                label: note_label(title),
+                keywords: "note".into(),
+            },
+            agent: None,
+            status: None,
+            detail: project.into(),
+        });
+    }
+    entries
+}
+
+#[gpui::test]
+fn at_mentions_insert_session_and_note_links(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update(cx, |view, cx| {
+        view.set_mentions(
+            editor_view::MentionDirectory {
+                entries: fixture_mentions(),
+            },
+            cx,
+        )
+    });
+    fn type_str(
+        view: &mut NoteEditorView,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<NoteEditorView>,
+    ) {
+        for ch in text.chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+    }
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        type_str(view, "wait for @re", window, cx);
+        // Two sessions match "re"; arrow to the second and take it with Tab.
+        assert_eq!(
+            view.mention_matches().len(),
+            2,
+            "codex resize + gemini release"
+        );
+        view.vertical(true, false, cx);
+        view.indent(&editor_view::Indent, window, cx);
+        type_str(view, "then @groc", window, cx);
+        view.newline(&editor_view::Newline, window, cx);
+        // An email address never opens the menu.
+        type_str(view, "mail me@x", window, cx);
+        assert!(!view.mention_open());
+    });
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(
+        text.contains(
+            "wait for [@Gemini: release notes draft](diri://session/s_gemini) then [@Groceries](diri://note/n-groceries) mail me@x"
+        ),
+        "{text}"
+    );
+    let (_, doc) = markdown::parse(&text);
+    assert_eq!(
+        doc.mentions(),
+        vec![
+            diri_notes::mention::MentionTarget::Session("s_gemini".into()),
+            diri_notes::mention::MentionTarget::Note("n-groceries".into()),
+        ]
+    );
+}

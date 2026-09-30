@@ -553,6 +553,9 @@ impl RootView {
                 TerminalPaneEvent::ExternalDropFeedback { message } => {
                     this.show_quote_feedback("Dropped files", message.clone(), cx);
                 }
+                TerminalPaneEvent::RevealSession(id) => {
+                    this.open_workspace_launch_session(id.clone(), window, cx);
+                }
             })
             .detach();
         }
@@ -1534,6 +1537,9 @@ impl RootView {
                                 cx,
                             )
                         }),
+                        crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
+                            TerminalPaneEvent::RevealSession(id),
+                        ) => this.open_workspace_launch_session(id.clone(), window, cx),
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
                             TerminalPaneEvent::OpenFileReference { reference, cwd, .. },
                         ) => {

@@ -1092,7 +1092,18 @@ mod tests {
             BlockKind::Todo { checked: true },
             BlockKind::Quote,
         ];
-        let styles = [Style::Bold, Style::Italic, Style::Strike, Style::Code];
+        // Mentions are plain links with `diri:` targets; the fuzz covers them
+        // beside an ordinary URL so both survive every nesting.
+        let styles = [
+            Style::Bold,
+            Style::Italic,
+            Style::Strike,
+            Style::Code,
+            Style::Link("https://x.dev/a_(b)".into()),
+            Style::Link("diri://session/s_4e97a43bd495".into()),
+            Style::Link("diri://note/20260930-142501-3fa9".into()),
+        ];
+        let mut mentions = 0;
         for _ in 0..4000 {
             let mut blocks = Vec::new();
             for _ in 0..(1 + next(4)) {
@@ -1119,7 +1130,8 @@ mod tests {
                         continue;
                     }
                     let style = styles[next(styles.len() as u64) as usize].clone();
-                    if style != Style::Code && !expressible(&text, range.clone()) {
+                    let link = matches!(style, Style::Link(_));
+                    if !link && style != Style::Code && !expressible(&text, range.clone()) {
                         continue;
                     }
                     if style == Style::Code
@@ -1156,6 +1168,7 @@ mod tests {
                 continue;
             }
             let doc = Document::new("", blocks);
+            mentions += doc.mentions().len();
             let text = write(&FrontMatter::default(), &doc);
             let (_, parsed) = parse(&text);
             if !equivalent(&parsed, &doc) {
@@ -1172,5 +1185,9 @@ mod tests {
                 );
             }
         }
+        assert!(
+            mentions > 500,
+            "the fuzz barely exercised mentions: {mentions}"
+        );
     }
 }
