@@ -9,6 +9,7 @@ pub mod edit;
 pub mod handoff;
 pub mod history;
 pub mod markdown;
+pub mod merge;
 pub mod mention;
 pub mod store;
 pub mod work;
