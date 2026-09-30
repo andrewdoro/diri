@@ -155,6 +155,7 @@ pub enum StoreEffect {
     /// rebuilds while hidden, so opening it asks for a current snapshot.
     PublishSnapshot,
     MarkSeen(SessionId),
+    MarkUnread(SessionId),
     Remove(SessionId),
     Resume {
         id: SessionId,
@@ -413,6 +414,9 @@ pub struct SessionStore {
     window_navigation_enabled: bool,
     focused_window_session: Option<SessionId>,
     notification_surface_visible: bool,
+    /// Sessions the user marked unread. Only opening one again reads it:
+    /// app or window activation leaves it unread even while it is visible.
+    unread_holds: HashSet<SessionId>,
     last_action_failure: Option<ActionFailure>,
     sidebar_selection_anchor: Option<SessionId>,
     mru_order: Vec<SessionId>,
@@ -523,6 +527,7 @@ impl SessionStore {
                 window_navigation_enabled: false,
                 focused_window_session: None,
                 notification_surface_visible: true,
+                unread_holds: HashSet::new(),
                 last_action_failure: None,
                 sidebar_selection_anchor: None,
                 mru_order: selected_session_id.into_iter().collect(),
@@ -708,10 +713,37 @@ impl SessionStore {
         if visible
             && self.app_is_active
             && let Some(id) = self.notification_selected_session().cloned()
+            && !self.unread_holds.contains(&id)
         {
             self.mark_notifications_read(&id);
             self.emit(StoreEffect::MarkSeen(id));
         }
+    }
+
+    /// Like marking a chat unread: the last completed turn reads "done ·
+    /// unseen" again, and stays so until the session is next opened.
+    pub fn mark_session_unread(&mut self, id: SessionId) {
+        if !self.sessions.contains_key(&id) {
+            return;
+        }
+        self.unread_holds.insert(id.clone());
+        self.emit(StoreEffect::MarkUnread(id));
+        self.emit(StoreEffect::UiChanged);
+    }
+
+    pub fn mark_session_read(&mut self, id: SessionId) {
+        if !self.sessions.contains_key(&id) {
+            return;
+        }
+        self.unread_holds.remove(&id);
+        self.mark_notifications_read(&id);
+        self.emit(StoreEffect::MarkSeen(id));
+        self.emit(StoreEffect::UiChanged);
+    }
+
+    /// Whether activation may read `id` passively; see `unread_holds`.
+    pub(crate) fn reads_passively(&self, id: &SessionId) -> bool {
+        !self.unread_holds.contains(id)
     }
 
     fn notification_is_focused(&self, id: &SessionId) -> bool {
@@ -2816,6 +2848,7 @@ impl SessionStore {
         if active
             && self.notification_surface_visible
             && let Some(id) = self.notification_selected_session().cloned()
+            && !self.unread_holds.contains(&id)
         {
             self.mark_notifications_read(&id);
             self.emit(StoreEffect::MarkSeen(id));
@@ -2826,6 +2859,7 @@ impl SessionStore {
     fn focus_session(&mut self, id: SessionId) {
         let selection_changed = self.selected_session_id.as_ref() != Some(&id);
         self.selected_session_id = Some(id.clone());
+        self.unread_holds.remove(&id);
         if self.window_navigation_enabled {
             self.invalidate_projection();
             return;
@@ -3590,6 +3624,7 @@ async fn run_effects(
                 Ok(())
             }
             StoreEffect::MarkSeen(id) => client.mark_seen(&id).await,
+            StoreEffect::MarkUnread(id) => client.mark_unread(&id).await,
             StoreEffect::Remove(id) => {
                 let result = client.remove(&id).await;
                 if let Err(error) = &result
@@ -3970,6 +4005,7 @@ fn action_context(effect: &StoreEffect) -> Option<ActionContext> {
         | StoreEffect::MutateWorkspace { .. }
         | StoreEffect::PublishSnapshot
         | StoreEffect::MarkSeen(_)
+        | StoreEffect::MarkUnread(_)
         | StoreEffect::RetryConnection
         | StoreEffect::LocateRepo { .. }
         | StoreEffect::ListDirectories { .. }

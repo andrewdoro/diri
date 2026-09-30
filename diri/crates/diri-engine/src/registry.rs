@@ -1943,6 +1943,20 @@ impl Registry {
         Ok(())
     }
 
+    /// Puts the last completed turn back behind `last_seen_at`, so the
+    /// session reads "done · unseen" again until it is next viewed. Returns
+    /// false when no turn has completed: there is nothing to be unread.
+    pub fn mark_unread(&mut self, id: &str) -> std::io::Result<bool> {
+        let record = self.records.get_mut(id).ok_or_else(|| not_found(id))?;
+        let Some(completed) = record.last_turn_completed_at else {
+            return Ok(false);
+        };
+        // One millisecond earlier keeps `last_seen_at` a real recency signal
+        // for the PR monitor and the governor.
+        record.last_seen_at = Some(DateMillis(completed.0 - 1.0));
+        Ok(true)
+    }
+
     /// Ends the session but keeps its record on the shelf: kill-tree,
     /// keep-record, stamp `archivedAt`.
     pub fn archive(&mut self, id: &str) -> std::io::Result<()> {

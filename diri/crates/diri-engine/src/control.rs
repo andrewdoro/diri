@@ -892,6 +892,7 @@ impl ControlServer {
             Method::SESSION_REMOVE => self.session_remove(params),
             Method::SESSION_RENAME => self.session_rename(params),
             Method::SESSION_MARK_SEEN => self.session_mark_seen(params),
+            Method::SESSION_MARK_UNREAD => self.session_mark_unread(params),
             Method::SESSION_ARCHIVE => self.session_archive(params),
             Method::SESSION_UNARCHIVE => self.session_unarchive(params),
             Method::SESSION_HISTORY => self.session_history(),
@@ -2557,6 +2558,20 @@ impl ControlServer {
         registry.persist_deferred();
         self.publish_updated(&registry, &p.session_id.0);
         self.pr_monitor_wake.wake_session(p.session_id.0);
+        Ok(json!({}))
+    }
+
+    fn session_mark_unread(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        if registry
+            .mark_unread(&p.session_id.0)
+            .map_err(io_control_error)?
+        {
+            // An explicit edit, but as small as mark-seen: same deferred write.
+            registry.persist_deferred();
+            self.publish_updated(&registry, &p.session_id.0);
+        }
         Ok(json!({}))
     }
 
@@ -6077,6 +6092,56 @@ mod tests {
         ));
         let list = ok_of(call(&server, "session.list", None));
         assert_eq!(list["sessions"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn mark_unread_returns_a_seen_completion_to_done_unseen() {
+        use diri_proto::{AgentKind, AttentionLevel, DateMillis, SessionRecord};
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let mut finished = test_record("s_done");
+        finished.kind = AgentKind::CLAUDE_CODE;
+        finished.last_turn_completed_at = Some(DateMillis(2_000.0));
+        let mut fresh = test_record("s_fresh");
+        fresh.kind = AgentKind::CLAUDE_CODE;
+        registry.lock().expect("registry").insert_record(finished);
+        registry.lock().expect("registry").insert_record(fresh);
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.path().join("daemon.sock"),
+        ));
+        let attention = |id: &str| {
+            let list = ok_of(call(&server, "session.list", None));
+            let record = list["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|record| record["id"] == id)
+                .cloned()
+                .unwrap();
+            serde_json::from_value::<SessionRecord>(record)
+                .unwrap()
+                .attention()
+        };
+        let params = |id: &str| Some(json!({ "sessionID": id }));
+
+        ok_of(call(&server, "session.mark_seen", params("s_done")));
+        assert_eq!(attention("s_done"), AttentionLevel::IdleSeen);
+        ok_of(call(&server, "session.mark_unread", params("s_done")));
+        assert_eq!(attention("s_done"), AttentionLevel::DoneUnseen);
+        ok_of(call(&server, "session.mark_seen", params("s_done")));
+        assert_eq!(attention("s_done"), AttentionLevel::IdleSeen);
+
+        // No completed turn: nothing to be unread, and nothing changes.
+        ok_of(call(&server, "session.mark_seen", params("s_fresh")));
+        ok_of(call(&server, "session.mark_unread", params("s_fresh")));
+        assert_eq!(attention("s_fresh"), AttentionLevel::IdleSeen);
+
+        let error = err_of(call(&server, "session.mark_unread", params("s_missing")));
+        assert_eq!(error.code, "not_found");
     }
 
     #[test]

@@ -50,6 +50,9 @@ impl Method {
     pub const SESSION_READ_DIFF: &'static str = "session.read_diff";
     pub const SESSION_READ_TRANSCRIPT: &'static str = "session.read_transcript";
     pub const SESSION_MARK_SEEN: &'static str = "session.mark_seen";
+    /// Returns a completed turn to "done · unseen", like marking a chat
+    /// unread. A no-op for a session with no completed turn.
+    pub const SESSION_MARK_UNREAD: &'static str = "session.mark_unread";
     pub const SESSION_HIBERNATE: &'static str = "session.hibernate";
     pub const SESSION_WAKE: &'static str = "session.wake";
     pub const SESSION_ARCHIVE: &'static str = "session.archive";
@@ -500,6 +503,7 @@ pub type SessionReadScreenParams = SessionIdParams;
 pub type SessionTerminalTitleParams = SessionIdParams;
 pub type SessionReadScrollbackParams = SessionIdParams;
 pub type SessionMarkSeenParams = SessionIdParams;
+pub type SessionMarkUnreadParams = SessionIdParams;
 pub type SessionHibernateParams = SessionIdParams;
 pub type SessionWakeParams = SessionIdParams;
 pub type SessionArchiveParams = SessionIdParams;
@@ -519,6 +523,7 @@ pub struct SessionReconnectResult {
 
 pub type SessionResumeResult = SessionRecord;
 pub type SessionMarkSeenResult = EmptyResult;
+pub type SessionMarkUnreadResult = EmptyResult;
 pub type SessionHibernateResult = EmptyResult;
 pub type SessionWakeResult = EmptyResult;
 pub type SessionArchiveResult = EmptyResult;

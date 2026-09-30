@@ -6095,12 +6095,13 @@ impl Sidebar {
         colors: SemanticColors,
         cx: &mut Context<Self>,
     ) -> PopoverSpec {
-        let (session, pinned, bulk, hosts, migrating) = {
+        let (session, pinned, unread, bulk, hosts, migrating) = {
             let mut store = self.store.write().expect("session store lock poisoned");
             let Some(session) = store.sessions().get(&id).cloned() else {
                 return PopoverSpec::empty();
             };
             let pinned = store.preferences().sidebar_pinned_sessions.contains(&id);
+            let unread = store.notifications().session_unread(&id);
             // The whole multi-selection, when the right-clicked row is part
             // of one (Swift: bulk actions split archive/revive honestly).
             let bulk =
@@ -6111,7 +6112,7 @@ impl Sidebar {
                 };
             let hosts = store.hosts().to_vec();
             let migrating = store.migrating().contains(&id);
-            (session, pinned, bulk, hosts, migrating)
+            (session, pinned, unread, bulk, hosts, migrating)
         };
         let mut content = div().p(px(4.0)).flex().flex_col();
         if bulk.len() > 1 {
@@ -6321,7 +6322,33 @@ impl Sidebar {
                             cx.notify();
                         }
                     }),
-                ))
+                ));
+            if let Some(read) = read_toggle(&session, unread) {
+                content = content.child(menu_row(
+                    if read {
+                        "Mark as Read"
+                    } else {
+                        "Mark as Unread"
+                    },
+                    colors,
+                    cx.listener({
+                        let id = id.clone();
+                        move |this, _, _, cx| {
+                            let mut store =
+                                this.store.write().expect("session store lock poisoned");
+                            if read {
+                                store.mark_session_read(id.clone());
+                            } else {
+                                store.mark_session_unread(id.clone());
+                            }
+                            drop(store);
+                            this.ui.popover = None;
+                            cx.notify();
+                        }
+                    }),
+                ));
+            }
+            content = content
                 .child(menu_row(
                     "Remove from Sidebar",
                     colors,
@@ -9305,6 +9332,18 @@ fn lineage_glyph(id: &SessionId, role: LineageRole, colors: SemanticColors) -> A
         .into_any_element()
 }
 
+/// The session menu's read toggle: `Some(true)` offers "Mark as Read" for a
+/// finished turn not yet looked at, `Some(false)` offers "Mark as Unread" for
+/// one already seen. Work in progress and input requests have nothing to read.
+fn read_toggle(session: &diri_proto::SessionRecord, notification_unread: bool) -> Option<bool> {
+    match session.attention() {
+        ProtoAttentionLevel::DoneUnseen => Some(true),
+        ProtoAttentionLevel::IdleSeen if notification_unread => Some(true),
+        ProtoAttentionLevel::IdleSeen => session.last_turn_completed_at.map(|_| false),
+        _ => None,
+    }
+}
+
 /// Unread inbox entries share the completion mark, while active work and
 /// requests for input retain priority. There is never a second unread dot.
 fn sidebar_activity_state(state: StatusState, unread: bool) -> StatusState {
@@ -9932,6 +9971,36 @@ mod tests {
             sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame),
             frame
         );
+    }
+
+    #[test]
+    fn read_toggle_offers_the_opposite_of_the_session_read_state() {
+        let fixture_session = || {
+            let mut session = SidebarPreviewFixture::make(PreviewScenario::Typical)
+                .list
+                .sessions
+                .into_iter()
+                .next()
+                .expect("fixture session");
+            session.kind = diri_proto::AgentKind::CLAUDE_CODE;
+            session.foreground_agent = None;
+            session.attention_state = None;
+            session.status = diri_proto::SessionStatus::Idle;
+            session
+        };
+        let mut done = fixture_session();
+        done.last_turn_completed_at = Some(diri_proto::DateMillis(50.0));
+        done.last_seen_at = Some(diri_proto::DateMillis(40.0));
+        assert_eq!(read_toggle(&done, false), Some(true));
+        done.last_seen_at = Some(diri_proto::DateMillis(60.0));
+        assert_eq!(read_toggle(&done, false), Some(false));
+        assert_eq!(read_toggle(&done, true), Some(true));
+
+        let mut fresh = fixture_session();
+        fresh.last_turn_completed_at = None;
+        assert_eq!(read_toggle(&fresh, false), None);
+        done.status = diri_proto::SessionStatus::Working;
+        assert_eq!(read_toggle(&done, false), None);
     }
 
     #[test]
@@ -11487,7 +11556,8 @@ mod tests {
     /// `DIRI_VISUAL_GROUPING=recency`, `DIRI_VISUAL_LIGHT=1`,
     /// `DIRI_VISUAL_THEME=<theme id>`, or
     /// `DIRI_VISUAL_POPOVER=none|project|session` to select the state to
-    /// capture (the default opens the grouping menu).
+    /// capture (the default opens the grouping menu), and
+    /// `DIRI_VISUAL_READ=seen|unseen` to finish that session's turn.
     /// `DIRI_VISUAL_BACKDROP=62616e` supplies a fixed RGB backdrop under glass;
     /// headless rendering cannot capture the native desktop blur.
     #[cfg(target_os = "macos")]
@@ -11579,6 +11649,21 @@ mod tests {
                             && session.id == SessionId::new("preview-codex")
                         {
                             session.host = Some("Forge".into());
+                        }
+                        // `DIRI_VISUAL_READ=seen|unseen` finishes the menu's
+                        // session so its Mark as Unread/Read item renders.
+                        if let Ok(read) = std::env::var("DIRI_VISUAL_READ")
+                            && session.id == SessionId::new("preview-codex")
+                        {
+                            session.status = diri_proto::SessionStatus::Idle;
+                            session.attention_state = None;
+                            session.last_turn_completed_at = Some(diri_proto::DateMillis(now));
+                            session.last_seen_at =
+                                Some(diri_proto::DateMillis(if read == "seen" {
+                                    now + 1.0
+                                } else {
+                                    now - 1.0
+                                }));
                         }
                         store.upsert_session(session);
                     }
