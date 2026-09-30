@@ -1175,6 +1175,7 @@ mod tests {
             host: None,
             account_profile_id: None,
             same_repo_as: None,
+            start_directory: None,
         };
         let session: SessionRecord = control.request(Method::SESSION_SPAWN, &spawn).await?;
         let session_id = session.id;

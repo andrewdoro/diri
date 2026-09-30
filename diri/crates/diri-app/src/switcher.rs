@@ -530,6 +530,10 @@ pub fn display_title_str(session: &SessionRecord) -> &str {
     if session.title_source == TitleSource::Placeholder {
         if matches!(session.status, SessionStatus::Exited(_)) {
             "Ended"
+        } else if session.kind == diri_proto::AgentKind::SHELL {
+            // Until the Engine names it after its program or folder, and for
+            // a remote shell, which reports neither.
+            "Terminal"
         } else {
             "Untitled"
         }
@@ -597,6 +601,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
         }
     }
 

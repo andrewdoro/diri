@@ -221,6 +221,9 @@ pub struct StatusReducer {
     manifest_id: Option<String>,
     manifest_version: Option<String>,
     evidence: Option<StatusEvidence>,
+    /// The shell's own authority and manifest while an Agent it runs in the
+    /// foreground has borrowed the reducer. See [`Self::lend_to_agent`].
+    lent_from: Option<(Authority, Option<String>, Option<String>)>,
 }
 
 impl StatusReducer {
@@ -234,6 +237,7 @@ impl StatusReducer {
             manifest_id: None,
             manifest_version: None,
             evidence: None,
+            lent_from: None,
         }
     }
 
@@ -278,6 +282,82 @@ impl StatusReducer {
         self.state.spawned_at = now
             .checked_sub(self.timing.startup_grace)
             .unwrap_or(SystemTime::UNIX_EPOCH);
+    }
+
+    /// The Agent manifest a shell's foreground program is being read with.
+    pub fn foreground_agent(&self) -> Option<&str> {
+        self.lent_from.as_ref().and(self.manifest_id.as_deref())
+    }
+
+    /// Hands a shell's status to an Agent the user started inside it.
+    ///
+    /// An Agent typed at a shell prompt gets none of the launch-time wiring
+    /// (no hooks, no notify command), so only its screen can say what it is
+    /// doing: while it holds the foreground the reducer reads that Agent's
+    /// screen rules as a screen-primary Agent would. It starts Idle and with
+    /// no turn in flight, so recognising an Agent never announces a finished
+    /// turn it did not run.
+    pub fn lend_to_agent(
+        &mut self,
+        manifest_id: &str,
+        manifest_version: Option<&str>,
+        now: SystemTime,
+    ) -> ReducerOutcome {
+        let mut outcome = ReducerOutcome::default();
+        if matches!(self.status, SessionStatus::Exited(_))
+            || (self.lent_from.is_some() && self.manifest_id.as_deref() == Some(manifest_id))
+        {
+            return outcome;
+        }
+        if self.lent_from.is_none() {
+            self.lent_from = Some((
+                self.authority,
+                self.manifest_id.take(),
+                self.manifest_version.take(),
+            ));
+        }
+        self.authority = Authority::ScreenPrimary;
+        self.manifest_id = Some(manifest_id.to_owned());
+        self.manifest_version = manifest_version.map(str::to_owned);
+        self.forget_screen(now);
+        self.set_status(SessionStatus::Idle, &mut outcome);
+        self.publish_evidence(
+            StatusEvidenceSource::ProcessLiveness,
+            None,
+            None,
+            now,
+            &mut outcome,
+        );
+        outcome
+    }
+
+    /// Returns a lent reducer to its shell, whose job state `running` is.
+    pub fn return_from_agent(&mut self, running: bool, now: SystemTime) -> ReducerOutcome {
+        let mut outcome = ReducerOutcome::default();
+        let Some((authority, manifest_id, manifest_version)) = self.lent_from.take() else {
+            return outcome;
+        };
+        self.authority = authority;
+        self.manifest_id = manifest_id;
+        self.manifest_version = manifest_version;
+        if matches!(self.status, SessionStatus::Exited(_)) {
+            return outcome;
+        }
+        self.forget_screen(now);
+        self.state.pending_needs_input = None;
+        self.apply_shell_job(running, now, &mut outcome);
+        outcome
+    }
+
+    /// Drops every belief read from a screen, keeping the session's clock.
+    fn forget_screen(&mut self, now: SystemTime) {
+        let spawned_at = now
+            .checked_sub(self.timing.startup_grace)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let mut state = InternalState::new(spawned_at);
+        state.transport_unavailable = self.state.transport_unavailable;
+        state.last_signal_at = now;
+        self.state = state;
     }
 
     pub fn with_attention_path(self, path: &std::path::Path) -> Self {

@@ -471,6 +471,12 @@ pub struct SessionSpawnParams {
     /// `cwd` / the host's defaultCwd when the repo isn't cloned there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub same_repo_as: Option<SessionId>,
+    /// Where a local terminal's shell starts, when that is not `cwd`: the
+    /// directory another terminal had `cd`'d to. `cwd` still decides the
+    /// Session's project, so following a terminal into a subdirectory does
+    /// not open a new project. Ignored for Agents and remote hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_directory: Option<String>,
 }
 
 pub type SessionSpawnResult = SessionRecord;

@@ -160,12 +160,18 @@ impl ManifestEngine {
                     reliable_completion: false,
                 },
                 |agent| {
-                    agent.session_capabilities(
+                    let mut capabilities = agent.session_capabilities(
                         record.resumability,
                         &record.status,
                         record.is_archived(),
                         record.agent_session_id.as_deref(),
-                    )
+                    );
+                    // An Agent started by hand in a shell has no conversation
+                    // Diri knows: forking it would pick whichever was latest.
+                    if record.kind == diri_proto::AgentKind::SHELL {
+                        capabilities.fork = false;
+                    }
+                    capabilities
                 },
             )
     }

@@ -2226,7 +2226,7 @@ fn apply_cursor_conversation(
         && let Some(title) = conversation
             .title
             .and_then(|title| normalize_agent_title(&title))
-            .filter(|title| !is_generic_terminal_title(title, record))
+            .filter(|title| !is_generic_terminal_title(title, &record.kind, &record.cwd))
         && (record.title != title || record.title_source != TitleSource::AgentProvided)
     {
         record.title = title;
@@ -2251,8 +2251,8 @@ fn apply_native_title(record: &mut SessionRecord, title: &str) -> bool {
     if !accepts_native_title(record.title_source) {
         return false;
     }
-    let Some(title) =
-        normalize_agent_title(title).filter(|title| !is_generic_terminal_title(title, record))
+    let Some(title) = normalize_agent_title(title)
+        .filter(|title| !is_generic_terminal_title(title, &record.kind, &record.cwd))
     else {
         return false;
     };
@@ -2304,12 +2304,14 @@ fn fold_session_view(record: &mut SessionRecord, view: &SessionView) {
     // they are idle. That must not freeze the record as AgentProvided, or
     // the first real prompt can never name the session.
     repair_persisted_agent_title(record);
-    if record.kind == diri_proto::AgentKind::SHELL
-        || matches!(
-            record.title_source,
-            TitleSource::AgentProvided | TitleSource::DirijorAssigned | TitleSource::UserRename
-        )
-    {
+    if record.kind == diri_proto::AgentKind::SHELL {
+        fold_shell_view(record, view);
+        return;
+    }
+    if matches!(
+        record.title_source,
+        TitleSource::AgentProvided | TitleSource::DirijorAssigned | TitleSource::UserRename
+    ) {
         return;
     }
     let terminal_title = view.terminal_title.as_deref().or_else(|| {
@@ -2332,6 +2334,54 @@ fn fold_session_view(record: &mut SessionRecord, view: &SessionView) {
         // saved/provider first prompt on every live fold and fight refreshes.
         record.title = title;
         record.title_source = TitleSource::FirstPrompt;
+    }
+}
+
+/// Names a shell after what it is doing, the way a terminal's own tab would:
+/// the Agent's task or the program in its foreground, else the directory its
+/// prompt sits in. A name the user or Diri gave it is never replaced.
+///
+/// A remote shell reports none of this and keeps its placeholder.
+fn fold_shell_view(record: &mut SessionRecord, view: &SessionView) {
+    record.foreground_agent = view.foreground_agent.clone().map(AgentKind::new);
+    if view.terminal_cwd.is_some() {
+        record.terminal_cwd.clone_from(&view.terminal_cwd);
+    }
+    if matches!(
+        record.title_source,
+        TitleSource::AgentProvided | TitleSource::DirijorAssigned | TitleSource::UserRename
+    ) {
+        return;
+    }
+    let cwd = record.terminal_cwd.as_deref().unwrap_or(&record.cwd);
+    let title = record
+        .foreground_agent
+        .as_ref()
+        .and_then(|agent| {
+            let title = view.terminal_title.as_deref()?;
+            normalize_terminal_title_for(title, agent, cwd)
+        })
+        .or_else(|| view.foreground_program.clone())
+        .or_else(|| record.terminal_cwd.as_deref().map(directory_title));
+    if let Some(title) = title
+        && (record.title != title || record.title_source != TitleSource::TerminalTitle)
+    {
+        record.title = title;
+        record.title_source = TitleSource::TerminalTitle;
+    }
+}
+
+/// A directory as a tab names it: its last component, or `~` for home.
+fn directory_title(path: &str) -> String {
+    let path = path.trim_end_matches('/');
+    if std::env::var_os("HOME")
+        .is_some_and(|home| home.to_string_lossy().trim_end_matches('/') == path)
+    {
+        return "~".to_owned();
+    }
+    match path.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => "/".to_owned(),
     }
 }
 
@@ -2370,6 +2420,10 @@ fn repair_codex_conversation(record: &mut SessionRecord, home: &Path) -> bool {
 /// titles by older builds. User and Diri-assigned names are intentionally
 /// untouched; only titles attributed to the Agent/PTY are safe to repair.
 fn repair_persisted_agent_title(record: &mut SessionRecord) -> bool {
+    // A shell's title names its foreground program, which may be `claude`.
+    if record.kind == AgentKind::SHELL {
+        return false;
+    }
     // Once Codex has an identified native name, its literal text belongs to
     // the conversation. A valid `/rename Ready` must not be parsed as activity.
     if record.kind == AgentKind::CODEX
@@ -2472,17 +2526,15 @@ fn normalize_agent_title(title: &str) -> Option<String> {
 /// the project, and temporarily replaces the name while generation is pending.
 /// Only a useful conversation component may become a provisional sidebar name.
 fn normalize_terminal_title(title: &str, record: &SessionRecord) -> Option<String> {
+    normalize_terminal_title_for(title, &record.kind, &record.cwd)
+}
+
+fn normalize_terminal_title_for(title: &str, kind: &AgentKind, cwd: &str) -> Option<String> {
     let mut title = normalize_agent_title(title)?;
-    if record.kind == AgentKind::CODEX {
+    if *kind == AgentKind::CODEX {
         if let Some((name, directory)) = title.rsplit_once(" | ")
-            && (directory
-                == record
-                    .cwd
-                    .trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("")
-                || directory == record.cwd)
+            && (directory == cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("")
+                || directory == cwd)
         {
             title = name.trim().to_owned();
         }
@@ -2513,16 +2565,16 @@ fn normalize_terminal_title(title: &str, record: &SessionRecord) -> Option<Strin
         }
         title = parts.join(" | ");
     }
-    (!title.is_empty() && !is_generic_terminal_title(&title, record)).then_some(title)
+    (!title.is_empty() && !is_generic_terminal_title(&title, kind, cwd)).then_some(title)
 }
 
-fn is_generic_terminal_title(title: &str, record: &SessionRecord) -> bool {
+fn is_generic_terminal_title(title: &str, kind: &AgentKind, cwd: &str) -> bool {
     let title = title.trim().to_ascii_lowercase();
     let compact_title = title
         .chars()
         .filter(|character| character.is_alphanumeric())
         .collect::<String>();
-    let cwd = record.cwd.trim_end_matches('/').to_ascii_lowercase();
+    let cwd = cwd.trim_end_matches('/').to_ascii_lowercase();
     let directory = cwd.rsplit('/').next().unwrap_or(&cwd);
     title == cwd
         || title == directory
@@ -2537,7 +2589,7 @@ fn is_generic_terminal_title(title: &str, record: &SessionRecord) -> bool {
                 | "terminal"
                 | "shell"
         )
-        || (record.kind == diri_proto::AgentKind::CURSOR && is_cursor_status_title(&title))
+        || (*kind == diri_proto::AgentKind::CURSOR && is_cursor_status_title(&title))
 }
 
 fn is_cursor_status_title(title: &str) -> bool {
@@ -2624,6 +2676,7 @@ fn recovered_record(capsule: diri_proto::recovery::SessionRecoveryCapsule) -> Se
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        terminal_cwd: None,
     }
 }
 
@@ -2849,6 +2902,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
         }
     }
 
@@ -3863,9 +3917,83 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_is_named_after_its_foreground_program_or_directory() {
+        let view = |program: Option<&str>, agent: Option<&str>, title: Option<&str>| SessionView {
+            remote_connection: None,
+            foreground_program: program.map(str::to_owned),
+            foreground_agent: agent.map(str::to_owned),
+            terminal_cwd: Some("/work/diri/crates".to_owned()),
+            attention_state: None,
+            terminal_title: title.map(str::to_owned),
+            id: "shell".to_owned(),
+            status: SessionStatus::Idle,
+            status_evidence: None,
+            needs_input: None,
+            last_turn_completed_at: None,
+            title: title.map(str::to_owned),
+            title_source: Some(TitleSource::TerminalTitle),
+            tail_offset: 0,
+            exited: false,
+        };
+        let mut shell = record("shell");
+        shell.cwd = "/work/diri".into();
+
+        // At the prompt, the directory `cd` moved it to; the shell's own
+        // OSC title (fish writes "fish ~/w/diri") is not a name.
+        fold_session_view(&mut shell, &view(None, None, Some("fish /work/diri")));
+        assert_eq!(shell.title, "crates");
+        assert_eq!(shell.title_source, TitleSource::TerminalTitle);
+        assert_eq!(shell.terminal_cwd.as_deref(), Some("/work/diri/crates"));
+        assert_eq!(shell.cwd, "/work/diri", "the launch cwd owns the project");
+        assert_eq!(shell.effective_kind(), &AgentKind::SHELL);
+
+        fold_session_view(&mut shell, &view(Some("vim"), None, Some("notes.md - VIM")));
+        assert_eq!(shell.title, "vim");
+
+        // Claude started by hand: its icon, then its own task title.
+        fold_session_view(
+            &mut shell,
+            &view(Some("claude"), Some("claude-code"), Some("✳ Claude Code")),
+        );
+        assert_eq!(shell.effective_kind(), &AgentKind::CLAUDE_CODE);
+        assert_eq!(shell.kind, AgentKind::SHELL);
+        assert_eq!(shell.title, "claude");
+        fold_session_view(
+            &mut shell,
+            &view(
+                Some("claude"),
+                Some("claude-code"),
+                Some("✳ Fix login redirect"),
+            ),
+        );
+        assert_eq!(shell.title, "Fix login redirect");
+
+        fold_session_view(&mut shell, &view(None, None, None));
+        assert_eq!(shell.foreground_agent, None);
+        assert_eq!(shell.title, "crates");
+
+        shell.title = "Build server".into();
+        shell.title_source = TitleSource::UserRename;
+        fold_session_view(&mut shell, &view(Some("npm"), None, None));
+        assert_eq!(shell.title, "Build server");
+
+        // A remote shell reports nothing and keeps its placeholder.
+        let mut remote = record("remote");
+        remote.title = "shell".into();
+        remote.title_source = TitleSource::Placeholder;
+        let mut nothing = view(None, None, None);
+        nothing.terminal_cwd = None;
+        fold_session_view(&mut remote, &nothing);
+        assert_eq!(remote.title_source, TitleSource::Placeholder);
+    }
+
+    #[test]
     fn pty_titles_are_filtered_fallbacks_and_never_override_user_renames() {
         let view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
             attention_state: None,
             terminal_title: None,
             id: "claude".to_owned(),
@@ -3903,6 +4031,9 @@ mod tests {
         captured_prompt.kind = AgentKind::CODEX;
         let prompt_view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
             title: Some("Implement terminal IME".to_owned()),
             title_source: Some(TitleSource::FirstPrompt),
             ..view.clone()
@@ -3916,6 +4047,9 @@ mod tests {
         generic.cwd = "/work/diri".to_owned();
         let generic_view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
             title: Some("diri".to_owned()),
             ..view
         };
@@ -3926,6 +4060,9 @@ mod tests {
         decorated.kind = AgentKind::CLAUDE_CODE;
         let decorated_view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
             title: Some("✳ Claude Code".to_owned()),
             ..generic_view.clone()
         };
@@ -3953,6 +4090,9 @@ mod tests {
         cursor.kind = AgentKind::CURSOR;
         let cursor_ready = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
             title: Some("Cursor Agent - \u{2705} Ready".to_owned()),
             title_source: Some(TitleSource::AgentProvided),
             ..generic_view
@@ -3964,6 +4104,9 @@ mod tests {
         cursor.title_source = TitleSource::AgentProvided;
         let cursor_prompt = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
             title: Some("Fix the cursor session title".to_owned()),
             title_source: Some(TitleSource::FirstPrompt),
             ..cursor_ready.clone()
@@ -3976,6 +4119,9 @@ mod tests {
         cursor.title_source = TitleSource::FirstPrompt;
         let named_working = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
             title: Some("Cursor Integration Fix - \u{23f3} Working ...".to_owned()),
             title_source: Some(TitleSource::AgentProvided),
             ..cursor_ready
@@ -3996,6 +4142,9 @@ mod tests {
         // be a follow-up to the conversation whose title was already saved.
         let view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
             attention_state: None,
             id: session.id.to_string(),
             status: SessionStatus::Working,
@@ -4111,6 +4260,9 @@ mod tests {
             session.title_source = TitleSource::FirstPrompt;
             let view = SessionView {
                 remote_connection: None,
+                foreground_program: None,
+                foreground_agent: None,
+                terminal_cwd: None,
                 attention_state: None,
                 terminal_title: None,
                 id: session.id.to_string(),
@@ -4135,6 +4287,9 @@ mod tests {
         session.cwd = "/work/anara".into();
         let mut view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
             attention_state: None,
             id: session.id.to_string(),
             status: SessionStatus::Working,
@@ -4667,6 +4822,9 @@ mod tests {
         session.status = SessionStatus::Working;
         let view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
             attention_state: None,
             terminal_title: None,
             id: "completed".to_owned(),
