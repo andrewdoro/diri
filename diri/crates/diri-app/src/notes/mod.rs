@@ -7,6 +7,7 @@
 //! (via `diri_notes::store`), saves continuously, keeps the Session's title in
 //! step with the note's, and reloads writes made by the CLI or agents.
 
+pub(crate) mod chip;
 pub(crate) mod editor_view;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -519,3 +519,45 @@ fn version_history_lists_previews_and_restores(cx: &mut gpui::TestAppContext) {
     editor.update(cx, |_, cx| cx.emit(EditorEvent::Dismiss));
     assert!(pane.read_with(cx, |pane, _| pane.versions.is_none()));
 }
+
+#[gpui::test]
+fn the_session_chip_api_reads_live_status_and_inserts_links(cx: &mut gpui::TestAppContext) {
+    use super::chip::ChipDot;
+    use diri_notes::mention::MentionTarget;
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update(cx, |view, cx| {
+        view.set_mentions(
+            editor_view::MentionDirectory {
+                entries: fixture_mentions(),
+            },
+            cx,
+        );
+        // A live session's dot carries its status ink; an unknown one is gone.
+        let live = ChipDot::for_target(
+            &MentionTarget::Session("s_codex".into()),
+            view.mentions(),
+            crate::app_theme::colors("dirijor-light"),
+        );
+        assert!(matches!(live, ChipDot::Status(_)));
+        let gone = ChipDot::for_target(
+            &MentionTarget::Session("s_missing".into()),
+            view.mentions(),
+            crate::app_theme::colors("dirijor-light"),
+        );
+        assert_eq!(gone, ChipDot::Gone);
+        let _chip = view.session_chip("s_codex", "fix resize flicker");
+        // Inserting programmatically writes the same link `@` would.
+        let last = view.editor.blocks().len() - 1;
+        view.insert_session_mention(diri_notes::edit::Pos::new(last, 0), "s_codex", cx);
+    });
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(
+        text.contains("[@Codex: fix resize flicker](diri://session/s_codex)"),
+        "{text}"
+    );
+}

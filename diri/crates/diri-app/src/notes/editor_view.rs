@@ -20,8 +20,7 @@ use diri_notes::doc::{Block, BlockKind, Style};
 use diri_notes::edit::{Editor, Granularity, Pos, Selection, Turn};
 use diri_notes::mention::{self, Candidate, MentionTarget};
 use diri_ui::{
-    AgentKind as UiAgentKind, AgentLogo, Ink, Palette, SemanticColors, StatusGlyph, StatusState,
-    Typo,
+    AgentKind as UiAgentKind, AgentLogo, Palette, SemanticColors, StatusGlyph, StatusState, Typo,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, ElementInputHandler,
@@ -213,7 +212,7 @@ pub(crate) struct MentionDirectory {
 }
 
 impl MentionDirectory {
-    fn find(&self, target: &MentionTarget) -> Option<&MentionEntry> {
+    pub(crate) fn find(&self, target: &MentionTarget) -> Option<&MentionEntry> {
         self.entries.iter().find(|e| &e.candidate.target == target)
     }
 
@@ -240,9 +239,7 @@ const INDENT_STEP: f32 = 24.0;
 /// Gutter width left of a list item that holds its fold chevron.
 const DISCLOSURE_WIDTH: f32 = 20.0;
 pub(crate) const MEASURE: f32 = 700.0;
-/// Mention chips grow this far past their text on each side.
-const CHIP_PAD_X: f32 = 3.0;
-const CHIP_DOT: f32 = 7.0;
+use super::chip::{DOT as CHIP_DOT, PAD_X as CHIP_PAD_X};
 
 /// The notes accent: Diri's ember, shared with the brand mark.
 pub(crate) fn accent() -> gpui::Rgba {
@@ -435,6 +432,49 @@ impl NoteEditorView {
 
     pub(crate) fn set_colors(&mut self, colors: SemanticColors) {
         self.colors = colors;
+    }
+
+    /// What `@` offers and what chips read their live status from.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "API for the to-do handoff (notes/todo-handoff)")
+    )]
+    pub(crate) fn mentions(&self) -> &MentionDirectory {
+        &self.mentions
+    }
+
+    /// The live chip for session `id`, for any note surface outside the
+    /// text flow (a to-do's work state, say): status from the same
+    /// directory the inline chips use, hollow once the session is gone.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "API for the to-do handoff (notes/todo-handoff)")
+    )]
+    pub(crate) fn session_chip(&self, id: &str, fallback: &str) -> super::chip::SessionChip {
+        super::chip::SessionChip::for_session(id, fallback, &self.mentions, self.colors)
+    }
+
+    /// Inserts a live session chip at `pos`, as if picked from `@`.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "API for the to-do handoff (notes/todo-handoff)")
+    )]
+    pub(crate) fn insert_session_mention(
+        &mut self,
+        pos: diri_notes::edit::Pos,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let target = MentionTarget::Session(id.to_owned());
+        let label = self
+            .mentions
+            .find(&target)
+            .map(|e| e.candidate.label.clone())
+            .unwrap_or_else(|| mention::session_label("", "Session"));
+        self.editor.set_caret(pos);
+        self.editor
+            .insert_mention(pos.offset..pos.offset, &target, &label, now_ms());
+        self.edited(cx);
     }
 
     /// Replaces what `@` offers and what chips show. Cheap when unchanged,
@@ -1767,25 +1807,12 @@ fn highlights(
     out
 }
 
-/// A session's live status as one ink, for the dot at the head of its chip.
-fn status_ink(agent: UiAgentKind, state: StatusState, colors: SemanticColors) -> gpui::Rgba {
-    match state {
-        StatusState::Working => Ink::working(agent, colors),
-        StatusState::NeedsInput { destructive: false } => Ink::on_surface(Ink::ATTENTION, colors),
-        StatusState::NeedsInput { destructive: true } => Ink::on_surface(Ink::DANGER, colors),
-        StatusState::DoneUnseen => Ink::on_surface(Ink::FRESH, colors),
-        StatusState::IdleSeen => colors.secondary,
-        StatusState::None | StatusState::Hibernated => colors.tertiary,
-    }
-}
-
 /// What one chip paints behind its text.
 struct ChipPaint {
     block: usize,
     text: String,
     range: Range<usize>,
-    /// Session chips: the status dot's ink, hollow when the session is gone.
-    dot: Option<(gpui::Rgba, bool)>,
+    dot: super::chip::ChipDot,
 }
 
 trait AlphaExt {
@@ -1985,19 +2012,7 @@ impl Render for NoteEditorView {
                 continue;
             }
             for chip in mention::in_block(block) {
-                let dot = match &chip.target {
-                    MentionTarget::Note(_) => None,
-                    MentionTarget::Session(_) => Some(
-                        match self
-                            .mentions
-                            .find(&chip.target)
-                            .and_then(|e| e.agent.zip(e.status))
-                        {
-                            Some((agent, state)) => (status_ink(agent, state, colors), false),
-                            None => (colors.tertiary, true),
-                        },
-                    ),
-                };
+                let dot = super::chip::ChipDot::for_target(&chip.target, &self.mentions, colors);
                 chips.push(ChipPaint {
                     block: index,
                     text: block.text.clone(),
@@ -2007,8 +2022,8 @@ impl Render for NoteEditorView {
             }
         }
         let chip_layouts = layouts.clone();
-        let chip_fill = colors.primary.alpha(0.07);
-        let chip_border = colors.primary.alpha(0.1);
+        let chip_fill = super::chip::fill(colors);
+        let chip_border = super::chip::border(colors);
         let chip_backdrop = canvas(
             |_, _, _| {},
             move |_, _, window, _| {
@@ -2023,13 +2038,15 @@ impl Render for NoteEditorView {
                         );
                         window.paint_quad(
                             fill(rect, chip_fill)
-                                .corner_radii(px(5.0))
-                                .border_widths(px(0.5))
+                                .corner_radii(px(super::chip::RADIUS))
+                                .border_widths(px(super::chip::BORDER))
                                 .border_color(chip_border),
                         );
                     }
-                    let Some((ink, hollow)) = chip.dot else {
-                        continue;
+                    let (ink, hollow) = match chip.dot {
+                        super::chip::ChipDot::Status(ink) => (ink, false),
+                        super::chip::ChipDot::Gone => (colors.tertiary, true),
+                        super::chip::ChipDot::None => continue,
                     };
                     let Some(at) = char_rect(layout, &chip.text, chip.range.start) else {
                         continue;
