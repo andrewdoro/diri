@@ -85,6 +85,15 @@ fn replay_budget() -> usize {
 /// write; an idle screen is checkpointed within about a second.
 const CHECKPOINT_SETTLE: Duration = Duration::from_secs(1);
 
+/// Longest a dirty screen goes without a checkpoint while output keeps
+/// arriving. The settle alone restarts on every chunk, so a TUI that animates
+/// a spinner or an elapsed timer never went quiet and never checkpointed. An
+/// Engine restart then cold-replayed from the last `CSI 2J`, which carries no
+/// DEC private modes: a working Codex was adopted outside its alternate screen
+/// with mouse reporting off, and the wheel scrolled replay debris locally
+/// instead of reaching Codex.
+const CHECKPOINT_MAX_STALENESS: Duration = Duration::from_secs(5);
+
 /// How long a deferred spawn waits for the first client size before
 /// launching at the estimated size anyway — an MCP-spawned agent may never
 /// get a view. The Swift daemon's 400ms fallback window.
@@ -4508,7 +4517,8 @@ fn pump_held(
     // corrected without bringing back periodic grid polling.
     shared.grid_wake.notify();
     let mut last_checkpoint_key: Option<CheckpointKey> = None;
-    let mut checkpoint_dirty_at: Option<Instant> = None;
+    // (first unsaved output, latest output) since the last checkpoint.
+    let mut checkpoint_dirty_at: Option<(Instant, Instant)> = None;
     let mut last_liveness = Instant::now();
     // When this session's foreground group was last sampled, and when bytes
     // last moved in either direction; see `held_foreground_sample_due`.
@@ -4733,7 +4743,9 @@ fn pump_held(
                         &mut last_checkpoint_key,
                     );
                 }
-            } else if checkpoint_dirty_at.is_some_and(|at| at.elapsed() >= CHECKPOINT_SETTLE) {
+            } else if checkpoint_dirty_at.is_some_and(|(first, last)| {
+                last.elapsed() >= CHECKPOINT_SETTLE || first.elapsed() >= CHECKPOINT_MAX_STALENESS
+            }) {
                 checkpoint_dirty_at = None;
                 persist_checkpoint(
                     &shared,
@@ -4859,7 +4871,8 @@ fn pump_held(
         };
 
         if !output.is_empty() {
-            checkpoint_dirty_at = Some(Instant::now());
+            let now = Instant::now();
+            checkpoint_dirty_at = Some((checkpoint_dirty_at.map_or(now, |(first, _)| first), now));
             // Detection snapshots the whole screen and walks it with the
             // manifest's patterns. That is cheap per screen and ruinous per
             // read: a session streaming output produces thousands of reads a

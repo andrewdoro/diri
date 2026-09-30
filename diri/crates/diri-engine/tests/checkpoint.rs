@@ -206,6 +206,44 @@ fn the_held_pump_writes_a_checkpoint_once_output_settles() {
         .expect("terminate");
 }
 
+/// A TUI that never goes quiet (a spinner, an elapsed-time counter) still
+/// gets checkpointed, modes included. Without this, an Engine restart
+/// cold-replayed from the last `CSI 2J`, adopted a working Codex outside its
+/// alternate screen with mouse reporting off, and wheel scrolling moved
+/// local replay debris instead of reaching Codex.
+#[test]
+fn a_screen_that_never_settles_is_still_checkpointed_with_its_modes() {
+    let root = holders_dir("busy");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+
+    // The pause keeps the modes out of the post-replay checkpoint; the
+    // ticker's gaps stay well under the settle delay.
+    let script = "sleep 0.5; printf '\\033[?1049h\\033[?1002h\\033[?1006h'; \
+                  i=0; while :; do i=$((i+1)); printf '\\r%s' \"$i\"; sleep 0.2; done";
+    let mut registry = Registry::new(engine(), root.join("state.json"));
+    registry
+        .spawn(
+            shell_spec("s_busy", script, &logs, Some(holder.clone())),
+            record("s_busy"),
+        )
+        .expect("spawn");
+
+    let path = checkpoint_path(&logs, "s_busy");
+    wait_until(
+        "a checkpoint of the alternate screen while output continues",
+        Duration::from_secs(10),
+        || {
+            ScreenCheckpoint::load(&path)
+                .is_some_and(|checkpoint| checkpoint.alt_screen && checkpoint.mouse.is_reporting())
+        },
+    );
+
+    registry
+        .terminate("s_busy", Duration::from_secs(2))
+        .expect("terminate");
+}
+
 /// The read side, proven by absence: an adopted session whose checkpoint
 /// carries content the log never contained must show that content — a raw
 /// tail replay could not have painted it.
