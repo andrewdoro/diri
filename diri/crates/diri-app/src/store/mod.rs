@@ -714,6 +714,7 @@ impl SessionStore {
             && self.app_is_active
             && let Some(id) = self.notification_selected_session().cloned()
             && !self.unread_holds.contains(&id)
+            && self.is_open(&id)
         {
             self.mark_notifications_read(&id);
             self.emit(StoreEffect::MarkSeen(id));
@@ -744,6 +745,12 @@ impl SessionStore {
     /// Whether activation may read `id` passively; see `unread_holds`.
     pub(crate) fn reads_passively(&self, id: &SessionId) -> bool {
         !self.unread_holds.contains(id)
+    }
+
+    /// Whether the Engine still knows `id`: a closing session is already
+    /// being removed, so marking it seen can only fail with `not_found`.
+    pub(crate) fn is_open(&self, id: &SessionId) -> bool {
+        self.sessions.contains_key(id) && !self.closing.contains(id)
     }
 
     fn notification_is_focused(&self, id: &SessionId) -> bool {
@@ -2849,6 +2856,7 @@ impl SessionStore {
             && self.notification_surface_visible
             && let Some(id) = self.notification_selected_session().cloned()
             && !self.unread_holds.contains(&id)
+            && self.is_open(&id)
         {
             self.mark_notifications_read(&id);
             self.emit(StoreEffect::MarkSeen(id));
