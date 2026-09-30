@@ -1633,6 +1633,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "diri-notes"
+version = "0.1.0"
+dependencies = [
+ "diri-proto",
+ "getrandom 0.4.3",
+ "tempfile",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "diri-proto"
 version = "0.1.0"
 dependencies = [
