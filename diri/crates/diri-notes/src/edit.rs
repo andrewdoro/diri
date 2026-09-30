@@ -907,6 +907,34 @@ impl Editor {
         self.changed();
     }
 
+    /// Pastes a bare URL at a collapsed caret as a link: a tool the note
+    /// recognises (a Notion page, a Linear issue, a Google Sheet) gets its
+    /// readable title, anything else shows the URL itself. In a title or a
+    /// code block the URL goes in as plain text.
+    pub fn paste_url(&mut self, url: &str, now_ms: u64) {
+        let index = self.selection.head.block;
+        if matches!(self.blocks[index].kind, BlockKind::Title | BlockKind::Code) {
+            self.paste(url, now_ms);
+            return;
+        }
+        let title = crate::links::recognize(url).map_or_else(|| url.to_owned(), |r| r.title);
+        self.checkpoint(EditKind::Other, now_ms);
+        self.delete_selection_inner();
+        let pos = self.selection.head;
+        let block = &mut self.blocks[pos.block];
+        let styles: Vec<Style> = block
+            .styles_at(pos.offset)
+            .into_iter()
+            .filter(|s| !matches!(s, Style::Link(_) | Style::Code))
+            .collect();
+        block.replace(pos.offset..pos.offset, &title, &styles);
+        let end = pos.offset + title.len();
+        block.add_mark(pos.offset..end, Style::Link(url.to_owned()));
+        self.selection = Selection::caret(Pos::new(pos.block, end));
+        self.pending = None;
+        self.changed();
+    }
+
     /// Return.
     pub fn enter(&mut self, now_ms: u64) {
         self.checkpoint(EditKind::Other, now_ms);
@@ -1915,5 +1943,25 @@ mod tests {
         e.undo();
         assert_eq!(e.block(1).text, "Intro and more");
         assert!(!e.blocks().iter().any(|b| b.text == "agent: booked"));
+    }
+
+    #[test]
+    fn a_pasted_tool_url_becomes_a_titled_link() {
+        let mut e = editor("# T\n\nsee ");
+        e.set_caret(Pos::new(1, 3));
+        e.insert_text(" ", 0);
+        e.paste_url("https://linear.app/acme/issue/ENG-7/ship-notes", 0);
+        assert_eq!(e.block(1).text, "see ENG-7 Ship notes");
+        assert_eq!(
+            markdown::write_inline(e.block(1), true),
+            "see [ENG-7 Ship notes](https://linear.app/acme/issue/ENG-7/ship-notes)"
+        );
+        // Typing after it is plain text.
+        e.insert_text("!", 0);
+        assert_eq!(e.block(1).marks.len(), 1);
+        e.paste_url("https://diri.sh", 0);
+        assert!(e.block(1).text.ends_with("!https://diri.sh"));
+        assert!(e.undo());
+        assert_eq!(e.block(1).text, "see ENG-7 Ship notes!");
     }
 }

@@ -121,10 +121,20 @@ pub enum IconName {
     Todo,
     Quote,
     Divider,
+    Notion,
+    GoogleDoc,
+    GoogleSheet,
+    GoogleSlides,
+    GoogleDrive,
+    Linear,
+    HubSpot,
+    Figma,
+    Slack,
+    GitHub,
 }
 
 impl IconName {
-    pub const ALL: [Self; 75] = [
+    pub const ALL: [Self; 85] = [
         Self::Account,
         Self::Activity,
         Self::Archive,
@@ -200,6 +210,16 @@ impl IconName {
         Self::Todo,
         Self::Quote,
         Self::Divider,
+        Self::Notion,
+        Self::GoogleDoc,
+        Self::GoogleSheet,
+        Self::GoogleSlides,
+        Self::GoogleDrive,
+        Self::Linear,
+        Self::HubSpot,
+        Self::Figma,
+        Self::Slack,
+        Self::GitHub,
     ];
 
     pub const fn asset_path(self) -> &'static str {
@@ -279,6 +299,16 @@ impl IconName {
             Self::Todo => "icons/todo.svg",
             Self::Quote => "icons/quote.svg",
             Self::Divider => "icons/divider.svg",
+            Self::Notion => "icons/notion.svg",
+            Self::GoogleDoc => "icons/google-doc.svg",
+            Self::GoogleSheet => "icons/google-sheet.svg",
+            Self::GoogleSlides => "icons/google-slides.svg",
+            Self::GoogleDrive => "icons/google-drive.svg",
+            Self::Linear => "icons/linear.svg",
+            Self::HubSpot => "icons/hubspot.svg",
+            Self::Figma => "icons/figma.svg",
+            Self::Slack => "icons/slack.svg",
+            Self::GitHub => "icons/github.svg",
         }
     }
 
@@ -364,6 +394,16 @@ impl IconName {
             "checkmark.square" => Self::Todo,
             "text.quote" => Self::Quote,
             "divider" => Self::Divider,
+            "notion" => Self::Notion,
+            "google.doc" => Self::GoogleDoc,
+            "google.sheet" => Self::GoogleSheet,
+            "google.slides" => Self::GoogleSlides,
+            "google.drive" => Self::GoogleDrive,
+            "linear" => Self::Linear,
+            "hubspot" => Self::HubSpot,
+            "figma" => Self::Figma,
+            "slack" => Self::Slack,
+            "github" => Self::GitHub,
             _ => return None,
         })
     }
@@ -439,6 +479,16 @@ fn embedded_svg(path: &str) -> Option<&'static [u8]> {
         "icons/todo.svg" => include_bytes!("../assets/icons/todo.svg"),
         "icons/quote.svg" => include_bytes!("../assets/icons/quote.svg"),
         "icons/divider.svg" => include_bytes!("../assets/icons/divider.svg"),
+        "icons/notion.svg" => include_bytes!("../assets/icons/notion.svg"),
+        "icons/google-doc.svg" => include_bytes!("../assets/icons/google-doc.svg"),
+        "icons/google-sheet.svg" => include_bytes!("../assets/icons/google-sheet.svg"),
+        "icons/google-slides.svg" => include_bytes!("../assets/icons/google-slides.svg"),
+        "icons/google-drive.svg" => include_bytes!("../assets/icons/google-drive.svg"),
+        "icons/linear.svg" => include_bytes!("../assets/icons/linear.svg"),
+        "icons/hubspot.svg" => include_bytes!("../assets/icons/hubspot.svg"),
+        "icons/figma.svg" => include_bytes!("../assets/icons/figma.svg"),
+        "icons/slack.svg" => include_bytes!("../assets/icons/slack.svg"),
+        "icons/github.svg" => include_bytes!("../assets/icons/github.svg"),
         "icons/account.svg" => include_bytes!("../assets/icons/account.svg"),
         "icons/activity.svg" => include_bytes!("../assets/icons/activity.svg"),
         "icons/archive.svg" => include_bytes!("../assets/icons/archive.svg"),

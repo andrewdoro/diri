@@ -16,7 +16,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use diri_notes::doc::{Block, BlockKind, Style};
+use diri_notes::doc::{Block, BlockKind, Mark, Style};
 use diri_notes::edit::{Editor, Granularity, Pos, Selection, Turn};
 use diri_notes::mention::{self, Candidate, MentionTarget};
 use diri_ui::{
@@ -226,6 +226,11 @@ const MENTION_LIMIT: usize = 8;
 /// A query this long without a match is prose, not a mention.
 const MENTION_QUERY_MAX: usize = 40;
 
+enum ChipHit {
+    Mention(MentionTarget),
+    Link(String),
+}
+
 struct MentionMenu {
     block_id: u64,
     /// Byte offset of the `@`.
@@ -240,6 +245,8 @@ const INDENT_STEP: f32 = 24.0;
 const DISCLOSURE_WIDTH: f32 = 20.0;
 pub(crate) const MEASURE: f32 = 700.0;
 use super::chip::{DOT as CHIP_DOT, PAD_X as CHIP_PAD_X};
+/// A tool chip's glyph.
+const CHIP_ICON: f32 = 13.0;
 
 /// The notes accent: Diri's ember, shared with the brand mark.
 pub(crate) fn accent() -> gpui::Rgba {
@@ -356,6 +363,8 @@ pub(crate) struct NoteEditorView {
     colors: SemanticColors,
     /// One layout per block from the last frame, valid for `layout_revision`.
     layouts: Vec<TextLayout>,
+    /// Each block's laid-out text, parallel to `layouts`.
+    shown: Vec<Shown>,
     layout_revision: u64,
     layout_count: usize,
     /// IME composition range, in bytes of the caret's block.
@@ -399,6 +408,7 @@ impl NoteEditorView {
             focus: cx.focus_handle(),
             colors,
             layouts: Vec::new(),
+            shown: Vec::new(),
             layout_revision: u64::MAX,
             layout_count: 0,
             marked: None,
@@ -582,6 +592,10 @@ impl NoteEditorView {
         } else {
             pos.offset
         };
+        let offset = self
+            .shown
+            .get(pos.block)
+            .map_or(offset, |s| s.to_display(offset));
         let point = layout.position_for_index(offset)?;
         Some((point, layout.line_height()))
     }
@@ -624,6 +638,7 @@ impl NoteEditorView {
         let offset = match layout.index_for_position(clamped) {
             Ok(i) | Err(i) => i,
         };
+        let offset = self.shown.get(index).map_or(offset, |s| s.to_model(offset));
         let text = &block.text;
         let mut offset = offset.min(text.len());
         while !text.is_char_boundary(offset) {
@@ -881,22 +896,32 @@ impl NoteEditorView {
         self.edited(cx);
     }
 
-    /// The mention chip under a window point, if any.
-    fn chip_at(&self, at: Point<Pixels>) -> Option<MentionTarget> {
+    /// The chip under a window point, if any: a mention or a tool link.
+    fn chip_at(&self, at: Point<Pixels>) -> Option<ChipHit> {
         let hidden = self.editor.hidden();
         for (index, block) in self.editor.blocks().iter().enumerate() {
-            let chips = mention::in_block(block);
-            if chips.is_empty() || hidden[index] {
+            if hidden[index] || block.marks.is_empty() {
                 continue;
             }
             let layout = self.layout(index)?;
-            for chip in chips {
-                let text = &block.text;
-                let hit = chip_rects(layout, text, chip.range.clone())
+            let shown = self.shown.get(index)?;
+            let hits = |range: &Range<usize>| {
+                chip_rects(layout, &shown.text, shown.range(range))
                     .iter()
-                    .any(|rect| rect.dilate(px(CHIP_PAD_X)).contains(&at));
-                if hit {
-                    return Some(chip.target);
+                    .any(|rect| rect.dilate(px(CHIP_PAD_X)).contains(&at))
+            };
+            for chip in mention::in_block(block) {
+                if hits(&chip.range) {
+                    return Some(ChipHit::Mention(chip.target));
+                }
+            }
+            for (range, _) in link_chips(block) {
+                if hits(&range) {
+                    let url = block.marks.iter().find_map(|m| match &m.style {
+                        Style::Link(url) if m.range == range => Some(url.clone()),
+                        _ => None,
+                    })?;
+                    return Some(ChipHit::Link(url));
                 }
             }
         }
@@ -1158,6 +1183,12 @@ impl NoteEditorView {
             self.run(cx, |e, now| e.toggle_style(Style::Link(url), now));
             return;
         }
+        // A bare URL becomes a link, titled when it opens a known tool.
+        if is_url(trimmed) {
+            let url = trimmed.to_owned();
+            self.run(cx, |e, now| e.paste_url(&url, now));
+            return;
+        }
         self.run(cx, |e, now| e.paste(&text, now));
     }
 
@@ -1374,11 +1405,14 @@ impl NoteEditorView {
         window.focus(&self.focus, cx);
         if event.click_count == 1
             && !event.modifiers.shift
-            && let Some(target) = self.chip_at(event.position)
+            && let Some(hit) = self.chip_at(event.position)
         {
             self.mention = None;
             self.slash = None;
-            cx.emit(EditorEvent::OpenMention(target));
+            match hit {
+                ChipHit::Mention(target) => cx.emit(EditorEvent::OpenMention(target)),
+                ChipHit::Link(url) => cx.open_url(&url),
+            }
             return;
         }
         let Some(pos) = self.hit(event.position) else {
@@ -1721,24 +1755,36 @@ fn placeholder(kind: BlockKind, only_block: bool) -> &'static str {
     }
 }
 
+/// Highlight runs for a block as laid out (`shown`): its marks moved to
+/// layout offsets, plus `fades`, the laid-out ranges drawn faded (a chip's
+/// padding and glyph room, a session chip's `@` under its dot).
 fn highlights(
     block: &Block,
+    shown: &Shown,
     colors: SemanticColors,
     faded: bool,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     if block.marks.is_empty() && !faded {
         return Vec::new();
     }
-    let text = &block.text;
-    let chips = mention::in_block(block);
+    let text = &shown.text;
+    let marks: Vec<Mark> = block
+        .marks
+        .iter()
+        .map(|m| Mark {
+            range: shown.range(&m.range),
+            style: m.style.clone(),
+        })
+        .collect();
+    let fades = shown.fades(block);
     let mut cuts: Vec<usize> = vec![0, text.len()];
-    for mark in &block.marks {
+    for mark in &marks {
         cuts.push(mark.range.start);
         cuts.push(mark.range.end);
     }
-    // The chip's `@` is its own run: a session paints its status dot there.
-    for chip in &chips {
-        cuts.push((chip.range.start + 1).min(chip.range.end));
+    for (range, _) in &fades {
+        cuts.push(range.start);
+        cuts.push(range.end);
     }
     cuts.sort_unstable();
     cuts.dedup();
@@ -1756,8 +1802,7 @@ fn highlights(
                 color: Some(colors.tertiary.into()),
             });
         }
-        for mark in block
-            .marks
+        for mark in marks
             .iter()
             .filter(|m| m.range.start <= a && b <= m.range.end)
         {
@@ -1776,7 +1821,10 @@ fn highlights(
                         style.color = Some(accent().into());
                     }
                 }
-                Style::Link(url) if MentionTarget::parse(url).is_some() => {
+                Style::Link(url)
+                    if MentionTarget::parse(url).is_some()
+                        || diri_notes::links::recognize(url).is_some() =>
+                {
                     style.font_weight = Some(FontWeight::MEDIUM);
                     if !faded {
                         style.color = Some(colors.primary.into());
@@ -1795,12 +1843,9 @@ fn highlights(
             }
         }
         // Highlight colors blend over the base, so only `fade_out` can hide
-        // the session `@` under its status dot.
-        if let Some(chip) = chips.iter().find(|c| c.range.start == a) {
-            style.fade_out = Some(match chip.target {
-                MentionTarget::Session(_) => 1.0,
-                MentionTarget::Note(_) => 0.55,
-            });
+        // text: chip padding, glyph room, the session `@` under its dot.
+        if let Some((_, fade)) = fades.iter().find(|(r, _)| r.start <= a && b <= r.end) {
+            style.fade_out = Some(*fade);
         }
         out.push((a..b, style));
     }
@@ -1812,7 +1857,11 @@ struct ChipPaint {
     block: usize,
     text: String,
     range: Range<usize>,
+    /// Layout offset of the chip's first stored character.
+    head: usize,
     dot: super::chip::ChipDot,
+    /// A tool link's glyph, painted in the room laid out before its title.
+    icon: Option<&'static str>,
 }
 
 trait AlphaExt {
@@ -1846,31 +1895,34 @@ impl Render for NoteEditorView {
 
         self.anchor_work_menu();
         let mut layouts = Vec::with_capacity(self.editor.blocks().len());
+        let mut shown_all = Vec::with_capacity(self.editor.blocks().len());
         let hidden = self.editor.hidden();
         let mut column = div().flex().flex_col().w_full();
         for (index, block) in self.editor.blocks().iter().enumerate() {
             let look = look(block.kind);
             let checked = block.kind == BlockKind::Todo { checked: true };
+            let shown = Shown::of(block);
             let text: SharedString = if block.text.is_empty() {
                 "\u{200B}".into()
             } else {
-                block.text.clone().into()
+                shown.text.clone().into()
             };
             let mut styled = StyledText::new(text).with_highlights(if block.text.is_empty() {
                 Vec::new()
             } else {
-                highlights(block, colors, checked)
+                highlights(block, &shown, colors, checked)
             });
             let code_ranges: Vec<(Range<usize>, SharedString)> = block
                 .marks
                 .iter()
                 .filter(|m| m.style == Style::Code)
-                .map(|m| (m.range.clone(), SharedString::from(mono)))
+                .map(|m| (shown.range(&m.range), SharedString::from(mono)))
                 .collect();
             if !code_ranges.is_empty() {
                 styled = styled.with_font_family_overrides(code_ranges);
             }
             layouts.push(styled.layout().clone());
+            shown_all.push(shown);
 
             let show_placeholder = block.text.is_empty()
                 && block.kind != BlockKind::Divider
@@ -2003,6 +2055,7 @@ impl Render for NoteEditorView {
             }
         }
         self.layouts = layouts.clone();
+        self.shown = shown_all.clone();
         self.layout_revision = self.editor.revision;
         self.layout_count = self.editor.blocks().len();
 
@@ -2011,30 +2064,44 @@ impl Render for NoteEditorView {
             if hidden[index] {
                 continue;
             }
+            let shown = &shown_all[index];
             for chip in mention::in_block(block) {
                 let dot = super::chip::ChipDot::for_target(&chip.target, &self.mentions, colors);
                 chips.push(ChipPaint {
                     block: index,
-                    text: block.text.clone(),
-                    range: chip.range,
+                    text: shown.text.clone(),
+                    range: shown.range(&chip.range),
+                    head: shown.head_of(chip.range.start),
                     dot,
+                    icon: None,
+                });
+            }
+            for (range, found) in link_chips(block) {
+                chips.push(ChipPaint {
+                    block: index,
+                    text: shown.text.clone(),
+                    range: shown.range(&range),
+                    head: shown.head_of(range.start),
+                    dot: super::chip::ChipDot::None,
+                    icon: Some(service_icon(found.service)),
                 });
             }
         }
+        let icon_ink = colors.secondary;
         let chip_layouts = layouts.clone();
         let chip_fill = super::chip::fill(colors);
         let chip_border = super::chip::border(colors);
         let chip_backdrop = canvas(
             |_, _, _| {},
-            move |_, _, window, _| {
+            move |_, _, window, cx| {
                 for chip in &chips {
                     let Some(layout) = chip_layouts.get(chip.block) else {
                         continue;
                     };
                     for rect in chip_rects(layout, &chip.text, chip.range.clone()) {
                         let rect = Bounds::from_corners(
-                            point(rect.left() - px(CHIP_PAD_X), rect.top() + px(1.0)),
-                            point(rect.right() + px(CHIP_PAD_X), rect.bottom() - px(1.0)),
+                            point(rect.left(), rect.top() + px(1.0)),
+                            point(rect.right(), rect.bottom() - px(1.0)),
                         );
                         window.paint_quad(
                             fill(rect, chip_fill)
@@ -2043,12 +2110,37 @@ impl Render for NoteEditorView {
                                 .border_color(chip_border),
                         );
                     }
+                    if let Some(icon) = chip.icon
+                        && let Some(room) = chip_rects(
+                            layout,
+                            &chip.text,
+                            chip.range.start + CHIP_EDGE.len()
+                                ..chip.range.start + CHIP_EDGE.len() + CHIP_ICON_ROOM.len(),
+                        )
+                        .first()
+                    {
+                        let side = px(CHIP_ICON);
+                        let center = room.center();
+                        let bounds = Bounds::new(
+                            point(center.x - side / 2.0, center.y - side / 2.0),
+                            size(side, side),
+                        );
+                        let _ = window.paint_svg(
+                            bounds,
+                            icon.into(),
+                            None,
+                            gpui::TransformationMatrix::unit(),
+                            icon_ink.into(),
+                            cx,
+                        );
+                        continue;
+                    }
                     let (ink, hollow) = match chip.dot {
                         super::chip::ChipDot::Status(ink) => (ink, false),
                         super::chip::ChipDot::Gone => (colors.tertiary, true),
                         super::chip::ChipDot::None => continue,
                     };
-                    let Some(at) = char_rect(layout, &chip.text, chip.range.start) else {
+                    let Some(at) = char_rect(layout, &chip.text, chip.head) else {
                         continue;
                     };
                     let center = at.center();
@@ -2086,6 +2178,7 @@ impl Render for NoteEditorView {
             .map(|b| (b.text.len(), b.text.is_empty()))
             .collect();
         let folded_away = hidden.clone();
+        let overlay_shown = shown_all;
         let autoscroll = std::mem::take(&mut self.autoscroll);
         let scroll = self.scroll.clone();
         let overlay = canvas(
@@ -2109,13 +2202,19 @@ impl Render for NoteEditorView {
                             0
                         };
                         let to = if index == end.block { end.offset } else { len };
+                        let shown = &overlay_shown[index];
+                        let (from, to) = (shown.to_display(from), shown.to_display(to));
                         rects.extend(selection_rects(layout, from, to, empty, index != end.block));
                     }
                 }
                 let caret = if selection.is_collapsed() {
                     layouts.get(selection.head.block).and_then(|layout| {
                         let (_, empty) = blocks_meta[selection.head.block];
-                        let offset = if empty { 0 } else { selection.head.offset };
+                        let offset = if empty {
+                            0
+                        } else {
+                            overlay_shown[selection.head.block].to_display(selection.head.offset)
+                        };
                         let at = layout.position_for_index(offset)?;
                         Some(Bounds::new(at, size(px(2.0), layout.line_height())))
                     })
@@ -2785,6 +2884,169 @@ fn menu_placement(
     }
 }
 
+/// A block's text as laid out: the stored text plus room inside each chip.
+/// Every chip gets a thin space at each end, so its pill has padding without
+/// reaching into the space beside it, and a tool chip gets room for its
+/// glyph. Offsets in the note (model) and in the layout (display) differ only
+/// by those inserts, and every layout lookup goes through
+/// [`Shown::to_display`] / [`Shown::to_model`].
+#[derive(Clone, Debug, Default)]
+struct Shown {
+    text: String,
+    /// Ascending by model offset, a trailing insert before a leading one.
+    inserts: Vec<Insert>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Insert {
+    at: usize,
+    text: &'static str,
+    /// Belongs to the chip ending at `at` (a caret there sits after it)
+    /// rather than the chip starting there (a caret there sits before it).
+    trailing: bool,
+}
+
+// Chip inserts are word characters drawn fully faded, not spaces: gpui's
+// line wrapper may break before any non-word character, which split a
+// chip's padding or glyph room from its title across lines.
+/// A chip's inner padding at either end.
+const CHIP_EDGE: &str = ".";
+/// Room for a tool chip's glyph: two digits, about a 13 pt icon at body size.
+const CHIP_ICON_ROOM: &str = "00";
+/// What leads a tool chip: its edge, then its glyph room.
+const CHIP_LEAD: &str = ".00";
+
+impl Shown {
+    fn of(block: &Block) -> Self {
+        let mut inserts = Vec::new();
+        for chip in mention::in_block(block) {
+            inserts.push(Insert {
+                at: chip.range.start,
+                text: CHIP_EDGE,
+                trailing: false,
+            });
+            inserts.push(Insert {
+                at: chip.range.end,
+                text: CHIP_EDGE,
+                trailing: true,
+            });
+        }
+        for (range, _) in link_chips(block) {
+            inserts.push(Insert {
+                at: range.start,
+                text: CHIP_LEAD,
+                trailing: false,
+            });
+            inserts.push(Insert {
+                at: range.end,
+                text: CHIP_EDGE,
+                trailing: true,
+            });
+        }
+        if inserts.is_empty() {
+            return Self {
+                text: block.text.clone(),
+                inserts,
+            };
+        }
+        inserts.sort_by_key(|i| (i.at, !i.trailing));
+        inserts.dedup();
+        let extra: usize = inserts.iter().map(|i| i.text.len()).sum();
+        let mut text = String::with_capacity(block.text.len() + extra);
+        let mut last = 0;
+        for insert in &inserts {
+            text.push_str(&block.text[last..insert.at]);
+            text.push_str(insert.text);
+            last = insert.at;
+        }
+        text.push_str(&block.text[last..]);
+        Self { text, inserts }
+    }
+
+    fn to_display(&self, model: usize) -> usize {
+        model
+            + self
+                .inserts
+                .iter()
+                .filter(|i| i.at < model || (i.trailing && i.at == model))
+                .map(|i| i.text.len())
+                .sum::<usize>()
+    }
+
+    fn to_model(&self, display: usize) -> usize {
+        let mut shift = 0;
+        for insert in &self.inserts {
+            let start = insert.at + shift;
+            if display < start {
+                break;
+            }
+            if display < start + insert.text.len() {
+                return insert.at;
+            }
+            shift += insert.text.len();
+        }
+        display - shift
+    }
+
+    /// A chip's model range in the layout, including its inserts.
+    fn range(&self, range: &Range<usize>) -> Range<usize> {
+        self.to_display(range.start)..self.to_display(range.end)
+    }
+
+    /// Laid-out ranges drawn faded, with how much: every insert fully, and
+    /// a mention's `@` (hidden under a session's dot, softened for a note).
+    fn fades(&self, block: &Block) -> Vec<(Range<usize>, f32)> {
+        let mut shift = 0;
+        let mut fades = Vec::with_capacity(self.inserts.len());
+        for insert in &self.inserts {
+            let start = insert.at + shift;
+            fades.push((start..start + insert.text.len(), 1.0));
+            shift += insert.text.len();
+        }
+        for chip in mention::in_block(block) {
+            let head = self.head_of(chip.range.start);
+            let fade = match chip.target {
+                MentionTarget::Session(_) => 1.0,
+                MentionTarget::Note(_) => 0.55,
+            };
+            fades.push((head..head + 1, fade));
+        }
+        fades
+    }
+
+    /// Where a chip's first stored character (a mention's `@`) is laid out.
+    fn head_of(&self, chip_start: usize) -> usize {
+        self.to_display(chip_start + 1) - 1
+    }
+}
+
+/// Links that open a known tool, which render as chips with its glyph.
+fn link_chips(
+    block: &Block,
+) -> impl Iterator<Item = (Range<usize>, diri_notes::links::Recognized)> + '_ {
+    block.marks.iter().filter_map(|mark| match &mark.style {
+        Style::Link(url) => diri_notes::links::recognize(url).map(|r| (mark.range.clone(), r)),
+        _ => None,
+    })
+}
+
+fn service_icon(service: diri_notes::links::Service) -> &'static str {
+    use diri_notes::links::Service;
+    match service {
+        Service::Notion => "icons/notion.svg",
+        Service::GoogleDocs => "icons/google-doc.svg",
+        Service::GoogleSheets => "icons/google-sheet.svg",
+        Service::GoogleSlides => "icons/google-slides.svg",
+        Service::GoogleDrive => "icons/google-drive.svg",
+        Service::Linear => "icons/linear.svg",
+        Service::HubSpot => "icons/hubspot.svg",
+        Service::Figma => "icons/figma.svg",
+        Service::Slack => "icons/slack.svg",
+        Service::GitHub => "icons/github.svg",
+        Service::Dashboard => "icons/chart-bar.svg",
+    }
+}
+
 /// Where one character sits, or `None` for a space that wrapped away.
 /// A wrap boundary index resolves to the end of the earlier line, so a
 /// character that opens a line is recovered from its right edge.
@@ -2881,4 +3143,38 @@ pub(crate) fn editor_entity_focus(
 ) {
     let focus = editor.read(cx).focus.clone();
     window.focus(&focus, cx);
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::*;
+
+    #[test]
+    fn chips_get_edges_and_glyph_room_and_offsets_map_both_ways() {
+        let mut block = Block::new(1, BlockKind::Paragraph, "see ENG-7 and @Plan!");
+        block.add_mark(4..9, Style::Link("https://linear.app/a/issue/ENG-7".into()));
+        block.add_mark(14..19, Style::Link("diri://note/n-1".into()));
+        block.add_mark(0..3, Style::Link("https://diri.sh".into()));
+        let shown = Shown::of(&block);
+        assert_eq!(
+            shown.text,
+            format!("see {CHIP_LEAD}ENG-7{CHIP_EDGE} and {CHIP_EDGE}@Plan{CHIP_EDGE}!"),
+            "plain links get nothing"
+        );
+        // A caret before a chip sits outside it; right after, outside too.
+        assert_eq!(shown.to_display(4), 4);
+        assert_eq!(
+            &shown.text[shown.to_display(9)..shown.to_display(9) + 1],
+            " "
+        );
+        for model in 0..=block.text.len() {
+            assert_eq!(shown.to_model(shown.to_display(model)), model);
+        }
+        // A click on the glyph lands before the chip.
+        assert_eq!(shown.to_model(5), 4);
+        let chip = shown.range(&(14..19));
+        assert!(shown.text[chip.clone()].starts_with(CHIP_EDGE));
+        assert!(shown.text[chip].ends_with(CHIP_EDGE));
+        assert_eq!(&shown.text[shown.head_of(14)..shown.head_of(14) + 1], "@");
+    }
 }

@@ -9530,7 +9530,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
             cx.run_until_parked();
         }
-        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold` types into the note:
+        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold|links` types into the note:
         // mention chips beside a to-do, then the `/` or `@` menu open at the
         // caret, to judge the menus beside the rest of diri's chrome.
         if let Ok(scene) = std::env::var("DIRI_VISUAL_NOTE_MENU") {
@@ -9582,6 +9582,26 @@ mod tests {
                     let end = view.editor.block(quick).text.len();
                     view.editor.set_caret(Pos::new(quick, end));
                     match scene.as_str() {
+                        "links" => {
+                            // A research line a PM would write: tool links
+                            // pasted bare become titled chips.
+                            view.editor.enter(0);
+                            view.editor.turn_into(diri_notes::edit::Turn::Kind(diri_notes::doc::BlockKind::Paragraph), 0);
+                            view.editor.insert_text("Sources: ", 0);
+                            for url in [
+                                "https://www.notion.so/acme/Q4-campaign-brief-1f2e3d4c5b6a79881f2e3d4c5b6a7988",
+                                "https://docs.google.com/spreadsheets/d/1AbC/edit",
+                                "https://linear.app/acme/issue/GRO-42/launch-email",
+                                "https://www.figma.com/design/AbC123/Onboarding-v2",
+                                "https://app.hubspot.com/contacts/1/record/0-3/2",
+                                "https://acme.slack.com/archives/C024BE91L/p1700000000000100",
+                                "https://app.amplitude.com/analytics/acme/chart/abc",
+                                "https://github.com/cristicretu/diri/pull/600",
+                            ] {
+                                view.editor.paste_url(url, 0);
+                                view.editor.insert_text(" ", 0);
+                            }
+                        }
                         "fold" => {
                             // Two nested items under "Quick capture", folded
                             // under "Agents can append".
