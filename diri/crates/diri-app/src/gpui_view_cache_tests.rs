@@ -335,3 +335,35 @@ fn a_scene_gives_back_capacity_a_single_large_frame_left_behind() {
         "shrunk to about twice the last frame"
     );
 }
+
+/// Diri's vendored-GPUI sprite sort must order sprites exactly as the stable
+/// sort it replaced: by key, ties kept in the order they were painted. Sprites
+/// sharing an order and a tile are indistinguishable on screen only if they
+/// stay put, so ties are checked by payload.
+#[test]
+fn the_sprite_sort_matches_a_stable_sort_by_key() {
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for len in [0usize, 1, 5, 31, 32, 33, 100, 1_000, 20_000] {
+        for distinct in [1u64, 3, 40, 1 << 40] {
+            let items: Vec<(u64, usize)> = (0..len)
+                .map(|index| (next() % distinct, index))
+                .collect();
+            let mut expected = items.clone();
+            expected.sort_by_key(|item| item.0);
+            let mut sorted = items.clone();
+            gpui::sort_sprites_for_test(&mut sorted, |item| item.0);
+            assert_eq!(sorted, expected, "len {len}, {distinct} distinct keys");
+        }
+        // Already in order: nothing moves.
+        let mut ordered: Vec<(u64, usize)> = (0..len).map(|index| (index as u64 / 3, index)).collect();
+        let expected = ordered.clone();
+        gpui::sort_sprites_for_test(&mut ordered, |item| item.0);
+        assert_eq!(ordered, expected);
+    }
+}
