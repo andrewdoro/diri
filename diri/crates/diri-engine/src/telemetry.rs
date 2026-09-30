@@ -175,6 +175,11 @@ pub fn record_rpc(
     }
     diri_telemetry::count("rpc.calls", 1);
     diri_telemetry::observe("rpc", elapsed);
+    // The Agent blocks on this reply once or twice per tool call, so its whole
+    // distribution matters, not only the `rpc.slow` tail.
+    if method == diri_proto::Method::HOOK_REPORT {
+        diri_telemetry::observe("rpc.hook_report", elapsed);
+    }
     // Long polls and waits on the user are slow by design.
     let waits = matches!(
         method,

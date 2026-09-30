@@ -94,7 +94,9 @@ excluded). `metrics` carries counters `rpc.calls, rpc.errors,
 engine.connections, engine.accept_errors, attach.reseeds, remote.delta_gaps,
 ssh.commands, ssh.channels, hook.queued` (hook reports answered before a busy
 Registry was free, applied in order by the hook applier) and timings `rpc,
-attach.seed, ssh.command`.
+rpc.hook_report` (the `hook.report` reply an Agent's synchronous hook waits
+on), `hook.apply_wait` (queue-to-Registry wait of a queued hook report, i.e.
+how stale its status was when it landed), `attach.seed, ssh.command`.
 
 `modes` fields are `{mouse: "off"|"1000"|"1002"|"1003"|"unknown", sgr,
 alt_screen, bracketed_paste, app_cursor}` from the Engine's own emulator. The
