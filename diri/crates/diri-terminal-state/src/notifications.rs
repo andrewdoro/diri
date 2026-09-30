@@ -24,7 +24,17 @@ pub(crate) struct NotificationParser {
     /// Base64 payload of the newest OSC 52 clipboard write. Later writes
     /// replace it: only the last copy would survive on the clipboard anyway.
     pub clipboard: Option<String>,
+    /// Exit status the Engine's `returnToLoginShell` wrapper reported for its
+    /// agent ([`AGENT_EXIT_OSC`]), not yet taken.
+    pub agent_exit: Option<i32>,
 }
+
+/// `OSC 6973;agent-exit;<status> BEL`: the status the login-shell wrapper's
+/// shell saw when the agent it launched returned (`$?`, or `$status` in
+/// fish). Private to diri; other terminals ignore an unknown OSC. It carries
+/// one integer and nothing the agent wrote, and like every product OSC here
+/// it is only honoured in live output, never in replayed history.
+pub const AGENT_EXIT_OSC: &str = "6973;agent-exit;";
 
 impl NotificationParser {
     pub fn reset_sequence(&mut self) {
@@ -117,6 +127,14 @@ impl NotificationParser {
         let Ok(payload) = std::str::from_utf8(&self.payload) else {
             return;
         };
+        if let Some(status) = payload.strip_prefix(AGENT_EXIT_OSC) {
+            if let Ok(status) = status.parse::<i32>()
+                && (0..=255).contains(&status)
+            {
+                self.agent_exit = Some(status);
+            }
+            return;
+        }
         if let Some(content) = payload.strip_prefix("52;") {
             // `52;<targets>;<base64>`. A `?` asks to read the clipboard and an
             // empty payload asks to clear it; a program may do neither.
@@ -211,6 +229,33 @@ mod tests {
         let messages = screen.take_notifications();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].body, "new");
+    }
+
+    #[test]
+    fn agent_exit_status_is_read_from_live_output_only() {
+        let mut screen = crate::HeadlessScreen::new(80, 24).with_notifications();
+        let old = b"\x1b]6973;agent-exit;1\x07";
+        let live = b"before\x1b]6973;agent-exit;137\x07after";
+        let bytes: Vec<_> = old.iter().chain(live).copied().collect();
+        screen.feed_with_history(&bytes, old.len());
+        assert_eq!(screen.take_agent_exit(), Some(137));
+        assert_eq!(screen.take_agent_exit(), None);
+        // Consumed, not drawn: the row holds only the text around it.
+        assert!(screen.lines()[0].starts_with("beforeafter"));
+
+        for junk in [
+            &b"\x1b]6973;agent-exit;\x07"[..],
+            b"\x1b]6973;agent-exit;-1\x07",
+            b"\x1b]6973;agent-exit;256\x07",
+            b"\x1b]6973;agent-exit;1; rm\x07",
+        ] {
+            screen.feed(junk);
+            assert_eq!(screen.take_agent_exit(), None);
+        }
+        // Screens that never opted in (the remote Holder) ignore it.
+        let mut holder = crate::HeadlessScreen::new(80, 24);
+        holder.feed(b"\x1b]6973;agent-exit;0\x07");
+        assert_eq!(holder.take_agent_exit(), None);
     }
 
     #[test]

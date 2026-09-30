@@ -452,6 +452,18 @@ impl AgentDescriptor {
             // then receives mouse reports and escape-coded keys as text:
             // `35;12;38M35;13;38M` at the prompt. Reset them before the shell
             // takes over, as the agent itself should have on a clean exit.
+            //
+            // First, the agent's own exit status goes to the Engine as a
+            // private OSC ([`diri_terminal_state::AGENT_EXIT_OSC`]): once the
+            // shell takes over it is otherwise lost, and an agent that dies at
+            // startup looks exactly like one the user quit. A separate
+            // `printf`, so the reset runs whatever the report does.
+            if let Some(status) = exit_status_parameter(&shell) {
+                command.push_str(&format!(
+                    "; printf '\\033]{}%s\\007' \"{status}\"",
+                    diri_terminal_state::AGENT_EXIT_OSC
+                ));
+            }
             command.push_str(&format!(
                 "; printf '{AGENT_EXIT_TERMINAL_RESET}'; exec {} -i -l",
                 shell_quote(&shell)
@@ -516,6 +528,18 @@ impl AgentDescriptor {
         self.env_scrub_prefixes
             .iter()
             .any(|prefix| key.starts_with(prefix))
+    }
+}
+
+/// How `shell` spells the last command's exit status, or `None` for a shell
+/// whose syntax is unknown, which then runs the wrapper without the report
+/// rather than risk a parse error that would stop the agent launching at all.
+fn exit_status_parameter(shell: &str) -> Option<&'static str> {
+    let name = std::path::Path::new(shell).file_name()?.to_str()?;
+    match name.trim_start_matches('-') {
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash" | "yash" => Some("$?"),
+        "fish" | "csh" | "tcsh" => Some("$status"),
+        _ => None,
     }
 }
 
@@ -773,7 +797,8 @@ mod tests {
         assert_eq!(
             spec.argv[4],
             format!(
-                "'codex' '--version'; printf '{AGENT_EXIT_TERMINAL_RESET}'; exec '/bin/sh' -i -l"
+                "'codex' '--version'; printf '\\033]6973;agent-exit;%s\\007' \"$?\"; \
+                 printf '{AGENT_EXIT_TERMINAL_RESET}'; exec '/bin/sh' -i -l"
             ),
             "the agent runs first, then the shell takes the PTY over"
         );
@@ -908,6 +933,102 @@ mod tests {
         assert!(stdout.find("agent-finished").unwrap() < reset);
         assert!(reset < stdout.find("shell-ready").unwrap());
         assert!(stdout.contains("\x1b[>4;0m\x1b[<99u\x1b[=0;1u"));
+    }
+
+    /// The status the wrapper's shell saw reaches the Engine's screen as the
+    /// private OSC, in every shell family the wrapper speaks, for a plain
+    /// failure and for a signal death, and the reset still follows it.
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_reports_the_agent_exit_status_in_every_shell() {
+        use std::process::{Command, Stdio};
+
+        let shells = [
+            "/bin/sh",
+            "/bin/bash",
+            "/bin/zsh",
+            "/opt/homebrew/bin/fish",
+            "/usr/bin/fish",
+        ]
+        .into_iter()
+        .filter(|shell| Path::new(shell).exists())
+        .collect::<Vec<_>>();
+        assert!(shells.contains(&"/bin/sh"));
+        for shell in shells {
+            // The agent: `sh -c` either exits 3 or SIGKILLs itself.
+            for (script, expected) in [("exit 3", 3), ("kill -9 $$", 128 + 9)] {
+                let wrapped = AgentDescriptor {
+                    binary: Some("/bin/sh".into()),
+                    return_to_login_shell: true,
+                    ..Default::default()
+                };
+                let spec = wrapped
+                    .spawn_spec(
+                        Path::new("/tmp"),
+                        [("SHELL".to_string(), shell.to_string())],
+                        &["-c".into(), script.into()],
+                    )
+                    .expect("spec");
+                // Run only the agent half: the final `exec` would start an
+                // interactive login shell that reads the user's rc files.
+                let command = spec.argv[4]
+                    .rsplit_once("; exec ")
+                    .expect("wrapper execs the shell")
+                    .0;
+                let output = Command::new(shell)
+                    .args(["-c", command])
+                    .env_clear()
+                    .envs(spec.env.iter().cloned())
+                    .stdin(Stdio::null())
+                    .output()
+                    .expect("run wrapper");
+
+                let mut screen =
+                    diri_terminal_state::HeadlessScreen::new(80, 24).with_notifications();
+                screen.feed(&output.stdout);
+                assert_eq!(
+                    screen.take_agent_exit(),
+                    Some(expected),
+                    "{shell} `{script}`: {:?}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+                let report = output
+                    .stdout
+                    .windows(4)
+                    .position(|window| window == b"6973")
+                    .expect("report");
+                let reset = output
+                    .stdout
+                    .windows(8)
+                    .position(|window| window == b"\x1b[?1003l")
+                    .expect("the reset still runs");
+                assert!(report < reset, "{shell}");
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_shells_run_the_wrapper_without_the_report() {
+        assert_eq!(exit_status_parameter("/usr/bin/zsh"), Some("$?"));
+        assert_eq!(exit_status_parameter("-bash"), Some("$?"));
+        assert_eq!(
+            exit_status_parameter("/opt/homebrew/bin/fish"),
+            Some("$status")
+        );
+        assert_eq!(exit_status_parameter("/usr/local/bin/nu"), None);
+        let spec = AgentDescriptor {
+            binary: Some("codex".into()),
+            return_to_login_shell: true,
+            ..Default::default()
+        }
+        .spawn_spec(
+            Path::new("/tmp"),
+            [("SHELL".to_string(), "/usr/local/bin/nu".to_string())],
+            &[],
+        )
+        .expect("spec");
+        assert!(!spec.argv[4].contains("6973"), "{}", spec.argv[4]);
+        assert!(spec.argv[4].contains("exec '/usr/local/bin/nu' -i -l"));
     }
 
     #[cfg(unix)]

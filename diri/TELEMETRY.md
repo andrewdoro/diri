@@ -94,10 +94,14 @@ excluded). `metrics` carries counters `rpc.calls, rpc.errors,
 engine.connections, engine.accept_errors, attach.reseeds, remote.delta_gaps,
 ssh.commands, ssh.channels, hook.queued` (hook reports answered before a busy
 Registry was free, applied in order by the hook applier) and timings `rpc,
-attach.seed, ssh.command`.
+rpc.hook_report` (the `hook.report` reply an Agent's synchronous hook waits
+on), `hook.apply_wait` (queue-to-Registry wait of a queued hook report, i.e.
+how stale its status was when it landed), `attach.seed, ssh.command`.
 
 `modes` fields are `{mouse: "off"|"1000"|"1002"|"1003"|"unknown", sgr,
-alt_screen, bracketed_paste, app_cursor}` from the Engine's own emulator. The
+alt_screen, bracketed_paste, app_cursor, keyboard, focus}` from the Engine's
+own emulator (`keyboard`: kitty keyboard enhancements pushed; `focus`: DEC 1004
+focus reporting). The
 local Holder is a byte pipe with no parser, so terminal-mode facts are
 recorded by the Engine, not the Holder.
 
@@ -143,8 +147,8 @@ recorded by the Engine, not the Holder.
 | `session.exec` | debug | `session, defer_ms, ms, cols, rows` | a deferred launch waiting on the first client size |
 | `session.status` | debug | `session, from, to` | status transitions (`starting, idle, working, needs_input, exited, unknown`) |
 | `session.exit` | info | `session, agent, code, signal, requested, runtime_s, adopted, modes` | how every PTY child ended; `requested` distinguishes kills from crashes |
-| `session.early_exit` | incident | `session, agent, kind: exit\|returned_to_shell, code, signal, ms, modes` | an unrequested nonzero exit within 10 s of launch; or, for `returnToLoginShell` agents, the agent already gone 10 s after launch (its login shell is the foreground group *and* has no child left: under `fish -c` the agent shares the shell's group, so the group alone is not evidence) (a resume of a missing conversation: "No conversation found" → zsh) |
-| `session.agent_exited` | info | `session, agent, source: session_end_hook, runtime_s, modes` | a wrapped agent that ended later and left its login shell (checked 2 s after Claude's `SessionEnd`) |
+| `session.early_exit` | incident | `session, agent, kind: exit\|returned_to_shell, code, signal, ms, modes` | an unrequested nonzero exit within 10 s of launch; or, for `returnToLoginShell` agents, the agent already gone 10 s after launch, with the `code`/`signal` its wrapper reported (see `agent_exited`; absent when the login shell is not sh/bash/zsh/ksh/fish/csh) (its login shell is the foreground group *and* has no child left: under `fish -c` the agent shares the shell's group, so the group alone is not evidence) (a resume of a missing conversation: "No conversation found" → zsh) |
+| `session.agent_exited` | info/warn | `session, agent, source: session_end_hook\|wrapper, code, signal, runtime_s, modes` | `session_end_hook`: a wrapped agent that ended later and left its login shell (checked 2 s after Claude's `SessionEnd`). `wrapper`: the `returnToLoginShell` wrapper reported the agent's exit status (`OSC 6973;agent-exit;<$?>`, live output only; 128+N is split into `signal` N); warn when nonzero. Only the integer is sent |
 | `session.modes_left_on_exit` | warn | `session, agent, kind: pty_exit\|returned_to_shell, modes` | mouse tracking or bracketed paste still on after the program that enabled it exited: `^[[<35;14;25M` typed into the shell |
 | `session.conversation` | info | `session, agent, conv, previous, source: hook\|cursor_store\|codex_repair` | conversation ids assigned, discovered or changed |
 | `session.transcript` | debug | `session, path (hash), moved` | the transcript moving (worktree entry) |
@@ -250,8 +254,8 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `app.sleep` / `app.wake` | info | | gaps that are sleep, not hangs; reconnect storms after wake |
 | `app.quit` | info | `uptime_s, windows_main, windows_opened` | clean exit vs crash (a timeline that just stops) |
 | `window.open` / `window.close` | info (main), debug (floating) | `kind` (`main`\|`floating`), `window`, `lived_s`, `open` | window churn vs RSS growth (closed-window leaks) |
-| `ui.frame` → `ui.slow_frame` | warn | `ms, window, surface` (`workbench`\|`settings`\|`palette`\|`launcher`), `workspace` | "diri is slow/janky"; frame ≥ 50 ms |
-| `ui.stall` | warn (1–3 s), incident (≥ 3 s) | `ms, ongoing, active` | beachballs, hangs; `ongoing=true` is written at 5 s while still stuck |
+| `ui.frame` → `ui.slow_frame` | warn | `ms, window, surface` (`workbench`\|`settings`\|`palette`\|`launcher`), `workspace, active` (window key), `cpu_ms` (main-thread CPU in the frame), `faults` (process page faults in the frame), `idle_ms` (since the window's previous frame) | "diri is slow/janky"; frame ≥ 50 ms. `cpu_ms` ≪ `ms` means the thread was starved or paging, not working; many `faults` after a long `idle_ms` means memory the system compressed being paged back in |
+| `ui.stall` | warn (1–3 s), incident (≥ 3 s) | `ms, ongoing, active, was_active` (frontmost when it began), `cpu_ms` (main-thread CPU during it), `faults`, `action` (static action name that finished inside it) | beachballs, hangs; `ongoing=true` is written at 5 s while still stuck. `cpu_ms` ≈ `ms`: busy on the main thread; ≈ 0: blocked (lock, synchronous call, AppKit) or not scheduled |
 | `ui.action` | debug | `action` (GPUI action name), `source` (`shortcut`\|`palette`) | what the user did just before a failure |
 | `ui.toast` | info | `title` (static toast title) | errors the user was shown ("Terminal", "Target unavailable", …) |
 | `privacy.notice_shown` / `privacy.upload_changed` | info | `upload` | consent history |
@@ -268,13 +272,13 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `pane.attached` | info | `session, reconnect, attempts, connect_ms, since_mount_ms` | attach latency, reattach loops |
 | `pane.attach_failing` | error | `session, attempts, reason, since_mount_ms` | a session that cannot be attached (3 failures) |
 | `pane.first_grid` | debug; warn if not a snapshot | `session, ms, snapshot` | first frame missing or a diff before a seed |
-| `pane.first_paint` | debug | `session, ms, grid_ms, parked` | mount → the first frame that drew content, taken inside the terminal element's paint. A pane that is never drawn (the selection pane under a workspace workbench, a warm pane of another tab, a window the system stopped drawing) records none; before 2026-09-30 the blank watchdog recorded those as a ~10 s "first paint" |
-| `pane.blank` | incident; warn if live with a blank grid | `session, agent, state, got_grid, content, frames, ms`; incidents add `redrawn` | "session doesn't render": running, and no content painted 10 s after mount, and still on screen: the watchdog asks for a frame and reports only if that frame draws the pane within 500 ms. `content=true` means the grid holds content that was never painted (a missed repaint: always an incident); `redrawn=true` means the requested frame then painted it, i.e. nothing had asked for that frame. A pane no frame draws (covered by a workbench, a warm pane of another tab, a window the system stopped drawing) is not reported, however it was drawn before |
+| `pane.first_paint` | debug | `session, ms, grid_ms, shown_ms, parked` | mount (or, for a pane nobody drew at mount, the first frame that showed it: `shown_ms` after mount) → the first frame that drew content, taken inside the terminal element's paint; `grid_ms` stays relative to mount. Once per mount of a resident per view. A pane that is never drawn (the selection pane under a workspace workbench, a warm pane of another tab, a window the system stopped drawing) records none; before 2026-09-30 the blank watchdog recorded those as a ~10 s "first paint" |
+| `pane.blank` | incident; warn if live with a blank grid | `session, agent, state, got_grid, content, frames, ms` | "session doesn't render": drawn at least once since mount, running, and no content painted 10 s after mount. `content=true` means the grid holds content that was never painted (a missed repaint: always an incident). A pane never drawn since mount is not reported |
 | `pane.detached` | warn | `session, live_ms, grids, reseeds` | "Terminal connection interrupted" toast |
 | `pane.drain_interrupted` | warn | `session` | input possibly lost on detach |
 | `pane.input_rejected` | warn (≤ 1 per 5 s per session) | `session, input` (`input`\|`mouse`\|`mouse_motion`\|`scroll`), `reason` (`passive_view`\|`disconnected`\|`overloaded`) | typing that goes nowhere; lost lease |
 | `pane.resize_storm` | warn (≤ 1/min) | `session, flips, cols, rows` | layouts fighting over the PTY size |
-| `pane.modes` | debug | `session, mouse, mouse_bits, alt_screen, bracketed_paste` | mouse tracking left on after an agent exits (`^[[<35;…M` in zsh) |
+| `pane.modes` | debug | `session, mouse, mouse_bits, alt_screen, bracketed_paste` | mouse tracking left on after an agent exits (`^[[<35;…M` in zsh). Once per session per change: every view attached to the session sees the same Modes chunk, and before 2026-09-30 each of them recorded it |
 | `pane.drop` | info | `session, files, outcome` (`paste`\|`upload`\|`refused`), `partial, remote` | Finder drops that did nothing |
 | `pane.drop_upload_failed` | error | `session` | remote drop copy failed |
 | `clipboard.copy` | info | `source` (`selection`\|`osc52`), `outcome` (`ok`\|`not_on_pasteboard`\|`empty_selection`\|`relayed`\|`stale`\|`app_inactive`\|`unknown_session`\|`no_listener`), `size`, `ms`/`age_ms`, `mouse_captured`, `session` | "copy doesn't work" (incl. agent-captured mouse) |

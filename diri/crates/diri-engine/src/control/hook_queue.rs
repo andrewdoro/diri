@@ -19,6 +19,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, TryLockError};
+use std::time::Instant;
 
 use crate::events::EventBus;
 use crate::registry::Registry;
@@ -33,10 +34,13 @@ pub(super) struct HookReport {
     pub(super) session_end: bool,
 }
 
+/// A report and when it was handed to the applier.
+type Queued = (HookReport, Instant);
+
 pub(super) struct HookQueue {
     /// Serializes the inline-or-queue decision so an inline report can never
     /// overtake one that is already queued.
-    order: Mutex<Option<SyncSender<HookReport>>>,
+    order: Mutex<Option<SyncSender<Queued>>>,
     /// Reports submitted to the applier and not yet applied.
     pending: Arc<AtomicUsize>,
 }
@@ -74,12 +78,12 @@ impl HookQueue {
         });
         self.pending.fetch_add(1, Ordering::AcqRel);
         diri_telemetry::count("hook.queued", 1);
-        if let Err(error) = sender.send(report) {
+        if let Err(error) = sender.send((report, Instant::now())) {
             // The applier is gone (it cannot normally exit): apply here, still
             // in order because `order` is held.
             self.pending.fetch_sub(1, Ordering::AcqRel);
             let mut locked = registry.lock().map_err(|_| PoisonedRegistry)?;
-            apply(&mut locked, events, error.0);
+            apply(&mut locked, events, error.0.0);
             return Ok(true);
         }
         Ok(false)
@@ -93,16 +97,19 @@ fn spawn_applier(
     registry: Arc<Mutex<Registry>>,
     events: EventBus,
     pending: &Arc<AtomicUsize>,
-) -> SyncSender<HookReport> {
-    let (sender, receiver) = sync_channel::<HookReport>(QUEUE_CAPACITY);
+) -> SyncSender<Queued> {
+    let (sender, receiver) = sync_channel::<Queued>(QUEUE_CAPACITY);
     let pending = Arc::clone(pending);
     let spawned = std::thread::Builder::new()
         .name("diri-hook-applier".into())
         .spawn(move || {
-            while let Ok(report) = receiver.recv() {
+            while let Ok((report, queued_at)) = receiver.recv() {
                 // A poisoned Registry fails every request; drop the report
                 // rather than fold it into state another thread left torn.
                 if let Ok(mut locked) = registry.lock() {
+                    // How stale a queued report's status is when it lands:
+                    // the wait the Agent no longer pays.
+                    diri_telemetry::observe("hook.apply_wait", queued_at.elapsed());
                     apply(&mut locked, &events, report);
                 }
                 pending.fetch_sub(1, Ordering::AcqRel);
