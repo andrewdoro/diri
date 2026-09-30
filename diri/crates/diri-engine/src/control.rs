@@ -2806,6 +2806,14 @@ impl ControlServer {
         if let Some(store) = &self.remote_bindings {
             let _ = store.remove(&p.session_id.0);
         }
+        // Closing a note's tab puts its file in the notes trash, from which
+        // "reopen closed" brings it back; its history stays either way.
+        if removed.is_note()
+            && let Some(note_id) = &removed.note_id
+            && let Ok(store) = self.note_store()
+        {
+            let _ = store.trash(note_id);
+        }
         self.events.record_removed(&removed);
         self.events.publish(
             diri_proto::EventName::SESSION_REMOVED,
@@ -3682,6 +3690,17 @@ impl ControlServer {
             self.publish_updated(&registry, &record.id.0);
             record
         };
+        // A note has nothing to relaunch: bring its file back and show it.
+        if record.is_note() {
+            if let Some(note_id) = &record.note_id
+                && let Ok(store) = self.note_store()
+                && store.path_for(note_id).is_ok_and(|path| !path.exists())
+            {
+                let _ = store.restore(note_id);
+            }
+            return serde_json::to_value(&record)
+                .map_err(|error| ControlError::internal(error.to_string()));
+        }
         match self.session_resume(Some(serde_json::json!({ "sessionID": record.id.0 }))) {
             Ok(resumed) => Ok(resumed),
             Err(error) => {
@@ -5605,6 +5624,17 @@ mod tests {
         assert_eq!(note.doc.title, "Launch plan");
         assert_eq!(note.doc.todo_progress(), (0, 1));
         assert_eq!(note.project(), Some(project.to_string_lossy().as_ref()));
+
+        // Closing the note's tab trashes its file; reopening brings it back.
+        ok_of(call(
+            &server,
+            "session.remove",
+            Some(json!({ "sessionID": record.id.0 })),
+        ));
+        assert!(store.load(&note_id).is_err(), "closed note is in the trash");
+        let reopened = ok_of(call(&server, "session.reopen_last", None));
+        assert_eq!(reopened["id"], record.id.0.as_str());
+        assert_eq!(store.load(&note_id).unwrap().doc.title, "Launch plan");
 
         // A daemon restart finds no holder for the note and must not call it lost.
         registry.lock().expect("registry").reap_orphans_for_test();
