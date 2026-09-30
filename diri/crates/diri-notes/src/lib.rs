@@ -7,4 +7,5 @@
 pub mod doc;
 pub mod edit;
 pub mod markdown;
+pub mod mention;
 pub mod store;
