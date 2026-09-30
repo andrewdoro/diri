@@ -223,18 +223,139 @@ pub(crate) struct FrameContext {
     pub(crate) workspace: bool,
 }
 
+/// Terminal paints counted when the root view began rendering, so the probe
+/// can attribute the frame's own share.
+#[derive(Clone, Copy)]
+pub(crate) struct FrameStart {
+    pub(crate) at: Instant,
+    paints: diri_term::element::PaintTotals,
+    /// The main thread's CPU time, when telemetry is recording.
+    cpu: Option<Duration>,
+}
+
+impl FrameStart {
+    pub(crate) fn now() -> Self {
+        Self {
+            at: Instant::now(),
+            paints: diri_term::element::PaintTotals::now(),
+            cpu: diri_telemetry::is_enabled()
+                .then(thread_cpu_time)
+                .flatten(),
+        }
+    }
+}
+
+/// CPU time the calling thread has used. A frame whose wall time far exceeds
+/// its CPU time was waiting (preempted by other work on a busy Mac, or on a
+/// slower core), not computing.
+fn thread_cpu_time() -> Option<Duration> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid, exclusively borrowed timespec.
+    let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    (status == 0).then(|| {
+        Duration::new(
+            u64::try_from(now.tv_sec).unwrap_or(0),
+            u32::try_from(now.tv_nsec).unwrap_or(0),
+        )
+    })
+}
+
+/// A 120 Hz frame budget: frames over it are candidates for a sampled
+/// `ui.slow_frame` breakdown even below [`SLOW_FRAME`].
+const OVER_BUDGET_FRAME: Duration = Duration::from_micros(8_333);
+/// At most one sampled over-budget breakdown per this interval.
+const OVER_BUDGET_SAMPLE_EVERY: Duration = Duration::from_secs(30);
+static OVER_BUDGET_SAMPLED_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Where one frame's CPU time went, as the probe sees it from the end of the
+/// root's paint: GPUI's phases so far, the terminals it painted and how many
+/// views rendered or replayed. Deferred overlays, tooltips and the
+/// accessibility update come after the probe; the accessibility cost is
+/// taken from the previous frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FrameBreakdown {
+    pub(crate) total: Duration,
+    /// The main thread's CPU time over `total`.
+    pub(crate) cpu: Option<Duration>,
+    pub(crate) gpui: gpui::FrameStats,
+    pub(crate) previous_a11y: Duration,
+    pub(crate) terminals: diri_term::element::PaintTotals,
+    pub(crate) windows: usize,
+}
+
+impl FrameBreakdown {
+    fn observe(&self) {
+        diri_telemetry::observe("ui.frame", self.total);
+        if let Some(cpu) = self.cpu {
+            diri_telemetry::observe("ui.frame.cpu", cpu);
+        }
+        diri_telemetry::observe("ui.frame.layout", self.gpui.layout);
+        diri_telemetry::observe("ui.frame.prepaint", self.gpui.prepaint);
+        diri_telemetry::observe("ui.frame.paint", self.gpui.paint);
+        diri_telemetry::observe(
+            "ui.frame.terminals",
+            Duration::from_micros(self.terminals.micros),
+        );
+        diri_telemetry::count("ui.frame.views_rendered", u64::from(self.gpui.views_rendered));
+        diri_telemetry::count("ui.frame.views_reused", u64::from(self.gpui.views_reused));
+        diri_telemetry::count("ui.frame.terminal_paints", self.terminals.paints);
+        diri_telemetry::count("ui.frame.shape_misses", self.terminals.shape_misses);
+        if self.gpui.a11y_active {
+            diri_telemetry::count("ui.frame.a11y_frames", 1);
+            diri_telemetry::observe("ui.frame.a11y", self.previous_a11y);
+        }
+    }
+
+    fn fields(&self, window: u64, context: FrameContext) -> Vec<(&'static str, Value)> {
+        vec![
+            ("ms", Value::from(self.total)),
+            ("cpu_ms", Value::from(self.cpu)),
+            ("active", Value::from(APP_ACTIVE.load(Ordering::Relaxed))),
+            ("window", Value::from(window)),
+            ("surface", Value::from(context.surface)),
+            ("workspace", Value::from(context.workspace)),
+            ("layout_ms", Value::from(self.gpui.layout)),
+            ("prepaint_ms", Value::from(self.gpui.prepaint)),
+            ("paint_ms", Value::from(self.gpui.paint)),
+            ("views", Value::from(u64::from(self.gpui.views_rendered))),
+            ("reused", Value::from(u64::from(self.gpui.views_reused))),
+            ("terminals", Value::from(self.terminals.paints)),
+            (
+                "terminal_ms",
+                Value::from(Duration::from_micros(self.terminals.micros)),
+            ),
+            ("shape_misses", Value::from(self.terminals.shape_misses)),
+            ("windows", Value::from(self.windows)),
+            ("a11y", Value::from(self.gpui.a11y_active)),
+        ]
+    }
+}
+
 /// A zero-size element painted last in a main window: the time from the
 /// start of the root view's render to here is the frame's CPU cost (render,
 /// layout, prepaint, paint of everything before it; not GPU present).
-pub(crate) fn frame_probe(started: Instant, context: FrameContext) -> impl IntoElement {
+pub(crate) fn frame_probe(started: FrameStart, context: FrameContext) -> impl IntoElement {
     canvas(
         |_, _, _| {},
-        move |_, _, window, _| {
+        move |_, _, window, cx| {
             if !diri_telemetry::is_enabled() {
                 return;
             }
-            let cost = started.elapsed();
-            diri_telemetry::observe("ui.frame", cost);
+            let breakdown = FrameBreakdown {
+                total: started.at.elapsed(),
+                cpu: started
+                    .cpu
+                    .zip(thread_cpu_time())
+                    .map(|(start, now)| now.saturating_sub(start)),
+                gpui: window.frame_stats_so_far(),
+                previous_a11y: window.last_frame_stats().a11y,
+                terminals: diri_term::element::PaintTotals::now().since(started.paints),
+                windows: cx.windows().len(),
+            };
+            breakdown.observe();
             if !LAUNCH_RECORDED.swap(true, Ordering::Relaxed) {
                 event!(
                     "app.launch",
@@ -243,19 +364,35 @@ pub(crate) fn frame_probe(started: Instant, context: FrameContext) -> impl IntoE
                     windows = MAIN_WINDOWS.load(Ordering::Relaxed)
                 );
             }
-            if cost >= SLOW_FRAME {
-                diri_telemetry::warn_event!(
+            let window_id = window.window_handle().window_id().as_u64();
+            if breakdown.total >= SLOW_FRAME {
+                diri_telemetry::record(
                     "ui.slow_frame",
-                    ms = cost,
-                    window = window.window_handle().window_id().as_u64(),
-                    surface = context.surface,
-                    workspace = context.workspace
+                    diri_telemetry::Severity::Warn,
+                    breakdown.fields(window_id, context),
+                );
+            } else if breakdown.total >= OVER_BUDGET_FRAME && over_budget_sample_due() {
+                diri_telemetry::record(
+                    "ui.slow_frame",
+                    diri_telemetry::Severity::Debug,
+                    breakdown.fields(window_id, context),
                 );
             }
         },
     )
     .absolute()
     .size_0()
+}
+
+/// One sampled over-budget frame per [`OVER_BUDGET_SAMPLE_EVERY`].
+fn over_budget_sample_due() -> bool {
+    let now = mono_ms();
+    let last = OVER_BUDGET_SAMPLED_MS.load(Ordering::Relaxed);
+    let every = u64::try_from(OVER_BUDGET_SAMPLE_EVERY.as_millis()).unwrap_or(u64::MAX);
+    (last == 0 || now.saturating_sub(last) >= every)
+        && OVER_BUDGET_SAMPLED_MS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
 }
 
 /// Watches main-thread responsiveness without polling it. A background
@@ -350,30 +487,113 @@ fn mono_ms() -> u64 {
 /// input and grid paths take no lock for it. Output that happens to arrive
 /// after a keystroke counts as its echo, so this is an upper bound on
 /// responsiveness, not an exact echo time.
+///
+/// The keystroke is followed hop by hop, each stamped by the thread that
+/// performs it:
+///
+/// - `input.echo.transport`: input queued → the first grid frame after it
+///   reached the pane's transport task. Everything outside this process: the
+///   socket, the Engine, the Holder, the PTY and the agent's own reaction
+///   (the Engine records its own share as `input.echo.engine` and
+///   `input.echo.publish`).
+/// - `input.echo.apply`: that frame → applied to the pane's grid on the main
+///   thread (queueing behind other main-thread work, such as a frame).
+/// - `input.echo`: input queued → applied, as before.
+/// - `input.echo.paint`: applied → the terminal painted it.
+/// - `input.echo.<agent>`: input queued → painted, by agent class.
 #[derive(Default)]
-pub(crate) struct EchoProbe(AtomicU64);
+pub(crate) struct EchoProbe {
+    /// When the pending input was queued, in µs since process start + 1; 0
+    /// when nothing is pending.
+    sent: AtomicU64,
+    /// When the first grid frame after `sent` reached the transport task.
+    received: AtomicU64,
+    /// When the echo was applied, awaiting its paint; and when its input was
+    /// queued. Main thread only.
+    applied: AtomicU64,
+    applied_sent: AtomicU64,
+}
 
 /// Longer than this is an agent thinking, not a terminal being slow.
 const ECHO_MAX: Duration = Duration::from_secs(2);
 
+/// Microseconds since the process started, plus one, so zero can mean
+/// "nothing pending" in an atomic.
+fn mono_us() -> u64 {
+    u64::try_from(process_started().elapsed().as_micros())
+        .unwrap_or(u64::MAX - 1)
+        .saturating_add(1)
+}
+
+fn span_us(from: u64, to: u64) -> Duration {
+    Duration::from_micros(to.saturating_sub(from))
+}
+
 impl EchoProbe {
     pub(crate) fn sent(&self) {
-        if diri_telemetry::is_enabled() {
+        if diri_telemetry::is_enabled()
+            && self
+                .sent
+                .compare_exchange(0, mono_us(), Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            self.received.store(0, Ordering::Release);
+        }
+    }
+
+    /// A grid frame reached the transport task. One atomic load unless a
+    /// keystroke is waiting for its first frame.
+    pub(crate) fn frame_received(&self) {
+        if self.sent.load(Ordering::Acquire) != 0 {
             let _ = self
-                .0
-                .compare_exchange(0, mono_ms(), Ordering::AcqRel, Ordering::Relaxed);
+                .received
+                .compare_exchange(0, mono_us(), Ordering::AcqRel, Ordering::Relaxed);
         }
     }
 
     pub(crate) fn screen_changed(&self) {
-        let sent = self.0.swap(0, Ordering::AcqRel);
+        let sent = self.sent.swap(0, Ordering::AcqRel);
         if sent == 0 {
             return;
         }
-        let latency = Duration::from_millis(mono_ms().saturating_sub(sent));
-        if latency <= ECHO_MAX {
-            diri_telemetry::observe("input.echo", latency);
+        let received = self.received.swap(0, Ordering::AcqRel);
+        let now = mono_us();
+        let latency = span_us(sent, now);
+        if latency > ECHO_MAX {
+            return;
         }
+        diri_telemetry::observe("input.echo", latency);
+        if received >= sent && received <= now {
+            diri_telemetry::observe("input.echo.transport", span_us(sent, received));
+            diri_telemetry::observe("input.echo.apply", span_us(received, now));
+        }
+        self.applied_sent.store(sent, Ordering::Relaxed);
+        self.applied.store(now, Ordering::Release);
+    }
+
+    /// The pane painted the session's grid; closes an applied echo.
+    pub(crate) fn painted(&self, agent: &str) {
+        let applied = self.applied.swap(0, Ordering::AcqRel);
+        if applied == 0 {
+            return;
+        }
+        let sent = self.applied_sent.load(Ordering::Relaxed);
+        let now = mono_us();
+        diri_telemetry::observe("input.echo.paint", span_us(applied, now));
+        diri_telemetry::observe(echo_metric(agent), span_us(sent, now));
+    }
+}
+
+/// `input.echo.<class>`: a closed set of names, so agent ids never become
+/// metric names.
+fn echo_metric(agent: &str) -> &'static str {
+    match diri_telemetry::agent_class(agent) {
+        diri_telemetry::AgentClass::Claude => "input.echo.claude",
+        diri_telemetry::AgentClass::Codex => "input.echo.codex",
+        diri_telemetry::AgentClass::Cursor => "input.echo.cursor",
+        diri_telemetry::AgentClass::Gemini => "input.echo.gemini",
+        diri_telemetry::AgentClass::Shell => "input.echo.shell",
+        diri_telemetry::AgentClass::Other => "input.echo.other",
     }
 }
 

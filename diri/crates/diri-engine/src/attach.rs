@@ -1078,6 +1078,7 @@ impl AttachHub {
                     requires_enhanced,
                 );
                 trace_hop!(FrameEnqueued);
+                wake.note_published_for_telemetry();
             }
 
             {

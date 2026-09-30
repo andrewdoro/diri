@@ -1343,6 +1343,55 @@ impl TerminalPane {
         self.apply_grid_updates(id, [update], window, cx);
     }
 
+    /// Lands changed rows on the selected grid the way a grid frame does,
+    /// for frame-cost fixtures that replay an agent's redraws.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn land_rows_for_test(
+        &mut self,
+        rows: Vec<(u16, Vec<diri_proto::grid::GridCell>)>,
+        cursor: (u16, u16),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        let Some((cols, grid_rows)) = self.residents.get(&id).map(|resident| {
+            let buffer = resident.element.buffer();
+            let buffer = buffer.read().unwrap();
+            (buffer.cols, buffer.rows)
+        }) else {
+            return;
+        };
+        let update = GridUpdate {
+            cols,
+            rows: grid_rows,
+            cursor_col: cursor.0,
+            cursor_row: cursor.1,
+            cursor_visible: true,
+            is_full_snapshot: false,
+            changed_rows: rows
+                .into_iter()
+                .filter(|(row, _)| *row < grid_rows)
+                .map(|(row, mut cells)| {
+                    cells.resize(usize::from(cols), diri_proto::grid::GridCell::BLANK);
+                    diri_proto::grid::ChangedRow::new(row, cells)
+                })
+                .collect(),
+        };
+        self.apply_grid_updates(id, [update], window, cx);
+    }
+
+    /// The selected grid's size, for fixtures.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn selected_grid_size_for_test(&self) -> Option<(u16, u16)> {
+        let id = self.selected_id()?;
+        let resident = self.residents.get(&id)?;
+        let buffer = resident.element.buffer();
+        let buffer = buffer.read().unwrap();
+        Some((buffer.cols, buffer.rows))
+    }
+
     #[cfg(test)]
     pub(crate) fn geometry_for_test(&self) -> (Option<TerminalViewport>, Option<(u16, u16)>) {
         let grid = self.selected_session().and_then(|session| {
@@ -4592,6 +4641,27 @@ impl TerminalPane {
     }
 }
 
+impl TerminalPane {
+    /// A zero-size element painted after the grid: closes the timing of a
+    /// keystroke whose echo this render shows (`input.echo.paint`).
+    fn echo_paint_probe(&self, session: &SessionRecord) -> Option<AnyElement> {
+        if !diri_telemetry::is_enabled() {
+            return None;
+        }
+        let attachment = self.residents.get(&session.id)?.attachment.clone();
+        let agent = session.kind.id().to_owned();
+        Some(
+            gpui::canvas(
+                |_, _, _| {},
+                move |_, _, _, _| attachment.echo_painted(&agent),
+            )
+            .absolute()
+            .size_0()
+            .into_any_element(),
+        )
+    }
+}
+
 fn quote_from_terminal_element(session_id: SessionId, element: &TerminalElement) -> Option<Quote> {
     let range = element.selection_range()?;
     Quote::new(
@@ -4678,6 +4748,9 @@ impl Render for TerminalPane {
             pane = pane.child(terminal_surface);
             if let Some(summary) = self.render_session_links(&session, sidebar_colors, window, cx) {
                 pane = pane.child(summary);
+            }
+            if let Some(probe) = self.echo_paint_probe(&session) {
+                pane = pane.child(probe);
             }
             pane.into_any_element()
         } else {

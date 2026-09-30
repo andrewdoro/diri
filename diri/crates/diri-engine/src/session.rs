@@ -547,6 +547,89 @@ pub(crate) struct GridWake {
 struct GridWakeInner {
     state: Mutex<GridWakeState>,
     changed: Condvar,
+    echo: EchoTiming,
+}
+
+/// Engine-side keystroke timing for telemetry, lock-free: the first input of
+/// a burst, the first PTY output after it (`input.echo.engine`: the Holder,
+/// the PTY and the agent's own reaction) and the first attach frame published
+/// after that output (`input.echo.publish`: batching and coalescing here).
+/// Times are µs since [`echo_epoch`] + 1; 0 means none pending.
+struct EchoTiming {
+    written: AtomicU64,
+    output: AtomicU64,
+    class: diri_telemetry::AgentClass,
+}
+
+/// Longer than this is not an echo; a stale input is replaced.
+const ECHO_TIMING_MAX: Duration = Duration::from_secs(2);
+
+fn echo_epoch_us() -> u64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(Instant::now);
+    u64::try_from(epoch.elapsed().as_micros())
+        .unwrap_or(u64::MAX - 1)
+        .saturating_add(1)
+}
+
+impl EchoTiming {
+    fn engine_metric(&self) -> &'static str {
+        use diri_telemetry::AgentClass;
+        match self.class {
+            AgentClass::Claude => "input.echo.engine.claude",
+            AgentClass::Codex => "input.echo.engine.codex",
+            AgentClass::Cursor => "input.echo.engine.cursor",
+            AgentClass::Gemini => "input.echo.engine.gemini",
+            AgentClass::Shell => "input.echo.engine.shell",
+            AgentClass::Other => "input.echo.engine.other",
+        }
+    }
+
+    fn note_input(&self) {
+        if !diri_telemetry::is_enabled() {
+            return;
+        }
+        let now = echo_epoch_us();
+        let written = self.written.load(Ordering::Acquire);
+        let max = u64::try_from(ECHO_TIMING_MAX.as_micros()).unwrap_or(u64::MAX);
+        if written == 0 || now.saturating_sub(written) > max {
+            self.output.store(0, Ordering::Release);
+            self.written.store(now, Ordering::Release);
+        }
+    }
+
+    /// One atomic load unless a keystroke is waiting for its output.
+    fn note_output(&self) {
+        let written = self.written.load(Ordering::Acquire);
+        if written == 0 {
+            return;
+        }
+        let now = echo_epoch_us();
+        if self
+            .output
+            .compare_exchange(0, now, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            let elapsed = Duration::from_micros(now.saturating_sub(written));
+            if elapsed <= ECHO_TIMING_MAX {
+                diri_telemetry::observe("input.echo.engine", elapsed);
+                diri_telemetry::observe(self.engine_metric(), elapsed);
+            }
+        }
+    }
+
+    fn note_published(&self) {
+        let output = self.output.load(Ordering::Acquire);
+        if output == 0 {
+            return;
+        }
+        self.output.store(0, Ordering::Release);
+        self.written.store(0, Ordering::Release);
+        let elapsed = Duration::from_micros(echo_epoch_us().saturating_sub(output));
+        if elapsed <= ECHO_TIMING_MAX {
+            diri_telemetry::observe("input.echo.publish", elapsed);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -563,7 +646,12 @@ struct GridWakeState {
 const INTERACTIVE_GRID_BUDGET: u8 = 2;
 
 impl GridWake {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::for_agent("")
+    }
+
+    fn for_agent(manifest_id: &str) -> Self {
         Self {
             inner: Arc::new(GridWakeInner {
                 state: Mutex::new(GridWakeState {
@@ -571,8 +659,29 @@ impl GridWake {
                     interactive_budget: 0,
                 }),
                 changed: Condvar::new(),
+                echo: EchoTiming {
+                    written: AtomicU64::new(0),
+                    output: AtomicU64::new(0),
+                    class: diri_telemetry::agent_class(manifest_id),
+                },
             }),
         }
+    }
+
+    /// A keystroke was written to the child; see [`EchoTiming`].
+    fn note_input_for_telemetry(&self) {
+        self.inner.echo.note_input();
+    }
+
+    /// The child produced output; see [`EchoTiming`].
+    fn note_output_for_telemetry(&self) {
+        self.inner.echo.note_output();
+    }
+
+    /// A frame carrying the child's latest output was queued to attached
+    /// clients; see [`EchoTiming`].
+    pub(crate) fn note_published_for_telemetry(&self) {
+        self.inner.echo.note_published();
     }
 
     pub(crate) fn notify(&self) {
@@ -2609,6 +2718,7 @@ impl Session {
             // Let the attachment pump interrupt a background coalescing wait
             // instead of making typed input cross an 8 ms frame boundary.
             self.shared.grid_wake.prioritize_interactive_changes();
+            self.shared.grid_wake.note_input_for_telemetry();
             self.shared.request_echo(bytes);
         }
         self.observe_prompt_input(bytes);
@@ -3023,7 +3133,7 @@ fn new_shared(
         child_pid: std::sync::atomic::AtomicI32::new(0),
         remote_grid: Mutex::new(None),
         remote_output_offset: AtomicU64::new(0),
-        grid_wake: GridWake::new(),
+        grid_wake: GridWake::for_agent(&spec.manifest_id),
         agent: spec.manifest_id.clone(),
         launched_at: fresh.then(Instant::now),
         terminate_requested: AtomicBool::new(false),
@@ -4095,6 +4205,7 @@ fn pump(
             Ok(usize::MAX) => {}
             Ok(0) => break, // the child closed the terminal
             Ok(n) => {
+                shared.grid_wake.note_output_for_telemetry();
                 let closed = feed_output_batch(&shared, &mut reader, &mut buffer, n);
                 // One detection pass per batch, not per read: the reducer
                 // discards observations it has already judged anyway.
@@ -4910,6 +5021,9 @@ fn pump_held(
             let historical = offset <= replay_until;
             if !replies.is_empty() && !historical {
                 let _ = client.write(&replies);
+            }
+            if !historical && !replaying {
+                shared.grid_wake.note_output_for_telemetry();
             }
             let batch_started = *publish_pending.get_or_insert_with(Instant::now);
             // A keystroke's echo cannot wait for the empty poll that proves

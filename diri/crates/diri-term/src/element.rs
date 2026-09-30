@@ -2707,10 +2707,49 @@ impl Element for TerminalElement {
     }
 }
 
+/// Running totals of terminal paints in this process, for per-frame
+/// breakdowns: a frame's share is the difference across it.
+static PAINTS: AtomicU64 = AtomicU64::new(0);
+static PAINT_SHAPE_MISSES: AtomicU64 = AtomicU64::new(0);
+static PAINT_MICROS: AtomicU64 = AtomicU64::new(0);
+
+/// Terminal element paints (prepaint + paint) so far in this process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaintTotals {
+    pub paints: u64,
+    pub shape_misses: u64,
+    pub micros: u64,
+}
+
+impl PaintTotals {
+    pub fn now() -> Self {
+        Self {
+            paints: PAINTS.load(Ordering::Relaxed),
+            shape_misses: PAINT_SHAPE_MISSES.load(Ordering::Relaxed),
+            micros: PAINT_MICROS.load(Ordering::Relaxed),
+        }
+    }
+
+    /// What was painted between `earlier` and `self`.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            paints: self.paints.saturating_sub(earlier.paints),
+            shape_misses: self.shape_misses.saturating_sub(earlier.shape_misses),
+            micros: self.micros.saturating_sub(earlier.micros),
+        }
+    }
+}
+
 /// One terminal paint (prepaint + paint of this element) for the flight
 /// recorder: a histogram always, an event when it alone would blow a frame.
 fn record_paint(cost: Duration, cache_misses: u64, grid: impl FnOnce() -> (u16, u16)) {
     const SLOW_PAINT: Duration = Duration::from_millis(50);
+    PAINTS.fetch_add(1, Ordering::Relaxed);
+    PAINT_SHAPE_MISSES.fetch_add(cache_misses, Ordering::Relaxed);
+    PAINT_MICROS.fetch_add(
+        u64::try_from(cost.as_micros()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
     if !diri_telemetry::is_enabled() {
         return;
     }
