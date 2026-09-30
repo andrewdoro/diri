@@ -398,7 +398,7 @@ mod tests {
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 106, "the shipped ruleset lost rules");
+        assert_eq!(rules, 107, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
             let expected_empty = matches!(id, "shell" | "generic" | "pi");
@@ -740,6 +740,44 @@ mod tests {
             now + Duration::from_secs(8),
         );
         assert_eq!(reducer.status(), &SessionStatus::Working);
+    }
+
+    /// Codex's startup update chooser, as `update_prompt.rs` draws it. Its
+    /// selected row starts with `›`, the same mark as the composer, so it read
+    /// as an idle input box; Enter there updates Codex and exits it.
+    #[test]
+    fn codex_update_chooser_is_a_question_not_an_idle_composer() {
+        let engine = engine();
+        let chooser = [
+            "  ✨ Update available! 0.158.0 -> 0.159.0",
+            "",
+            "  Release notes: https://github.com/openai/codex/releases/latest",
+            "",
+            "› 1. Update now (runs `npm install -g @openai/codex`)",
+            "  2. Skip",
+            "  3. Skip until next version",
+            "",
+            "  Press enter to continue",
+        ];
+        let observation = engine
+            .evaluate(&cursor_snapshot(&chooser, None), "codex")
+            .expect("chooser rule");
+        assert_eq!(observation.state, ManifestState::BlockedQuestion);
+
+        // Once the chat is up, the in-history update banner is not a blocker.
+        let chat = [
+            "✨ Update available! 0.158.0 -> 0.159.0",
+            "Run npm install -g @openai/codex to update.",
+            "",
+            "› Ask Codex to do anything",
+        ];
+        assert_eq!(
+            engine
+                .evaluate(&cursor_snapshot(&chat, None), "codex")
+                .unwrap()
+                .state,
+            ManifestState::Idle
+        );
     }
 
     #[test]

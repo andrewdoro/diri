@@ -66,14 +66,21 @@ fn find<'a>(records: &'a [Value], kind: &str, session: &str) -> Option<&'a Value
 }
 
 fn wait_for(state: &Path, what: &str, mut found: impl FnMut(&[Value]) -> bool) -> Vec<Value> {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         diri_telemetry::flush(Duration::from_secs(1));
         let records = records(state);
         if found(&records) {
             return records;
         }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}: {:?}",
+            records
+                .iter()
+                .map(|record| format!("{} {}", record["k"], record["f"]))
+                .collect::<Vec<_>>()
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -110,8 +117,11 @@ fn launches_exits_and_holder_facts_reach_the_spool() {
     // the launch, the exit and an early-exit incident, and the Holder process
     // itself records the child it spawned and how it ended.
     let holder = PathBuf::from(env!("CARGO_BIN_EXE_diri-holder"));
-    let session = Session::spawn(spec("s_tel_early", root.path(), holder, "exit 3"), engine())
-        .expect("spawn");
+    let session = Session::spawn(
+        spec("s_tel_early", root.path(), holder.clone(), "exit 3"),
+        engine(),
+    )
+    .expect("spawn");
     let records = wait_for(&state, "early exit and holder facts", |records| {
         find(records, "session.early_exit", "s_tel_early").is_some()
             && find(records, "holder.exit", "s_tel_early").is_some()
@@ -136,4 +146,48 @@ fn launches_exits_and_holder_facts_reach_the_spool() {
             .exists(),
         "an incident asks the uploader to send soon"
     );
+
+    // A `returnToLoginShell` agent that fails at startup: the PTY lives on as
+    // the login shell, so only the wrapper's report says how the agent ended,
+    // and the early-exit probe carries that status instead of guessing.
+    let wrapped = diri_engine::agent::AgentDescriptor {
+        binary: Some("/bin/sh".into()),
+        return_to_login_shell: true,
+        ..Default::default()
+    };
+    let pty = wrapped
+        .spawn_spec(
+            Path::new("/tmp"),
+            [
+                ("SHELL".to_string(), "/bin/sh".to_string()),
+                (
+                    "HOME".to_string(),
+                    root.path().to_string_lossy().into_owned(),
+                ),
+            ],
+            &["-c".into(), "exit 7".into()],
+        )
+        .expect("wrapped spec")
+        .size(80, 24);
+    let mut wrapped_spec = spec("s_tel_wrapped", root.path(), holder, "");
+    wrapped_spec.pty = pty;
+    // The early-exit probe watches deferred launches of wrapped manifests.
+    wrapped_spec.manifest_id = "codex".into();
+    wrapped_spec.defer_launch = true;
+    let mut session = Session::spawn(wrapped_spec, engine()).expect("spawn wrapped");
+    let records = wait_for(&state, "wrapped agent exit", |records| {
+        find(records, "session.agent_exited", "s_tel_wrapped").is_some()
+            && find(records, "session.early_exit", "s_tel_wrapped").is_some()
+    });
+    let _ = session.terminate(Duration::from_secs(1));
+    drop(session);
+
+    let exited = find(&records, "session.agent_exited", "s_tel_wrapped").unwrap();
+    assert_eq!(exited["s"], "warn");
+    assert_eq!(exited["f"]["source"], "wrapper");
+    assert_eq!(exited["f"]["code"], 7);
+    assert_eq!(exited["f"]["runtime_s"], 0);
+    let early = find(&records, "session.early_exit", "s_tel_wrapped").unwrap();
+    assert_eq!(early["f"]["kind"], "returned_to_shell");
+    assert_eq!(early["f"]["code"], 7);
 }

@@ -14,7 +14,7 @@
 //! see [`scan_progress`].
 
 mod notifications;
-pub use notifications::TerminalNotification;
+pub use notifications::{AGENT_EXIT_OSC, TerminalNotification};
 
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
@@ -505,6 +505,12 @@ impl HeadlessScreen {
     /// The newest undelivered OSC 52 clipboard write, still base64-encoded.
     pub fn take_clipboard(&mut self) -> Option<String> {
         self.notifications.as_mut()?.clipboard.take()
+    }
+
+    /// The exit status the login-shell wrapper reported for its agent since
+    /// the last call. See [`notifications::AGENT_EXIT_OSC`].
+    pub fn take_agent_exit(&mut self) -> Option<i32> {
+        self.notifications.as_mut()?.agent_exit.take()
     }
 
     pub fn take_notifications(&mut self) -> Vec<TerminalNotification> {
