@@ -228,10 +228,18 @@ pub fn kill_stragglers(leader: i32, frozen: &[HolderProcessSample]) -> Vec<Holde
     killed
 }
 
-/// SIGTERM the tree (waking stopped members with SIGCONT so the TERM is
-/// deliverable), give it half a second, then SIGKILL whatever survived.
+/// Hang up and SIGTERM the tree (waking stopped members with SIGCONT so both
+/// are deliverable), give it half a second, then SIGKILL whatever survived.
+///
+/// The hangup is what closing a terminal sends, and it is the signal the
+/// usual session leader actually obeys: every local session runs under an
+/// interactive shell (`$SHELL -l`, or the `-i -l -c` wrapper that returns an
+/// agent to a prompt), and interactive zsh and bash ignore SIGTERM. With
+/// SIGTERM alone the leader outlived every grace and each close waited the
+/// full half second for the SIGKILL.
 pub fn kill_tree(root: i32) {
     let mut tree = enumerate(root);
+    let _ = signal(root, libc::SIGHUP);
     let _ = signal(root, libc::SIGTERM);
     let _ = signal(root, libc::SIGCONT);
 
