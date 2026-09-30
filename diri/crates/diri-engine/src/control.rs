@@ -4536,15 +4536,23 @@ fn deliver_initial_prompt(
     with_session(registry, session_id, |session| session.paste_text(prompt))
         .ok_or(InitialPromptFailure::SessionEnded)?
         .map_err(|_| InitialPromptFailure::InputFailed)?;
-    match wait_for_echo(registry, session_id, probe.as_deref(), &before, ECHO_WINDOW) {
+    match wait_for_echo(
+        registry,
+        session_id,
+        probe.as_deref(),
+        &before,
+        ECHO_WINDOW,
+        None,
+    ) {
         EchoOutcome::Gone => return Err(InitialPromptFailure::SessionEnded),
-        EchoOutcome::Visible => {
-            return submit_typed_prompt(registry, session_id, probe.as_deref());
+        EchoOutcome::Visible(shown) => {
+            return submit_typed_prompt(registry, session_id, shown.as_deref());
         }
         EchoOutcome::Missing => *delivery = "blind_enter",
     }
     // A line-mode reader may not display anything until Enter. Send it once;
     // a missing response leaves an unknown outcome, never permission to retry.
+    let submitted_at = diri_proto::DateMillis::from(std::time::SystemTime::now());
     with_session(registry, session_id, |session| session.submit_input())
         .ok_or(InitialPromptFailure::SessionEnded)?
         .map_err(|_| InitialPromptFailure::InputFailed)?;
@@ -4554,17 +4562,20 @@ fn deliver_initial_prompt(
         probe.as_deref(),
         &before,
         LANDED_WINDOW,
+        Some(submitted_at),
     ) {
         EchoOutcome::Gone => Err(InitialPromptFailure::SessionEnded),
-        EchoOutcome::Visible => Ok(()),
+        EchoOutcome::Visible(_) => Ok(()),
         EchoOutcome::Missing => Err(InitialPromptFailure::SubmissionUnconfirmed),
     }
 }
 
 /// What the screen said about a prompt we just typed.
 enum EchoOutcome {
-    /// The prompt is visibly sitting in the composer: safe to submit.
-    Visible,
+    /// The prompt is visibly sitting in the composer: safe to submit. Carries
+    /// the text that proved it — the probe, or the placeholder a TUI shows in
+    /// place of a long paste — for the submission check to watch.
+    Visible(Option<String>),
     /// No echo was observed; acceptance is unknown.
     Missing,
     /// The session exited or vanished — stop touching it.
@@ -4574,19 +4585,25 @@ enum EchoOutcome {
 /// How long to watch for the prompt to echo back as it is typed, and how long
 /// to watch for it after submitting. The first is short because a TUI that
 /// renders its composer does so immediately; the second is longer because it
-/// covers a round trip through the agent.
+/// covers a round trip through the agent, which Codex holds back until all
+/// of its MCP servers have started. Both end early on confirmation, so the
+/// long window only delays reporting an outcome that stays unknown.
 const ECHO_WINDOW: Duration = Duration::from_millis(1500);
-const LANDED_WINDOW: Duration = Duration::from_millis(2500);
+const LANDED_WINDOW: Duration = Duration::from_secs(10);
 
 /// Polls for the typed prompt to appear on screen. With no usable probe —
 /// every word of the prompt was already on screen — any change from `before`
-/// is taken as the echo, which is the best signal available in that case.
+/// is taken as the echo, which is the best signal available in that case. A
+/// paste placeholder that was not on screen before also counts: Claude and
+/// Codex show one instead of a long paste, so no word of it ever appears.
+/// With `submitted_at`, fresh Agent evidence after that Enter counts too.
 fn wait_for_echo(
     registry: &Arc<Mutex<Registry>>,
     session_id: &str,
     probe: Option<&str>,
     before: &str,
     window: Duration,
+    submitted_at: Option<diri_proto::DateMillis>,
 ) -> EchoOutcome {
     let polls = (window.as_millis() / 100).max(1);
     for _ in 0..polls {
@@ -4601,10 +4618,31 @@ fn wait_for_echo(
         }
         let echoed = probe.map_or_else(|| now != before, |probe| now.contains(probe));
         if echoed {
-            return EchoOutcome::Visible;
+            return EchoOutcome::Visible(probe.map(str::to_owned));
+        }
+        if let Some(placeholder) = new_paste_placeholder(before, &now) {
+            return EchoOutcome::Visible(Some(placeholder));
+        }
+        if submitted_at.is_some_and(|at| agent_started_working(registry, session_id, at)) {
+            return EchoOutcome::Visible(None);
         }
     }
     EchoOutcome::Missing
+}
+
+/// Claude Code shows `[Pasted text #1 +6 lines]` and Codex `[Pasted Content
+/// 1234 chars]` in place of a long paste. The first such marker on `now` that
+/// `before` lacked is the composer's echo of our paste.
+fn new_paste_placeholder(before: &str, now: &str) -> Option<String> {
+    static PLACEHOLDER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\[Pasted (?:text #\d+(?: \+\d+ lines)?|Content \d+ chars)\]")
+            .expect("paste placeholder pattern compiles")
+    });
+    PLACEHOLDER
+        .find_iter(now)
+        .map(|found| found.as_str())
+        .find(|placeholder| !before.contains(placeholder))
+        .map(str::to_owned)
 }
 
 /// Presses Enter on a prompt already verified to be in the composer, and
@@ -4635,7 +4673,7 @@ fn submit_typed_prompt(
     // The prompt may remain in the transcript after submission. In that
     // case require a fresh, authoritative Agent signal; startup output or
     // a status that predates Enter cannot acknowledge these bytes.
-    for _ in 0..20 {
+    for _ in 0..LANDED_WINDOW.as_millis() / 100 {
         std::thread::sleep(Duration::from_millis(100));
         match screen_text(registry, session_id) {
             None => return Err(InitialPromptFailure::SessionEnded),
