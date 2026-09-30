@@ -250,8 +250,8 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `app.sleep` / `app.wake` | info | | gaps that are sleep, not hangs; reconnect storms after wake |
 | `app.quit` | info | `uptime_s, windows_main, windows_opened` | clean exit vs crash (a timeline that just stops) |
 | `window.open` / `window.close` | info (main), debug (floating) | `kind` (`main`\|`floating`), `window`, `lived_s`, `open` | window churn vs RSS growth (closed-window leaks) |
-| `ui.frame` → `ui.slow_frame` | warn | `ms, window, surface` (`workbench`\|`settings`\|`palette`\|`launcher`), `workspace` | "diri is slow/janky"; frame ≥ 50 ms |
-| `ui.stall` | warn (1–3 s), incident (≥ 3 s) | `ms, ongoing, active` | beachballs, hangs; `ongoing=true` is written at 5 s while still stuck |
+| `ui.frame` → `ui.slow_frame` | warn | `ms, window, surface` (`workbench`\|`settings`\|`palette`\|`launcher`), `workspace, active` (window key), `cpu_ms` (main-thread CPU in the frame), `faults` (process page faults in the frame), `idle_ms` (since the window's previous frame) | "diri is slow/janky"; frame ≥ 50 ms. `cpu_ms` ≪ `ms` means the thread was starved or paging, not working; many `faults` after a long `idle_ms` means memory the system compressed being paged back in |
+| `ui.stall` | warn (1–3 s), incident (≥ 3 s) | `ms, ongoing, active, was_active` (frontmost when it began), `cpu_ms` (main-thread CPU during it), `faults`, `action` (static action name that finished inside it) | beachballs, hangs; `ongoing=true` is written at 5 s while still stuck. `cpu_ms` ≈ `ms`: busy on the main thread; ≈ 0: blocked (lock, synchronous call, AppKit) or not scheduled |
 | `ui.action` | debug | `action` (GPUI action name), `source` (`shortcut`\|`palette`) | what the user did just before a failure |
 | `ui.toast` | info | `title` (static toast title) | errors the user was shown ("Terminal", "Target unavailable", …) |
 | `privacy.notice_shown` / `privacy.upload_changed` | info | `upload` | consent history |

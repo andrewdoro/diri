@@ -4525,7 +4525,7 @@ impl RootView {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let frame_started = std::time::Instant::now();
+        let frame_started = crate::telemetry::frame_start();
         self.main_viewport = window.viewport_size();
         if self.pending_notification_open.is_some()
             && self
