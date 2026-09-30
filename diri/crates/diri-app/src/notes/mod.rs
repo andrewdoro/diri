@@ -8,6 +8,7 @@
 //! step with the note's, and reloads writes made by the CLI or agents.
 
 pub(crate) mod editor_view;
+pub(crate) mod work_item;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -78,6 +79,12 @@ impl Focusable for NotePane {
             _ => self.focus.clone(),
         }
     }
+}
+
+fn editor_view_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 pub(crate) enum NotePaneEvent {
@@ -202,6 +209,7 @@ impl NotePane {
                 cx.emit(NotePaneEvent::Dismiss);
             }
             EditorEvent::OpenMention(target) => this.open_mention(target, cx),
+            EditorEvent::Work(request) => this.on_work(request, cx),
         });
         let synced_title = self
             .runtime
@@ -223,6 +231,7 @@ impl NotePane {
             _subscription: subscription,
         });
         self.push_mentions(cx);
+        self.push_work(cx);
         cx.notify();
     }
 
@@ -232,7 +241,13 @@ impl NotePane {
             loop {
                 match changes.recv().await {
                     Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if this.update(cx, |this, cx| this.push_mentions(cx)).is_err() {
+                        if this
+                            .update(cx, |this, cx| {
+                                this.push_mentions(cx);
+                                this.push_work(cx);
+                            })
+                            .is_err()
+                        {
                             return;
                         }
                     }

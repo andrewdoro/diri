@@ -13,22 +13,26 @@ use diri_notes::doc::{Block, BlockId, BlockKind};
 use diri_notes::edit::Pos;
 use diri_notes::work::{self, Brief, SessionFacts, WorkState};
 use diri_proto::{AgentKind, SessionId};
-use diri_ui::{AgentLogo, GlassMenuRow as _, Ink, SemanticColors, Typo};
+use diri_ui::{AgentLogo, Ink, SemanticColors, Typo};
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, ScrollHandle, SharedString,
-    anchored, deferred, div, point, prelude::*, px,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, ScrollHandle, SharedString, div,
+    prelude::*, px,
 };
 
 use super::editor_view::{EditorEvent, NoteEditorView, accent};
+use crate::floating;
 use crate::icons::sf_symbol;
 
 /// The keyboard shortcut that starts work from the to-do at the caret.
 pub(crate) const START_SHORTCUT: &str = "⌥⌘↩";
 const PANEL_WIDTH: f32 = 440.0;
+const TICK_WIDTH: f32 = 280.0;
 const PREVIEW_HEIGHT: f32 = 200.0;
-const ROW_HEIGHT: f32 = 32.0;
-const ROW_ICON_SLOT: f32 = 22.0;
-const ROW_RADIUS: f32 = 12.0;
+const PREVIEW_LINE: f32 = 16.0;
+/// Roughly how many mono characters fit a preview line, for the height the
+/// panel reserves before it is measured.
+const PREVIEW_CHARS_PER_LINE: usize = 62;
+const LABEL_HEIGHT: f32 = 24.0;
 /// The Start affordance sits in the margin right of the text column.
 const ACCESSORY_GAP: f32 = 12.0;
 
@@ -75,7 +79,7 @@ struct TickPanel {
 const TICK_CHOICES: [&str; 3] = ["Tick and stop the agent", "Tick, keep it running", "Cancel"];
 
 enum Pending {
-    Starting { ticket: u64 },
+    Starting { ticket: u64, label: String },
     Failed(String),
 }
 
@@ -106,7 +110,7 @@ impl WorkView {
         self.pending
             .iter()
             .filter_map(|(block, pending)| match pending {
-                Pending::Starting { ticket } => Some((*block, *ticket)),
+                Pending::Starting { ticket, .. } => Some((*block, *ticket)),
                 Pending::Failed(_) => None,
             })
             .collect()
@@ -162,6 +166,42 @@ impl WorkView {
             index += 1;
         }
         self.hidden = hidden;
+    }
+
+    /// Carries fold and start state across a reload, which renumbers
+    /// blocks: each to-do is found again by its text, nearest first.
+    pub(crate) fn remap(&mut self, old: &[Block], new: &[Block]) {
+        let find = |id: BlockId| -> Option<BlockId> {
+            let from = old.iter().position(|b| b.id == id)?;
+            let text = work::task_text(&old[from]);
+            new.iter()
+                .enumerate()
+                .filter(|(_, b)| {
+                    matches!(b.kind, BlockKind::Todo { .. }) && work::task_text(b) == text
+                })
+                .min_by_key(|(index, _)| index.abs_diff(from))
+                .map(|(_, b)| b.id)
+        };
+        self.folds = std::mem::take(&mut self.folds)
+            .into_iter()
+            .filter_map(|(id, folded)| Some((find(id)?, folded)))
+            .collect();
+        self.pending = std::mem::take(&mut self.pending)
+            .into_iter()
+            .filter_map(|(id, pending)| Some((find(id)?, pending)))
+            .collect();
+        if let Some(panel) = &mut self.start {
+            match find(panel.block) {
+                Some(id) => panel.block = id,
+                None => self.start = None,
+            }
+        }
+        if let Some(panel) = &mut self.tick {
+            match find(panel.block) {
+                Some(id) => panel.block = id,
+                None => self.tick = None,
+            }
+        }
     }
 
     pub(crate) fn is_hidden(&self, index: usize) -> bool {
@@ -245,9 +285,18 @@ impl NoteEditorView {
         cx.notify();
     }
 
-    /// The host asked the Engine to spawn; the to-do shows "Starting…".
-    pub(crate) fn work_started(&mut self, block: BlockId, ticket: u64, cx: &mut Context<Self>) {
-        self.work.pending.insert(block, Pending::Starting { ticket });
+    /// The host asked the Engine to spawn; the to-do shows "Starting…" and
+    /// links the session as `label` once it exists.
+    pub(crate) fn work_started(
+        &mut self,
+        block: BlockId,
+        ticket: u64,
+        label: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.work
+            .pending
+            .insert(block, Pending::Starting { ticket, label });
         cx.notify();
     }
 
@@ -256,13 +305,16 @@ impl NoteEditorView {
     pub(crate) fn work_finished(
         &mut self,
         block: BlockId,
-        outcome: Result<(SessionId, String), String>,
+        outcome: Result<SessionId, String>,
         now_ms: u64,
         cx: &mut Context<Self>,
     ) {
         match outcome {
-            Ok((session, label)) => {
-                self.work.pending.remove(&block);
+            Ok(session) => {
+                let label = match self.work.pending.remove(&block) {
+                    Some(Pending::Starting { label, .. }) => label,
+                    _ => diri_notes::mention::session_label("", ""),
+                };
                 if let Some(index) = self.block_index(block)
                     && self.editor.link_session(index, &label, &session.0, now_ms)
                 {
@@ -356,6 +408,18 @@ impl NoteEditorView {
         let folded = self.work.folded(self.editor.block(index));
         self.work.folds.insert(block, !folded);
         cx.notify();
+    }
+
+    /// Puts the caret on the to-do that links `session`, unfolded, and
+    /// scrolls to it: the way back from a session to its work item.
+    pub(crate) fn reveal_session(&mut self, session: &str, cx: &mut Context<Self>) -> bool {
+        let Some(index) = work::todo_for_session(self.editor.blocks(), session) else {
+            return false;
+        };
+        let end = self.editor.block(index).text.len();
+        self.editor.set_caret(Pos::new(index, end));
+        self.touched_for_work(cx);
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -596,121 +660,119 @@ impl NoteEditorView {
         )
     }
 
-    /// The panel under a to-do row, when one is open for it.
-    pub(super) fn work_panel_for(
-        &self,
-        block: BlockId,
-        colors: SemanticColors,
+    /// The open Start or "still working" panel, hosted like the `/` and `@`
+    /// menus: a glass panel window in the app, a floating surface in the
+    /// window otherwise, anchored under the to-do.
+    pub(super) fn work_menu(
+        &mut self,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let content = if self.work.start.as_ref().is_some_and(|p| p.block == block) {
-            self.start_panel_content(colors, cx)?
-        } else if self.work.tick.as_ref().is_some_and(|p| p.block == block) {
-            self.tick_panel_content(colors, cx)?
-        } else {
-            return None;
-        };
-        // Glass menus are panel windows in the app; fixtures and opaque
-        // windows keep the in-window surface they can inspect.
-        let surface = diri_ui::FloatingSurface::new(colors, content)
-            .radius(crate::floating::MENU_RADIUS);
-        Some(
-            deferred(
-                anchored()
-                    .position_mode(gpui::AnchoredPositionMode::Local)
-                    .position(point(px(-8.0), px(4.0)))
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(div().w(px(PANEL_WIDTH)).occlude().child(surface)),
+        let block = self
+            .work
+            .start
+            .as_ref()
+            .map(|p| p.block)
+            .or(self.work.tick.as_ref().map(|p| p.block))?;
+        let index = self.block_index(block)?;
+        // Anchor under the to-do's text even if the caret moved this frame.
+        self.anchor_menus_at(Pos::new(index, self.editor.block(index).text.len()));
+        if self.work.start.is_some() {
+            let height = self.start_panel_height();
+            self.host_menu(
+                START_PANEL,
+                Self::start_panel_rows,
+                PANEL_WIDTH,
+                height,
+                window,
+                cx,
             )
-            .with_priority(1)
-            .into_any_element(),
-        )
+        } else {
+            let height = super::editor_view::menu_height(TICK_CHOICES.len(), 1) + LABEL_HEIGHT;
+            self.host_menu(
+                TICK_PANEL,
+                Self::tick_panel_rows,
+                TICK_WIDTH,
+                height,
+                window,
+                cx,
+            )
+        }
     }
 
-    fn start_panel_content(
-        &self,
-        colors: SemanticColors,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn start_panel_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.start_panel_rows(cx)?;
+        Some(floating::surface(self.colors(), floating::MENU_RADIUS, PANEL_WIDTH, rows).into_any_element())
+    }
+
+    fn tick_panel_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.tick_panel_rows(cx)?;
+        Some(floating::surface(self.colors(), floating::MENU_RADIUS, TICK_WIDTH, rows).into_any_element())
+    }
+
+    fn start_panel_height(&self) -> f32 {
+        let Some(panel) = &self.work.start else {
+            return 0.0;
+        };
+        let lines: usize = panel
+            .brief
+            .prompt
+            .lines()
+            .map(|line| line.chars().count() / PREVIEW_CHARS_PER_LINE + 1)
+            .sum();
+        let preview = (lines as f32 * PREVIEW_LINE + 16.0).min(PREVIEW_HEIGHT);
+        super::editor_view::menu_height(panel.agents.len().max(1), 1)
+            + 2.0 * LABEL_HEIGHT
+            + preview
+            + 8.0
+    }
+
+    fn start_panel_rows(&mut self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let colors = self.colors();
         let panel = self.work.start.as_ref()?;
-        let mut list = div().flex().flex_col().py(px(5.0));
-        list = list.child(section_label("Start with", colors));
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .py(px(floating::MENU_PADDING_Y))
+            .child(section_label("Start with".into(), None, colors));
         if panel.agents.is_empty() {
-            list = list.child(
-                div()
-                    .mx(px(6.0))
-                    .px(px(10.0))
-                    .h(px(ROW_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .text_size(px(Typo::ROW.size))
-                    .text_color(colors.secondary)
-                    .child("No agents installed. Add one in Settings › Agents."),
-            );
+            list = list.child(super::editor_view::menu_empty(
+                "No agents installed. Add one in Settings.",
+                colors,
+            ));
         }
         for (index, agent) in panel.agents.iter().enumerate() {
-            let active = index == panel.selected;
-            list = list.child(
-                div()
-                    .id(("work-agent", index))
-                    .mx(px(6.0))
-                    .px(px(10.0))
-                    .h(px(ROW_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .rounded(px(ROW_RADIUS))
-                    .cursor_pointer()
-                    .glass_menu_row(colors, active)
-                    .child(
-                        div()
-                            .w(px(ROW_ICON_SLOT))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                AgentLogo::new(
-                                    crate::session_presentation::ui_agent_kind(&agent.kind),
-                                    20.0,
-                                    colors,
-                                )
-                                .badged(false),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(Typo::ROW.size))
-                            .text_color(colors.primary)
-                            .child(agent.name.clone()),
-                    )
-                    .when(agent.is_default, |el| {
-                        el.child(
-                            div()
-                                .text_size(px(Typo::ROW.size))
-                                .text_color(colors.tertiary)
-                                .child("Default"),
-                        )
-                    })
-                    .when(active, |el| {
-                        el.child(
-                            div()
-                                .w(px(18.0))
-                                .text_size(px(Typo::ROW.size))
-                                .text_color(colors.tertiary)
-                                .child("↩"),
-                        )
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.confirm_start(index, cx);
-                        }),
-                    ),
-            );
+            let logo = AgentLogo::new(
+                crate::session_presentation::ui_agent_kind(&agent.kind),
+                super::editor_view::MENU_LOGO,
+                colors,
+            )
+            .badged(false)
+            .into_any_element();
+            let row = floating::menu_row(("note-work-agent", index), logo, colors, index == panel.selected)
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered && let Some(panel) = &mut this.work.start
+                        && panel.selected != index
+                    {
+                        panel.selected = index;
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.confirm_start(index, cx);
+                    }),
+                )
+                .child(super::editor_view::menu_label(agent.name.clone(), colors))
+                .when(index == panel.selected, |row| {
+                    row.child(floating::menu_shortcut("↩", colors))
+                })
+                .when(agent.is_default && index != panel.selected, |row| {
+                    row.child(floating::menu_shortcut("Default", colors))
+                });
+            list = list.child(row);
         }
         let brief = &panel.brief;
         let mut summary = vec![format_bytes(brief.prompt.len())];
@@ -730,106 +792,129 @@ impl NoteEditorView {
             summary.push("shortened".to_owned());
         }
         list = list
+            .child(floating::menu_separator(colors))
+            .child(section_label(
+                "What the agent gets".into(),
+                Some(summary.join(" · ").into()),
+                colors,
+            ))
             .child(
                 div()
-                    .mx(px(12.0))
-                    .my(px(5.0))
-                    .h(px(1.0))
-                    .bg(colors.primary.alpha(0.08)),
-            )
-            .child(
-                div()
-                    .px(px(16.0))
-                    .pt(px(4.0))
-                    .pb(px(6.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(11.5))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(colors.secondary)
-                            .child("What the agent gets"),
-                    )
-                    .child(div().text_color(colors.tertiary).child(summary.join(" · "))),
-            )
-            .child(
-                div()
-                    .id("work-brief")
-                    .mx(px(12.0))
-                    .mb(px(6.0))
+                    .id("note-work-brief")
+                    .mx(px(floating::MENU_ROW_MARGIN + 4.0))
+                    .mb(px(4.0))
                     .max_h(px(PREVIEW_HEIGHT))
                     .overflow_y_scroll()
                     .track_scroll(&panel.scroll)
                     .rounded(px(8.0))
-                    .bg(colors.primary.alpha(0.04))
+                    .bg(colors.primary.alpha(0.045))
                     .px(px(10.0))
                     .py(px(8.0))
                     .font_family(crate::fonts::mono_family())
                     .text_size(px(11.0))
-                    .line_height(px(16.0))
-                    .text_color(colors.primary.alpha(0.82))
+                    .line_height(px(PREVIEW_LINE))
+                    .text_color(colors.primary.alpha(0.8))
                     .child(brief.prompt.trim_end().to_owned()),
             );
-        Some(list.into_any_element())
+        Some(list)
     }
 
-    fn tick_panel_content(
-        &self,
-        colors: SemanticColors,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn tick_panel_rows(&mut self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let colors = self.colors();
         let panel = self.work.tick.as_ref()?;
         let mut list = div()
             .flex()
             .flex_col()
-            .py(px(5.0))
-            .child(section_label("The agent is still working", colors));
+            .py(px(floating::MENU_PADDING_Y))
+            .child(section_label(
+                "The agent is still working".into(),
+                None,
+                colors,
+            ));
         for (index, label) in TICK_CHOICES.iter().enumerate() {
-            let active = index == panel.selected;
-            list = list.child(
-                div()
-                    .id(("work-tick", index))
-                    .mx(px(6.0))
-                    .px(px(10.0))
-                    .h(px(ROW_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .rounded(px(ROW_RADIUS))
-                    .cursor_pointer()
-                    .glass_menu_row(colors, active)
-                    .text_size(px(Typo::ROW.size))
-                    .text_color(colors.primary)
-                    .when(index == 2, |el| {
-                        el.mt(px(1.0)).text_color(colors.secondary)
-                    })
-                    .child(div().flex_1().child(*label))
-                    .when(index == 2, |el| {
-                        el.child(div().text_color(colors.tertiary).child("esc"))
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.confirm_tick(index, cx);
-                        }),
-                    ),
+            if index == 2 {
+                list = list.child(floating::menu_separator(colors));
+            }
+            let icon = sf_symbol(
+                ["checkmark.circle.fill", "checkmark", "xmark"][index],
+                super::editor_view::MENU_ICON,
+                colors.secondary,
             );
+            let row = floating::menu_row(("note-work-tick", index), icon, colors, index == panel.selected)
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered && let Some(panel) = &mut this.work.tick
+                        && panel.selected != index
+                    {
+                        panel.selected = index;
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.confirm_tick(index, cx);
+                    }),
+                )
+                .child(super::editor_view::menu_label(*label, colors))
+                .when(index == 2, |row| row.child(floating::menu_shortcut("esc", colors)));
+            list = list.child(row);
         }
-        Some(list.into_any_element())
+        Some(list)
     }
 }
 
-fn section_label(text: &'static str, colors: SemanticColors) -> impl IntoElement {
+pub(super) const START_PANEL: floating::Target<NoteEditorView> = floating::Target {
+    key: "note-work-start",
+    radius: floating::MENU_RADIUS,
+    content: NoteEditorView::start_panel_content,
+    dismiss: |this, _, cx| {
+        this.work.start = None;
+        cx.notify();
+    },
+};
+
+pub(super) const TICK_PANEL: floating::Target<NoteEditorView> = floating::Target {
+    key: "note-work-tick",
+    radius: floating::MENU_RADIUS,
+    content: NoteEditorView::tick_panel_content,
+    dismiss: |this, _, cx| {
+        this.work.tick = None;
+        cx.notify();
+    },
+};
+
+/// A quiet heading inside a panel, with optional trailing detail.
+fn section_label(
+    text: SharedString,
+    detail: Option<SharedString>,
+    colors: SemanticColors,
+) -> impl IntoElement {
     div()
-        .px(px(16.0))
-        .pt(px(4.0))
-        .pb(px(3.0))
-        .text_size(px(11.5))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(colors.tertiary)
-        .child(text)
+        .h(px(LABEL_HEIGHT))
+        .px(px(floating::MENU_ROW_MARGIN + floating::MENU_ROW_INSET))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .text_size(px(Typo::META.size))
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(colors.secondary)
+                .child(text),
+        )
+        .when_some(detail, |el, detail| {
+            el.child(
+                div()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(colors.tertiary)
+                    .child(detail),
+            )
+        })
 }
 
 fn one_line(text: &str, max_chars: usize) -> String {
@@ -864,11 +949,236 @@ pub(crate) fn link_in_file(link: &crate::store::WorkLink, session: &SessionId) {
     let _ = store.update(&link.note_id, |note| {
         let found = note.doc.blocks.iter().position(|block| {
             matches!(block.kind, BlockKind::Todo { .. })
-                && work::task_title_matches(block, &link.todo_text)
+                && work::task_text(block) == link.todo_text
         });
         if let Some(index) = found {
             diri_notes::handoff::link_session(note, index, &link.label, &session.0);
         }
         Ok(())
     });
+}
+
+// ---------------------------------------------------------------------------
+// The pane: live facts in, spawns and selections out
+
+impl super::NotePane {
+    /// Live facts for every session the open note links, plus any starts the
+    /// Engine has answered. Runs on every session-store change.
+    pub(crate) fn push_work(&mut self, cx: &mut Context<Self>) {
+        let super::PaneState::Open(open) = &self.state else {
+            return;
+        };
+        let editor = open.editor.clone();
+        let linked: Vec<String> = editor
+            .read(cx)
+            .editor
+            .blocks()
+            .iter()
+            .flat_map(work::sessions)
+            .collect();
+        let pending = editor.read(cx).work.pending_tickets();
+        let (facts, outcomes) = {
+            let mut store = self.runtime.store.write().expect("store");
+            let facts: HashMap<String, SessionFacts> = linked
+                .into_iter()
+                .filter_map(|id| {
+                    let record = store.sessions().get(&SessionId::new(id.clone()))?;
+                    Some((id, SessionFacts::from_record(record)))
+                })
+                .collect();
+            let outcomes: Vec<_> = pending
+                .into_iter()
+                .filter_map(|(block, ticket)| Some((block, store.take_work_outcome(ticket)?)))
+                .collect();
+            (facts, outcomes)
+        };
+        editor.update(cx, |view, cx| {
+            if view.work.facts != facts {
+                view.work.set_facts(facts);
+                cx.notify();
+            }
+            for (block, outcome) in outcomes {
+                view.work_finished(block, outcome, super::editor_view_now_ms(), cx);
+            }
+        });
+    }
+
+    pub(super) fn on_work(&mut self, request: &WorkRequest, cx: &mut Context<Self>) {
+        match request {
+            WorkRequest::Prepare { block } => self.prepare_work(*block, cx),
+            WorkRequest::Start {
+                block,
+                kind,
+                agent_name,
+            } => self.start_work(*block, kind.clone(), agent_name, cx),
+            WorkRequest::Open { session } => {
+                let id = SessionId::new(session.clone());
+                if self.runtime.store.read().expect("store").sessions().contains_key(&id) {
+                    self.save(cx);
+                    cx.emit(super::NotePaneEvent::Reveal(id));
+                }
+            }
+            WorkRequest::Stop { session } => {
+                self.runtime
+                    .store
+                    .write()
+                    .expect("store")
+                    .archive_sessions(vec![SessionId::new(session.clone())]);
+            }
+        }
+    }
+
+    /// The note as it stands in the editor, and the document index of the
+    /// editor block `block` (the editor's block 0 is the title).
+    fn work_note(&self, block: BlockId, cx: &Context<Self>) -> Option<(diri_notes::store::Note, usize)> {
+        let super::PaneState::Open(open) = &self.state else {
+            return None;
+        };
+        let view = open.editor.read(cx);
+        let index = view.editor.blocks().iter().position(|b| b.id == block)?;
+        let note = diri_notes::store::Note {
+            front: open.front.clone(),
+            doc: view.editor.document(),
+        };
+        Some((note, index.checked_sub(1)?))
+    }
+
+    fn brief_for(&self, note: &diri_notes::store::Note, todo: usize) -> Brief {
+        let super::PaneState::Open(open) = &self.state else {
+            return Brief::default();
+        };
+        let mut notes = Vec::new();
+        let mut sessions = Vec::new();
+        let store = self.runtime.store.read().expect("store");
+        for target in work::mentions(&note.doc.blocks, todo) {
+            match target {
+                diri_notes::mention::MentionTarget::Note(id) => {
+                    if let Some(loaded) = self.store.as_ref().and_then(|s| s.load(&id).ok()) {
+                        let body = diri_notes::markdown::write(
+                            &diri_notes::markdown::FrontMatter::default(),
+                            &loaded.doc,
+                        );
+                        notes.push(work::ResolvedNote {
+                            id,
+                            title: loaded.doc.title.clone(),
+                            body,
+                        });
+                    }
+                }
+                diri_notes::mention::MentionTarget::Session(id) => {
+                    if let Some(record) = store.sessions().get(&SessionId::new(id.clone())) {
+                        let facts = SessionFacts::from_record(record);
+                        let state = work::state(false, Some(Some(&facts)));
+                        sessions.push(work::ResolvedSession {
+                            id,
+                            kind: record.effective_kind().id().to_owned(),
+                            title: record.title.clone(),
+                            status: state_word(&state).to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        work::brief(&open.id, note, todo, &notes, &sessions)
+    }
+
+    /// Installed agents, the user's default first; a Terminal default falls
+    /// back to the first agent, since a shell cannot read a brief.
+    fn work_agents(&self) -> Vec<AgentChoice> {
+        let store = self.runtime.store.read().expect("store");
+        let catalog = store.agent_catalog(None);
+        let default = crate::agent_catalog::resolved_target_agent(
+            &store.preferences().default_agent,
+            catalog,
+        );
+        let mut agents: Vec<AgentChoice> = crate::agent_catalog::quick_agent_options(catalog)
+            .into_iter()
+            .filter(|option| option.available && !option.kind.is_terminal())
+            .map(|option| AgentChoice {
+                is_default: option.kind == default,
+                kind: option.kind,
+                name: option.display_name,
+            })
+            .collect();
+        if !agents.iter().any(|a| a.is_default)
+            && let Some(first) = agents.first_mut()
+        {
+            first.is_default = true;
+        }
+        agents.sort_by_key(|a| !a.is_default);
+        agents
+    }
+
+    fn prepare_work(&mut self, block: BlockId, cx: &mut Context<Self>) {
+        let Some((note, todo)) = self.work_note(block, cx) else {
+            return;
+        };
+        let brief = self.brief_for(&note, todo);
+        let agents = self.work_agents();
+        let super::PaneState::Open(open) = &self.state else {
+            return;
+        };
+        open.editor.update(cx, |view, cx| {
+            if let Some(index) = view.editor.blocks().iter().position(|b| b.id == block) {
+                let end = view.editor.block(index).text.len();
+                view.editor.set_caret(Pos::new(index, end));
+            }
+            view.open_start_panel(block, agents, brief, cx);
+        });
+    }
+
+    fn start_work(&mut self, block: BlockId, kind: AgentKind, agent_name: &str, cx: &mut Context<Self>) {
+        let Some((note, todo)) = self.work_note(block, cx) else {
+            return;
+        };
+        let brief = self.brief_for(&note, todo);
+        let todo_block = &note.doc.blocks[todo];
+        let title = work::task_title(todo_block);
+        let label = diri_notes::mention::session_label(agent_name, &title);
+        // The file must hold the to-do before the Engine answers, so the
+        // executor can link it even if this note is closed by then.
+        self.save(cx);
+        let (Some(notes), super::PaneState::Open(open)) = (self.store.as_ref(), &self.state) else {
+            return;
+        };
+        let link = crate::store::WorkLink {
+            notes_dir: notes.dir().to_path_buf(),
+            note_id: open.id.clone(),
+            todo_text: work::task_text(todo_block),
+            label: label.clone(),
+        };
+        let editor = open.editor.clone();
+        let note_session = open.session.clone();
+        let ticket = {
+            let mut store = self.runtime.store.write().expect("store");
+            let cwd = store.sessions().get(&note_session).map(|s| s.cwd.clone());
+            let params = store.spawn_params(
+                kind,
+                crate::store::SpawnOptions {
+                    cwd,
+                    title: Some(title),
+                    initial_prompt: Some(brief.prompt),
+                    parent: Some(note_session),
+                    ..crate::store::SpawnOptions::default()
+                },
+            );
+            store.start_work_item(params, link)
+        };
+        editor.update(cx, |view, cx| view.work_started(block, ticket, label, cx));
+    }
+}
+
+/// One word for a session's state, for the brief's list of mentioned
+/// sessions.
+fn state_word(state: &WorkState) -> &'static str {
+    match state {
+        WorkState::Ready | WorkState::Starting => "starting",
+        WorkState::Working => "working",
+        WorkState::NeedsYou(_) => "waiting for input",
+        WorkState::Review(_) => "idle",
+        WorkState::Stopped => "exited",
+        WorkState::Archived => "archived",
+        WorkState::Missing => "unknown",
+        WorkState::Done => "done",
+    }
 }

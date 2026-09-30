@@ -99,6 +99,12 @@ pub fn task_markdown(block: &Block) -> String {
         .to_owned()
 }
 
+/// The to-do's plain text without its session chips, trimmed: what
+/// identifies it across reloads and in the file.
+pub fn task_text(block: &Block) -> String {
+    without_session_chips(block).text.trim().to_owned()
+}
+
 /// A title for the session started from `block`: its plain text, one line,
 /// [`TITLE_CHARS`] at most.
 pub fn task_title(block: &Block) -> String {
