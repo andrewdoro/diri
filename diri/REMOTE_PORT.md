@@ -176,6 +176,19 @@ shared incremental ledger in an owner-only `usage-v1` directory under its state
 root. A stable random usage-store identity deduplicates SSH aliases. The app
 persists the latest aggregate per configured destination for offline display.
 
+A poll of a host whose current Helper target is already known costs one SSH
+command: the fixed channel script runs the exact Build ID's `probe` (stdin
+closed) and, only when it exits successfully, `exec`s `usage` in the same
+channel. The Engine verifies the probe line exactly as the separate probe path
+does before accepting the response; a missing, failed or mismatched probe
+forgets the cached target and takes the full verified bootstrap path. Only
+read-only management commands may share a probe channel. The Helper keeps the
+login-environment values that select roots (`HOME`, `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, never the full environment) in an owner-only
+`usage-v1/login-environment.json`, reused while the account shell, HOME, the
+stat stamps of the standard shell startup files and a one-hour age all still
+match; otherwise the two login-shell captures run again.
+
 A scan permits at most 100,000 filesystem entries, depth 48, 256 MiB of changed
 bytes per file and 1 GiB of changed bytes in total; preflight is bounded to 20
 seconds. Responses contain at most 4,096 daily/model buckets and 2 MiB. Exceeding

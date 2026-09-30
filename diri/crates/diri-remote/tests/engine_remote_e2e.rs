@@ -340,7 +340,29 @@ fn engine_collects_remote_usage_without_a_node_or_holder() {
         }],
     };
     let first = manager.transcript_usage(&host, &request).unwrap();
+    let commands = || fs::read_to_string(&argv).unwrap().lines().count();
+    let before_warm = commands();
     let second = manager.transcript_usage(&host, &request).unwrap();
+    // A warm host answers a poll with ONE SSH command: probe + scan fused.
+    assert_eq!(commands() - before_warm, 1);
+    let warm_call = fs::read_to_string(&argv).unwrap();
+    let warm_call = warm_call.lines().last().unwrap();
+    assert!(
+        warm_call.contains(" probe --format=json </dev/null; exec ")
+            && warm_call.ends_with(" usage'>"),
+        "{warm_call}"
+    );
+    // A vanished Helper fails the fused probe closed: the full verified
+    // bootstrap reinstalls it, and the result is unchanged.
+    fs::rename(home.join(".cache/diri/bin"), home.join("moved-helper-bin")).unwrap();
+    let before_reinstall = commands();
+    let reinstalled = manager.transcript_usage(&host, &request).unwrap();
+    assert!(commands() - before_reinstall > 2);
+    assert_eq!(reinstalled.buckets, first.buckets);
+    assert_eq!(reinstalled.source_id, first.source_id);
+    let before_warm = commands();
+    manager.transcript_usage(&host, &request).unwrap();
+    assert_eq!(commands() - before_warm, 1);
     assert_eq!(first.buckets, second.buckets);
     assert_eq!(first.source_id, second.source_id);
     assert_eq!(first.buckets.len(), 1);
