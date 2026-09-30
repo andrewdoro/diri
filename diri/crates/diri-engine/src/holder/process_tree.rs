@@ -79,6 +79,20 @@ pub fn enumerate_in(table: &ProcessTable, root: i32) -> Vec<HolderProcessSample>
     walk(&table.0, vec![root])
 }
 
+/// Whether `pid` has at least one live direct child.
+///
+/// A foreground group alone cannot tell "the shell is running a command"
+/// from "the shell is idle": a non-interactive `fish -c` or `sh -c` runs the
+/// command in the shell's own process group, so the shell's pid is the
+/// foreground group either way. A child process is the tie-breaker.
+pub fn has_children(pid: i32) -> bool {
+    pid > 1
+        && ProcessTable::capture()
+            .0
+            .iter()
+            .any(|process| process.ppid == pid)
+}
+
 /// Children transitively, plus every member of any process group a visited
 /// process belongs to, starting from `seeds`. The holder itself is excluded.
 fn walk(all: &[Observed], seeds: Vec<i32>) -> Vec<HolderProcessSample> {

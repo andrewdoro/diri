@@ -5104,12 +5104,31 @@ fn record_exit_telemetry(shared: &Shared) {
 }
 
 /// Whether the agent a `returnToLoginShell` wrapper started has already gone,
-/// leaving its login shell in the foreground (`<shell> -c "agent; exec
-/// <shell>"`: the agent runs in its own job, the shell's group is the
-/// child's pid). `None` when the Holder cannot say.
+/// leaving its login shell in the foreground. `None` when the Holder cannot
+/// say.
 fn agent_returned_to_shell(client: &HolderClient) -> Option<bool> {
     let stat = client.stat().ok()?;
-    Some(stat.alive && stat.foreground_pid == Some(stat.child_pid))
+    Some(shell_is_back(
+        stat.alive,
+        stat.foreground_pid,
+        stat.child_pid,
+        || crate::holder::process_tree::has_children(stat.child_pid),
+    ))
+}
+
+/// The wrapper is `<shell> -c "agent; …; exec <shell>"`. Whether the agent
+/// gets its own foreground job depends on the shell: `zsh -i -c` gives it
+/// one, but `fish -c` (and `sh -c`) run it in the shell's own process group,
+/// so the child's pid is the foreground group for the agent's whole life.
+/// The group only rules the shell out; the agent is gone only once the
+/// shell also has no child left running it.
+fn shell_is_back(
+    alive: bool,
+    foreground_pgid: Option<i32>,
+    child_pid: i32,
+    shell_has_children: impl FnOnce() -> bool,
+) -> bool {
+    alive && foreground_pgid == Some(child_pid) && !shell_has_children()
 }
 
 fn record_returned_to_shell(shared: &Shared, early: bool, source: &'static str) {
@@ -6508,5 +6527,98 @@ mod echo_request_tests {
         assert!(request.expired(late));
         assert!(!request.answered_by(late, 10, 11, 80));
         assert!(request.answered_by(at + ECHO_WINDOW, 10, 11, 80));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod returned_to_shell_tests {
+    use super::shell_is_back;
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_foreground_group_alone_never_says_the_agent_left() {
+        assert!(!shell_is_back(true, Some(42), 42, || true));
+        assert!(shell_is_back(true, Some(42), 42, || false));
+        assert!(!shell_is_back(true, Some(99), 42, || false));
+        assert!(!shell_is_back(true, None, 42, || false));
+        assert!(!shell_is_back(false, Some(42), 42, || false));
+    }
+
+    /// The `returnToLoginShell` wrapper's shape on a real PTY, per shell:
+    /// `fish -c` runs the agent in the shell's own group (every Claude launch
+    /// under fish was reported as back at its shell ~10 s in), `zsh -i -c`
+    /// gives it its own job. Neither may read as returned while the agent
+    /// runs, and both must once it is gone and the shell was exec'd again.
+    #[test]
+    fn a_running_agent_is_not_mistaken_for_its_login_shell() {
+        let mut shells: Vec<Vec<&str>> = vec![vec!["/bin/sh"]];
+        if std::path::Path::new("/bin/zsh").exists() {
+            shells.push(vec!["/bin/zsh", "-f", "-i"]);
+        }
+        for fish in [
+            "/opt/homebrew/bin/fish",
+            "/usr/local/bin/fish",
+            "/usr/bin/fish",
+        ] {
+            if std::path::Path::new(fish).exists() {
+                shells.push(vec![fish, "--no-config", "-i"]);
+                break;
+            }
+        }
+        for shell in shells {
+            check_shell(&shell);
+        }
+    }
+
+    fn check_shell(shell: &[&str]) {
+        let mut argv: Vec<String> = shell.iter().map(|arg| (*arg).to_string()).collect();
+        // `sleep` stands in for the agent, `exec cat` for the idle login
+        // shell the wrapper execs into (same pid, nothing running under it).
+        argv.extend(["-c".into(), "sleep 2; exec cat".into()]);
+        let spec = crate::pty::PtySpec::new(argv, "/tmp")
+            .env("PATH", "/usr/bin:/bin")
+            .env("TERM", "xterm-256color")
+            .env("HOME", "/tmp");
+        let mut pty = crate::pty::Pty::spawn(&spec).expect("spawn shell");
+        let child = pty.pid() as i32;
+        let mut reader = pty.reader().expect("reader");
+        reader.set_nonblocking(true).ok();
+        let mut drain = [0u8; 4096];
+        let returned = |pty: &crate::pty::Pty| {
+            shell_is_back(true, pty.foreground_pgid(), child, || {
+                crate::holder::process_tree::has_children(child)
+            })
+        };
+
+        // While the agent runs: sampled well inside its two seconds.
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(1400) {
+            let _ = reader.read(&mut drain);
+            if started.elapsed() > Duration::from_millis(400) {
+                assert!(
+                    !returned(&pty),
+                    "{shell:?}: agent still running but read as returned (fg={:?} child={child})",
+                    pty.foreground_pgid()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // After it: the shell is back.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = reader.read(&mut drain);
+            if returned(&pty) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{shell:?}: agent gone but never read as returned (fg={:?} child={child})",
+                pty.foreground_pgid()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = pty.terminate(Duration::from_millis(500));
     }
 }
