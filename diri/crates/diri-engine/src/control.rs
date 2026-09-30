@@ -1243,6 +1243,12 @@ impl ControlServer {
                         .to_string_lossy()
                         .into_owned(),
                 ));
+                if let Some(dir) = self.resolved_notes_dir() {
+                    pty.env.push((
+                        diri_proto::paths::ENV_NOTES_DIR.into(),
+                        dir.to_string_lossy().into_owned(),
+                    ));
+                }
             }
             if let Some(uuid) = &agent_session_id {
                 record.agent_session_id = Some(uuid.clone());
@@ -1518,6 +1524,14 @@ impl ControlServer {
                     diri_telemetry::event!("notes.adopted", count = adopted);
                 }
             });
+    }
+
+    /// The notes directory this Engine serves: pinned by the daemon, else the
+    /// standard location.
+    fn resolved_notes_dir(&self) -> Option<PathBuf> {
+        self.notes_dir
+            .clone()
+            .or_else(diri_notes::store::NoteStore::resolve_dir)
     }
 
     fn note_store(&self) -> Result<diri_notes::store::NoteStore, ControlError> {
@@ -3575,6 +3589,12 @@ impl ControlServer {
                     .to_string_lossy()
                     .into_owned(),
             ));
+            if let Some(dir) = self.resolved_notes_dir() {
+                pty.env.push((
+                    diri_proto::paths::ENV_NOTES_DIR.into(),
+                    dir.to_string_lossy().into_owned(),
+                ));
+            }
         }
         Ok(crate::session::SessionSpec {
             id: id.to_string(),

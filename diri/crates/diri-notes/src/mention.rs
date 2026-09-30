@@ -68,6 +68,26 @@ pub fn session_label(agent: &str, title: &str) -> String {
     }
 }
 
+/// How people know an agent kind: `claude-code` is "Claude Code". The same
+/// name the New Agent menu shows, so a chip written by an agent reads like
+/// one the app wrote.
+pub fn agent_display_name(kind_id: &str) -> String {
+    match kind_id.trim().to_ascii_lowercase().as_str() {
+        "claude-code" | "claude" => "Claude Code".to_owned(),
+        "codex" => "Codex".to_owned(),
+        "cursor" => "Cursor".to_owned(),
+        "gemini" => "Gemini".to_owned(),
+        "opencode" => "OpenCode".to_owned(),
+        "shell" => "Terminal".to_owned(),
+        other => {
+            let mut chars = other.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            })
+        }
+    }
+}
+
 /// The visible text of a note mention: `@Release plan`.
 pub fn note_label(title: &str) -> String {
     let title = one_line(title);

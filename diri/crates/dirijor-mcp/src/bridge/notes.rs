@@ -614,7 +614,9 @@ impl Bridge {
         if let (Some(index), Some(child)) = (todo, child.as_deref())
             && spawned["ok"] != false
         {
-            let label = mention::session_label(&kind, &name);
+            // The same short chip the app writes: "@Claude Code". The to-do's
+            // text is already right beside it.
+            let label = mention::session_label(&mention::agent_display_name(&kind), "");
             store
                 .update(&meta.id, &Author::Session(caller.clone()), |note| {
                     handoff::link_session(note, index, &label, child);
@@ -1381,7 +1383,7 @@ mod tests {
         );
         let text = fixture.store().load(&note_id).unwrap().to_markdown();
         assert!(
-            text.contains("- [ ] Find a venue [@codex: Find a venue](diri://session/s_worker)"),
+            text.contains("- [ ] Find a venue [@Codex](diri://session/s_worker)"),
             "{text}"
         );
 

@@ -155,7 +155,9 @@ impl NoteStore {
     /// (tests, fixtures), else beside the rest of Diri's state, honouring the
     /// same `DIRIJOR_APP_SUPPORT` override every other component uses.
     pub fn resolve_dir() -> Option<PathBuf> {
-        if let Some(dir) = std::env::var_os("DIRI_NOTES_DIR").filter(|d| !d.is_empty()) {
+        if let Some(dir) =
+            std::env::var_os(diri_proto::paths::ENV_NOTES_DIR).filter(|d| !d.is_empty())
+        {
             return Some(PathBuf::from(dir));
         }
         if let Some(support) =
