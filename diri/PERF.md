@@ -137,6 +137,17 @@ first non-blank cell. Not claimed: that no real stall happened in that data;
 only that none of the 14 samples shows one, and that one would now be
 reported as `pane.blank content=true`.
 
+**Follow-up (the one `pane.blank frames=0` incident, 0.8.9).** A reopened
+Codex session was mounted by two panes sharing one grid 19 ms apart: one
+painted it 2.4 ms after its mount, the other received the grid and was never
+drawn with it (`frames=0`), and 0.8.9's watchdog reported that one. The #576
+"drawn since mount" test covers a pane never drawn, but not one drawn once
+while its grid was still blank and covered since: headless, that pane was
+reported as `content=true`, a false missed-repaint incident. The watchdog now
+asks for a frame at 10 s and reports only if that frame draws the pane within
+500 ms; a real missed repaint is still reported, with `redrawn=true` when the
+requested frame put the waiting content on screen.
+
 **`workspace.mutate` → `invalid_workspace` (19 of 57 mutations in the current
 spool files) was the 256-tab limit, already fixed on main by #575.** Every failure
 coincided with attaching one of 5 sessions, each failing on nearly every
