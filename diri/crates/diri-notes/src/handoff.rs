@@ -127,7 +127,7 @@ pub fn link_session(note: &mut Note, index: usize, label: &str, session_id: &str
     }
 }
 
-fn append_chip(block: &mut Block, label: &str, target: &MentionTarget) -> bool {
+pub(crate) fn append_chip(block: &mut Block, label: &str, target: &MentionTarget) -> bool {
     if mention::in_block(block).iter().any(|m| &m.target == target) {
         return false;
     }

@@ -6,6 +6,7 @@ mod projection;
 mod residency;
 mod window_navigation;
 mod workspace_spawn;
+mod work_items;
 mod workspaces;
 
 use std::collections::{HashMap, HashSet};
@@ -35,6 +36,7 @@ use crate::switcher::{
     SessionSwitcherState, SwitcherKey, SwitcherOutcome,
 };
 
+pub use work_items::WorkLink;
 pub use prefs::{
     InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
     WindowMaterial, WindowMode, WindowPlacement,
@@ -168,6 +170,13 @@ pub enum StoreEffect {
         title: String,
     },
     Spawn(SessionSpawnParams),
+    /// An agent started from a note's to-do: spawned without selecting it,
+    /// its id linked back into the to-do (see `work_items`).
+    StartWorkItem {
+        ticket: u64,
+        params: SessionSpawnParams,
+        link: WorkLink,
+    },
     /// Read herdr's saved sessions off the main thread.
     ScanHerdr {
         tracked: HashSet<String>,
@@ -381,6 +390,7 @@ pub struct SessionStore {
     sessions: HashMap<SessionId, Arc<SessionRecord>>,
     auxiliary_slots: HashMap<(SessionId, usize), SessionId>,
     auxiliary_pending: HashSet<(SessionId, usize)>,
+    work_items: work_items::WorkItems,
     projects: HashMap<ProjectId, Project>,
     /// Projects in the order the Engine first saw them. Its list is
     /// append-only, which makes this the one order here that never reshuffles.
@@ -508,6 +518,7 @@ impl SessionStore {
                 sessions: HashMap::new(),
                 auxiliary_slots: HashMap::new(),
                 auxiliary_pending: HashSet::new(),
+                work_items: work_items::WorkItems::default(),
                 projects: HashMap::new(),
                 project_seniority: Vec::new(),
                 selected_session_id: selected_session_id.clone(),
@@ -3719,6 +3730,20 @@ async fn run_effects(
                 }
                 Err(error) => Err(error),
             },
+            StoreEffect::StartWorkItem {
+                ticket,
+                params,
+                link,
+            } => {
+                tokio::spawn(work_items::run(
+                    Arc::clone(&client),
+                    Arc::clone(&store),
+                    ticket,
+                    params,
+                    link,
+                ));
+                Ok(())
+            }
             StoreEffect::SpawnAuxiliary { params, slot } => {
                 let parent = params.parent.clone().expect("auxiliary parent");
                 let result = client.spawn(params).await;
@@ -4035,7 +4060,9 @@ fn action_context(effect: &StoreEffect) -> Option<ActionContext> {
                 title: title.clone(),
             }),
         ),
-        StoreEffect::Spawn(_) => ("Create session failed", None),
+        StoreEffect::Spawn(_) | StoreEffect::StartWorkItem { .. } => {
+            ("Create session failed", None)
+        }
         StoreEffect::SpawnAuxiliary { .. } => ("Open terminal failed", None),
         StoreEffect::Migrate { .. } => ("Move session failed", None),
         StoreEffect::ReparentWorktree(_) => ("Move session to worktree failed", None),
