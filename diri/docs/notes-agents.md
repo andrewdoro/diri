@@ -184,118 +184,176 @@ their note, so:
 ## Concurrent writes
 
 The app, the CLI, and agents all write the same files. Atomic rename
-prevents torn files but not lost updates. The app today skips reloads while
-it has unsaved typing and then saves its whole buffer, so an agent append
-that lands during typing is overwritten.
+prevents torn files; a lock and a merge prevent lost updates.
 
-- `NoteStore::update(id, |note| …)` does read-modify-write under an advisory
-  `flock` on `<notes>/.lock`. CLI and MCP writes use it.
-- `NoteStore::save_if_unchanged(id, note, expected_source)` lets the app
-  save only when the file still matches what it loaded. On mismatch it
-  returns `Conflict(current)`, and the app merges: agent edits are
-  append-only or single-block, so it re-applies the user's editor state onto
-  the new file, or keeps the user's blocks and appends the outside blocks.
-  The app merge itself is the editor owner's call. The store gives the
-  primitive and a test that proves the race.
+- `NoteStore::update(id, author, |note| …)` does read-modify-write under an
+  advisory `flock` on `<notes>/.lock`. Every CLI, MCP and Engine write uses
+  it. Concurrent writers are tested with 8 threads.
+- The editor saves with `NoteStore::save_if_unchanged(id, note, expected)`,
+  where `expected` is the text it last loaded or saved. When someone else
+  wrote in between, the save returns `Conflict(current)` instead of
+  overwriting.
+- `diri_notes::merge::merge3(base, mine, theirs)` is a block-level three-way
+  merge:
+  - A block only one side changed takes that change.
+  - Blocks either side inserted are all kept, the person's first.
+  - When both sides edited the same block, the person's text is kept with
+    the outside checkbox, or with a suffix the outside write appended (a
+    session chip).
+  - Any other outside edit of that same block yields to the person's text
+    and stays in history.
+  - Rewrites that share no text are different blocks, so both survive.
+  - A 2,000-round randomized test checks these rules.
+- `Editor::absorb` installs a merge as one undo step and keeps the caret in
+  the text being typed.
+- `NotePane` merges on the file watcher's reconcile while there is unsaved
+  typing. It also merges on a save conflict, then saves over the result.
+  App tests interleave typing with a `write_note`-style append, and with a
+  tick plus chip on the very to-do being typed in.
 
-## Seams the lead needs to decide (not built here)
+## Version history
 
-- **S1: creating a note session from outside the app. Resolved** by
-  `session.spawn` kind `note` (feat/notes 49f5fc47). `dirijor note add/todo`
-  now create through it; see "CLI creation" below.
-- **S2: agent-initiated handoff with the note as parent.**
-  `session.spawn_tracked` requires `spawn.parent == senderID`
-  (`control/operations.rs:129`). When an agent calls `start_from_note`, the
-  parent is the note, not the caller. Options:
-  - (a) Allow `spawn.parent` to be a session of kind `note` that the sender
-    may act for. This keeps idempotency. The authorization stays in
-    `McpPolicy`; the Engine checks only that the parent is a note session.
-    **Recommended.**
-  - (b) Use untracked `session.spawn` for handoffs. This loses at-most-once
-    dedup on MCP retries.
-  - The app path is unaffected either way (`session.spawn` already accepts
-    any parent).
-- **S3: terminal-only RPCs on note sessions.** Guarded client-side: MCP
-  `send_prompt`, `submit_task`, manage, and release refuse a note target
-  ("is a note, not an agent"), and `report_to_parent` to a note writes into
-  it. The Engine still accepts `session.deliver_message` / `task.submit` for
-  a note from other clients; a structured `session_has_no_terminal` there
-  would close the gap for good.
-- **S4: project of a note session.** The note session's `cwd`/`project_id`
-  must be derived from the front-matter `project` root exactly as for agents
-  (`session_project_id(root, None)`), or children will not indent under it.
-  Inbox notes (no project): children land in whatever project their `cwd`
-  is, so they show at the root of that project. Decide whether that is
-  acceptable or whether Inbox notes need a pseudo-project.
-- **S5: one source of truth for pinned/archived/title.** Front matter holds
-  `pinned`/`archived` and the document holds the title, while the sidebar
-  sorts by `SessionRecord`. Proposal: the session record is authoritative for
-  sidebar state, and the app mirrors changes into front matter so the CLI and
-  agents see them when Diri is not running. Title flows file → session, via
-  the app on save.
-- **S6: removing a note session.** Decide whether removing the session
-  trashes the file (`NoteStore::trash`) or only unlinks it. Proposal:
-  archive ↔ `archived: true`, and remove → trash. Both are done by the app,
-  not the Engine.
+- **Storage:** every note keeps versions in `<notes>/.history/<id>/`, one
+  owner-only (0600, dirs 0700) file per version, named
+  `<unix ms>~<author>~<reason>.md`. There is no index to fall out of sync,
+  and history survives trash and restore because it is keyed by note id.
+- **When a version is taken:**
+  - edits: at most one per 60 seconds;
+  - always the note as it stood before any outside write (`update`), and
+    the result of that write, attributed to the agent (`Session(id)`) or
+    the command line;
+  - always before and after a restore.
+- **Comparison:** versions compare by body, so pins, archives and session
+  stamps are not versions. A restore replaces only the text, and the note
+  keeps its place, pin and Session.
+- **Retention:** every version from the last hour, then the newest per 10
+  minutes for a day, per day for 30 days, and per week after that. Caps are
+  200 versions and 20 MiB per note, and the newest is always kept.
+- **Summaries:** plain words, e.g. "1 new to-do, 1 to-do done", "added 3
+  lines", "restored the version from …".
+- **Where people and agents use it:**
+  - MCP `note_history` lists or reads versions. It is read-only and there is
+    no restore tool.
+  - CLI: `dirijor note history NOTE [VERSION]` and `dirijor note restore
+    NOTE VERSION`. `restore` refuses to run inside an agent's session.
+  - App: **Version History…** in the palette whenever a note is selected. It
+    opens a glass panel over the note with rows showing when and who (you,
+    the command line, or the agent's sidebar name), what changed, and a
+    readable preview. Restore asks through the system alert sheet.
+    Screenshots: `docs/screenshots/notes-version-history-{light,dark}.png`.
 
-- **S7: adopting orphan note files.** Notes written before note sessions
-  (the PR #597 Notes window, or `dirijor note` while the Engine was down)
-  have files but no Session, and with the Notes window gone the app no longer
-  shows them. Adopting by copying content into a new note session would change
-  the note id, which breaks `diri://note/` mentions and loses `created`.
-  Proposal: additive `SessionSpawnParams.note_id`. For kind `note` with
-  `note_id` set, `session_spawn_note` skips `store.create`, checks that the
-  file exists (`store.meta`), and returns the existing live note Session if
-  one already carries that `note_id`. Otherwise it inserts the record as it
-  does today, with title from the file and `cwd` from its `project`, falling
-  back to the request's `cwd`. The app, or the Engine at start, can then adopt
-  unarchived orphans once, and the CLI can adopt the note it touches. Until
-  then, orphans are still found by `list_notes` and `dirijor note list`.
+## Agents keeping their note current
 
-## CLI creation
+One contract, `dirijor_mcp::tools::NOTES_CONTRACT`, is part of the MCP
+server's instructions, and every note tool's description points into it.
+It is written for people who are not developers, because they read the
+notes:
 
-`dirijor note add` and `dirijor note todo` (when it has to create the
-project's "To-dos" note) go through `Bridge::spawn_note` → `session.spawn`
-kind `note`:
+1. If `whoami` shows `origin_note`, you were started from a note. Read it
+   first with `read_note {"note":"origin"}`: it is your brief.
+2. As you find important things (a decision, a finding, a blocker, a result,
+   a link), add one short entry with `write_note {"entry": …}`. It is filed
+   under your own to-do (the one carrying your chip) or under the note's
+   Updates. Entries are one or two plain sentences, with no progress chatter.
+   Entries over 500 characters are refused, with a pointer to `create_note`.
+3. Never rewrite or delete the person's text. Every agent write is additive.
+4. Tick your own to-dos as you finish them (`write_note` todo + checked).
+5. Finish with a one-paragraph result via `report_to_parent` with status
+   done. When the parent is a note, the result lands in the note.
 
-- The project is `--project`, else the calling agent's project root (so a
-  worktree agent's note lands in the repo's project), else the current
-  directory. `--inbox` writes a project-less file with no Session.
-- The parent is the calling session (`DIRIJOR_SESSION_ID`), so a note an
-  agent writes is indented under it. The shared "To-dos" note has no parent.
-- An unreachable Engine, or one that predates note sessions (`no manifest
-  for agent "note"`), writes the file directly and says so on stderr. Any
-  other Engine error fails the command and never falls back silently.
-- Other edits (`append`, `todo --to`, `check`, `link`) stay direct file
-  writes under the store lock. The Engine never needs to know about them.
+The handoff brief that `start_from_note` gives an agent restates the same
+steps. `tests` in `dirijor-mcp` check the instructions, the tool
+descriptions, and that note tools avoid "repo/worktree/branch/commit".
 
-## Status
+## Agents creating and starting from notes
 
-Built on `notes/engine-agents` (base `feat/notes` 49f5fc47, plus
-`diri_notes::mention` taken unchanged from PR #600):
+- **`create_note`** takes a title, rich Markdown, an optional project and
+  `open`. It creates a note Session whose parent is the calling agent, in
+  the agent's project, so the note sits under the agent in the sidebar.
+  `open:true` sends `session.reveal`.
+  - **New, additive: `session.reveal`.** It is a request (`{"sessionID"}`)
+    and an event of the same name. The Engine checks that the session exists
+    and publishes the event; the app selects the session without taking
+    focus from another app. CLI: `dirijor note add|create --open`.
+- **`start_from_note`** takes a note, an optional to-do, kind,
+  `separate_copy`, prompt and task. It is a tracked spawn whose parent is
+  the note Session. The agent is briefed with the note and the non-note
+  sessions it mentions, and its chip goes on the to-do. A note without a
+  Session is adopted first.
+  - Policy: root agents may start work from any note. Delegated agents may
+    start work only from the note they came from. Depth skips notes, and
+    notes do not count as live children.
 
-- Mentions in `NoteMeta`; `NoteStore::update` / `save_if_unchanged` under a
-  store lock; `handoff` helpers (to-dos, links, Updates, prompt).
-- MCP `list_notes` (joins note sessions: `session_id`, project via the
-  Session's `project_id`), `read_note` (id, title, note Session id, or
-  `origin`), `write_note`, `whoami.origin_note`, `report_to_parent` → note.
-- Policy: children of a note are roots, spawn depth skips notes, notes are
-  never agent targets, delegated `write_note` reaches the origin note.
-- CLI creation through note sessions with a file fallback; `check`, `link`,
-  `list --mentions`.
-- Verified: unit tests against a fake Engine; `tests/notes_cli.rs` drives the
-  real `dirijor` binary against an in-process `ControlServer`; a manual run
-  against the live Engine found a note mentioning the calling session.
-- Not built: `start_from_note` (waits on S2), orphan adoption (S7), app use
-  of `save_if_unchanged` (editor owner).
+## Engine: note sessions without terminals (round 2, resolves S2, S3, S7)
 
-## Build order (this work)
+- **S2, done.** `session.spawn_tracked` accepts a parent that is a note
+  Session as well as the sender. Who may do so is decided in `McpPolicy`.
+  The app path (`session.spawn`) always accepted any parent.
+- **S3, done.** Terminal and process requests on a note fail at once with
+  `session_has_no_terminal`, for every client:
+  - `session.deliver_message`, `task.submit`, `send_text`, `send_key`,
+    `resize`, `read_screen`, `terminal_title`, `reset_terminal`,
+    `capture_find`, `read_scrollback(_cells)`, `read_transcript`, `resume`,
+    `reconnect`, `hibernate`, `wake`, `fork`, `migrate` and
+    `continue_with_account`.
+  - Attach has no error frame, so it closes immediately, as it does for any
+    id without a terminal, and records `attach.note_rejected`.
+  - Adding an attach error frame would be a protocol change. It is not
+    proposed.
+- **S7, done.** Adoption keeps each note's id and created date.
+  - **Adopting one file:** `SessionSpawnParams.note_id` (additive) adopts an
+    existing notes file. It is idempotent per note id: the file's existing
+    Session is returned, including under concurrent calls. The file keeps
+    its id and `created`, and the record's `created_at` comes from it.
+  - **The stamp:** every note that gets a Session is stamped
+    `session: <id>` in its front matter, both new ones (`create_for_session`)
+    and adopted ones. The stamp is written after the record exists, so a
+    crash in between is repaired by the next scan, not duplicated.
+  - **Automatic adoption: one scan at Engine startup.** It runs on a
+    one-shot thread after `bind()`, so only the singleton Engine adopts. It
+    handles unstamped, unarchived files with no Session, oldest first. It is
+    cheap: one directory read per start. It is deterministic: running it
+    twice adopts nothing new, which is tested.
+    - This covers notes from before note Sessions and CLI notes written
+      while the Engine was down. The app needs no work on connect.
+    - A note whose Session was removed keeps its stamp, so it is never
+      resurrected.
+  - **Inbox notes** (no project) live in the home folder, the same place a
+    new terminal without a project opens. The folder in the note's
+    `project` wins while it still exists, then the requested `cwd`, then
+    home.
 
-1. `NoteMeta.mentions` on the shared `diri_notes::mention` model + tests.
-2. `NoteStore::update` with lock + `save_if_unchanged` + race test.
-3. `diri_notes::handoff` (prompt builder, to-do link insertion) + tests.
-4. MCP `list_notes` / `read_note` / `write_note` + CLI parity. Discovery by
-   file project and mentions works before note sessions exist.
-5. Done after note sessions landed: note-session joins, `origin`,
-   `whoami.origin_note`, `report_to_parent` → note, policy changes, CLI
-   creation. Remaining: `start_from_note` once S2 is decided.
+## Seams still open for the lead
+
+- **S4 (unchanged):** Inbox notes now have a home, the home folder. Children
+  of a note still indent only within the note's project group.
+- **S5:** pinned, archived and title in front matter versus the
+  SessionRecord. Unchanged.
+- **S6:** removing a note Session leaves its file, which stays stamped and so
+  is not re-adopted. It still shows in `list_notes`, `dirijor note list` and
+  `read_note`. Decide whether remove should also move the file to the trash
+  (history survives either way).
+- **Undo across a merge:** `absorb` is one undo step. Redoing past it is
+  unaffected, but undoing past it also undoes the outside write in the
+  editor. The next save writes that, and history keeps the agent's version.
+  If this surprises people, the editor could skip absorbed steps when
+  undoing.
+- **Local times:** history rows in the app are relative ("2 hours ago"). The
+  CLI and MCP give UTC times, labelled as such, because `diri-notes` has no
+  time-zone data. A time-zone crate would only be worth it if people read
+  those times directly.
+
+## CLI
+
+- **Creating:** `dirijor note add|create`, and `todo` when it creates the
+  project's "To-dos" note, go through `session.spawn` kind `note`.
+  - The project is `--project`, else the calling agent's project root, else
+    the current folder.
+  - `--inbox` writes a file with no project and no Session.
+  - `--open` shows the note.
+  - If the Engine is unreachable or too old, the file is written directly
+    and stderr says Diri isn't running. Any other Engine error fails the
+    command.
+- **Editing:** `append`, `todo --to`, `check` and `link` are locked,
+  attributed file writes.
+- **History:** `history` and `restore` are described above.

@@ -65,7 +65,8 @@ impl Bridge {
         let params = serde_json::to_value(params).map_err(|e| e.to_string())?;
         let mut client = match self.connect(NOTE_SPAWN_TIMEOUT) {
             Ok(client) => client,
-            Err(failure) => return Ok(NoteSpawn::Unavailable(render_failure(failure))),
+            // The technical cause helps no one reading a note tool's reply.
+            Err(_) => return Ok(NoteSpawn::Unavailable("Diri isn't running".into())),
         };
         let deadline = Instant::now() + NOTE_SPAWN_TIMEOUT;
         match client.request_until(Method::SESSION_SPAWN.into(), params, deadline) {
