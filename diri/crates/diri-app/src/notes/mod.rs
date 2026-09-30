@@ -11,6 +11,9 @@ pub(crate) mod editor_view;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod todos;
+pub(crate) mod work_item;
+#[cfg(test)]
+pub(crate) mod work_item_tests;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,6 +82,12 @@ impl Focusable for NotePane {
             _ => self.focus.clone(),
         }
     }
+}
+
+fn editor_view_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 pub(crate) enum NotePaneEvent {
@@ -167,6 +176,19 @@ impl NotePane {
             self.save(cx);
             self.load(session, note_id, window, cx);
         }
+        // Arrived from a session's header: show the to-do it works on.
+        let reveal = self
+            .runtime
+            .store
+            .write()
+            .expect("store")
+            .take_note_reveal(session);
+        if let (Some(child), PaneState::Open(open)) = (reveal, &self.state) {
+            let editor = open.editor.clone();
+            if editor.update(cx, |view, cx| view.reveal_session(&child.0, cx)) {
+                self.focus_on_show = true;
+            }
+        }
         if std::mem::take(&mut self.focus_on_show) {
             let handle = self.focus_handle(cx);
             window.focus(&handle, cx);
@@ -217,7 +239,11 @@ impl NotePane {
         };
         let note = store::parse_note(&source);
         let colors = self.colors();
-        let editor = cx.new(|cx| NoteEditorView::new(Editor::new(&note.doc), colors, cx));
+        let editor = cx.new(|cx| {
+            let mut view = NoteEditorView::new(Editor::new(&note.doc), colors, cx);
+            view.fold_started_work();
+            view
+        });
         let subscription = cx.subscribe_in(&editor, window, |this, _, event, _, cx| match event {
             EditorEvent::Changed => this.schedule_save(cx),
             EditorEvent::Dismiss => {
@@ -225,6 +251,7 @@ impl NotePane {
                 cx.emit(NotePaneEvent::Dismiss);
             }
             EditorEvent::OpenMention(target) => this.open_mention(target, cx),
+            EditorEvent::Work(request) => this.on_work(request, cx),
         });
         let synced_title = self
             .runtime
@@ -246,6 +273,7 @@ impl NotePane {
             _subscription: subscription,
         });
         self.push_mentions(cx);
+        self.push_work(cx);
         cx.notify();
     }
 
@@ -255,7 +283,13 @@ impl NotePane {
             loop {
                 match changes.recv().await {
                     Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if this.update(cx, |this, cx| this.push_mentions(cx)).is_err() {
+                        if this
+                            .update(cx, |this, cx| {
+                                this.push_mentions(cx);
+                                this.push_work(cx);
+                            })
+                            .is_err()
+                        {
                             return;
                         }
                     }

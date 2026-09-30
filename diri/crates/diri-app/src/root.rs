@@ -9202,6 +9202,216 @@ mod tests {
     /// A note Session selected in the real window: the sidebar lists it among
     /// agents and terminals (one agent is its child), and the main area shows
     /// the note editor. `DIRI_VISUAL_OUTPUT=<png>`, `DIRI_VISUAL_THEME=<id>`.
+    /// To-dos as agent work inside a note, in the real window: a
+    /// marketing launch plan whose to-dos are being worked on by agents.
+    /// `DIRI_VISUAL_OUTPUT=<png>`, `DIRI_VISUAL_THEME=<id>`,
+    /// `DIRI_WORK_SCENE=tracking|start|tick`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes the note work-item screenshot artifact"]
+    fn render_note_work_screenshot() {
+        use diri_notes::edit::Pos;
+        use gpui::{AppContext as _, HeadlessAppContext};
+        let output = std::env::var("DIRI_VISUAL_OUTPUT").expect("DIRI_VISUAL_OUTPUT");
+        let scene = std::env::var("DIRI_WORK_SCENE").unwrap_or_else(|_| "tracking".into());
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| {
+            crate::fonts::init(cx);
+            cx.set_reduce_motion(true);
+            cx.bind_keys(crate::notes::key_bindings());
+        });
+        let notes_dir = tempfile::tempdir().unwrap();
+        let note_store =
+            Arc::new(diri_notes::store::NoteStore::open(notes_dir.path().join("notes")).unwrap());
+        let (_, doc) = diri_notes::markdown::parse(crate::notes::work_item_tests::TRACKING);
+        let (note_id, _) = note_store.create(doc, None).unwrap();
+
+        let services = test_services();
+        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::from_env(None));
+        let template = fixture.list.sessions[0].clone();
+        let mut note = template.clone();
+        note.id = SessionId::new("s_note_launch");
+        note.kind = AgentKind::NOTE;
+        note.title = "Launch plan".into();
+        note.title_source = diri_proto::TitleSource::DirijorAssigned;
+        note.status = diri_proto::SessionStatus::Idle;
+        note.needs_input = None;
+        note.resumability = diri_proto::Resumability::NotResumable;
+        note.note_id = Some(note_id);
+        note.parent = None;
+        note.pinned = false;
+        note.archived_at = None;
+        note.git_branch = None;
+        note.foreground_agent = None;
+        note.pull_requests = None;
+        note.worktree_path = None;
+        let child = |id: &str, kind: AgentKind, title: &str| {
+            let mut s = template.clone();
+            s.id = SessionId::new(id);
+            s.kind = kind;
+            s.title = title.into();
+            s.parent = Some(note.id.clone());
+            s.archived_at = None;
+            s.pinned = false;
+            s.needs_input = None;
+            s.pull_requests = None;
+            s.foreground_agent = None;
+            s.last_turn_completed_at = None;
+            s
+        };
+        let mut posts = child("s_posts", AgentKind::CLAUDE_CODE, "Draft 3 LinkedIn posts");
+        posts.status = diri_proto::SessionStatus::Working;
+        let mut pricing = child("s_pricing", AgentKind::CODEX, "Pick the pricing headline");
+        pricing.status =
+            diri_proto::SessionStatus::NeedsInput(diri_proto::NeedsInputKind::Question);
+        pricing.needs_input = Some(diri_proto::NeedsInputDetail {
+            kind: diri_proto::NeedsInputKind::Question,
+            source: diri_proto::NeedsInputSource::CodexNotify,
+            tool_name: None,
+            summary: "Should the headline lead with price or with time saved?".into(),
+            prompt_excerpt: None,
+            options: None,
+            risk_hint: diri_proto::RiskHint::Neutral,
+            occurred_at: diri_proto::DateMillis(1.0),
+        });
+        let mut faq = child("s_faq", AgentKind::CLAUDE_CODE, "Write the launch FAQ");
+        faq.status = diri_proto::SessionStatus::Idle;
+        faq.last_turn_completed_at = Some(diri_proto::DateMillis(2.0));
+        let mut redirect = child(
+            "s_redirect",
+            AgentKind::CODEX,
+            "Fix the signup redirect loop",
+        );
+        redirect.status = diri_proto::SessionStatus::Idle;
+        redirect.last_turn_completed_at = Some(diri_proto::DateMillis(2.0));
+        redirect.pull_requests = Some(vec![
+            serde_json::from_value(serde_json::json!({
+                "url": "https://github.com/acme/app/pull/612", "number": 612,
+                "state": "OPEN", "isDraft": false, "additions": 18, "deletions": 4,
+                "changedFiles": 2, "commentCount": 0, "reviewCount": 0,
+                "checksPassed": 3, "checksFailed": 0, "checksPending": 0,
+                "fetchedAt": 0.0
+            }))
+            .unwrap(),
+        ]);
+        fixture.list.sessions.insert(1, note);
+        for session in [posts, pricing, faq, redirect] {
+            fixture.list.sessions.insert(2, session);
+        }
+        {
+            let mut store = services.store.store.write().unwrap();
+            store.hydrate(fixture.list);
+            store.set_agent_catalog(crate::agent_setup::bundled_catalog(&[
+                "claude-code",
+                "codex",
+                "gemini",
+            ]));
+            store.select(SessionId::new("s_note_launch"));
+            store
+                .update_preferences(|prefs| {
+                    prefs.sidebar_visible = true;
+                    prefs.terminal_theme = std::env::var("DIRI_VISUAL_THEME")
+                        .unwrap_or_else(|_| "dirijor-light".into());
+                })
+                .unwrap();
+        }
+        let runtime = Arc::clone(&services.store);
+        let note_pane = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let window = cx
+            .open_window(size(px(1240.0), px(780.0)), {
+                let note_pane = note_pane.clone();
+                move |window, cx| {
+                    cx.new(|cx| {
+                        let root =
+                            RootView::new(services, false, PreviewScenario::Empty, window, cx);
+                        let pane = cx.new(|cx| {
+                            crate::notes::NotePane::with_store(runtime, Some(note_store), false, cx)
+                        });
+                        *note_pane.borrow_mut() = Some(pane.clone());
+                        if let Some(terminal) = &root.terminal {
+                            terminal
+                                .update(cx, |terminal, _| terminal.set_note_pane_for_test(pane));
+                        }
+                        root
+                    })
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let pane = note_pane.borrow().clone().expect("note pane");
+        let editor = cx
+            .update(|cx| pane.read(cx).editor_for_test())
+            .expect("open note editor");
+        let find = |cx: &mut HeadlessAppContext, text: &'static str| {
+            cx.update(|cx| {
+                editor
+                    .read(cx)
+                    .editor
+                    .blocks()
+                    .iter()
+                    .position(|b| b.text.starts_with(text))
+                    .expect(text)
+            })
+        };
+        let posts = find(&mut cx, "Draft 3 LinkedIn");
+        let venue = find(&mut cx, "Book the venue");
+        cx.update(|cx| pane.update(cx, |pane, cx| pane.push_work(cx)));
+        cx.update_window(window.into(), |_, window, cx| {
+            editor.update(cx, |view, cx| {
+                // Show one started to-do open, with its context and report.
+                view.set_folded(posts, false, cx);
+                let end = view.editor.block(venue).text.len();
+                view.editor.set_caret(Pos::new(venue, end));
+                let focus = gpui::Focusable::focus_handle(view, cx);
+                window.focus(&focus, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+        }
+        match scene.as_str() {
+            "start" => {
+                let block = cx.update(|cx| editor.read(cx).editor.block(venue).id);
+                cx.update(|cx| {
+                    pane.update(cx, |pane, cx| {
+                        pane.on_work(&crate::notes::work_item::WorkRequest::Prepare { block }, cx)
+                    })
+                });
+            }
+            "tick" => {
+                cx.update(|cx| {
+                    editor.update(cx, |view, cx| {
+                        view.editor.set_caret(Pos::new(posts, 0));
+                        view.guard_tick(posts, cx);
+                    })
+                });
+            }
+            _ => {}
+        }
+        cx.run_until_parked();
+        for _ in 0..3 {
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+        }
+        cx.capture_screenshot(window.into())
+            .unwrap()
+            .save(&output)
+            .unwrap();
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "writes the notes-in-window screenshot artifact"]

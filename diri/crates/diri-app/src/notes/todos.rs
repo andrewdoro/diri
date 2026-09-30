@@ -340,17 +340,18 @@ impl TodosPage {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let kind = crate::session_presentation::ui_agent_kind(record.effective_kind());
-        let (label, tone) = match &record.status {
-            diri_proto::SessionStatus::Working | diri_proto::SessionStatus::Starting => {
-                ("Working on it", colors.secondary)
+        // The same live state the note shows under the to-do.
+        let facts = diri_notes::work::SessionFacts::from_record(record);
+        let state = diri_notes::work::state(false, Some(Some(&facts)));
+        let tone = match &state {
+            diri_notes::work::WorkState::NeedsYou(_) => diri_ui::Ink::ATTENTION,
+            diri_notes::work::WorkState::Review(_) => crate::notes::editor_view::accent(),
+            diri_notes::work::WorkState::Starting | diri_notes::work::WorkState::Working => {
+                colors.secondary
             }
-            diri_proto::SessionStatus::NeedsInput(_) => ("Needs you", diri_ui::Ink::ATTENTION),
-            diri_proto::SessionStatus::Idle => {
-                ("Ready to review", crate::notes::editor_view::accent())
-            }
-            diri_proto::SessionStatus::Exited(_) => ("Stopped", colors.tertiary),
-            diri_proto::SessionStatus::Unknown => ("", colors.tertiary),
+            _ => colors.tertiary,
         };
+        let label = state.label();
         let id = record.id.clone();
         div()
             .id(SharedString::from(format!("todo-session-{}", record.id.0)))
@@ -479,11 +480,14 @@ impl Render for TodosPage {
                 let note_id = group.note_id.clone();
                 let index = item.index;
                 let open_session = group.note_session.clone();
+                // The newest attempt speaks for the to-do; earlier ones are
+                // history in the note.
                 let chips: Vec<gpui::AnyElement> = item
                     .linked
-                    .iter()
-                    .filter_map(|id| self.session(id))
+                    .last()
+                    .and_then(|id| self.session(id))
                     .map(|record| self.session_chip(&record, colors, cx))
+                    .into_iter()
                     .collect();
                 list = list.child(
                     div()

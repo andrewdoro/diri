@@ -154,10 +154,18 @@ functions and `session.spawn` directly, as the app already does for ⌘T.
 
 `report_to_parent` today delivers to the parent's terminal or records the
 report on an open task. A note has no terminal. In `dirijor-mcp`, when the
-parent is a note session, `report_to_parent` appends a dated, attributed line
-under a `## Updates` heading in the note (creating the heading if missing)
-and links the reporter. This is a client-side change in the bridge and needs
-nothing from the Engine.
+parent is a note session, `report_to_parent` writes into the note through
+`handoff::append_update`:
+
+- a session linked to a to-do (a `diri://session/<id>` chip in the to-do's
+  text) gets a dated, attributed child bullet under that to-do, after its
+  other children, so progress folds with the work it belongs to
+  (`diri_notes::work`, design in `plans/notes-todo-handoff.md`);
+- any other child gets a line under a `## Updates` heading (created if
+  missing).
+
+The reply says which (`todo` is the block index, or null). Agents never tick
+the to-do; the person reviews the work and ticks it.
 
 ### Policy (`bridge/policy.rs`, this work)
 

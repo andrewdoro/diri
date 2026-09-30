@@ -1077,6 +1077,33 @@ impl Editor {
         self.changed();
     }
 
+    /// Links a session to the to-do at `index` with a trailing mention chip
+    /// (an agent started from it). One undo step; `false` when the block is
+    /// not a to-do or already links that session.
+    pub fn link_session(
+        &mut self,
+        index: usize,
+        label: &str,
+        session_id: &str,
+        now_ms: u64,
+    ) -> bool {
+        let target = crate::mention::MentionTarget::Session(session_id.to_owned());
+        let Some(block) = self.blocks.get(index) else {
+            return false;
+        };
+        if !matches!(block.kind, BlockKind::Todo { .. })
+            || crate::mention::in_block(block)
+                .iter()
+                .any(|m| m.target == target)
+        {
+            return false;
+        }
+        self.checkpoint(EditKind::Other, now_ms);
+        crate::handoff::append_chip(&mut self.blocks[index], label, &target);
+        self.changed();
+        true
+    }
+
     /// ⌘B / ⌘I / ⌘E / ⌘⇧X, and ⌘K with a URL.
     pub fn toggle_style(&mut self, style: Style, now_ms: u64) {
         if self.selection.is_collapsed() {

@@ -10,3 +10,4 @@ pub mod handoff;
 pub mod markdown;
 pub mod mention;
 pub mod store;
+pub mod work;

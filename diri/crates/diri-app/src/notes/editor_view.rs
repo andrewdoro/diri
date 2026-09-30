@@ -94,6 +94,7 @@ actions!(
         MoveBlockDown,
         Escape,
         ShowCharacterPalette,
+        StartWork,
     ]
 );
 
@@ -111,6 +112,8 @@ const KEY_TURN_CODE: &str = "cmd-alt-c";
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     let c = Some(EDITOR_CONTEXT);
     vec![
+        // ⌘⇧↩ zooms the pane, ⌘↩ ticks, ⌥⌘↩ folds.
+        KeyBinding::new("ctrl-cmd-enter", StartWork, c),
         KeyBinding::new("backspace", Backspace, c),
         KeyBinding::new("shift-backspace", Backspace, c),
         KeyBinding::new("alt-backspace", BackspaceWord, c),
@@ -186,6 +189,8 @@ pub(crate) enum EditorEvent {
     Dismiss,
     /// A mention chip was clicked: the host reveals that session or note.
     OpenMention(MentionTarget),
+    /// A to-do's work item needs the host (see `work_item`).
+    Work(super::work_item::WorkRequest),
 }
 
 /// One thing the `@` menu offers, with what its chip needs to stay live.
@@ -230,7 +235,7 @@ struct MentionMenu {
 }
 
 const CARET_BLINK: Duration = Duration::from_millis(530);
-const MARKER_WIDTH: f32 = 26.0;
+pub(super) const MARKER_WIDTH: f32 = 26.0;
 const INDENT_STEP: f32 = 24.0;
 /// Gutter width left of a list item that holds its fold chevron.
 const DISCLOSURE_WIDTH: f32 = 20.0;
@@ -372,6 +377,8 @@ pub(crate) struct NoteEditorView {
     /// Checkboxes ticked this session, for their pop animation.
     ticked: Vec<(u64, Instant)>,
     link_hint: Option<SharedString>,
+    /// To-dos as agent work: folds, starts in flight, their panels.
+    pub(super) work: super::work_item::WorkView,
 }
 
 impl EventEmitter<EditorEvent> for NoteEditorView {}
@@ -411,6 +418,18 @@ impl NoteEditorView {
             caret_bounds: None,
             ticked: Vec::new(),
             link_hint: None,
+            work: super::work_item::WorkView::default(),
+        }
+    }
+
+    pub(super) fn colors(&self) -> SemanticColors {
+        self.colors
+    }
+
+    /// Menus open under `pos` this frame, wherever the caret was painted.
+    pub(super) fn anchor_menus_at(&mut self, pos: Pos) {
+        if let Some((point, line)) = self.caret_point(pos) {
+            self.caret_bounds = Some(Bounds::new(point, size(px(2.0), line)));
         }
     }
 
@@ -432,6 +451,7 @@ impl NoteEditorView {
     /// Replaces the content after an outside change, keeping the caret close.
     pub(crate) fn reload(&mut self, editor: Editor, cx: &mut Context<Self>) {
         let selection = self.editor.selection;
+        self.work.remap(self.editor.blocks(), editor.blocks());
         // Folds are view state keyed by runtime ids; carry each one to the
         // block at the same place with the same text.
         let folded: Vec<(usize, String)> = (0..self.editor.blocks().len())
@@ -470,7 +490,7 @@ impl NoteEditorView {
         cx.emit(EditorEvent::Changed);
     }
 
-    fn moved(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn moved(&mut self, cx: &mut Context<Self>) {
         self.marked = None;
         self.sync_slash();
         self.sync_mention();
@@ -888,6 +908,9 @@ impl NoteEditorView {
     }
 
     pub(crate) fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if self.work_panel_key(super::work_item::PanelKey::Enter, cx) {
+            return;
+        }
         if let Some(menu) = &self.mention {
             let selected = menu.selected;
             self.apply_mention(selected, cx);
@@ -1000,6 +1023,14 @@ impl NoteEditorView {
     }
 
     pub(super) fn vertical(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
+        let key = if down {
+            super::work_item::PanelKey::Down
+        } else {
+            super::work_item::PanelKey::Up
+        };
+        if !extend && self.work_panel_key(key, cx) {
+            return;
+        }
         if !extend && self.mention.is_some() {
             let count = self.mention_matches().len().max(1);
             if let Some(menu) = &mut self.mention {
@@ -1183,6 +1214,9 @@ impl NoteEditorView {
 
     fn toggle_todo(&mut self, _: &ToggleTodo, _: &mut Window, cx: &mut Context<Self>) {
         let head = self.editor.selection.head.block;
+        if self.editor.selection.is_collapsed() && self.guard_tick(head, cx) {
+            return;
+        }
         let id = self.editor.block(head).id;
         self.run(cx, |e, now| e.toggle_todo(now));
         if self.editor.block(head).kind == (BlockKind::Todo { checked: true }) {
@@ -1230,6 +1264,9 @@ impl NoteEditorView {
     }
 
     fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
+        if self.work_panel_key(super::work_item::PanelKey::Escape, cx) {
+            return;
+        }
         if self.slash.take().is_some() || self.mention.take().is_some() {
             cx.notify();
             return;
@@ -1252,6 +1289,10 @@ impl NoteEditorView {
         window.show_character_palette();
     }
 
+    fn start_work(&mut self, _: &StartWork, _: &mut Window, cx: &mut Context<Self>) {
+        self.start_work_at_caret(cx);
+    }
+
     fn check(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(block) = self.editor.blocks().get(index) else {
             return;
@@ -1259,9 +1300,23 @@ impl NoteEditorView {
         let BlockKind::Todo { checked } = block.kind else {
             return;
         };
+        if self.guard_tick(index, cx) {
+            return;
+        }
+        self.set_todo_checked(index, !checked, cx);
+    }
+
+    pub(super) fn set_todo_checked(&mut self, index: usize, checked: bool, cx: &mut Context<Self>) {
+        let Some(block) = self.editor.blocks().get(index) else {
+            return;
+        };
+        let was = block.kind == (BlockKind::Todo { checked: true });
         let id = block.id;
-        self.editor.set_checked(index, !checked, now_ms());
-        if !checked {
+        if was == checked {
+            return;
+        }
+        self.editor.set_checked(index, checked, now_ms());
+        if checked {
             self.ticked.push((id, Instant::now()));
         }
         self.edited(cx);
@@ -1762,6 +1817,7 @@ impl Render for NoteEditorView {
         self.ticked
             .retain(|(_, at)| at.elapsed() < Duration::from_millis(600));
 
+        self.anchor_work_menu();
         let mut layouts = Vec::with_capacity(self.editor.blocks().len());
         let hidden = self.editor.hidden();
         let mut column = div().flex().flex_col().w_full();
@@ -1850,7 +1906,7 @@ impl Render for NoteEditorView {
                 row.pt(px(look.top)).pb(px(look.bottom))
             };
             let row = if !folded_away && self.editor.has_children(index) {
-                row.child(self.disclosure(index, indent, look.top, look.line, group, cx))
+                row.child(self.disclosure(index, indent, look.top, look.line, group.clone(), cx))
             } else {
                 row
             };
@@ -1906,7 +1962,18 @@ impl Render for NoteEditorView {
                 ),
                 _ => row.child(content),
             };
+            let row = row.children(self.work_accessory(
+                block,
+                focused && head.block == index,
+                group.clone(),
+                look.line,
+                colors,
+                cx,
+            ));
             column = column.child(row);
+            if !folded_away && let Some(status) = self.work_status_line(block, indent, colors, cx) {
+                column = column.child(status);
+            }
         }
         self.layouts = layouts.clone();
         self.layout_revision = self.editor.revision;
@@ -2090,6 +2157,7 @@ impl Render for NoteEditorView {
         } else {
             None
         };
+        let work_menu = self.work_menu(window, cx);
         let hint = self.link_hint.clone().map(|hint| {
             div()
                 .absolute()
@@ -2171,6 +2239,7 @@ impl Render for NoteEditorView {
             .on_action(cx.listener(Self::move_block_down))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::show_character_palette))
+            .on_action(cx.listener(Self::start_work))
             .child(
                 div()
                     .id("note-editor-scroll")
@@ -2203,6 +2272,7 @@ impl Render for NoteEditorView {
             )
             .children(slash_menu)
             .children(mention_menu)
+            .children(work_menu)
             .children(hint)
     }
 }
@@ -2381,7 +2451,7 @@ impl NoteEditorView {
 
     /// Mounts `target`'s menu at the caret for this frame, with a scrim that
     /// turns a click anywhere else into a dismissal.
-    fn host_menu(
+    pub(super) fn host_menu(
         &mut self,
         target: floating::Target<Self>,
         rows: fn(&mut Self, &mut Context<Self>) -> Option<gpui::Div>,
@@ -2635,8 +2705,8 @@ const MENTION_MENU: floating::Target<NoteEditorView> = floating::Target {
 const SLASH_MENU_WIDTH: f32 = 240.0;
 const MENTION_MENU_WIDTH: f32 = 340.0;
 /// Glyphs and agent marks at the New Agent menu's sizes.
-const MENU_ICON: f32 = 13.0;
-const MENU_LOGO: f32 = 20.0;
+pub(super) const MENU_ICON: f32 = 13.0;
+pub(super) const MENU_LOGO: f32 = 20.0;
 /// A status mark is inset 0.08 where a bare logo is inset 0.28; this size
 /// draws the mark exactly as large as the New Agent menu's 20 pt logos.
 const MENU_STATUS_MARK: f32 = MENU_LOGO * (1.0 - 2.0 * 0.28) / (1.0 - 2.0 * 0.08);
@@ -2645,14 +2715,14 @@ const MENU_MARGIN: f32 = 8.0;
 /// A separator's hairline plus its padding.
 const MENU_SEPARATOR_HEIGHT: f32 = 9.0;
 
-fn menu_height(rows: usize, separators: usize) -> f32 {
+pub(super) fn menu_height(rows: usize, separators: usize) -> f32 {
     2.0 * floating::MENU_PADDING_Y
         + rows as f32 * floating::MENU_ROW_HEIGHT
         + separators as f32 * MENU_SEPARATOR_HEIGHT
         + 2.0
 }
 
-fn menu_label(label: impl Into<SharedString>, colors: SemanticColors) -> gpui::Div {
+pub(super) fn menu_label(label: impl Into<SharedString>, colors: SemanticColors) -> gpui::Div {
     div()
         .min_w_0()
         .flex_1()
@@ -2664,7 +2734,7 @@ fn menu_label(label: impl Into<SharedString>, colors: SemanticColors) -> gpui::D
         .child(label.into())
 }
 
-fn menu_empty(text: &'static str, colors: SemanticColors) -> gpui::Div {
+pub(super) fn menu_empty(text: &'static str, colors: SemanticColors) -> gpui::Div {
     div()
         .h(px(floating::MENU_ROW_HEIGHT))
         .px(px(floating::MENU_ROW_MARGIN + floating::MENU_ROW_INSET))
