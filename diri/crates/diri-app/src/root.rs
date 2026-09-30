@@ -238,7 +238,8 @@ pub struct RootView {
     launch_cursor: Option<u64>,
     launch_scroll: gpui::ScrollHandle,
     active_workspace: Option<diri_proto::workspace::WorkspaceId>,
-    workspace_error: Option<String>,
+    /// The last workspace failure shown, and the layout revision it failed at.
+    workspace_error: Option<(u64, String)>,
     workspace_workbench: Option<Entity<crate::workspace_workbench::WorkspaceWorkbench>>,
     sidebar: Entity<Sidebar>,
     terminal: Option<Entity<TerminalPane>>,
@@ -1191,22 +1192,25 @@ impl RootView {
                             this.sync_workspace_spawn_context(cx);
                             this.sync_inspector_context(cx);
                             this.sync_auxiliary_terminal(window, cx);
-                            let error = this
-                                .window_store
-                                .read()
-                                .expect("store")
-                                .workspace_catalog()
-                                .error
-                                .clone();
-                            if error != this.workspace_error {
-                                this.workspace_error = error.clone();
-                                if let Some(error) = error {
-                                    this.show_quote_feedback(
-                                        "Workspace change was not saved",
-                                        error,
-                                        cx,
-                                    );
-                                }
+                            let error = {
+                                let store = this.window_store.read().expect("store");
+                                let catalog = store.workspace_catalog();
+                                catalog.error.clone().map(|error| {
+                                    (catalog.snapshot().map_or(0, |s| s.revision), error)
+                                })
+                            };
+                            // Each edit clears the error, so one rejection
+                            // repeated per click would toast per click. Say it
+                            // once until the layout moves on.
+                            if let Some(error) = error
+                                && this.workspace_error.as_ref() != Some(&error)
+                            {
+                                this.workspace_error = Some(error.clone());
+                                this.show_quote_feedback(
+                                    "Workspace change was not saved",
+                                    error.1,
+                                    cx,
+                                );
                             }
                             cx.notify();
                         })

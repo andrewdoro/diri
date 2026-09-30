@@ -1,5 +1,8 @@
 //! Revision-gated cache of the Engine's saved layout catalog. The UI never
 //! persists a second copy or retries a rejected edit against a new revision.
+//! Nor does it resend an edit the Engine already rejected on its merits:
+//! navigation can request the same placement on every click, and a full tab
+//! limit rejects it identically until the layout or the sessions change.
 use super::*;
 use diri_proto::workspace::{
     WORKSPACE_SCHEMA_VERSION, WorkspaceMutation, WorkspaceMutationParams, WorkspaceSnapshot,
@@ -22,6 +25,8 @@ pub struct WorkspaceCatalog {
     refresh_again: bool,
     editing: bool,
     announced_revision: u64,
+    in_flight: Option<AttemptedEdit>,
+    rejected: Option<RejectedEdit>,
     pub error: Option<String>,
     pub created_workspace: Option<(u64, diri_proto::workspace::WorkspaceId)>,
     pub create_request_id: u64,
@@ -40,12 +45,44 @@ impl Default for WorkspaceCatalog {
             refresh_again: false,
             editing: false,
             announced_revision: 0,
+            in_flight: None,
+            rejected: None,
             error: None,
             created_workspace: None,
             create_request_id: 0,
             creating: false,
         }
     }
+}
+
+/// The Engine decides an edit from its saved layout (named by the revision)
+/// and, for placements, which sessions exist. Only those inputs can change an
+/// identical edit's outcome.
+#[derive(Clone, Debug, PartialEq)]
+struct AttemptedEdit {
+    params: WorkspaceMutationParams,
+    sessions: u64,
+}
+
+struct RejectedEdit {
+    edit: AttemptedEdit,
+    message: String,
+}
+
+/// Order-independent identity of the session inventory.
+fn session_fingerprint(sessions: &HashMap<SessionId, Arc<SessionRecord>>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    sessions.keys().fold(sessions.len() as u64, |acc, id| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut hasher);
+        acc ^ hasher.finish()
+    })
+}
+
+/// A conflict means the revision moved; anything else the Engine returned was
+/// decided against the layout this edit named and repeats until it changes.
+fn deterministic_rejection(error: &ClientError) -> bool {
+    matches!(error, ClientError::Control(error) if error.code != "workspace_revision_conflict")
 }
 
 impl WorkspaceCatalog {
@@ -78,6 +115,21 @@ impl SessionStore {
         self.finish_workspace_request(self.workspaces.generation, true, Ok(snapshot));
     }
 
+    #[cfg(test)]
+    pub(crate) fn finish_workspace_refresh_for_test(&mut self, snapshot: WorkspaceSnapshot) {
+        self.finish_workspace_request(self.workspaces.generation, false, Ok(snapshot));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reject_workspace_edit_for_test(&mut self, code: &str) {
+        let error = diri_proto::control::ControlError::new(code, "rejected");
+        self.finish_workspace_request(
+            self.workspaces.generation,
+            true,
+            Err(ClientError::Control(error)),
+        );
+    }
+
     pub fn workspace_catalog(&self) -> &WorkspaceCatalog {
         &self.workspaces
     }
@@ -97,6 +149,9 @@ impl SessionStore {
         catalog.creating = false;
         catalog.created_workspace = None;
         catalog.announced_revision = 0;
+        catalog.in_flight = None;
+        // Another Engine may decide differently.
+        catalog.rejected = None;
         catalog.status = if connected {
             WorkspaceCatalogStatus::Loading
         } else {
@@ -139,18 +194,35 @@ impl SessionStore {
         }
     }
 
+    fn attempted_edit(&self, mutation: WorkspaceMutation) -> Option<AttemptedEdit> {
+        Some(AttemptedEdit {
+            params: WorkspaceMutationParams {
+                expected_revision: self.workspaces.snapshot.as_ref()?.revision,
+                mutation,
+            },
+            sessions: session_fingerprint(&self.sessions),
+        })
+    }
+
+    /// The Engine already rejected this exact edit against the visible layout
+    /// and the current sessions; sending it again would fail the same way.
+    pub fn workspace_edit_rejected(&self, mutation: &WorkspaceMutation) -> Option<&str> {
+        let rejected = self.workspaces.rejected.as_ref()?;
+        (rejected.edit.params.mutation == *mutation
+            && self.attempted_edit(mutation.clone()).as_ref() == Some(&rejected.edit))
+        .then_some(rejected.message.as_str())
+    }
+
     pub fn edit_workspace(&mut self, mutation: WorkspaceMutation) -> bool {
-        let catalog = &mut self.workspaces;
-        if !catalog.can_edit() {
+        if !self.workspaces.can_edit() || self.workspace_edit_rejected(&mutation).is_some() {
             return false;
         }
-        let Some(snapshot) = &catalog.snapshot else {
+        let Some(edit) = self.attempted_edit(mutation) else {
             return false;
         };
-        let params = WorkspaceMutationParams {
-            expected_revision: snapshot.revision,
-            mutation,
-        };
+        let params = edit.params.clone();
+        let catalog = &mut self.workspaces;
+        catalog.in_flight = Some(edit);
         catalog.editing = true;
         catalog.creating = matches!(&params.mutation, WorkspaceMutation::CreateWorkspace { .. });
         if catalog.creating {
@@ -174,9 +246,13 @@ impl SessionStore {
         if generation != catalog.generation || !catalog.connected {
             return;
         }
-        if mutation {
+        let attempted = if mutation {
             catalog.editing = false;
+            catalog.in_flight.take()
         } else {
+            None
+        };
+        if !mutation {
             catalog.refreshing = false;
         }
         match result {
@@ -219,6 +295,12 @@ impl SessionStore {
             }
             Err(error) => {
                 if mutation {
+                    if deterministic_rejection(&error) {
+                        catalog.rejected = attempted.map(|edit| RejectedEdit {
+                            edit,
+                            message: error.to_string(),
+                        });
+                    }
                     catalog.error = Some(format!(
                         "Workspace change was not confirmed: {error}. Reloading the current layout."
                     ));
@@ -382,6 +464,143 @@ mod tests {
                 .map(|(request, id)| (*request, id.0.as_str())),
             Some((second, "second"))
         );
+    }
+
+    fn limit_reached() -> ClientError {
+        ClientError::Control(diri_proto::control::ControlError::new(
+            "workspace_limit_reached",
+            "workspace or tab count exceeds the limit",
+        ))
+    }
+
+    /// Submits `mutation` and answers it with `result`, returning whether an
+    /// RPC went out at all.
+    fn submit(
+        store: &mut SessionStore,
+        effects: &mut mpsc::UnboundedReceiver<StoreEffect>,
+        generation: u64,
+        mutation: &WorkspaceMutation,
+        result: Result<WorkspaceSnapshot, ClientError>,
+    ) -> bool {
+        if !store.edit_workspace(mutation.clone()) {
+            return false;
+        }
+        assert!(matches!(
+            effects.try_recv(),
+            Ok(StoreEffect::MutateWorkspace { .. })
+        ));
+        store.finish_workspace_request(generation, true, result);
+        // Settle the reload every failed edit asks for.
+        let revision = store.workspace_catalog().snapshot().unwrap().revision;
+        while let Ok(effect) = effects.try_recv() {
+            if matches!(effect, StoreEffect::RefreshWorkspaces { .. }) {
+                store.finish_workspace_request(generation, false, Ok(snapshot(revision)));
+            }
+        }
+        true
+    }
+
+    /// A tab limit full of placements rejected every agent activation, and
+    /// navigation asked again on every click: 1,727 identical rejections and
+    /// 929 toasts on one install. The Engine's verdict on the same layout and
+    /// sessions is final; only a new revision or session inventory can change it.
+    #[test]
+    fn a_rejected_edit_is_not_resent_until_the_layout_or_sessions_change() {
+        let (mut store, mut effects, generation) = connected();
+        store.finish_workspace_request(generation, false, Ok(snapshot(7)));
+        let open = WorkspaceMutation::OpenProjectAgent {
+            session_id: SessionId::new("agent"),
+            preferred_workspace: None,
+        };
+        let mut rpcs = 0;
+        for _ in 0..50 {
+            rpcs += usize::from(submit(
+                &mut store,
+                &mut effects,
+                generation,
+                &open,
+                Err(limit_reached()),
+            ));
+        }
+        assert_eq!(rpcs, 1, "one rejection, not one per activation");
+        assert!(store.workspace_edit_rejected(&open).is_some());
+        assert!(store.workspace_catalog().can_edit());
+
+        // A different edit, such as closing a tab to make room, still goes out.
+        let close = WorkspaceMutation::RemoveTab {
+            tab_id: diri_proto::workspace::TabId::new("stale"),
+        };
+        assert!(store.workspace_edit_rejected(&close).is_none());
+
+        // A session ending lets the Engine reclaim its tab: ask again.
+        store.upsert_session(super::super::tests::session("gone", "p", 1.0));
+        while effects.try_recv().is_ok() {}
+        assert!(submit(
+            &mut store,
+            &mut effects,
+            generation,
+            &open,
+            Err(limit_reached()),
+        ));
+        assert!(!submit(
+            &mut store,
+            &mut effects,
+            generation,
+            &open,
+            Err(limit_reached())
+        ));
+
+        // So does any committed layout change.
+        store.workspace_announced(8);
+        let StoreEffect::RefreshWorkspaces { .. } = effects.try_recv().unwrap() else {
+            panic!("refresh")
+        };
+        store.finish_workspace_request(generation, false, Ok(snapshot(8)));
+        assert!(store.workspace_edit_rejected(&open).is_none());
+        assert!(submit(
+            &mut store,
+            &mut effects,
+            generation,
+            &open,
+            Ok(snapshot(9))
+        ));
+    }
+
+    #[test]
+    fn conflicts_and_uncertain_failures_are_not_remembered_as_rejections() {
+        let (mut store, mut effects, generation) = connected();
+        store.finish_workspace_request(generation, false, Ok(snapshot(3)));
+        let open = WorkspaceMutation::OpenProjectAgent {
+            session_id: SessionId::new("agent"),
+            preferred_workspace: None,
+        };
+        let conflict = ClientError::Control(diri_proto::control::ControlError::new(
+            "workspace_revision_conflict",
+            "expected revision 3, current revision 4",
+        ));
+        assert!(submit(
+            &mut store,
+            &mut effects,
+            generation,
+            &open,
+            Err(conflict)
+        ));
+        assert!(store.workspace_edit_rejected(&open).is_none());
+        let io = ClientError::Io("directory sync failed".into());
+        assert!(submit(&mut store, &mut effects, generation, &open, Err(io)));
+        assert!(store.workspace_edit_rejected(&open).is_none());
+        // A new Engine connection decides afresh.
+        assert!(submit(
+            &mut store,
+            &mut effects,
+            generation,
+            &open,
+            Err(limit_reached())
+        ));
+        assert!(store.workspace_edit_rejected(&open).is_some());
+        store.workspace_connection_changed(false);
+        store.workspace_connection_changed(true);
+        assert!(store.workspace_edit_rejected(&open).is_none());
     }
 
     #[test]
