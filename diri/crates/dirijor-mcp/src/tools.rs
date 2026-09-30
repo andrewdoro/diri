@@ -107,7 +107,7 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "schedule_agent",
-            "Schedule an agent run for later or on a repeating cron, owned by Diri rather than by this session: it survives this session closing and Diri restarting. Use this instead of your own cron or loop whenever the user asks to run something at a time or every day/hour. Each run opens a new top-level session with the prompt. If the Mac is asleep or Diri is not running when a run is due, it fires once on wake inside catch_up_hours (default 12) and is recorded as missed beyond that. Give exactly one of cron (five fields, local time, e.g. \"0 9 * * 1-5\"), at_ms (epoch ms), or in_minutes.",
+            "Schedule an agent run owned by Diri, not by this session: it survives this session closing and Diri restarting. Use it whenever the user wants something done later, at a time, or repeatedly, instead of your own cron/loop tools. How runs work: at each due time Diri opens a NEW top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation, so write a self-contained prompt: the goal, the repo and relevant context, what to produce, and where the result goes (open a PR, write a file, post a summary). For code changes pass worktree:true and base \"origin/main\" so each run starts clean. Give a short `name`. When: exactly one of cron (five fields, the Mac's local time, e.g. \"0 9 * * 1-5\" weekdays 09:00), in_minutes (relative one-off), or at_ms (epoch ms). Missed runs: if the Mac was asleep or Diri was closed, the newest missed run fires once when it is back, within catch_up_hours (default 12); older ones are recorded as missed. wake_mac:true (use when the user wants it to run even if the Mac is asleep): Diri wakes the Mac 2 minutes early (lid must be open), keeps it awake while the agent works, then puts it back to sleep if nobody used it. It needs the one-time \"Allow diri to wake the Mac\" approval in Settings > Schedules; if list_schedules reports wakeHelperError, tell the user to turn it on. After creating, confirm in words from the returned nextDue, e.g. \"weekdays at 09:00, next run Monday; it will wake the Mac\".",
             json!({
                 "type": "object",
                 "properties": {
@@ -122,7 +122,8 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
                     "branch": {"type": "string"},
                     "base": {"type": "string", "description": "Starting ref for each run's worktree, e.g. origin/main."},
                     "catch_up_hours": {"type": "number", "minimum": 0, "maximum": 168, "description": "A run missed by up to this long still fires late; 0 never catches up. Default 12."},
-                    "keep_awake": {"type": "boolean", "description": "Keep an awake Mac from idle-sleeping shortly before each run and while it works. Cannot wake a sleeping Mac."}
+                    "keep_awake": {"type": "boolean", "description": "Keep an awake Mac from idle-sleeping shortly before each run and while it works. Cannot wake a sleeping Mac."},
+                    "wake_mac": {"type": "boolean", "description": "Wake a sleeping Mac (lid open) 2 minutes before each run, keep it awake while the run works, then let it sleep again. Needs the one-time wake approval in Settings > Schedules; list_schedules reports if it is missing."}
                 },
                 "required": ["kind", "cwd", "prompt"]
             }),

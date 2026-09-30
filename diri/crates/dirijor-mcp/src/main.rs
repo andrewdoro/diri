@@ -66,6 +66,42 @@ fn tool_content(result: Result<Value, String>) -> Value {
     json!({"content":[{"type":"text","text":text}],"isError":is_error})
 }
 
+/// Claude Code keeps only the first 2048 characters of server instructions
+/// and silently drops the rest, so every sentence here has to earn its place.
+/// Detail belongs in tool descriptions, which are delivered separately.
+#[cfg(test)]
+const INSTRUCTIONS_LIMIT: usize = 2048;
+
+fn instructions(browser: &str) -> String {
+    format!(
+        "This session runs INSIDE Diri, a desktop orchestrator for coding agents; these \
+         tools control it. Use them proactively, without asking, when the user wants to \
+         open/spawn/close an agent, session, tab, or terminal (Claude Code, Codex, Cursor, \
+         Gemini, shell), see or message other sessions, or parallelize across worktrees.\n\n\
+         Scheduling: to run anything later, at a time, or repeatedly (\"every weekday at \
+         9\", \"in 2 hours\"), ALWAYS use schedule_agent, never your own cron/loop/reminder \
+         tools (CronCreate, /loop, /schedule) or a sleeping shell: those die with this \
+         session and skip runs the Mac slept through. Pass wake_mac:true to wake a sleeping \
+         Mac for the run and let it sleep again after. Read schedule_agent's description \
+         before calling it.\n\n\
+         Parallel work: spawn_agents (worktree:true, prompt, task:true per subtask) → \
+         wait_any(task_ids) → per ready task: read_output mode:last_message, answer_task if \
+         blocked, get_diff, integrate → wait_any on the pending ids → release_agent. \
+         wait_any returns when ANY target needs you.\n\n\
+         To spawn an agent use its native kind (e.g. `claude`, `codex`; default your own) \
+         with the task as `prompt`. Never use `shell` to launch an agent CLI (`claude`, `codex`, ...): a child `shell` is a raw terminal in the parent's Cmd+J pane whose prompt runs as shell commands.\n\n\
+         A Diri task you receive: report_task acknowledged first, then completed/failed for \
+         that task_id after verifying (JSON matching result_schema if given), or blocked \
+         with your question.\n\n\
+         Delivery is deduplicated and at most once: reuse message_id/operation_id/request_id \
+         on retries and never resend under a new identity. A receipt is not completion; \
+         pass since_ms to wait_for_agent/wait_any for untracked prompts.\n\n\
+         Also: get_artifacts gives PR/preview URLs and ports; fork_agent branches a \
+         conversation; manage_agent hibernates idle children; quick_open_include edits \
+         Cmd+P folders.{browser}"
+    )
+}
+
 fn initialize(params: &Value) -> Value {
     let version = params
         .get("protocolVersion")
@@ -81,39 +117,7 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": {"tools":{}},
         "serverInfo": {"name":"dirijor","version":"0.1.0"},
-        "instructions": format!(
-            "This session is running INSIDE Diri, a desktop orchestrator for coding agents. \
-             These tools control it. Use them proactively whenever the user asks to \
-             open/start/spawn/close another agent, session, tab, or terminal (Claude Code, \
-             Codex, Cursor, Gemini, or a shell), to check what other sessions are doing, to \
-             talk to another session, or to parallelize work across git worktrees — no \
-             extra confirmation of intent needed.\n\n\
-             Parallel work (preferred): spawn_agents with one entry per subtask \
-             (worktree:true, prompt, task:true) → wait_any(task_ids) → for each ready task \
-             read its result (read_output mode:last_message for detail), answer_task if it is \
-             blocked, get_diff to review, integrate to bring its branch into your checkout → \
-             call wait_any again with the pending ids → release_agent when done. wait_any \
-             returns as soon as ANY target needs you; do not wait for all of them at once.\n\n\
-             Agent vs terminal rule: to spawn another agent, select its native kind (for \
-             example `claude` or `codex`) and pass its task as `prompt`. If no agent is named, \
-             use your own native kind when available. Never use `shell` to launch an agent CLI \
-             such as `claude`, `codex`, `cursor`, or `gemini`; a child `shell` is a raw \
-             terminal in the parent's Cmd+J pane whose prompt runs as shell commands.\n\n\
-             When you receive a Diri task: report_task acknowledged before starting, then \
-             completed or failed for that exact task_id after verifying (JSON matching \
-             result_schema when the task has one), or blocked with your question. \
-             report_to_parent is recorded on your open task automatically.\n\n\
-             Delivery rules: messages, spawns, and tasks are deduplicated and delivered at \
-             most once. Reuse message_id/operation_id/request_id on retries; never resend \
-             under a new identity because an agent is slow or its screen is unchanged. A \
-             delivery receipt does not mean the work is done. For untracked prompts, pass the \
-             returned since_ms to wait_for_agent/wait_any so an agent that was already idle \
-             does not count as finished.\n\n\
-             Also: get_artifacts returns PR/preview URLs and ports (PRs include live GitHub \
-             status); fork_agent branches a conversation to try an alternative; manage_agent \
-             hibernates idle children instead of killing them; quick_open_include edits the \
-             folders Cmd+P indexes (e.g. `**/.worktrees/`).{browser}"
-        )
+        "instructions": instructions(browser),
     })
 }
 
@@ -182,6 +186,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instructions_fit_the_client_cap_with_every_section() {
+        let longest = instructions(
+            " To test a web feature, use test_run with a preview URL from get_artifacts.",
+        );
+        assert!(
+            longest.chars().count() <= INSTRUCTIONS_LIMIT,
+            "{} chars: Claude Code drops everything past {INSTRUCTIONS_LIMIT}",
+            longest.chars().count()
+        );
+        // The scheduling rule must sit well inside the kept prefix.
+        assert!(longest.find("schedule_agent").unwrap() < 1024);
+        assert!(longest.contains("wake_mac"));
+        assert!(longest.ends_with("get_artifacts."));
+    }
 
     struct Fake;
 

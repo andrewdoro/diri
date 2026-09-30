@@ -55,6 +55,7 @@ impl Bridge {
             "when": when,
             "spawn": spawn,
             "keepAwake": optional_bool(args, "keep_awake").unwrap_or(false),
+            "wakeMac": optional_bool(args, "wake_mac").unwrap_or(false),
         });
         if let Some(window) = catch_up_ms {
             params["catchUpWindowMs"] = json!(window);

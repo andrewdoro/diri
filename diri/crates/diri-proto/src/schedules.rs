@@ -37,6 +37,11 @@ pub struct ScheduleSpec {
     /// session works. Cannot wake a sleeping Mac or stop lid-close sleep.
     #[serde(default)]
     pub keep_awake: bool,
+    /// Wake a sleeping Mac shortly before each run through the approved
+    /// wake helper, hold it awake while the run works (implies keep-awake),
+    /// then let it sleep again if nobody used it meanwhile.
+    #[serde(default)]
+    pub wake_mac: bool,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -93,6 +98,22 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+/// Stamped on a session a schedule opened, so clients can mark it and say
+/// which schedule started it and whether diri woke the Mac for it.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledRunInfo {
+    pub schedule_id: String,
+    pub title: String,
+    pub due_at: DateMillis,
+    /// The schedule asks to wake the Mac.
+    #[serde(default)]
+    pub wake_mac: bool,
+    /// diri actually woke the Mac for this run.
+    #[serde(default)]
+    pub woke_mac: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleRecord {
@@ -133,6 +154,10 @@ pub struct ScheduleIdParams {
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleListResult {
     pub schedules: Vec<ScheduleRecord>,
+    /// Why the Engine could not reach the wake helper last time a schedule
+    /// asked to wake the Mac, usually because it is not approved yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_helper_error: Option<String>,
 }
 
 #[cfg(test)]
@@ -151,6 +176,7 @@ mod tests {
         assert_eq!(spec.catch_up_window_ms, DEFAULT_CATCH_UP_WINDOW_MS);
         assert!(spec.enabled);
         assert!(!spec.keep_awake);
+        assert!(!spec.wake_mac);
         assert_eq!(spec.spawn.kind, AgentKind::CLAUDE_CODE);
     }
 
@@ -169,6 +195,7 @@ mod tests {
                 .unwrap(),
                 catch_up_window_ms: 5,
                 keep_awake: true,
+                wake_mac: true,
                 enabled: false,
             },
             created_at: DateMillis(0.0),

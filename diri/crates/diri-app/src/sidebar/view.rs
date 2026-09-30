@@ -3546,6 +3546,7 @@ impl Sidebar {
         let session_is_remote = session.host.is_some();
         let ended = matches!(session.status, diri_proto::SessionStatus::Exited(_)) && !archived;
         let remote_marked = session_is_remote && !host_marked_above;
+        let scheduled_run = session.scheduled_run.clone();
         let title = display_title(session);
         let non_persistent =
             session.remote_persistence == Some(PersistenceCapability::NonPersistent);
@@ -3561,6 +3562,7 @@ impl Sidebar {
             row.pinned,
             !hovered && focused && shortcut.is_some(),
         ) - if loading { 60.0 } else { 0.0 }
+            - if scheduled_run.is_some() { 18.0 } else { 0.0 }
             - if row.has_children {
                 Space::INDENT + 8.0
             } else {
@@ -3892,6 +3894,10 @@ impl Sidebar {
             })
             .when(loading, |element| {
                 element.child(StateChip::new("Loading", colors.secondary, colors))
+            })
+            .when_some(scheduled_run, |element, run| {
+                // A schedule opened this session, perhaps after waking the Mac.
+                element.child(scheduled_mark(&id, &run, colors))
             })
             .when(remote_marked, |element| {
                 // This session's agent runs on another machine.
@@ -8503,6 +8509,36 @@ fn pin_mark(colors: SemanticColors) -> AnyElement {
         .into_any_element()
 }
 
+/// Quiet trailing glyph for a session a schedule opened: a grey clock, or an
+/// indigo one when diri woke the Mac for it (a moon already means Sleeping). Hover names the schedule and what happened,
+/// so the tab explains why it appeared while nobody was at the keyboard.
+fn scheduled_mark(
+    id: &SessionId,
+    run: &diri_proto::schedules::ScheduledRunInfo,
+    colors: SemanticColors,
+) -> AnyElement {
+    let (symbol, color) = if run.woke_mac {
+        ("clock.fill", crate::schedules_page::NIGHT)
+    } else {
+        ("clock.fill", colors.tertiary)
+    };
+    use crate::tooltip_warmth::WarmTooltip;
+    let tooltip = crate::schedules_page::scheduled_run_summary(run);
+    div()
+        .id(format!("scheduled-mark:{}", id.0))
+        .debug_selector(|| "scheduled-mark".to_owned())
+        .aria_label(tooltip.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .child(sf_symbol(symbol, 9.0, color))
+        .warm_tooltip(move |_, cx| {
+            cx.new(|_| crate::palette_chrome::PaletteTooltip(tooltip.clone(), colors))
+                .into()
+        })
+        .into_any_element()
+}
+
 /// Trailing count on a fold that hides archived sessions. It stands on the
 /// identity column so it lines up under the agent glyphs above it, growing
 /// leftward if the number needs more than the slot.
@@ -11663,6 +11699,22 @@ mod tests {
                                 } else {
                                     now - 1.0
                                 }));
+                        }
+                        // `DIRI_VISUAL_SCHEDULED=1` marks two sessions as
+                        // scheduled runs: one diri woke the Mac for (indigo
+                        // clock) and one it did not (grey clock).
+                        if std::env::var_os("DIRI_VISUAL_SCHEDULED").is_some() {
+                            let woke = session.id == SessionId::new("preview-spawned-review");
+                            if woke || session.id == SessionId::new("preview-cursor") {
+                                session.scheduled_run =
+                                    Some(diri_proto::schedules::ScheduledRunInfo {
+                                        schedule_id: "sched_preview".into(),
+                                        title: session.title.clone(),
+                                        due_at: diri_proto::DateMillis(now - 600_000.0),
+                                        wake_mac: woke,
+                                        woke_mac: woke,
+                                    });
+                            }
                         }
                         store.upsert_session(session);
                     }

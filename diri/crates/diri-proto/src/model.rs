@@ -817,6 +817,9 @@ pub struct SessionRecord {
     pub listening_ports: Option<Vec<PortInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreground_agent: Option<AgentKind>,
+    /// Present when a Diri schedule opened this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_run: Option<crate::schedules::ScheduledRunInfo>,
 }
 
 impl SessionRecord {

@@ -1260,6 +1260,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            scheduled_run: None,
         };
         let child = ProcessIdentity::new(
             4321,

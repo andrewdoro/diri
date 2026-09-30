@@ -26,6 +26,14 @@ use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
 use crate::store::{SessionStore, StoreRuntime};
 
 const ROW_MIN_HEIGHT: f32 = 50.0;
+/// Indigo for everything about waking the Mac: the schedule's badge and the
+/// clock on a session diri woke the Mac for. Not an agent's brand color.
+pub(crate) const NIGHT: gpui::Rgba = gpui::Rgba {
+    r: 0.49,
+    g: 0.51,
+    b: 0.97,
+    a: 1.0,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Repeat {
@@ -62,6 +70,7 @@ struct Draft {
     folder: Option<PathBuf>,
     catch_up: bool,
     keep_awake: bool,
+    wake_mac: bool,
     field: Field,
     error: Option<String>,
     saving: bool,
@@ -79,6 +88,7 @@ impl Draft {
             folder,
             catch_up: true,
             keep_awake: false,
+            wake_mac: false,
             field: Field::Prompt,
             error: None,
             saving: false,
@@ -105,6 +115,9 @@ pub struct SchedulesPage {
     /// Schedule ids with a request in flight, so their buttons dim.
     busy: Vec<String>,
     login: LoginState,
+    wake_helper: LoginState,
+    /// The Engine's last failure reaching the wake helper.
+    wake_helper_error: Option<String>,
     refresh_task: Option<Task<()>>,
     _events: Task<()>,
 }
@@ -149,6 +162,11 @@ impl SchedulesPage {
                 status: login::status(),
                 error: None,
             },
+            wake_helper: LoginState {
+                status: login::status_of(login::Service::WakeHelper),
+                error: None,
+            },
+            wake_helper_error: None,
             refresh_task: None,
             _events: events_task,
         }
@@ -166,6 +184,7 @@ impl SchedulesPage {
             draft
                 .prompt
                 .insert("Triage new GitHub issues and label them");
+            draft.wake_mac = true;
             self.draft = Some(draft);
         }
     }
@@ -173,6 +192,7 @@ impl SchedulesPage {
     /// Called when the tab is shown.
     pub fn open(&mut self, cx: &mut Context<Self>) {
         self.login.status = login::status();
+        self.wake_helper.status = login::status_of(login::Service::WakeHelper);
         self.refresh(cx);
     }
 
@@ -194,6 +214,7 @@ impl SchedulesPage {
                 match result {
                     Ok(Ok(list)) => {
                         this.schedules = list.schedules;
+                        this.wake_helper_error = list.wake_helper_error;
                         this.error = None;
                     }
                     Ok(Err(error)) => this.error = Some(error.to_string()),
@@ -344,6 +365,7 @@ impl SchedulesPage {
             draft.folder.as_ref(),
             draft.catch_up,
             draft.keep_awake,
+            draft.wake_mac,
             now_ms(),
         ) {
             Ok(spec) => spec,
@@ -384,6 +406,25 @@ impl SchedulesPage {
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    /// Registers the wake helper. macOS then asks an administrator to allow
+    /// it in System Settings > Login Items, which this opens.
+    fn toggle_wake_helper(&mut self, cx: &mut Context<Self>) {
+        let enable = self.wake_helper.status != login::Status::Enabled;
+        match login::set_enabled_of(login::Service::WakeHelper, enable) {
+            Ok(status) => {
+                self.wake_helper = LoginState {
+                    status,
+                    error: None,
+                };
+                if status == login::Status::RequiresApproval {
+                    login::open_settings();
+                }
+            }
+            Err(error) => self.wake_helper.error = Some(error),
+        }
         cx.notify();
     }
 
@@ -461,6 +502,19 @@ impl SchedulesPage {
     }
 }
 
+/// Hover text for the mark on a session a schedule opened.
+pub(crate) fn scheduled_run_summary(run: &diri_proto::schedules::ScheduledRunInfo) -> String {
+    let due = local::describe(run.due_at.0, Some(now_ms()));
+    let wake = if run.woke_mac {
+        ". diri woke the Mac for this run and lets it sleep again when the agent finishes"
+    } else if run.wake_mac {
+        ". The Mac was already awake"
+    } else {
+        ""
+    };
+    format!("Started by the schedule “{}”, due {due}{wake}.", run.title)
+}
+
 /// `~/code/app` for paths under the home folder.
 fn home_relative(path: &str) -> String {
     match std::env::var("HOME") {
@@ -504,6 +558,7 @@ pub(crate) mod plan {
         folder: Option<&PathBuf>,
         catch_up: bool,
         keep_awake: bool,
+        wake_mac: bool,
         now_ms: f64,
     ) -> Result<ScheduleSpec, String> {
         let prompt = prompt.trim();
@@ -554,6 +609,7 @@ pub(crate) mod plan {
                 0
             },
             keep_awake,
+            wake_mac,
             enabled: true,
         })
     }
@@ -750,7 +806,8 @@ mod local {
 mod login {
     #[cfg(target_os = "macos")]
     pub(super) use crate::macos::login_item::{
-        LoginItemStatus as Status, open_settings, set_enabled, status,
+        LoginItemStatus as Status, Service, open_settings, set_enabled, set_enabled_of, status,
+        status_of,
     };
 
     #[cfg(not(target_os = "macos"))]
@@ -774,6 +831,22 @@ mod login {
 
     #[cfg(not(target_os = "macos"))]
     pub(super) fn open_settings() {}
+
+    #[cfg(not(target_os = "macos"))]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Service {
+        WakeHelper,
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn status_of(_: Service) -> Status {
+        Status::Unavailable
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn set_enabled_of(_: Service, _: bool) -> Result<Status, String> {
+        Err("Waking the Mac is only available on macOS.".into())
+    }
 }
 
 #[cfg(test)]
@@ -788,6 +861,7 @@ mod preview {
             Some(kind),
             Some(&PathBuf::from("/Users/example/code/app")),
             true,
+            false,
             false,
             0.0,
         )
@@ -821,18 +895,13 @@ mod preview {
                     spawn: spawn("Triage new GitHub issues", AgentKind::CLAUDE_CODE),
                     catch_up_window_ms: DEFAULT_CATCH_UP_WINDOW_MS,
                     keep_awake: false,
+                    wake_mac: true,
                     enabled: true,
                 },
                 created_at: DateMillis(now - 72.0 * hour),
                 revision: 4,
                 next_due: Some(DateMillis(nine + 24.0 * hour)),
-                runs: vec![run(
-                    nine,
-                    nine + 600_000.0,
-                    ScheduleOutcome::Late,
-                    Some(LateReason::Asleep),
-                    0,
-                )],
+                runs: vec![run(nine, nine + 20_000.0, ScheduleOutcome::OnTime, None, 0)],
             },
             ScheduleRecord {
                 id: "sched_2".into(),
@@ -844,6 +913,7 @@ mod preview {
                     spawn: spawn("Summarize yesterday's merged PRs", AgentKind::CODEX),
                     catch_up_window_ms: DEFAULT_CATCH_UP_WINDOW_MS,
                     keep_awake: true,
+                    wake_mac: false,
                     enabled: true,
                 },
                 created_at: DateMillis(now - 48.0 * hour),
@@ -851,9 +921,9 @@ mod preview {
                 next_due: Some(DateMillis(half_eight + 24.0 * hour)),
                 runs: vec![run(
                     half_eight,
-                    half_eight + 20_000.0,
-                    ScheduleOutcome::OnTime,
-                    None,
+                    half_eight + 600_000.0,
+                    ScheduleOutcome::Late,
+                    Some(LateReason::Asleep),
                     0,
                 )],
             },
@@ -867,6 +937,7 @@ mod preview {
                     spawn: spawn("Bump dependencies", AgentKind::CLAUDE_CODE),
                     catch_up_window_ms: 0,
                     keep_awake: false,
+                    wake_mac: false,
                     enabled: false,
                 },
                 created_at: DateMillis(now - 240.0 * hour),
@@ -954,12 +1025,19 @@ fn section(title: &'static str, content: impl IntoElement, colors: SemanticColor
         )
 }
 
+/// Trails the title of a schedule that wakes the Mac: the same indigo clock
+/// the session it opens carries in the sidebar. Not a moon: that already
+/// means Sleeping there.
+fn wake_mark() -> AnyElement {
+    crate::icons::sf_symbol("clock.fill", 11.0, NIGHT)
+}
+
 fn divider(colors: SemanticColors) -> gpui::Div {
     div().mx(px(12.0)).h(px(1.0)).bg(colors.primary.alpha(0.06))
 }
 
 fn text_stack(
-    label: impl Into<SharedString>,
+    label: impl IntoElement,
     detail: impl Into<SharedString>,
     colors: SemanticColors,
 ) -> gpui::Div {
@@ -975,7 +1053,7 @@ fn text_stack(
                 .text_size(px(Typo::ROW_EMPHASIZED.size))
                 .font_weight(Typo::ROW_EMPHASIZED.weight)
                 .text_color(colors.primary)
-                .child(label.into()),
+                .child(label),
         )
         .child(
             div()
@@ -1004,7 +1082,9 @@ impl SchedulesPage {
             "{} · {agent} · {folder}",
             plan::describe_when(&record.spec.when)
         );
-        if record.spec.keep_awake {
+        if record.spec.wake_mac {
+            detail.push_str(" · wakes the Mac");
+        } else if record.spec.keep_awake {
             detail.push_str(" · keeps Mac awake");
         }
         let next = match (&record.next_due, record.spec.enabled) {
@@ -1104,7 +1184,16 @@ impl SchedulesPage {
                     .flex()
                     .flex_col()
                     .gap(px(3.0))
-                    .child(text_stack(record.spec.title.clone(), detail, colors))
+                    .child(text_stack(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(record.spec.title.clone())
+                            .when(record.spec.wake_mac, |title| title.child(wake_mark())),
+                        detail,
+                        colors,
+                    ))
                     .child(status),
             )
             .child(actions)
@@ -1245,6 +1334,7 @@ impl SchedulesPage {
             .unwrap_or_else(|| "No folder chosen".into());
         let catch_up = draft.catch_up;
         let keep_awake = draft.keep_awake;
+        let wake_mac = draft.wake_mac;
         let toggle = |id: &'static str,
                       label: &'static str,
                       detail: &'static str,
@@ -1347,7 +1437,26 @@ impl SchedulesPage {
                 keep_awake,
                 cx,
                 |draft| draft.keep_awake = !draft.keep_awake,
+            ))
+            .child(divider(colors))
+            .child(toggle(
+                "schedule-wake-mac",
+                "Wake the Mac",
+                "Wake a sleeping Mac 2 minutes before, keep it awake while the agent works, then let it sleep again. The lid must be open.",
+                wake_mac,
+                cx,
+                |draft| draft.wake_mac = !draft.wake_mac,
             ));
+        if wake_mac && self.wake_helper.status != login::Status::Enabled {
+            form = form.child(
+                div()
+                    .px(px(12.0))
+                    .pb(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(Ink::ATTENTION)
+                    .child("Turn on “Allow diri to wake the Mac” below first, or this schedule can't wake it."),
+            );
+        }
         if let Some(error) = &draft.error {
             form = form.child(
                 div()
@@ -1418,7 +1527,54 @@ impl SchedulesPage {
             .child(text_stack("Open diri at login", detail, colors))
             .child(switch(status == login::Status::Enabled, colors))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_login(cx)));
-        section("When your Mac restarts", row, colors).into_any_element()
+        let helper = self.wake_helper.status;
+        let wanted = self
+            .schedules
+            .iter()
+            .any(|record| record.spec.wake_mac && record.spec.enabled);
+        let helper_detail = match (helper, &self.wake_helper.error, &self.wake_helper_error) {
+            (_, Some(error), _) => format!("Couldn't change this: {error}"),
+            (login::Status::RequiresApproval, None, _) => {
+                "Waiting for approval: switch on diri in System Settings > General > Login Items. macOS asks for an administrator password once.".to_owned()
+            }
+            (login::Status::Unavailable, None, _) => {
+                "Only available when diri is installed in Applications.".to_owned()
+            }
+            (login::Status::Enabled, None, Some(error)) if wanted => {
+                format!("Approved, but diri couldn't reach it: {error}")
+            }
+            _ => "A small helper that can only schedule wakes for your runs and put the Mac back to sleep after them. Needs a one-time administrator approval.".to_owned(),
+        };
+        let helper_row = div()
+            .id("schedule-wake-helper")
+            .role(gpui::Role::Switch)
+            .aria_label("Allow diri to wake the Mac")
+            .min_h(px(ROW_MIN_HEIGHT))
+            .px(px(12.0))
+            .py(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .cursor_pointer()
+            .hover(move |style| style.bg(colors.primary.alpha(0.025)))
+            .child(text_stack(
+                "Allow diri to wake the Mac",
+                helper_detail,
+                colors,
+            ))
+            .child(switch(helper == login::Status::Enabled, colors))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_wake_helper(cx)));
+        section(
+            "When the Mac is asleep or restarts",
+            div()
+                .flex()
+                .flex_col()
+                .child(helper_row)
+                .child(divider(colors))
+                .child(row),
+            colors,
+        )
+        .into_any_element()
     }
 }
 
@@ -1531,6 +1687,7 @@ mod tests {
                 Some(&folder),
                 true,
                 false,
+                false,
                 0.0,
             )
             .unwrap()
@@ -1576,6 +1733,7 @@ mod tests {
                 Some(&folder),
                 true,
                 false,
+                false,
                 0.0
             )
             .is_err()
@@ -1589,6 +1747,7 @@ mod tests {
                 None,
                 true,
                 false,
+                false,
                 0.0
             )
             .is_err()
@@ -1602,6 +1761,7 @@ mod tests {
                 Some(&folder),
                 true,
                 false,
+                false,
                 0.0
             )
             .is_err()
@@ -1614,6 +1774,7 @@ mod tests {
                 agent,
                 Some(&folder),
                 true,
+                false,
                 false,
                 0.0
             )

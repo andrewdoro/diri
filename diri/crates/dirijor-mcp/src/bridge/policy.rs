@@ -320,6 +320,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            scheduled_run: None,
         }
     }
 

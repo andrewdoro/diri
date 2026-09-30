@@ -1,7 +1,12 @@
-//! Open at login, through `SMAppService.mainAppService`: a standard login
-//! item the user can see and remove in System Settings. No LaunchAgent, no
-//! helper, no privileges. Scheduled runs need diri running to fire, so this
-//! is what lets a run due during a restart catch up.
+//! Open at login and the wake helper, both through `SMAppService`, so each
+//! is a standard item the user sees, approves, and can remove in System
+//! Settings > General > Login Items.
+//!
+//! - `mainAppService`: diri opens at login, so runs due across a restart can
+//!   catch up. No privileges.
+//! - `daemonServiceWithPlistName:`: the bundled `diri-wake-helper`, which
+//!   runs as root on demand and only schedules wakes (see
+//!   `diri_engine::wake`). macOS requires an administrator to approve it.
 
 use objc2::msg_send;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
@@ -19,16 +24,43 @@ pub(crate) enum LoginItemStatus {
     Unavailable,
 }
 
-fn service() -> Option<*mut AnyObject> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Service {
+    /// diri itself, opened at login.
+    App,
+    /// The privileged wake helper.
+    WakeHelper,
+}
+
+/// Plist in `Contents/Library/LaunchDaemons`, named after its launchd label.
+const WAKE_HELPER_PLIST: &str = "com.dirijor.diri.wake.plist";
+
+fn service(which: Service) -> Option<*mut AnyObject> {
     let class = AnyClass::get(c"SMAppService")?;
-    // SAFETY: `mainAppService` is a class property returning an autoreleased
-    // SMAppService that stays valid for the current autorelease scope.
-    let service: *mut AnyObject = unsafe { msg_send![class, mainAppService] };
+    // SAFETY: both are class methods returning an autoreleased SMAppService
+    // that stays valid for the current autorelease scope.
+    let service: *mut AnyObject = unsafe {
+        match which {
+            Service::App => msg_send![class, mainAppService],
+            Service::WakeHelper => {
+                let name = objc2_foundation::NSString::from_str(WAKE_HELPER_PLIST);
+                msg_send![class, daemonServiceWithPlistName: &*name]
+            }
+        }
+    };
     (!service.is_null()).then_some(service)
 }
 
 pub(crate) fn status() -> LoginItemStatus {
-    let Some(service) = service() else {
+    status_of(Service::App)
+}
+
+pub(crate) fn set_enabled(enabled: bool) -> Result<LoginItemStatus, String> {
+    set_enabled_of(Service::App, enabled)
+}
+
+pub(crate) fn status_of(which: Service) -> LoginItemStatus {
+    let Some(service) = service(which) else {
         return LoginItemStatus::Unavailable;
     };
     // SAFETY: `status` is an NSInteger-valued property of SMAppService.
@@ -41,9 +73,10 @@ pub(crate) fn status() -> LoginItemStatus {
     }
 }
 
-/// Registers or unregisters diri as a login item. Returns the new status.
-pub(crate) fn set_enabled(enabled: bool) -> Result<LoginItemStatus, String> {
-    let service = service().ok_or_else(|| "Login items aren't available here.".to_owned())?;
+/// Registers or unregisters a service. Returns the new status; a helper that
+/// still needs the administrator's approval reports `RequiresApproval`.
+pub(crate) fn set_enabled_of(which: Service, enabled: bool) -> Result<LoginItemStatus, String> {
+    let service = service(which).ok_or_else(|| "Login items aren't available here.".to_owned())?;
     let mut error: *mut AnyObject = std::ptr::null_mut();
     // SAFETY: both selectors take an `NSError **` out-parameter and return BOOL.
     let ok: Bool = unsafe {
@@ -53,7 +86,7 @@ pub(crate) fn set_enabled(enabled: bool) -> Result<LoginItemStatus, String> {
             msg_send![service, unregisterAndReturnError: &mut error]
         }
     };
-    let now = status();
+    let now = status_of(which);
     if ok.as_bool() || (enabled && now == LoginItemStatus::RequiresApproval) {
         return Ok(now);
     }

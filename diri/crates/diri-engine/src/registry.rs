@@ -2624,6 +2624,7 @@ fn recovered_record(capsule: diri_proto::recovery::SessionRecoveryCapsule) -> Se
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        scheduled_run: None,
     }
 }
 
@@ -2849,6 +2850,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            scheduled_run: None,
         }
     }
 

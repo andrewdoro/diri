@@ -79,7 +79,7 @@ pub struct ControlServer {
     session_operations: Mutex<std::collections::HashSet<String>>,
     agent_scans: Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
     hook_reports: hook_queue::HookQueue,
-    scheduler: schedules::Scheduler,
+    scheduler: Arc<schedules::Scheduler>,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -189,7 +189,7 @@ impl ControlServer {
             session_operations: Mutex::new(std::collections::HashSet::new()),
             agent_scans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             hook_reports: hook_queue::HookQueue::new(),
-            scheduler: schedules::Scheduler::default(),
+            scheduler: Arc::new(schedules::Scheduler::default()),
         }
     }
 
@@ -4098,6 +4098,7 @@ pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::Session
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        scheduled_run: None,
     }
 }
 
@@ -5073,6 +5074,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            scheduled_run: None,
         }
     }
 
