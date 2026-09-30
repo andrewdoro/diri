@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "id": "gemini",
-  "version": "2026.08.15.1",
+  "version": "2026.09.30.1",
   "statusModel": "full",
   "agent": {
     "id": "gemini",
@@ -102,11 +102,36 @@
       }
     },
     {
+      "id": "folder-trust-dialog",
+      "state": "blockedQuestion",
+      "priority": 960,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 8,
+      "when": {
+        "all": [
+          {
+            "contains": "trust folder"
+          },
+          {
+            "contains": "don't trust"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 12,
+        "maxChars": 400
+      }
+    },
+    {
       "id": "working-cancel-timer",
       "state": "working",
       "priority": 900,
       "region": "bottom_non_empty_lines",
-      "regionLines": 6,
+      "regionLines": 12,
       "when": {
         "contains": "esc to cancel"
       }

@@ -105,6 +105,13 @@ const LAUNCH_FALLBACK: Duration = Duration::from_millis(400);
 /// width. The Swift daemon's `scheduleDebouncedLaunch` delay.
 const LAUNCH_DEBOUNCE: Duration = Duration::from_millis(120);
 
+/// Quiet time between a submitted prompt's paste and its Enter. Gemini CLI
+/// turns an Enter that lands within 40 ms of an untrusted paste into a
+/// newline (paste protection, re-armed on its next React render), so at the
+/// old 30 ms a follow-up sat unsent in the composer and merged with the next
+/// one. The extra margin covers Node's event loop under load.
+const PASTE_SUBMIT_GAP: Duration = Duration::from_millis(80);
+
 /// Quiet time between holder liveness probes: a holder that died markerless
 /// (SIGKILL, machine issues) must not leave a forever-live session behind.
 /// Elapsed-based so the probe cadence is the same on fast and idle ticks.
@@ -2630,7 +2637,7 @@ impl Session {
             return self.write_input(text.as_bytes());
         }
         self.paste_text(text)?;
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(PASTE_SUBMIT_GAP);
         self.submit_input()
     }
 

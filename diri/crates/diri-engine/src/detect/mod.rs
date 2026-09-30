@@ -18,7 +18,7 @@ mod regions;
 
 pub use manifest::{Manifest, ManifestState, RegionKind, StatusModel};
 pub use redact::redact;
-pub(crate) use regions::prompt_box_body;
+pub(crate) use regions::{bottom_non_empty, prompt_box_body};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -404,7 +404,7 @@ mod tests {
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 107, "the shipped ruleset lost rules");
+        assert_eq!(rules, 108, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
             let expected_empty = matches!(id, "shell" | "generic" | "pi");
@@ -563,6 +563,107 @@ mod tests {
                 .expect("Maki screen should match");
             assert_eq!(observation.state, state);
             assert_eq!(observation.matched_rule_id, rule);
+        }
+    }
+
+    /// Screens captured from Gemini CLI 0.62 running inside the Engine. Its
+    /// footer (edit-mode hint, composer bars, workspace row) is seven lines
+    /// tall, so the spinner sits eighth from the bottom: a six-line window
+    /// read every streamed turn as idle.
+    #[test]
+    fn gemini_rules_match_the_screens_gemini_cli_draws() {
+        let footer = [
+            " ────────────────────────────────────────────────────────",
+            "  Shift+Tab to accept edits",
+            " ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
+            "  >   Type your message or @path/to/file",
+            " ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "  workspace (/directory)        sandbox          /model",
+            "  ~/project                     no sandbox       gemini-2.5-flash",
+        ];
+        let with_footer = |lines: &[&'static str]| {
+            lines
+                .iter()
+                .chain(footer.iter())
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        let trust_dialog = vec![
+            " ╭──────────────────────────────────────────────────────╮",
+            " │ Do you trust the files in this folder?               │",
+            " │                                                      │",
+            " │ Trusting a folder allows Gemini CLI to load its      │",
+            " │ local configurations, including custom commands.     │",
+            " │                                                      │",
+            " │ ● 1. Trust folder (project)                          │",
+            " │   2. Trust parent folder (work)                      │",
+            " │   3. Don't trust                                     │",
+            " │                                                      │",
+            " ╰──────────────────────────────────────────────────────╯",
+        ];
+        let cases = [
+            (
+                with_footer(&[
+                    " > SLOW stream something",
+                    " ✦ slow part 0 slow part 1",
+                    "  ⠼ Thinking... (esc to cancel, 1s)        ? for shortcuts",
+                ]),
+                ManifestState::Working,
+                "working-cancel-timer",
+            ),
+            (
+                trust_dialog.clone(),
+                ManifestState::BlockedQuestion,
+                "folder-trust-dialog",
+            ),
+            (
+                // Accepting trust restarts Gemini below the old dialog, which
+                // stays on screen; the fresh composer must win.
+                trust_dialog
+                    .iter()
+                    .copied()
+                    .chain([
+                        "  Gemini CLI is restarting to apply the trust changes...",
+                        "  Gemini CLI v0.62.0",
+                        " Tips for getting started:",
+                        " 1. Create GEMINI.md files to customize your interactions",
+                    ])
+                    .chain(footer)
+                    .collect(),
+                ManifestState::Idle,
+                "idle-placeholder",
+            ),
+            (
+                vec![
+                    " > RUNCMD for me",
+                    "╭──────────────────────────────────────────────────────╮",
+                    "│ ? Shell  touch diri-e2e-file                         │",
+                    "│ Allow execution of [Shell]?                          │",
+                    "│                                                      │",
+                    "│ ● 1. Allow once                                      │",
+                    "│   2. Allow for this session                          │",
+                    "│   3. No, suggest changes (esc)                       │",
+                    "╰──────────────────────────────────────────────────────╯",
+                ],
+                ManifestState::BlockedPermission,
+                "confirm-dialog",
+            ),
+            (
+                with_footer(&[" > Reply with PINEAPPLE", " ✦ PINEAPPLE"]),
+                ManifestState::Idle,
+                "idle-placeholder",
+            ),
+        ];
+
+        let engine = engine();
+        for (lines, state, rule) in cases {
+            let observation = engine
+                .evaluate(&ScreenSnapshot::from_lines(lines), "gemini")
+                .expect("Gemini screen should match");
+            assert_eq!(
+                (observation.state, observation.matched_rule_id.as_str()),
+                (state, rule)
+            );
         }
     }
 

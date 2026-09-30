@@ -4488,6 +4488,13 @@ fn prepare_agent_input(
         accept_claude_workspace_trust(registry, session_id);
     }
     if let Some(prompt) = prompt {
+        let gemini = with_session(registry, session_id, |session| {
+            session.manifest_id() == diri_proto::AgentKind::GEMINI_ID
+        })
+        .unwrap_or(false);
+        if gemini {
+            accept_gemini_folder_trust(registry, session_id);
+        }
         inject_initial_prompt(registry, session_id, prompt)?;
     }
     Ok(())
@@ -4584,6 +4591,105 @@ fn is_claude_workspace_trust_screen(screen: &str) -> bool {
     let normalized = screen.to_ascii_lowercase();
     normalized.contains("yes, i trust this folder")
         && (normalized.contains("1.") || normalized.contains("1 "))
+}
+
+/// Answers Gemini CLI's "Do you trust the files in this folder?" dialog when
+/// a spawn carries an initial prompt, then waits out the restart Gemini does
+/// to apply trust.
+///
+/// Before this the injector's paste-then-Enter answered the dialog by
+/// accident: Enter picks the preselected "Trust folder", Gemini restarts, and
+/// the prompt died with the old process while the spawn reported success. The
+/// trade is the one [`accept_claude_workspace_trust`] documents, and it is no
+/// wider than the accidental Enter was. Without a prompt the dialog is left to
+/// the user, where the manifest reports it as a question.
+///
+/// A trusted folder costs about a second: the composer has to stand alone
+/// long enough to rule out the dialog Gemini opens just after it. Capped at
+/// 20s either way.
+fn accept_gemini_folder_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted_at: Option<Instant> = None;
+    let mut composer_since: Option<Instant> = None;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_gemini_folder_trust_screen(&screen) {
+            composer_since = None;
+            if accepted_at.is_none() {
+                diri_telemetry::event!(
+                    "prompt.workspace_trust_accepted",
+                    session = diri_telemetry::id(session_id),
+                );
+                // Enter on the preselected "1. Trust folder": a digit would
+                // only move Gemini's selection.
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted_at = Some(Instant::now());
+            }
+        } else if is_gemini_composer_screen(&screen) {
+            // The outgoing process can repaint its composer before it
+            // restarts, and a prompt typed into it dies with it. After an
+            // accept, only a composer drawn below the restart notice is the
+            // new process's; the time bound covers a Gemini that applies
+            // trust without restarting.
+            //
+            // Before any accept, Gemini paints the composer first and opens
+            // the dialog ~100 ms later, so the composer only proves a
+            // trusted folder once it has stood alone for a moment.
+            let since = *composer_since.get_or_insert_with(Instant::now);
+            let ready = match accepted_at {
+                None => since.elapsed() >= GEMINI_TRUST_QUIET,
+                Some(accepted) => {
+                    gemini_restarted_below_notice(&screen)
+                        || accepted.elapsed() > Duration::from_secs(5)
+                }
+            };
+            if ready {
+                return;
+            }
+        } else {
+            composer_since = None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// How long Gemini's composer must stand with no trust dialog before a
+/// folder counts as already trusted.
+const GEMINI_TRUST_QUIET: Duration = Duration::from_secs(1);
+
+/// True when Gemini's composer appears after its "restarting to apply the
+/// trust changes" notice, i.e. the relaunched process has drawn its UI.
+fn gemini_restarted_below_notice(lines: &[String]) -> bool {
+    let notice = lines
+        .iter()
+        .rposition(|line| line.contains("restarting to apply the trust changes"));
+    let composer = lines.iter().rposition(|line| {
+        line.to_lowercase()
+            .contains("type your message or @path/to/file")
+    });
+    matches!((notice, composer), (Some(notice), Some(composer)) if composer > notice)
+}
+
+/// Gemini's trust dialog, anchored to its option lines at the bottom of the
+/// screen: the question itself stays in view above the restarted UI.
+fn is_gemini_folder_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 8)
+        .join("\n")
+        .to_lowercase();
+    bottom.contains("1. trust folder") && bottom.contains("don't trust")
+}
+
+fn is_gemini_composer_screen(lines: &[String]) -> bool {
+    crate::detect::bottom_non_empty(lines, 8)
+        .join("\n")
+        .to_lowercase()
+        .contains("type your message or @path/to/file")
 }
 
 /// Types and submits an initial prompt at most once. Screen observations can
@@ -7390,6 +7496,33 @@ mod tests {
             &path,
         );
         let _listener = server.bind().expect("a stale socket should be replaced");
+    }
+
+    #[test]
+    fn gemini_trust_is_read_from_the_dialog_at_the_bottom_only() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let dialog = "│ Do you trust the files in this folder? │\n\
+                      │ ● 1. Trust folder (project)          │\n\
+                      │   2. Trust parent folder (work)      │\n\
+                      │   3. Don't trust                     │";
+        assert!(is_gemini_folder_trust_screen(&lines(dialog)));
+        assert!(!is_gemini_composer_screen(&lines(dialog)));
+
+        // After accepting, Gemini restarts beneath the old dialog.
+        let restarted = format!(
+            "{dialog}\n Gemini CLI is restarting to apply the trust changes...\n\
+             Gemini CLI v0.62.0\n Tips for getting started:\n\
+             1. Create GEMINI.md files\n ▄▄▄▄▄▄\n\
+             >   Type your message or @path/to/file\n ▀▀▀▀▀▀\n\
+             workspace (/directory)\n ~/project"
+        );
+        assert!(!is_gemini_folder_trust_screen(&lines(&restarted)));
+        assert!(is_gemini_composer_screen(&lines(&restarted)));
+        assert!(gemini_restarted_below_notice(&lines(&restarted)));
+        // The outgoing process's composer, drawn before the notice.
+        let outgoing = " ▄▄▄▄▄▄\n >   Type your message or @path/to/file\n ▀▀▀▀▀▀\n\
+                        Gemini CLI is restarting to apply the trust changes...";
+        assert!(!gemini_restarted_below_notice(&lines(outgoing)));
     }
 
     #[test]
