@@ -6233,8 +6233,14 @@ impl Sidebar {
                 ));
             }
             if !running && session.can_resume() {
+                // A local terminal comes back as a fresh shell where it was.
+                let label = if session.kind == ProtoAgentKind::SHELL && session.host.is_none() {
+                    "Restart"
+                } else {
+                    "Resume"
+                };
                 content = content.child(menu_row(
-                    "Resume",
+                    label,
                     colors,
                     cx.listener({
                         let id = id.clone();
