@@ -27,13 +27,25 @@
 //! Every failure answers `false`: a job that cannot be inspected is not known
 //! to be waiting, and a wrong "needs you" is worse than a missing one.
 
+/// What inspecting a foreground group found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupRead {
+    /// A member is blocked reading the terminal.
+    Reading,
+    /// Every member was inspected and none is.
+    NotReading,
+    /// None of the members that could be inspected is, but some could not
+    /// be: another user's process, such as a setuid `sudo`.
+    Uninspectable,
+}
+
 /// Whether a process in foreground group `pgid` is blocked reading the
 /// terminal. The caller has already checked that the line discipline is in
 /// canonical mode; raw-mode readers are editors and TUIs, not questions.
 #[must_use]
-pub fn group_reads_terminal(pgid: i32) -> bool {
+pub fn group_reads_terminal(pgid: i32) -> GroupRead {
     if pgid <= 1 {
-        return false;
+        return GroupRead::NotReading;
     }
     platform::group_reads_terminal(pgid)
 }
@@ -45,7 +57,7 @@ const MAX_GROUP_MEMBERS: usize = 64;
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::MAX_GROUP_MEMBERS;
+    use super::{GroupRead, MAX_GROUP_MEMBERS};
 
     const PROC_PGRP_ONLY: u32 = 2;
     const PROC_PIDLISTTHREADS: i32 = 6;
@@ -63,7 +75,7 @@ mod platform {
     const MAX_DESCRIPTORS: usize = 512;
     const MAX_THREADS: usize = 256;
 
-    pub(super) fn group_reads_terminal(pgid: i32) -> bool {
+    pub(super) fn group_reads_terminal(pgid: i32) -> GroupRead {
         let mut pids = [0i32; MAX_GROUP_MEMBERS + 1];
         // SAFETY: the buffer is writable for exactly the size passed.
         let filled = unsafe {
@@ -75,28 +87,30 @@ mod platform {
             )
         };
         if filled <= 0 {
-            return false;
+            return GroupRead::NotReading;
         }
         let count = filled as usize / std::mem::size_of::<i32>();
         if count > MAX_GROUP_MEMBERS {
-            return false;
+            return GroupRead::NotReading;
         }
         let members: Vec<i32> = pids[..count]
             .iter()
             .copied()
             .filter(|pid| *pid > 0)
             .collect();
-        let Some(parents) = members
-            .iter()
-            .map(|pid| parent_of(*pid))
-            .collect::<Option<Vec<i32>>>()
-        else {
-            return false;
-        };
-        members
-            .iter()
-            .filter(|pid| !parents.contains(pid))
-            .any(|pid| blocked_in_plain_read(*pid) && !wait_explained(*pid))
+        let parents: Vec<Option<i32>> = members.iter().map(|pid| parent_of(*pid)).collect();
+        let mut found = GroupRead::NotReading;
+        for pid in &members {
+            if parents.contains(&Some(*pid)) {
+                continue;
+            }
+            match blocked_in_plain_read(*pid) {
+                Some(true) if !wait_explained(*pid) => return GroupRead::Reading,
+                Some(_) => {}
+                None => found = GroupRead::Uninspectable,
+            }
+        }
+        found
     }
 
     fn parent_of(pid: i32) -> Option<i32> {
@@ -110,10 +124,9 @@ mod platform {
         (filled == size && info.pbi_pid == pid as u32).then_some(info.pbi_ppid as i32)
     }
 
-    /// A thread asleep while still holding its kernel stack. A process that
-    /// cannot be inspected (another user's, such as a setuid `sudo`) has
-    /// none as far as this can tell.
-    fn blocked_in_plain_read(pid: i32) -> bool {
+    /// Whether a thread is asleep while still holding its kernel stack;
+    /// `None` for a process that cannot be inspected.
+    fn blocked_in_plain_read(pid: i32) -> Option<bool> {
         let mut threads = vec![0u64; MAX_THREADS];
         // SAFETY: the buffer is writable for exactly the size passed.
         let filled = unsafe {
@@ -126,10 +139,10 @@ mod platform {
             )
         };
         if filled <= 0 {
-            return false;
+            return None;
         }
         let count = (filled as usize / std::mem::size_of::<u64>()).min(MAX_THREADS);
-        threads[..count].iter().any(|thread| {
+        Some(threads[..count].iter().any(|thread| {
             // SAFETY: zero is a valid `proc_threadinfo`; the kernel fills it.
             let mut info: libc::proc_threadinfo = unsafe { std::mem::zeroed() };
             let size = std::mem::size_of_val(&info) as i32;
@@ -146,7 +159,7 @@ mod platform {
             filled == size
                 && info.pth_run_state == libc::TH_STATE_WAITING
                 && info.pth_flags & libc::TH_FLAGS_SWAPPED == 0
-        })
+        }))
     }
 
     /// Whether a pipe or socket of `pid` accounts for its blocked thread, or
@@ -207,7 +220,7 @@ mod platform {
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::MAX_GROUP_MEMBERS;
+    use super::{GroupRead, MAX_GROUP_MEMBERS};
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
     /// `read`, `readv` and `pread64`, which is how line prompts read.
@@ -221,11 +234,12 @@ mod platform {
     /// `/dev/tty`, which `sudo`, `ssh` and `git` open to ask their questions.
     const DEV_TTY: (u64, u64) = (5, 0);
 
-    pub(super) fn group_reads_terminal(pgid: i32) -> bool {
+    pub(super) fn group_reads_terminal(pgid: i32) -> GroupRead {
         let Ok(entries) = std::fs::read_dir("/proc") else {
-            return false;
+            return GroupRead::NotReading;
         };
         let mut members = 0;
+        let mut found = GroupRead::NotReading;
         for entry in entries.flatten() {
             let Some(pid) = entry
                 .file_name()
@@ -246,42 +260,49 @@ mod platform {
             }
             members += 1;
             if members > MAX_GROUP_MEMBERS {
-                return false;
+                return GroupRead::NotReading;
             }
-            if reads_terminal(pid, tty) {
-                return true;
+            match reads_terminal(pid, tty) {
+                Some(true) => return GroupRead::Reading,
+                Some(false) => {}
+                None => found = GroupRead::Uninspectable,
             }
         }
-        false
+        found
     }
 
-    fn reads_terminal(pid: u32, tty: (u64, u64)) -> bool {
-        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
-            return false;
-        };
-        tasks.flatten().any(|task| {
-            let Some(fd) = std::fs::read_to_string(task.path().join("syscall"))
-                .ok()
-                .as_deref()
-                .and_then(|line| super::read_fd_from_syscall(line, READ_SYSCALLS))
-            else {
-                return false;
+    /// `None` when a thread's syscall cannot be read: `/proc/<pid>/syscall`
+    /// needs ptrace access, which another user's process (`sudo`) denies.
+    fn reads_terminal(pid: u32, tty: (u64, u64)) -> Option<bool> {
+        let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?;
+        let mut reading = Some(false);
+        for task in tasks.flatten() {
+            let Ok(line) = std::fs::read_to_string(task.path().join("syscall")) else {
+                reading = None;
+                continue;
             };
-            std::fs::metadata(format!("/proc/{pid}/fd/{fd}")).is_ok_and(|meta| {
+            let Some(fd) = super::read_fd_from_syscall(&line, READ_SYSCALLS) else {
+                continue;
+            };
+            let terminal = std::fs::metadata(format!("/proc/{pid}/fd/{fd}")).is_ok_and(|meta| {
                 let device = (
                     libc::major(meta.rdev()) as u64,
                     libc::minor(meta.rdev()) as u64,
                 );
                 meta.file_type().is_char_device() && (device == tty || device == DEV_TTY)
-            })
-        })
+            });
+            if terminal {
+                return Some(true);
+            }
+        }
+        reading
     }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
-    pub(super) fn group_reads_terminal(_: i32) -> bool {
-        false
+    pub(super) fn group_reads_terminal(_: i32) -> super::GroupRead {
+        super::GroupRead::NotReading
     }
 }
 
@@ -355,7 +376,7 @@ mod tests {
 
     #[test]
     fn a_group_that_does_not_exist_is_not_waiting() {
-        assert!(!group_reads_terminal(0));
-        assert!(!group_reads_terminal(i32::MAX - 7));
+        assert_eq!(group_reads_terminal(0), GroupRead::NotReading);
+        assert_eq!(group_reads_terminal(i32::MAX - 7), GroupRead::NotReading);
     }
 }

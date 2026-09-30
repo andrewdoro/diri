@@ -156,14 +156,14 @@ impl Pty {
     }
 
     /// Whether a job the shell started, not the shell itself, is stopped at
-    /// a question: the line discipline assembles lines, and either echo is
-    /// off (a password prompt, the one line read nothing else does) or a
-    /// member of the foreground group is blocked reading the terminal. See
+    /// a question: the line discipline assembles lines and a member of the
+    /// foreground group is blocked reading the terminal. See
     /// [`crate::line_wait`] for how that read is told from any other wait.
     ///
     /// Raw-mode readers (editors, pagers, agent TUIs) are excluded by
-    /// construction, and so is the shell at its own prompt. The echo rule is
-    /// what catches `sudo`, whose setuid process cannot be inspected.
+    /// construction, and so is the shell at its own prompt. A group with a
+    /// member that cannot be inspected (a setuid `sudo`) counts as waiting
+    /// when echo is off, which is how `sudo` asks for its password.
     #[must_use]
     pub fn job_awaits_line(&self) -> bool {
         // SAFETY: zero is a valid initialization for `termios`; the kernel
@@ -181,7 +181,15 @@ impl Pty {
         else {
             return false;
         };
-        lflag_reads_secret(termios.c_lflag) || crate::line_wait::group_reads_terminal(job)
+        match crate::line_wait::group_reads_terminal(job) {
+            crate::line_wait::GroupRead::Reading => true,
+            crate::line_wait::GroupRead::NotReading => false,
+            // Echo off in line mode is a password prompt, and the one read
+            // a job cannot hide by being unreadable. It is only trusted
+            // there: a job that inherits a terminal left silenced (a prompt
+            // killed before `stty echo`) is otherwise just quiet.
+            crate::line_wait::GroupRead::Uninspectable => lflag_reads_secret(termios.c_lflag),
+        }
     }
 
     /// Whether the line discipline is collecting a secret: echo is off while

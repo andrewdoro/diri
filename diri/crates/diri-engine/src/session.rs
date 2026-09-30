@@ -399,6 +399,10 @@ struct Shared {
     /// feeds `screen` for local status reduction and artifact detection.
     remote_grid: Mutex<Option<RemoteGridState>>,
     remote_output_offset: AtomicU64,
+    /// How far a held pump has fed the Holder's output into `screen`. A
+    /// line question is only read off the screen once it has caught up
+    /// with what the Holder had written when it answered.
+    held_screen_offset: AtomicU64,
     grid_wake: GridWake,
     /// The manifest this session runs, for telemetry.
     agent: String,
@@ -3108,6 +3112,7 @@ fn new_shared(
         child_pid: std::sync::atomic::AtomicI32::new(0),
         remote_grid: Mutex::new(None),
         remote_output_offset: AtomicU64::new(0),
+        held_screen_offset: AtomicU64::new(0),
         grid_wake: GridWake::new(),
         agent: spec.manifest_id.clone(),
         launched_at: fresh.then(Instant::now),
@@ -3437,11 +3442,15 @@ fn sample_held_pty_facts(
     if shell {
         match line_probe_due(shared) {
             // Asked, and a Holder that predates the probe did not answer.
-            Some(true) if probe => {
-                if let Some(awaiting) = stat.awaiting_line {
-                    apply_line_wait(shared, awaiting);
-                }
-            }
+            Some(true) if probe => match stat.awaiting_line {
+                // Output the Holder wrote before it answered has not reached
+                // the screen or the settle yet: the question, if it is one,
+                // is read on a later sample.
+                Some(true)
+                    if shared.held_screen_offset.load(Ordering::SeqCst) < stat.log_offset => {}
+                Some(awaiting) => apply_line_wait(shared, awaiting),
+                None => {}
+            },
             Some(false) => apply_line_wait(shared, false),
             _ => {}
         }
@@ -5105,6 +5114,7 @@ fn pump_held(
             marker_buffer.clear();
         }
         offset = start + chunk.len() as u64;
+        shared.held_screen_offset.store(offset, Ordering::SeqCst);
         last_liveness = Instant::now();
 
         // The floor is an incarnation boundary, so no marker straddles it:

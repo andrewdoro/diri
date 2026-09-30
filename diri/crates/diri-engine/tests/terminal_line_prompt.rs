@@ -65,7 +65,12 @@ fn needs_input(session: &Session) -> bool {
 fn never_flagged(session: &Session, what: &str) {
     let until = Instant::now() + Duration::from_millis(2_500);
     while Instant::now() < until {
-        assert!(!needs_input(session), "{what} was flagged as needing input");
+        assert!(
+            !needs_input(session),
+            "{what} was flagged as needing input: {:?} {:?}",
+            session.view().needs_input,
+            session.screen_lines()
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -93,7 +98,12 @@ fn exercise(session: &mut Session) {
     );
     let detail = view.needs_input.expect("detail");
     assert_eq!(detail.source, NeedsInputSource::TerminalLine);
-    assert_eq!(detail.summary, "Proceed? [y/N]");
+    assert_eq!(
+        detail.summary,
+        "Proceed? [y/N]",
+        "screen: {:?}",
+        session.screen_lines()
+    );
     assert!(!detail.secret);
 
     // Answering clears it at once, although the job runs on.
