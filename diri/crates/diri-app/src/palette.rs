@@ -1261,6 +1261,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: None,
+            terminal_progress: None,
         }
     }
 

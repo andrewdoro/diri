@@ -3529,6 +3529,7 @@ impl Sidebar {
             migrating,
             activity_state,
             activity_frame,
+            progress,
             marked,
             hovered,
             focused,
@@ -3635,7 +3636,12 @@ impl Sidebar {
                     }
                 }))
                 .children(indent_rails(row, colors))
-                .child(activity_mark(activity_state, activity_frame, colors))
+                .child(crate::progress_mark::leading_mark(
+                    activity_state,
+                    activity_frame,
+                    progress,
+                    colors,
+                ))
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -3691,11 +3697,16 @@ impl Sidebar {
             .pl(px(Space::ROW_H - 1.0))
             .pr(px(Space::ROW_H))
             .h(px(SIDEBAR_NAV_ROW_HEIGHT))
+            .relative()
             .flex()
             .items_center()
             .gap(px(8.0))
             .rounded(px(SIDEBAR_ROW_RADIUS))
             .bg(fill_color)
+            // Bar and fill progress sit under everything the row draws.
+            .children(progress.and_then(|face| {
+                crate::progress_mark::progress_underlay(face, colors, SIDEBAR_ROW_RADIUS)
+            }))
             .border_1()
             .border_color(if marked {
                 Palette::CLAY.alpha(0.78)
@@ -3836,7 +3847,12 @@ impl Sidebar {
             // Activity shares the project's icon column. Leaf rows reserve
             // no empty disclosure column; only parents get a trailing fold.
             // Hover keeps activity visible and swaps identity for the close action.
-            .child(activity_mark(activity_state, activity_frame, colors))
+            .child(crate::progress_mark::leading_mark(
+                activity_state,
+                activity_frame,
+                progress,
+                colors,
+            ))
             .child(
                 if let Some(range) = super::filter::label_match(&title, filter) {
                     div()

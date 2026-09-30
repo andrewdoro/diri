@@ -562,7 +562,15 @@ pub(crate) fn assert_color_environment(env: &mut Vec<(String, String)>) {
     });
     env.push(("TERM".into(), "xterm-256color".into()));
     env.push(("COLORTERM".into(), "truecolor".into()));
+    // Diri shows `OSC 9;4` progress on the session's tab, but cargo only
+    // sends it to terminals it recognises by name (Windows Terminal, ConEmu,
+    // iTerm2). A value the user chose, `false` included, is kept.
+    if !env.iter().any(|(key, _)| key == CARGO_PROGRESS_ENV) {
+        env.push((CARGO_PROGRESS_ENV.into(), "true".into()));
+    }
 }
+
+const CARGO_PROGRESS_ENV: &str = "CARGO_TERM_PROGRESS_TERM_INTEGRATION";
 
 /// Terminal modes an agent may leave on, turned off after it exits and
 /// before the login shell takes the PTY, written for the shell's `printf`
@@ -1119,6 +1127,16 @@ mod tests {
         assert_eq!(get("TERM"), Some("xterm-256color"));
         assert_eq!(get("COLORTERM"), Some("truecolor"));
         assert_eq!(get("NO_COLOR"), None);
+        assert_eq!(get(super::CARGO_PROGRESS_ENV), Some("true"));
+
+        let mut chosen = vec![(super::CARGO_PROGRESS_ENV.to_owned(), "false".to_owned())];
+        super::assert_color_environment(&mut chosen);
+        let values: Vec<_> = chosen
+            .iter()
+            .filter(|(key, _)| key == super::CARGO_PROGRESS_ENV)
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(values, ["false"], "the user's own choice stands");
     }
 
     #[test]

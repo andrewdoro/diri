@@ -41,6 +41,8 @@ pub(in crate::sidebar) struct StripTabProps {
     pub(super) state: StatusState,
     /// The activity mark's frame, or zero for a mark that does not animate.
     pub(super) activity_frame: usize,
+    /// Terminal progress, when the session reports any.
+    pub(super) progress: Option<crate::progress_mark::ProgressFace>,
     pub(super) colors: SemanticColors,
     pub(super) custom_ordering: bool,
     /// The strip's shared pill layer draws the selection this frame, so the
@@ -136,6 +138,7 @@ impl Sidebar {
             } else {
                 0
             },
+            progress: crate::progress_mark::face(session, self.activity_frame, reduce_motion),
             colors,
             custom_ordering,
             // Only the selected tab paints a fill the pill can replace.
@@ -159,7 +162,9 @@ impl Sidebar {
         props: StripTabProps,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.working_row_rendered |= props.state == StatusState::Working;
+        // An indeterminate progress sweep rides the working marks' tick.
+        self.working_row_rendered |= props.state == StatusState::Working
+            || props.progress.is_some_and(|face| face.animates());
         if props.shift.is_none() {
             self.tab_shift.applied.borrow_mut().remove(&props.id);
         }

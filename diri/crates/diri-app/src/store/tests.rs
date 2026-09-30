@@ -66,6 +66,7 @@ pub(super) fn session(value: &str, project: &str, created: f64) -> SessionRecord
         foreground_agent: None,
         terminal_cwd: None,
         foreground_ports: None,
+        terminal_progress: None,
     }
 }
 
@@ -3431,6 +3432,7 @@ fn a_new_terminal_starts_where_the_last_terminal_in_its_project_was() {
     let terminal = |value: &str, project: &str, cwd: &str| SessionRecord {
         kind: AgentKind::SHELL,
         terminal_cwd: Some(cwd.to_owned()),
+        terminal_progress: None,
         ..session(value, project, 2.0)
     };
     let (mut store, mut effects) = hydrated(
@@ -3488,6 +3490,7 @@ fn only_terminals_carry_a_location_for_their_hover() {
     let mut terminal = SessionRecord {
         kind: AgentKind::SHELL,
         terminal_cwd: Some("/work/p/web".into()),
+        terminal_progress: None,
         ..session("term", "p", 1.0)
     };
     assert_eq!(

@@ -30,8 +30,11 @@ pub(super) fn session_tab_face(
     title: impl IntoElement,
     active: bool,
     colors: SemanticColors,
+    under: Option<AnyElement>,
 ) -> gpui::Div {
     div()
+        // Progress drawn under the tab's content (see `progress_mark`).
+        .children(under)
         .px(px(10.0))
         .rounded(px(SIDEBAR_ROW_RADIUS))
         .flex()
@@ -245,12 +248,28 @@ impl Sidebar {
     }
 
     pub(super) fn agent_tab_icon(kind: &ProtoAgentKind, colors: SemanticColors) -> AnyElement {
-        match ui_agent_kind(kind).brand_mark() {
-            Some(mark) => diri_ui::BrandMark::solid(mark, 16.0, colors.secondary)
+        Self::agent_tab_icon_sized(kind, colors, 16.0)
+    }
+
+    fn agent_tab_icon_sized(
+        kind: &ProtoAgentKind,
+        colors: SemanticColors,
+        size: f32,
+    ) -> AnyElement {
+        let icon = match ui_agent_kind(kind).brand_mark() {
+            Some(mark) => diri_ui::BrandMark::solid(mark, size, colors.secondary)
                 .inset(0.08)
                 .into_any_element(),
-            None => sf_symbol("terminal", 16.0, colors.secondary),
-        }
+            // Exactly `size`: `sf_symbol` rounds up to its 12 pt tier, which
+            // would crowd a progress ring.
+            None => diri_ui::Icon::new(diri_ui::IconName::Terminal, size, colors.secondary)
+                .into_any_element(),
+        };
+        div()
+            .size(px(size))
+            .flex_none()
+            .child(icon)
+            .into_any_element()
     }
 
     pub(super) fn navigation_sessions(
@@ -511,7 +530,28 @@ impl Sidebar {
         let id = id.clone();
         let title = title.clone();
         let entity = cx.entity();
+        // Progress takes the mark while the session has nothing more urgent
+        // to say: a ring around the logo, or a pie in its place.
+        let progress = props.progress.filter(|_| {
+            !matches!(
+                state,
+                StatusState::NeedsInput { .. } | StatusState::Hibernated
+            )
+        });
+        let progress_mark = progress.and_then(|face| {
+            let logo = Self::agent_tab_icon_sized(kind, colors, 10.0);
+            crate::progress_mark::progress_mark(face, colors, Some(logo))
+        });
         let mark = match state {
+            _ if progress_mark.is_some() => div()
+                .id(SharedString::from(format!(
+                    "horizontal-tab-progress-{}",
+                    id.0
+                )))
+                .role(Role::Image)
+                .aria_label("Progress")
+                .children(progress_mark)
+                .into_any_element(),
             StatusState::IdleSeen | StatusState::None => div()
                 .id(SharedString::from(format!("horizontal-tab-logo-{}", id.0)))
                 .debug_selector({
@@ -552,7 +592,10 @@ impl Sidebar {
             None => title_fade(title.clone()).into_any_element(),
         };
         let location = props.location.clone();
-        let tab = session_tab_face(mark, face, active, colors)
+        let under = progress.and_then(|face| {
+            crate::progress_mark::progress_underlay(face, colors, SIDEBAR_ROW_RADIUS)
+        });
+        let tab = session_tab_face(mark, face, active, colors, under)
             .id(SharedString::from(format!("horizontal-tab-{}", id.0)))
             .when_some(location, |tab, place| {
                 tab.warm_tooltip(move |_, cx| {

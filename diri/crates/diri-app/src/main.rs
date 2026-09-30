@@ -47,6 +47,7 @@ mod path_picker;
 mod peek_settle;
 mod phone_access;
 mod platform;
+mod progress_mark;
 mod project_hue;
 pub mod query_editor;
 pub mod quick_open;

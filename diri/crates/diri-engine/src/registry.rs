@@ -305,6 +305,9 @@ impl Registry {
                         repaired.push(record.id.0.clone());
                     }
                     record.remote_connection = None;
+                    // Progress is a live report; whatever reported it is gone
+                    // or will report again.
+                    record.terminal_progress = None;
                     repair_persisted_agent_title(&mut record);
                     // Resolve the owning project before repairing its
                     // location namespace. In particular, a linked worktree's
@@ -2307,6 +2310,7 @@ fn is_local_cursor_record(record: &SessionRecord) -> bool {
 
 fn fold_session_view(record: &mut SessionRecord, view: &SessionView) {
     record.remote_connection = view.remote_connection;
+    record.terminal_progress = view.terminal_progress;
     fold_session_status(record, view);
     // cursor-agent (and similar) stamp a brand/status OSC title as soon as
     // they are idle. That must not freeze the record as AgentProvided, or
@@ -2752,6 +2756,7 @@ fn recovered_record(capsule: diri_proto::recovery::SessionRecoveryCapsule) -> Se
         foreground_agent: None,
         terminal_cwd: None,
         foreground_ports: None,
+        terminal_progress: None,
     }
 }
 
@@ -2979,6 +2984,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: None,
+            terminal_progress: None,
         }
     }
 
@@ -4002,6 +4008,7 @@ mod tests {
             foreground_agent: agent.map(str::to_owned),
             terminal_cwd: Some("/work/diri/crates".to_owned()),
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             attention_state: None,
             terminal_title: title.map(str::to_owned),
             id: "shell".to_owned(),
@@ -4167,6 +4174,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             attention_state: None,
             terminal_title: None,
             id: "claude".to_owned(),
@@ -4208,6 +4216,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("Implement terminal IME".to_owned()),
             title_source: Some(TitleSource::FirstPrompt),
             ..view.clone()
@@ -4225,6 +4234,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("diri".to_owned()),
             ..view
         };
@@ -4239,6 +4249,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("✳ Claude Code".to_owned()),
             ..generic_view.clone()
         };
@@ -4270,6 +4281,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("Cursor Agent - \u{2705} Ready".to_owned()),
             title_source: Some(TitleSource::AgentProvided),
             ..generic_view
@@ -4285,6 +4297,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("Fix the cursor session title".to_owned()),
             title_source: Some(TitleSource::FirstPrompt),
             ..cursor_ready.clone()
@@ -4301,6 +4314,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("Cursor Integration Fix - \u{23f3} Working ...".to_owned()),
             title_source: Some(TitleSource::AgentProvided),
             ..cursor_ready
@@ -4325,6 +4339,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             attention_state: None,
             id: session.id.to_string(),
             status: SessionStatus::Working,
@@ -4444,6 +4459,7 @@ mod tests {
                 foreground_agent: None,
                 terminal_cwd: None,
                 foreground_ports: Vec::new(),
+                terminal_progress: None,
                 attention_state: None,
                 terminal_title: None,
                 id: session.id.to_string(),
@@ -4472,6 +4488,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             attention_state: None,
             id: session.id.to_string(),
             status: SessionStatus::Working,
@@ -5008,6 +5025,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             foreground_ports: Vec::new(),
+            terminal_progress: None,
             attention_state: None,
             terminal_title: None,
             id: "completed".to_owned(),
