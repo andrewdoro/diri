@@ -1,5 +1,100 @@
 # diri performance record
 
+## Resource growth over a long session: explained, not leaked (2026-09-30)
+
+Local telemetry from one 0.8.10 install (4.7 h, one `health` sample a
+minute) showed the App footprint 394 → 446 MB, Engine footprint 62 → 105 MB,
+Engine threads 47 → 59 and descriptors 176 → 204. Only aggregates were read.
+
+### What the telemetry says
+
+Engine threads and descriptors track the live gauges exactly. A least-squares
+fit over all 282 samples:
+
+- threads = 10.2 + 1.00 × records + 1.83 × clients + 0.23 × attached
+- fds = −22.6 + 6.05 × records + 2.46 × clients + 1.55 × attached
+
+Residuals stay within ±0.8 for the whole run apart from single-minute
+transients (worst 3.7, gone the next minute). They do not drift with time or
+with the ~2,770 `client.hello` connections, 57 Helper probes, 14 freezes or 8
+wakes. Start: 31 records, 3 clients, 2 attachments. End: 32 records, 8 clients,
+7 attachments. That accounts for all of +12 threads and +28 fds. Each warm
+terminal pane is one attachment: roughly 2 Engine threads and 4 descriptors.
+
+Engine footprint swings from 80 to 175 MB within minutes. Its 10th
+percentile per half hour rises 62 → 80 MB over the first 2.5 h and then stays
+at 80–82 MB. That is caches filling to their bounds (below), not a slope.
+
+App threads (12–17) and descriptors (16–22) are flat. Its footprint median
+per half hour goes 384 → 414–473 MB as `terminal_panes` goes 4 → 8, while RSS
+falls (median 130 → ~100 MB) and the floor twice drops to ~150–200 MB when the
+system reclaims. The growth follows warm workspace panes, which are capped.
+
+### Reproduction: every churn path, private Engines
+
+Release `dirijord-rs`, `diri-holder` and `dirijor` from origin/main
+(`ab2b715e`), each run with its own `HOME` under `/private/tmp` and uploads off.
+Threads from `ps -M`, descriptors from `lsof`, live heap from `heap -s`, and
+growth attributed by diffing `malloc_history -allByCount` snapshots under
+`MallocStackLogging=1`. Counts are after a warm-up. "Heap" is live
+allocations added per cycle.
+
+| Churn | Cycles | Threads | fds | Heap per cycle | Where the heap went |
+| --- | ---: | --- | --- | ---: | --- |
+| Connect, Hello, `hook.report`, close | 1,000 | 9 → 9 | 8 → 8 | 0 | — |
+| `dirijor hook` processes | 500 | 9 → 9 | 8 → 8 | 0 | — |
+| `events.subscribe`, close | 500 | 9 → 9 | 8 → 8 | ~0 | — |
+| Spawn, exit, remove | 100 | 10 → 10 | 9 → 9 | ~1 KB | event ring |
+| Spawn, kill, remove | 1,000 | 9 → 9 | 9 → 9 | ~1.2 KB | event ring (all 5,399 net allocations) |
+| Attach/detach, producing session | 500 | 14 → 14 | 29 → 29 | ~1 KB | event ring, terminal history |
+| Attach/detach, idle / hibernated session | 250 each | 14 → 14 | 29 → 29 | ~0.2 KB | event ring (`mark_seen` update) |
+| Preview + preview-set open/close | 500 | 14 → 14 | 30 → 30 | ~0.6 KB | terminal history only |
+| Hibernate + wake | 500 | 14 → 14 | 30 → 30 | ~2 KB | event ring (all 2,432 net allocations) |
+| Real-session hooks (`dirijor hook`) | 1,000 | 11 → 11 | 15 → 15 | up to 10 KB | event ring; each `session.updated` grows with the record's attention history |
+| List + workspace snapshot + history per connection | 500 | 18 → 18 | 50 → 50 | none (fluctuates) | — |
+| Remote spawn/exit over a fake `ssh` + Helper re-probe (in-process) | 100 | 1 → 1 | 4 → 4 | — | — |
+| Holder manager over 150 spawn/exit | 150 | 3 → 3 | 6 → 6 | 0 | — |
+
+No path left a thread or descriptor behind. All heap growth was attributed to
+bounded structures.
+
+### Bounds (what the growth converges to)
+
+| Structure | Bound | Notes |
+| --- | --- | --- |
+| Engine event replay ring | 4,096 events / 8 MiB | Every `session.updated` is retained until evicted, so the ring's resident size depends on record size |
+| Engine terminal history per session | 4 MiB compressed | `HISTORY_STORAGE_BUDGET_BYTES` |
+| Attention history per record | 200 events (~125 B JSON each, ~25 KB) | Serialized into `state.json` and into every `session.updated` for that session |
+| Warm workspace panes per window | 16 | Each is an App pane plus an Engine attachment (~2 threads, ~4 fds) that keeps streaming |
+| App parked grids / resident terminals | 12 / 1 | `PARKED_GRID_CAP`, `TerminalResidency` |
+| Engine per live record | 1 thread, ~5–6 fds | pump thread; output log (2), attention SQLite, holder socket, kqueue |
+| Message receipts | 100,000 rows | SQLite, on disk |
+
+### Guard
+
+`cargo test -p diri-engine --test resource_growth` runs 40 cycles of hook
+connections, attach/detach on an idle and a producing session, subscriptions,
+hibernate/wake and spawn/kill/remove against a holder-backed control server.
+It requires threads and descriptors to return to their post-warm-up baseline.
+It passes on main because nothing leaks there. As a check that it can fail, one
+leaked descriptor per connection (`mem::forget` of a stream clone in `serve`)
+fails it with "descriptors grew from 32 to 152". A forwarder that ignores its
+stop flag does not fail it, because the next published event's failed write
+ends that thread anyway.
+
+Not claimed: anything about GPU/IOSurface memory in the App footprint (the
+test platform has none). There is no heap assertion in the guard, because the
+event ring legitimately grows for its first 4,096 events. Not done: shrinking
+the bounds above. The warm-pane cap and the attention history size are product
+decisions.
+Related observation, by design: in the remote probe, dropping an exited
+remote Session without terminating it left its Holder running with the final
+grid (100 cycles, 100 idle Holders on the loopback host). A Holder is meant to
+outlive a detach. The Engine's `session.kill`/`session.remove` path
+(`Session::terminate`) stops it explicitly, including when the Agent already
+exited. The user's run had no remote sessions (`sessions.remote` = 0
+throughout).
+
 ## Cheap column changes: deferred history reflow (2026-09-29)
 
 #561 made a drag stop blocking other sessions, but each column change still
