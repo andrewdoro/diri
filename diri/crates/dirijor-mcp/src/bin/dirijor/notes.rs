@@ -8,7 +8,7 @@ use std::path::Path;
 
 use diri_notes::doc::{Block, Document};
 use diri_notes::markdown;
-use diri_notes::store::{NoteMeta, NoteStore};
+use diri_notes::store::{self, NoteMeta, NoteStore, Resolve};
 
 use super::CliError;
 
@@ -207,25 +207,10 @@ fn resolve(store: &NoteStore, query: &str) -> Result<NoteMeta, CliError> {
     let notes = store
         .list()
         .map_err(|e| CliError::failure(format!("cannot list notes: {e}")))?;
-    if let Some(exact) = notes.iter().find(|n| n.id == query) {
-        return Ok(exact.clone());
-    }
-    let needle = query.to_lowercase();
-    let exact_title: Vec<&NoteMeta> = notes
-        .iter()
-        .filter(|n| n.title.to_lowercase() == needle)
-        .collect();
-    if exact_title.len() == 1 {
-        return Ok(exact_title[0].clone());
-    }
-    let matches: Vec<&NoteMeta> = notes
-        .iter()
-        .filter(|n| !n.archived && n.title.to_lowercase().contains(&needle))
-        .collect();
-    match matches.as_slice() {
-        [one] => Ok((*one).clone()),
-        [] => Err(CliError::not_found(format!("no note matches \"{query}\""))),
-        many => Err(CliError::failure(format!(
+    match store::resolve(&notes, query) {
+        Resolve::Found(note) => Ok(note),
+        Resolve::NotFound => Err(CliError::not_found(format!("no note matches \"{query}\""))),
+        Resolve::Ambiguous(many) => Err(CliError::failure(format!(
             "\"{query}\" matches {} notes: {}",
             many.len(),
             many.iter()

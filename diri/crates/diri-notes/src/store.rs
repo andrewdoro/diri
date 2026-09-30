@@ -367,6 +367,40 @@ pub fn append_markdown(note: &mut Note, markdown_body: &str) {
     note.doc = Document::new(note.doc.title.clone(), blocks);
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolve {
+    Found(NoteMeta),
+    NotFound,
+    /// More than one note matches; each is listed so the caller can be exact.
+    Ambiguous(Vec<NoteMeta>),
+}
+
+/// Finds a note by exact id, else exact title (case-insensitive), else the
+/// single unarchived note whose title contains `query`.
+pub fn resolve(notes: &[NoteMeta], query: &str) -> Resolve {
+    if let Some(exact) = notes.iter().find(|n| n.id == query) {
+        return Resolve::Found(exact.clone());
+    }
+    let needle = query.to_lowercase();
+    let exact_title: Vec<&NoteMeta> = notes
+        .iter()
+        .filter(|n| n.title.to_lowercase() == needle)
+        .collect();
+    if let [one] = exact_title.as_slice() {
+        return Resolve::Found((*one).clone());
+    }
+    let matches: Vec<NoteMeta> = notes
+        .iter()
+        .filter(|n| !n.archived && n.title.to_lowercase().contains(&needle))
+        .cloned()
+        .collect();
+    match matches.len() {
+        0 => Resolve::NotFound,
+        1 => Resolve::Found(matches.into_iter().next().expect("one match")),
+        _ => Resolve::Ambiguous(matches),
+    }
+}
+
 pub fn parse_note(source: &str) -> Note {
     let (front, doc) = markdown::parse(source);
     Note { front, doc }
