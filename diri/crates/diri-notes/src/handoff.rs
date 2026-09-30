@@ -148,10 +148,34 @@ fn chip_markdown(label: &str, target: &MentionTarget) -> String {
     markdown::write_inline(&block, false)
 }
 
-/// Appends a dated, attributed line under the note's `## Updates` heading,
-/// creating the heading at the end of the note when it is missing. Lines
-/// already under the heading stay in order; new ones go last.
-pub fn append_update(note: &mut Note, date: &str, label: &str, session_id: &str, text: &str) {
+/// Where [`append_update`] put a report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdatePlace {
+    /// Under the to-do the reporting session was started from (block index).
+    Todo(usize),
+    /// In the note's `## Updates` section.
+    Updates,
+}
+
+/// Records a report from `session_id` in the note. A session linked to a
+/// to-do reports under that to-do, so its progress folds with the work
+/// (see [`crate::work`]); any other session gets a dated, attributed line
+/// under the note's `## Updates` heading, created at the end of the note
+/// when missing. Lines already there stay in order; new ones go last.
+pub fn append_update(
+    note: &mut Note,
+    date: &str,
+    label: &str,
+    session_id: &str,
+    text: &str,
+) -> UpdatePlace {
+    if let Some(todo) = crate::work::todo_for_session(&note.doc.blocks, session_id)
+        && let Some(line) =
+            crate::work::append_todo_update(note, todo, date, label, session_id, text)
+    {
+        let _ = line;
+        return UpdatePlace::Todo(todo);
+    }
     let has_heading = note.doc.blocks.iter().any(|block| {
         matches!(block.kind, BlockKind::Heading(_)) && block.text.trim() == UPDATES_HEADING
     });
@@ -164,6 +188,7 @@ pub fn append_update(note: &mut Note, date: &str, label: &str, session_id: &str,
     line.text = format!("{date} {body}");
     let escaped = markdown::write_inline(&line, false);
     append_markdown(note, &format!("- {author} {escaped}"));
+    UpdatePlace::Updates
 }
 
 /// A session a note mentions, as the handoff prompt describes it.
@@ -237,7 +262,8 @@ pub fn prompt(
     out.push_str(&format!(
         "\nThis note is your parent in Diri. Re-read it any time with read_note (note \"{note_id}\" \
          or \"origin\"). Post progress and your final result with report_to_parent; reports \
-         are added to the note's Updates section. Check off a finished to-do with write_note.\n"
+         appear under the to-do you were started from, or in the note's Updates section. \
+         Leave the to-do unticked; the person reviews your work and ticks it.\n"
     ));
     out
 }

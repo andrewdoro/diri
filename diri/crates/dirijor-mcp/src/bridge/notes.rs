@@ -486,18 +486,30 @@ impl Bridge {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
         );
+        let mut place = handoff::UpdatePlace::Updates;
         store
             .update(note_id, |doc| {
-                handoff::append_update(doc, &date, &label, &caller.id.0, &text);
+                place = handoff::append_update(doc, &date, &label, &caller.id.0, &text);
                 Ok(())
             })
             .map_err(|e| format!("cannot write note {note_id}: {e}"))?;
+        let (todo, where_) = match place {
+            handoff::UpdatePlace::Todo(index) => (
+                json!(index),
+                "Your parent is a note: the report was added under the to-do you were started from.",
+            ),
+            handoff::UpdatePlace::Updates => (
+                Value::Null,
+                "Your parent is a note: the report was added to its Updates section.",
+            ),
+        };
         Ok(json!({
             "ok": true,
             "parent": note.id.0,
             "status": status,
             "recorded_in_note": note_id,
-            "note": "Your parent is a note: the report was added to its Updates section.",
+            "todo": todo,
+            "note": where_,
         }))
     }
 }
@@ -831,6 +843,43 @@ mod tests {
                 && source.contains("done: Fixed the flicker (PR #600)"),
             "{source}"
         );
+    }
+
+    #[test]
+    fn reports_from_a_todos_agent_land_under_that_todo() {
+        let (fixture, note_id) = from_note();
+        fixture
+            .store()
+            .update(&note_id, |note| {
+                diri_notes::store::append_markdown(
+                    note,
+                    "- [ ] Draft the launch posts\n  - Tone: plain",
+                );
+                let index = handoff::find_todo(
+                    note,
+                    &handoff::TodoSelector::Text("Draft the launch posts".into()),
+                )
+                .expect("to-do");
+                handoff::link_session(note, index, "@Codex", "child");
+                Ok(())
+            })
+            .unwrap();
+        let report = fixture
+            .bridge("child")
+            .call(
+                "report_to_parent",
+                &json!({"summary": "Drafted post 1 of 3", "status": "update"}),
+            )
+            .unwrap();
+        assert!(report["todo"].is_u64(), "{report}");
+        let source = fixture.store().load(&note_id).unwrap().to_markdown();
+        assert!(
+            source.contains(
+                "- [ ] Draft the launch posts [@Codex](diri://session/child)\n  - Tone: plain\n  - [@"
+            ) && source.contains("Drafted post 1 of 3"),
+            "{source}"
+        );
+        assert!(!source.contains("## Updates"), "{source}");
     }
 
     #[test]
