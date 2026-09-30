@@ -7,6 +7,7 @@
 //! is tested without a window. The GPUI view adds only layout-driven motion
 //! (up/down, clicks) and drawing.
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -102,6 +103,9 @@ pub struct Editor {
     next_id: u64,
     /// Bumped on every content change; views key caches off it.
     pub revision: u64,
+    /// List items whose children are folded away, by block id. View state:
+    /// never saved to the note and not part of undo.
+    collapsed: HashSet<u64>,
 }
 
 impl Editor {
@@ -115,6 +119,7 @@ impl Editor {
             last_edit: None,
             next_id: 1,
             revision: 0,
+            collapsed: HashSet::new(),
         };
         let title_id = editor.fresh_id();
         editor
@@ -202,6 +207,8 @@ impl Editor {
             anchor: self.clamp_pos(selection.anchor),
             head: self.clamp_pos(selection.head),
         };
+        self.reveal(selection.anchor.block);
+        self.reveal(selection.head.block);
         if selection != self.selection {
             self.pending = None;
             self.last_edit = None;
@@ -246,6 +253,123 @@ impl Editor {
     }
 
     // -----------------------------------------------------------------------
+    // Folding
+
+    /// The blocks nested under the list item at `index`: the run of deeper
+    /// list items right after it. Empty for anything that is not a list item.
+    pub fn children(&self, index: usize) -> Range<usize> {
+        let Some(block) = self.blocks.get(index) else {
+            return index..index;
+        };
+        let mut end = index + 1;
+        if block.kind.is_list() {
+            while self
+                .blocks
+                .get(end)
+                .is_some_and(|b| b.kind.is_list() && b.indent > block.indent)
+            {
+                end += 1;
+            }
+        }
+        index + 1..end
+    }
+
+    pub fn has_children(&self, index: usize) -> bool {
+        !self.children(index).is_empty()
+    }
+
+    /// Whether the item at `index` hides its children.
+    pub fn is_collapsed(&self, index: usize) -> bool {
+        self.blocks
+            .get(index)
+            .is_some_and(|b| self.collapsed.contains(&b.id))
+            && self.has_children(index)
+    }
+
+    /// Folds or unfolds the children of the list item at `index`. Folding
+    /// with the caret inside the subtree moves it to the end of the item.
+    /// A view-state change: the note's content and revision are untouched.
+    pub fn set_collapsed(&mut self, index: usize, collapsed: bool) {
+        if !self.has_children(index) {
+            return;
+        }
+        let id = self.blocks[index].id;
+        if !collapsed {
+            self.collapsed.remove(&id);
+            return;
+        }
+        self.collapsed.insert(id);
+        let inside = self.children(index);
+        if inside.contains(&self.selection.head.block)
+            || inside.contains(&self.selection.anchor.block)
+        {
+            let end = Pos::new(index, self.blocks[index].text.len());
+            self.selection = Selection::caret(end);
+            self.pending = None;
+            self.last_edit = None;
+        }
+    }
+
+    pub fn toggle_collapsed(&mut self, index: usize) {
+        let collapsed = self.is_collapsed(index);
+        self.set_collapsed(index, !collapsed);
+    }
+
+    /// For each block, whether a folded ancestor hides it.
+    pub fn hidden(&self) -> Vec<bool> {
+        let mut hidden = vec![false; self.blocks.len()];
+        let mut fold: Option<u8> = None;
+        for (index, block) in self.blocks.iter().enumerate() {
+            if let Some(depth) = fold {
+                if block.kind.is_list() && block.indent > depth {
+                    hidden[index] = true;
+                    continue;
+                }
+                fold = None;
+            }
+            if block.kind.is_list() && self.collapsed.contains(&block.id) {
+                fold = Some(block.indent);
+            }
+        }
+        hidden
+    }
+
+    pub fn is_hidden(&self, index: usize) -> bool {
+        self.hidden().get(index).copied().unwrap_or(false)
+    }
+
+    /// Unfolds every ancestor hiding `index`.
+    fn reveal(&mut self, index: usize) {
+        if self.collapsed.is_empty() || !self.is_hidden(index) {
+            return;
+        }
+        let mut depth = self.blocks[index].indent;
+        for ancestor in (0..index).rev() {
+            let block = &self.blocks[ancestor];
+            if !block.kind.is_list() {
+                break;
+            }
+            if block.indent < depth {
+                depth = block.indent;
+                self.collapsed.remove(&block.id);
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn visible_after(&self, index: usize) -> Option<usize> {
+        let hidden = self.hidden();
+        (index + 1..self.blocks.len()).find(|i| !hidden[*i])
+    }
+
+    fn visible_before(&self, index: usize) -> Option<usize> {
+        let hidden = self.hidden();
+        (0..index).rev().find(|i| !hidden[*i])
+    }
+
+    // -----------------------------------------------------------------------
     // Horizontal motion
 
     pub fn step(&self, pos: Pos, forward: bool, granularity: Granularity) -> Pos {
@@ -262,17 +386,15 @@ impl Editor {
             Granularity::Block => Pos::new(pos.block, if forward { text.len() } else { 0 }),
             Granularity::Grapheme | Granularity::Word => {
                 if forward && pos.offset >= text.len() {
-                    return if pos.block + 1 < self.blocks.len() {
-                        Pos::new(pos.block + 1, 0)
-                    } else {
-                        pos
+                    return match self.visible_after(pos.block) {
+                        Some(next) => Pos::new(next, 0),
+                        None => pos,
                     };
                 }
                 if !forward && pos.offset == 0 {
-                    return if pos.block > 0 {
-                        Pos::new(pos.block - 1, self.blocks[pos.block - 1].text.len())
-                    } else {
-                        pos
+                    return match self.visible_before(pos.block) {
+                        Some(previous) => Pos::new(previous, self.blocks[previous].text.len()),
+                        None => pos,
                     };
                 }
                 let mut offset = if granularity == Granularity::Grapheme {
@@ -332,6 +454,9 @@ impl Editor {
     fn changed(&mut self) {
         self.revision += 1;
         self.ensure_trailing();
+        // An edit never leaves the caret inside a folded subtree.
+        self.reveal(self.selection.anchor.block);
+        self.reveal(self.selection.head.block);
     }
 
     pub fn can_undo(&self) -> bool {
@@ -785,13 +910,19 @@ impl Editor {
             self.changed();
             return;
         }
+        // Return on a folded item starts its next sibling, after the subtree.
+        let at = if self.is_collapsed(pos.block) {
+            self.children(pos.block).end
+        } else {
+            pos.block + 1
+        };
         let id = self.fresh_id();
         let mut tail = self.blocks[pos.block].split_off(pos.offset, id, next_kind);
         if kind == BlockKind::Title {
             tail.marks.clear();
         }
-        self.blocks.insert(pos.block + 1, tail);
-        self.selection = Selection::caret(Pos::new(pos.block + 1, 0));
+        self.blocks.insert(at, tail);
+        self.selection = Selection::caret(Pos::new(at, 0));
         self.changed();
     }
 
@@ -826,7 +957,14 @@ impl Editor {
         } else {
             end.block
         };
-        start.block.max(1)..last + 1
+        // A folded item moves and converts with the subtree it hides.
+        let mut end = last + 1;
+        for index in start.block.max(1)..=last {
+            if self.is_collapsed(index) {
+                end = end.max(self.children(index).end);
+            }
+        }
+        start.block.max(1)..end
     }
 
     /// Tab / Shift-Tab.
@@ -1560,5 +1698,106 @@ mod tests {
         e.set_caret(Pos::new(1, 2));
         e.insert_mention(0..2, &MentionTarget::Note("n".into()), "@n", 0);
         assert_eq!(e.block(1).text, "@x");
+    }
+
+    fn outline() -> Editor {
+        editor(
+            "# T\n\n- parent\n  - child one\n    - grandchild\n  - child two\n- sibling\n\nafter\n",
+        )
+    }
+
+    fn texts_visible(e: &Editor) -> Vec<String> {
+        let hidden = e.hidden();
+        e.blocks()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !hidden[*i])
+            .map(|(_, b)| b.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn children_are_the_run_of_deeper_list_items() {
+        let e = outline();
+        assert_eq!(e.children(1), 2..5);
+        assert_eq!(e.children(2), 3..4);
+        assert!(e.children(3).is_empty());
+        assert!(e.children(5).is_empty());
+        assert!(e.children(6).is_empty(), "paragraphs never have children");
+    }
+
+    #[test]
+    fn folding_hides_the_subtree_and_is_not_an_edit() {
+        let mut e = outline();
+        let revision = e.revision;
+        e.set_caret(Pos::new(3, 2));
+        e.set_collapsed(1, true);
+        assert!(e.is_collapsed(1));
+        assert_eq!(texts_visible(&e), ["T", "parent", "sibling", "after"]);
+        // The caret was inside the fold: it lands on the folded item.
+        assert_eq!(e.selection, Selection::caret(Pos::new(1, 6)));
+        assert_eq!(e.revision, revision);
+        assert!(!e.can_undo());
+        // Items without children cannot fold.
+        e.set_collapsed(5, true);
+        assert!(!e.is_collapsed(5));
+        e.toggle_collapsed(1);
+        assert_eq!(texts_visible(&e).len(), e.blocks().len());
+    }
+
+    #[test]
+    fn arrows_skip_a_folded_subtree() {
+        let mut e = outline();
+        e.set_collapsed(1, true);
+        e.set_caret(Pos::new(1, 6));
+        e.move_horizontal(true, Granularity::Grapheme, false);
+        assert_eq!(e.selection.head, Pos::new(5, 0));
+        e.move_horizontal(false, Granularity::Grapheme, false);
+        assert_eq!(e.selection.head, Pos::new(1, 6));
+    }
+
+    #[test]
+    fn return_on_a_folded_item_adds_a_sibling_after_its_subtree() {
+        let mut e = outline();
+        e.set_collapsed(1, true);
+        e.set_caret(Pos::new(1, 6));
+        e.enter(0);
+        assert_eq!(e.selection.head, Pos::new(5, 0));
+        assert_eq!(e.block(5).kind, BlockKind::Bullet);
+        assert_eq!(e.block(5).indent, 0);
+        assert!(e.is_collapsed(1), "the fold stays");
+        assert_eq!(e.block(4).text, "child two");
+    }
+
+    #[test]
+    fn a_caret_placed_inside_a_fold_unfolds_it() {
+        let mut e = outline();
+        e.set_collapsed(2, true);
+        e.set_collapsed(1, true);
+        e.set_caret(Pos::new(3, 0));
+        assert!(!e.is_collapsed(1) && !e.is_collapsed(2));
+        assert!(!e.is_hidden(3));
+    }
+
+    #[test]
+    fn a_folded_item_moves_with_its_subtree() {
+        let mut e = outline();
+        e.set_collapsed(1, true);
+        e.set_caret(Pos::new(1, 0));
+        e.move_blocks(false, 0);
+        let texts: Vec<&str> = e.blocks().iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "T",
+                "sibling",
+                "parent",
+                "child one",
+                "grandchild",
+                "child two",
+                "after"
+            ]
+        );
+        assert!(e.is_collapsed(2));
     }
 }
