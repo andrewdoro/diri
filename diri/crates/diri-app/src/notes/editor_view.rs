@@ -25,15 +25,18 @@ use diri_ui::{
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight,
-    HighlightStyle, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Render, ScrollHandle, SharedString, StrikethroughStyle, StyledText, Task, TextLayout,
-    UTF16Selection, UnderlineStyle, Window, actions, anchored, canvas, deferred, div, fill, point,
-    prelude::*, px, size,
+    HighlightStyle, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, ScrollHandle, SharedString, StrikethroughStyle,
+    StyledText, Task, TextLayout, UTF16Selection, UnderlineStyle, Window, actions, anchored,
+    canvas, deferred, div, fill, point, prelude::*, px, size,
 };
 
 use crate::floating;
 
 pub(crate) const EDITOR_CONTEXT: &str = "DiriNoteEditor";
+/// The editor's context while the ⌘K link panel owns the keyboard: none of
+/// the editor's bindings match, so keys reach the panel's field.
+const LINK_EDITOR_CONTEXT: &str = "DiriNoteLinkEditor";
 
 actions!(
     diri_notes,
@@ -226,6 +229,24 @@ const MENTION_LIMIT: usize = 8;
 /// A query this long without a match is prose, not a mention.
 const MENTION_QUERY_MAX: usize = 40;
 
+/// The ⌘K panel: a URL field over the selection or the link at the caret,
+/// and what Return does with it.
+struct LinkEditor {
+    query: crate::query_editor::QueryEditor,
+    /// The selection ⌘K was pressed on, restored when the link applies.
+    selection: Selection,
+    /// The link being edited: (block, range, url).
+    existing: Option<(usize, Range<usize>, String)>,
+    selected: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum LinkRow {
+    Apply { url: String },
+    Open { url: String },
+    Remove,
+}
+
 enum ChipHit {
     Mention(MentionTarget),
     Link(String),
@@ -378,11 +399,11 @@ pub(crate) struct NoteEditorView {
     _blink: Task<()>,
     slash: Option<SlashMenu>,
     mention: Option<MentionMenu>,
+    link_editor: Option<LinkEditor>,
     mentions: Rc<MentionDirectory>,
     caret_bounds: Option<Bounds<Pixels>>,
     /// Checkboxes ticked this session, for their pop animation.
     ticked: Vec<(u64, Instant)>,
-    link_hint: Option<SharedString>,
     /// To-dos as agent work: folds, starts in flight, their panels.
     pub(super) work: super::work_item::WorkView,
 }
@@ -421,10 +442,10 @@ impl NoteEditorView {
             _blink: Task::ready(()),
             slash: None,
             mention: None,
+            link_editor: None,
             mentions: Rc::default(),
             caret_bounds: None,
             ticked: Vec::new(),
-            link_hint: None,
             work: super::work_item::WorkView::default(),
         }
     }
@@ -1223,38 +1244,178 @@ impl NoteEditorView {
     }
 
     /// ⌘K links the selection to the URL on the clipboard, or unlinks.
-    fn link(&mut self, _: &Link, _: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.link_at_caret().is_some() && self.editor.selection.is_collapsed() {
-            self.run(cx, |e, now| e.remove_link(now));
-            self.flash_hint("Link removed", cx);
-            return;
+    /// ⌘K opens the link panel on the selection, or on the link at the
+    /// caret, prefilled with that link's URL (or a URL on the clipboard).
+    pub(crate) fn link(&mut self, _: &Link, _: &mut Window, cx: &mut Context<Self>) {
+        let selection = self.editor.selection;
+        let existing = if selection.is_collapsed() {
+            self.editor.link_at(selection.head)
+        } else {
+            self.editor.link_at(selection.start())
+        };
+        let prefill = existing
+            .as_ref()
+            .map(|(_, _, url)| url.clone())
+            .or_else(|| {
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .map(|t| t.trim().to_owned())
+                    .filter(|t| is_url(t))
+            });
+        let mut query = crate::query_editor::QueryEditor::default();
+        if let Some(url) = prefill {
+            query.insert(&url);
+            query.select_all();
         }
-        let clip = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .map(|t| t.trim().to_owned())
-            .filter(|t| is_url(t));
-        match clip {
-            Some(url) if !self.editor.selection.is_collapsed() => {
-                self.run(cx, |e, now| e.toggle_style(Style::Link(url), now));
+        self.slash = None;
+        self.mention = None;
+        self.link_editor = Some(LinkEditor {
+            query,
+            selection,
+            existing,
+            selected: 0,
+        });
+        crate::telemetry::notes_event("notes.link_editor.opened", "");
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(super) fn link_row_labels(&self) -> Vec<String> {
+        self.link_rows()
+            .iter()
+            .map(|row| match row {
+                LinkRow::Apply { url } => format!("apply {url}"),
+                LinkRow::Open { url } => format!("open {url}"),
+                LinkRow::Remove => "remove".to_owned(),
+            })
+            .collect()
+    }
+
+    fn link_rows(&self) -> Vec<LinkRow> {
+        let Some(editor) = &self.link_editor else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        if let Some(url) = normalize_url(editor.query.text()) {
+            let unchanged = editor.existing.as_ref().is_some_and(|(_, _, u)| *u == url);
+            if !unchanged {
+                rows.push(LinkRow::Apply { url });
             }
-            _ => self.flash_hint("Copy a URL, select text, then ⌘K", cx),
+        }
+        if let Some((_, _, url)) = &editor.existing {
+            rows.push(LinkRow::Open { url: url.clone() });
+            rows.push(LinkRow::Remove);
+        }
+        rows
+    }
+
+    fn close_link_editor(&mut self, cx: &mut Context<Self>) {
+        if self.link_editor.take().is_some() {
+            cx.notify();
         }
     }
 
-    fn flash_hint(&mut self, hint: &'static str, cx: &mut Context<Self>) {
-        self.link_hint = Some(hint.into());
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(1600))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.link_hint = None;
+    pub(super) fn apply_link_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.link_rows().get(index).cloned() else {
+            return;
+        };
+        let Some(editor) = self.link_editor.take() else {
+            return;
+        };
+        let now = now_ms();
+        let target = match (&editor.existing, editor.selection.is_collapsed()) {
+            (Some((block, range, _)), true) => Selection {
+                anchor: Pos::new(*block, range.start),
+                head: Pos::new(*block, range.end),
+            },
+            _ => editor.selection,
+        };
+        match row {
+            LinkRow::Open { url } => {
+                cx.open_url(&url);
                 cx.notify();
-            });
-        })
-        .detach();
+                return;
+            }
+            LinkRow::Remove => {
+                self.editor.set_selection(target);
+                self.editor.remove_link(now);
+                self.editor.set_caret(target.end());
+                crate::telemetry::notes_event("notes.link.removed", "");
+            }
+            LinkRow::Apply { url } => {
+                self.editor.set_selection(target);
+                let kind = link_kind(&url);
+                if target.is_collapsed() {
+                    self.editor.paste_url(&url, now);
+                } else {
+                    self.editor.set_link(&url, now);
+                    self.editor.set_caret(target.end());
+                }
+                crate::telemetry::notes_event("notes.link.set", kind);
+            }
+        }
+        self.edited(cx);
+    }
+
+    /// Keys while the link panel is open: its field edits with the shared
+    /// query-field map; typed text arrives through the input handler.
+    fn link_editor_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::query_editor::{self, ClipboardEdit, Edit, LocalEdit};
+        if self.link_editor.is_none() {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        let rows = self.link_rows().len().max(1);
+        let editor = self.link_editor.as_mut().expect("checked above");
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.link_editor = None;
+            }
+            "enter" if keystroke.modifiers.platform => {
+                if let Some(index) = self
+                    .link_rows()
+                    .iter()
+                    .position(|row| matches!(row, LinkRow::Open { .. }))
+                {
+                    self.apply_link_row(index, cx);
+                }
+            }
+            "enter" => {
+                let selected = editor.selected;
+                self.apply_link_row(selected, cx);
+            }
+            "up" => editor.selected = (editor.selected + rows - 1) % rows,
+            "down" => editor.selected = (editor.selected + 1) % rows,
+            _ => match query_editor::edit_for(keystroke) {
+                // Text goes through the input handler, like every field.
+                None | Some(Edit::Local(LocalEdit::Insert(_))) => return,
+                Some(Edit::Local(local)) => {
+                    editor.query.apply(local);
+                    editor.selected = 0;
+                }
+                Some(Edit::Clipboard(ClipboardEdit::Copy)) => {
+                    query_editor::copy_selection(&editor.query, cx);
+                }
+                Some(Edit::Clipboard(ClipboardEdit::Cut)) => {
+                    query_editor::cut_selection(&mut editor.query, cx);
+                }
+                Some(Edit::Clipboard(ClipboardEdit::Paste)) => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        editor
+                            .query
+                            .insert(text.trim().lines().next().unwrap_or_default());
+                        editor.selected = 0;
+                    }
+                }
+            },
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
 
     /// ⌥⌘↩ folds or unfolds the list item under the caret, or the nearest
@@ -1338,7 +1499,10 @@ impl NoteEditorView {
         if self.work_panel_key(super::work_item::PanelKey::Escape, cx) {
             return;
         }
-        if self.slash.take().is_some() || self.mention.take().is_some() {
+        if self.slash.take().is_some()
+            || self.mention.take().is_some()
+            || self.link_editor.take().is_some()
+        {
             cx.notify();
             return;
         }
@@ -1566,6 +1730,12 @@ impl EntityInputHandler for NoteEditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(editor) = self.link_editor.as_mut() {
+            editor.query.insert(text);
+            editor.selected = 0;
+            cx.notify();
+            return;
+        }
         let block = self.ime_block();
         let range = range_utf16
             .as_ref()
@@ -1598,6 +1768,11 @@ impl EntityInputHandler for NoteEditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A composition in the link field lands when it commits.
+        if self.link_editor.is_some() {
+            let _ = (new_text, new_selected_range_utf16);
+            return;
+        }
         let block = self.ime_block();
         let range = range_utf16
             .as_ref()
@@ -2207,7 +2382,10 @@ impl Render for NoteEditorView {
                         rects.extend(selection_rects(layout, from, to, empty, index != end.block));
                     }
                 }
-                let caret = if selection.is_collapsed() {
+                // The head's position is tracked for every selection (menus
+                // anchor to it, autoscroll follows it); only a collapsed one
+                // paints a caret.
+                let caret = {
                     layouts.get(selection.head.block).and_then(|layout| {
                         let (_, empty) = blocks_meta[selection.head.block];
                         let offset = if empty {
@@ -2218,8 +2396,6 @@ impl Render for NoteEditorView {
                         let at = layout.position_for_index(offset)?;
                         Some(Bounds::new(at, size(px(2.0), layout.line_height())))
                     })
-                } else {
-                    None
                 };
                 PaintState {
                     selection: rects,
@@ -2232,7 +2408,7 @@ impl Render for NoteEditorView {
                     window.paint_quad(fill(*rect, selection_color));
                 }
                 if let Some(caret) = state.caret {
-                    if caret_on {
+                    if caret_on && selection.is_collapsed() {
                         window.paint_quad(fill(caret, caret_color));
                     }
                     if autoscroll {
@@ -2260,6 +2436,19 @@ impl Render for NoteEditorView {
         } else {
             None
         };
+        let link_menu = if self.link_editor.is_some() {
+            let height = self.link_menu_height();
+            self.host_menu(
+                LINK_MENU,
+                Self::link_menu_rows,
+                LINK_MENU_WIDTH,
+                height,
+                window,
+                cx,
+            )
+        } else {
+            None
+        };
         let mention_menu = if self.mention.is_some() {
             let height = self.mention_menu_height();
             self.host_menu(
@@ -2274,29 +2463,15 @@ impl Render for NoteEditorView {
             None
         };
         let work_menu = self.work_menu(window, cx);
-        let hint = self.link_hint.clone().map(|hint| {
-            div()
-                .absolute()
-                .bottom(px(18.0))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded(px(8.0))
-                        .bg(colors.primary.alpha(0.85))
-                        .text_color(colors.background)
-                        .text_size(px(12.0))
-                        .child(hint),
-                )
-        });
 
         div()
             .id("note-editor")
-            .key_context(EDITOR_CONTEXT)
+            .key_context(if self.link_editor.is_some() {
+                LINK_EDITOR_CONTEXT
+            } else {
+                EDITOR_CONTEXT
+            })
+            .on_key_down(cx.listener(Self::link_editor_key_down))
             .track_focus(&self.focus)
             .relative()
             .size_full()
@@ -2389,7 +2564,7 @@ impl Render for NoteEditorView {
             .children(slash_menu)
             .children(mention_menu)
             .children(work_menu)
-            .children(hint)
+            .children(link_menu)
     }
 }
 
@@ -2795,6 +2970,195 @@ impl NoteEditorView {
             .filter(|pair| pair[0].agent.is_some() && pair[1].agent.is_none())
             .count();
         menu_height(matches.len().max(1), separators)
+    }
+}
+
+impl NoteEditorView {
+    fn link_menu_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.link_menu_rows(cx)?;
+        Some(
+            floating::surface(self.colors, floating::MENU_RADIUS, LINK_MENU_WIDTH, rows)
+                .into_any_element(),
+        )
+    }
+
+    fn link_menu_rows(&mut self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let editor = self.link_editor.as_ref()?;
+        let colors = self.colors;
+        let field = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(7.0))
+            .h(px(LINK_FIELD_HEIGHT))
+            .mx(px(floating::MENU_ROW_MARGIN))
+            .px(px(floating::MENU_ROW_INSET))
+            .rounded(px(floating::MENU_ROW_RADIUS))
+            .bg(colors.primary.alpha(0.06))
+            .text_size(px(Typo::ROW.size))
+            .text_color(colors.primary)
+            .child(crate::icons::sf_symbol("link", MENU_ICON, colors.tertiary))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(if editor.query.is_empty() {
+                        div()
+                            .text_color(colors.tertiary)
+                            .child(format!("{}Paste or type a link", crate::navigation::CARET))
+                            .into_any_element()
+                    } else {
+                        crate::navigation::query_label(&field_view(&editor.query))
+                    }),
+            );
+        let selected = editor.selected;
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .py(px(floating::MENU_PADDING_Y))
+            .child(field);
+        let rows = self.link_rows();
+        if !rows.is_empty() {
+            list = list.child(floating::menu_separator(colors));
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let (icon, label, keys): (AnyElement, SharedString, &str) = match row {
+                LinkRow::Apply { url } => {
+                    let found = diri_notes::links::recognize(url);
+                    let icon = found.as_ref().map_or_else(
+                        || crate::icons::sf_symbol("link", MENU_ICON, colors.secondary),
+                        |found| {
+                            gpui::svg()
+                                .path(service_icon(found.service))
+                                .size(px(CHIP_ICON))
+                                .text_color(colors.secondary)
+                                .into_any_element()
+                        },
+                    );
+                    let label = match (&found, self.editor.selection.is_collapsed()) {
+                        (Some(found), true) => format!("Insert {}", found.title),
+                        (Some(found), false) => format!("Link to {}", found.name),
+                        (None, _) => format!("Link to {}", short_url(url)),
+                    };
+                    (icon, label.into(), "↩")
+                }
+                LinkRow::Open { url } => (
+                    crate::icons::sf_symbol("square.and.arrow.up", MENU_ICON, colors.secondary),
+                    format!("Open {}", short_url(url)).into(),
+                    "⌘↩",
+                ),
+                LinkRow::Remove => (
+                    crate::icons::sf_symbol("xmark", MENU_ICON, colors.secondary),
+                    "Remove link".into(),
+                    "",
+                ),
+            };
+            let item = floating::menu_row(("note-link-row", i), icon, colors, i == selected)
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered
+                        && let Some(editor) = &mut this.link_editor
+                        && editor.selected != i
+                    {
+                        editor.selected = i;
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.apply_link_row(i, cx);
+                    }),
+                )
+                .child(menu_label(label, colors))
+                .when(!keys.is_empty(), |item| {
+                    item.child(floating::menu_shortcut(keys, colors))
+                });
+            list = list.child(item);
+        }
+        Some(list)
+    }
+
+    fn link_menu_height(&self) -> f32 {
+        let rows = self.link_rows().len();
+        let separator = if rows > 0 { MENU_SEPARATOR_HEIGHT } else { 0.0 };
+        menu_height(rows, 0) + LINK_FIELD_HEIGHT + separator
+    }
+}
+
+const LINK_MENU: floating::Target<NoteEditorView> = floating::Target {
+    key: "note-link-editor",
+    radius: floating::MENU_RADIUS,
+    content: NoteEditorView::link_menu_content,
+    dismiss: |this, _, cx| this.close_link_editor(cx),
+};
+const LINK_MENU_WIDTH: f32 = 340.0;
+const LINK_FIELD_HEIGHT: f32 = 32.0;
+
+/// The link field as drawn: a long URL with the caret at its end shows its
+/// tail, the way a native field scrolls to keep the caret in view.
+fn field_view(query: &crate::query_editor::QueryEditor) -> crate::query_editor::QueryEditor {
+    const VISIBLE: usize = 38;
+    let text = query.text();
+    let count = text.chars().count();
+    if count <= VISIBLE || query.selection().is_some() || query.cursor() != text.len() {
+        return query.clone();
+    }
+    let tail: String = text.chars().skip(count - (VISIBLE - 1)).collect();
+    let mut shown = crate::query_editor::QueryEditor::default();
+    shown.insert(&format!("…{tail}"));
+    shown
+}
+
+/// What ⌘K's field holds as a link: a URL, a `diri://` mention, or a bare
+/// domain (`notion.so/…`), which gets `https://`.
+fn normalize_url(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return None;
+    }
+    if is_url(text) || MentionTarget::parse(text).is_some() {
+        return Some(text.to_owned());
+    }
+    let host = text.split('/').next().unwrap_or_default();
+    (host.contains('.') && !host.starts_with('.') && !host.ends_with('.'))
+        .then(|| format!("https://{text}"))
+}
+
+/// `https://www.notion.so/acme/Q4…` → `notion.so/acme/Q4…`, cut to fit a row.
+fn short_url(url: &str) -> String {
+    let bare = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.");
+    if bare.chars().count() > 34 {
+        format!("{}…", bare.chars().take(33).collect::<String>())
+    } else {
+        bare.to_owned()
+    }
+}
+
+/// A link's kind for counts-only telemetry: the tool family, never the URL.
+fn link_kind(url: &str) -> &'static str {
+    use diri_notes::links::Service;
+    match diri_notes::links::recognize(url).map(|r| r.service) {
+        Some(Service::Notion) => "notion",
+        Some(
+            Service::GoogleDocs
+            | Service::GoogleSheets
+            | Service::GoogleSlides
+            | Service::GoogleDrive,
+        ) => "google",
+        Some(Service::Linear) => "linear",
+        Some(Service::HubSpot) => "hubspot",
+        Some(Service::Figma) => "figma",
+        Some(Service::Slack) => "slack",
+        Some(Service::GitHub) => "github",
+        Some(Service::Dashboard) => "dashboard",
+        None if MentionTarget::parse(url).is_some() => "mention",
+        None => "web",
     }
 }
 

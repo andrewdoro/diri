@@ -561,3 +561,69 @@ fn the_session_chip_api_reads_live_status_and_inserts_links(cx: &mut gpui::TestA
         "{text}"
     );
 }
+
+#[gpui::test]
+fn the_link_panel_edits_links_through_its_own_field(cx: &mut gpui::TestAppContext) {
+    use diri_notes::edit::{Pos, Selection};
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update_in(cx, |view, window, cx| {
+        let intro = view
+            .editor
+            .blocks()
+            .iter()
+            .position(|b| b.text.starts_with("A rich"))
+            .unwrap();
+        let text = view.editor.block(intro).text.clone();
+        // 1. On an existing link: the panel offers to open or remove it.
+        let spec = text.find("the spec").unwrap();
+        view.editor.set_caret(Pos::new(intro, spec + 2));
+        view.link(&editor_view::Link, window, cx);
+        assert_eq!(
+            view.link_row_labels(),
+            ["open https://diri.sh/notes", "remove"]
+        );
+        // Typing goes to the field, not the note.
+        view.replace_text_in_range(None, "x.dev", window, cx);
+        assert_eq!(view.editor.block(intro).text, text);
+        assert_eq!(view.link_row_labels()[0], "apply https://x.dev");
+        // Remove is the last row.
+        view.apply_link_row(2, cx);
+        assert!(view.editor.link_at(Pos::new(intro, spec + 2)).is_none());
+
+        // 2. A selection linked by typing a bare domain.
+        let calm = text.find("calm").unwrap();
+        view.editor.set_selection(Selection {
+            anchor: Pos::new(intro, calm),
+            head: Pos::new(intro, calm + 4),
+        });
+        view.link(&editor_view::Link, window, cx);
+        for ch in "notion.so/acme/Calm-1f2e3d4c5b6a79881f2e3d4c5b6a7988".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+        view.apply_link_row(0, cx);
+
+        // 3. At a bare caret, a tool URL inserts its titled chip.
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(Pos::new(last, 0));
+        view.link(&editor_view::Link, window, cx);
+        for ch in "https://linear.app/acme/issue/GRO-9/pricing-page".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+        view.apply_link_row(0, cx);
+    });
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(text.contains("— see the spec."), "{text}");
+    assert!(
+        text.contains("[_calm_](https://notion.so/acme/Calm-1f2e3d4c5b6a79881f2e3d4c5b6a7988)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[GRO-9 Pricing page](https://linear.app/acme/issue/GRO-9/pricing-page)"),
+        "{text}"
+    );
+}

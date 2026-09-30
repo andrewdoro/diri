@@ -292,6 +292,19 @@ Sizes are buckets (`0`, `<64`, `<1k`, `<16k`, `<256k`, `<1m`, `>=1m`); no
 clipboard, paste, keystroke or terminal content is ever recorded.
 
 
+
+### Notes
+
+Counts only, through `telemetry::notes_event(name, kind)`: a fixed event name
+and, where it helps, a fixed family. Never note text, titles, URLs, session or
+note ids.
+
+| kind | sev | fields | catches |
+|---|---|---|---|
+| `notes.link_editor.opened` | info | | ⌘K panel use |
+| `notes.link.set` | info | `kind` (`notion`\|`google`\|`linear`\|`hubspot`\|`figma`\|`slack`\|`github`\|`dashboard`\|`mention`\|`web`) | which tools people link, to decide which chips matter |
+| `notes.link.removed` | info | | links taken back out |
+
 ## Upload
 
 The Engine's uploader wakes once a minute. If `spool/urgent` exists, or an

@@ -103,6 +103,21 @@ pub(crate) fn action(name: &'static str, source: &'static str) {
     debug_event!("ui.action", action = name, source = source);
 }
 
+/// A Diri Notes feature was used. Counts only: `name` is a fixed event
+/// name and `kind` a fixed family ("linear", "bullet"), never note text,
+/// titles, URLs or ids. Catalogued under Notes in `diri/TELEMETRY.md`.
+pub(crate) fn notes_event(name: &'static str, kind: &'static str) {
+    if !diri_telemetry::is_enabled() {
+        return;
+    }
+    let fields = if kind.is_empty() {
+        Vec::new()
+    } else {
+        vec![("kind", Value::from(kind))]
+    };
+    diri_telemetry::record(name, diri_telemetry::Severity::Info, fields);
+}
+
 /// The last action the main thread finished, and when ([`mono_ms`]). An
 /// action that ends inside a stall is named on its `ui.stall`.
 static LAST_ACTION: Mutex<Option<(&'static str, u64)>> = Mutex::new(None);

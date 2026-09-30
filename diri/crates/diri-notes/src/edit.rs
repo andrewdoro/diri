@@ -1264,6 +1264,39 @@ impl Editor {
         self.changed();
     }
 
+    /// Links every selected run to `url`, replacing any link already there
+    /// (⌘K's editor). Code and titles cannot hold links.
+    pub fn set_link(&mut self, url: &str, now_ms: u64) {
+        if self.selection.is_collapsed() {
+            return;
+        }
+        self.checkpoint(EditKind::Other, now_ms);
+        for (index, range) in self.selected_ranges() {
+            let block = &mut self.blocks[index];
+            if matches!(block.kind, BlockKind::Title | BlockKind::Code) {
+                continue;
+            }
+            let range = trim_range(&block.text, range);
+            block.add_mark(range, Style::Link(url.to_owned()));
+        }
+        self.changed();
+    }
+
+    /// The link at `pos` as (block, range, url): a caret inside it or at
+    /// either end of it.
+    pub fn link_at(&self, pos: Pos) -> Option<(usize, Range<usize>, String)> {
+        self.blocks
+            .get(pos.block)?
+            .marks
+            .iter()
+            .find_map(|m| match &m.style {
+                Style::Link(url) if m.range.start <= pos.offset && pos.offset <= m.range.end => {
+                    Some((pos.block, m.range.clone(), url.clone()))
+                }
+                _ => None,
+            })
+    }
+
     /// The link under the caret, if any.
     pub fn link_at_caret(&self) -> Option<String> {
         let pos = self.selection.head;
@@ -1963,5 +1996,27 @@ mod tests {
         assert!(e.block(1).text.ends_with("!https://diri.sh"));
         assert!(e.undo());
         assert_eq!(e.block(1).text, "see ENG-7 Ship notes!");
+    }
+
+    #[test]
+    fn set_link_replaces_a_link_and_link_at_finds_it() {
+        let mut e = editor("# T\n\nread [the brief](https://a.dev) today\n");
+        let (block, range, url) = e.link_at(Pos::new(1, 7)).expect("caret in link");
+        assert_eq!(
+            (block, range.clone(), url.as_str()),
+            (1, 5..14, "https://a.dev")
+        );
+        e.set_selection(Selection {
+            anchor: Pos::new(1, range.start),
+            head: Pos::new(1, range.end),
+        });
+        e.set_link("https://docs.google.com/document/d/x", 0);
+        assert_eq!(
+            markdown::write_inline(e.block(1), true),
+            "read [the brief](https://docs.google.com/document/d/x) today"
+        );
+        assert!(e.undo());
+        assert_eq!(e.link_at(Pos::new(1, 7)).unwrap().2, "https://a.dev");
+        assert_eq!(e.link_at(Pos::new(1, 2)), None);
     }
 }
