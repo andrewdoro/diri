@@ -95,6 +95,7 @@ pub(crate) fn record(id: &str, kind: AgentKind) -> SessionRecord {
         foreground_agent: None,
         terminal_cwd: None,
         note_id: None,
+        foreground_ports: None,
     }
 }
 
@@ -304,6 +305,7 @@ fn a_todo_becomes_tracked_work_inside_its_note(cx: &mut gpui::TestAppContext) {
             options: None,
             risk_hint: RiskHint::Unknown,
             occurred_at: DateMillis(1.0),
+            secret: false,
         });
     });
     pane.update(cx, |pane, cx| pane.push_work(cx));

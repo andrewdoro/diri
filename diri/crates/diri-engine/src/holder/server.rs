@@ -844,7 +844,13 @@ fn handle(shared: &Shared, request: &HolderRequest) -> HolderResult<HolderRespon
             Ok(HolderResponse::success())
         }
 
-        HolderOperation::Stat => Ok(HolderResponse::with_stat(current_stat(shared))),
+        HolderOperation::Stat => {
+            let mut stat = current_stat(shared);
+            if request.line_probe == Some(true) {
+                stat.awaiting_line = Some(shared.pty.lock().expect("pty").job_awaits_line());
+            }
+            Ok(HolderResponse::with_stat(stat))
+        }
     }
 }
 
@@ -1005,6 +1011,7 @@ fn current_stat_without_identity(shared: &Shared) -> HolderStat {
         // Sampled on request, from the owner: the holder itself never polls,
         // and an idle one still costs no wakeups.
         secret_input: Some(pty.secret_input()),
+        awaiting_line: None,
     }
 }
 

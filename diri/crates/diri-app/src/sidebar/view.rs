@@ -6298,6 +6298,22 @@ impl Sidebar {
                 .child(copy_session_id_row(id, colors, cx));
         } else {
             let running = !matches!(session.status, diri_proto::SessionStatus::Exited(_));
+            // A dev server opens where its tab says it is, as the links
+            // menu's Local preview row does, without opening that menu.
+            if running && let Some(port) = crate::switcher::served_port(&session) {
+                let url = format!("http://localhost:{port}");
+                content = content
+                    .child(menu_row(
+                        format!("Open localhost:{port}"),
+                        colors,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.open_url(&url);
+                            this.ui.popover = None;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(menu_divider(colors));
+            }
             if session.kind == ProtoAgentKind::CLAUDE_CODE
                 || (session.kind == ProtoAgentKind::CODEX && session.host.is_none())
             {
@@ -6319,8 +6335,14 @@ impl Sidebar {
                 ));
             }
             if !running && session.can_resume() {
+                // A local terminal comes back as a fresh shell where it was.
+                let label = if session.kind == ProtoAgentKind::SHELL && session.host.is_none() {
+                    "Restart"
+                } else {
+                    "Resume"
+                };
                 content = content.child(menu_row(
-                    "Resume",
+                    label,
                     colors,
                     cx.listener({
                         let id = id.clone();
@@ -11687,6 +11709,11 @@ mod tests {
                 id: SessionId::new("preview-codex"),
                 position: point(px(48.0), px(210.0)),
             }),
+            // The fixture's dev-server terminal, which offers its address.
+            "server" => Some(Popover::SessionActions {
+                id: SessionId::new("preview-shell"),
+                position: point(px(48.0), px(210.0)),
+            }),
             _ => Some(Popover::SidebarLayout),
         };
         // First row of a right-click menu, for `DIRI_VISUAL_MENU_HOVER`.
@@ -11814,6 +11841,31 @@ mod tests {
                             terminal.updated_at = diri_proto::DateMillis(now);
                             store.upsert_session(terminal);
                         }
+                        // And one whose script stopped at a question, which
+                        // the Engine flags as it flags an Agent's prompt.
+                        let mut asking = base.clone();
+                        asking.id = SessionId::new("preview-term-deploy");
+                        asking.title = "deploy".into();
+                        asking.title_source = diri_proto::TitleSource::TerminalTitle;
+                        asking.terminal_cwd = Some(format!("{root}/infra"));
+                        asking.status = diri_proto::SessionStatus::NeedsInput(
+                            diri_proto::NeedsInputKind::Question,
+                        );
+                        asking.needs_input = Some(diri_proto::NeedsInputDetail {
+                            kind: diri_proto::NeedsInputKind::Question,
+                            source: diri_proto::NeedsInputSource::TerminalLine,
+                            tool_name: None,
+                            summary: "Deploy to production? [y/N]".into(),
+                            prompt_excerpt: Some("Deploy to production? [y/N]".into()),
+                            options: None,
+                            risk_hint: diri_proto::RiskHint::Neutral,
+                            occurred_at: diri_proto::DateMillis(now),
+                            secret: false,
+                        });
+                        asking.foreground_agent = None;
+                        asking.listening_ports = None;
+                        asking.updated_at = diri_proto::DateMillis(now);
+                        store.upsert_session(asking);
                     }
                     store
                         .update_preferences(|prefs| {

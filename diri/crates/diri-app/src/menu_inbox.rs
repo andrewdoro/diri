@@ -164,6 +164,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             note_id: None,
+            foreground_ports: None,
         })
     }
 
@@ -335,6 +336,7 @@ mod tests {
                 prompt_excerpt: None,
                 options: None,
                 risk_hint: RiskHint::Neutral,
+                secret: false,
                 occurred_at: DateMillis(1.0),
             });
         }

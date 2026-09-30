@@ -839,6 +839,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             note_id: None,
+            foreground_ports: None,
         }
     }
 
@@ -878,6 +879,7 @@ mod tests {
             rows: Some(3),
             epoch_offset,
             secret_input: None,
+            awaiting_line: None,
         }
     }
 

@@ -1274,6 +1274,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             note_id: None,
+            foreground_ports: None,
         }
     }
 

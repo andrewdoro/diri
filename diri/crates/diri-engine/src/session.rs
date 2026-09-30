@@ -283,6 +283,8 @@ pub struct SessionView {
     pub foreground_agent: Option<String>,
     /// A local shell's live working directory, which `cd` moves.
     pub terminal_cwd: Option<String>,
+    /// The TCP ports a local shell's foreground job listens on, lowest first.
+    pub foreground_ports: Vec<diri_proto::PortInfo>,
     pub tail_offset: u64,
     pub exited: bool,
 }
@@ -399,6 +401,10 @@ struct Shared {
     /// feeds `screen` for local status reduction and artifact detection.
     remote_grid: Mutex<Option<RemoteGridState>>,
     remote_output_offset: AtomicU64,
+    /// How far a held pump has fed the Holder's output into `screen`. A
+    /// line question is only read off the screen once it has caught up
+    /// with what the Holder had written when it answered.
+    held_screen_offset: AtomicU64,
     grid_wake: GridWake,
     /// The manifest this session runs, for telemetry.
     agent: String,
@@ -432,6 +438,9 @@ struct ForegroundProgram {
     name: Option<String>,
     cwd: Option<String>,
     cwd_read_at: Option<Instant>,
+    /// The TCP ports the job listens on: a dev server's address.
+    ports: Vec<diri_proto::PortInfo>,
+    ports_read_at: Option<Instant>,
     /// The Agent manifest the screen is read with while the reducer is lent.
     read_as: Option<String>,
 }
@@ -460,6 +469,11 @@ const JOB_NAME_SETTLE: Duration = Duration::from_secs(2);
 /// process group, so this is what notices it; a user cannot type a command
 /// and look at the tab faster than this.
 const SHELL_CWD_REFRESH: Duration = Duration::from_millis(500);
+
+/// How often a running job's listening ports are read again. A dev server
+/// opens its port some time after it starts (a bundler compiles first), and
+/// says so on screen, so the samples its output triggers find it within this.
+const JOB_PORTS_REFRESH: Duration = Duration::from_secs(1);
 
 struct RemoteGridState {
     reset_required: bool,
@@ -1979,7 +1993,7 @@ impl Session {
             .lock()
             .expect("prompt title")
             .clone();
-        let (foreground_program, foreground_agent, terminal_cwd) = {
+        let (foreground_program, foreground_agent, terminal_cwd, foreground_ports) = {
             let foreground = self.shared.foreground.lock().expect("foreground");
             let agent = foreground.name.as_deref().and_then(|name| {
                 self.shared
@@ -1988,7 +2002,12 @@ impl Session {
                     .find(|agent| agent.binary == name)
                     .map(|agent| agent.manifest_id.clone())
             });
-            (foreground.name.clone(), agent, foreground.cwd.clone())
+            (
+                foreground.name.clone(),
+                agent,
+                foreground.cwd.clone(),
+                foreground.ports.clone(),
+            )
         };
         let (title, title_source) = if let Some(title) = prompt_title {
             (Some(title), Some(diri_proto::TitleSource::FirstPrompt))
@@ -2019,6 +2038,7 @@ impl Session {
             foreground_program,
             foreground_agent,
             terminal_cwd,
+            foreground_ports,
             status: self.shared.status.lock().expect("status").clone(),
             status_evidence,
             needs_input: self.shared.needs_input.lock().expect("needs input").clone(),
@@ -2750,6 +2770,7 @@ impl Session {
                     SampleHost::Local,
                 );
                 record_secret_input(&self.shared, reading_secret);
+                probe_direct_line_wait(&self.shared, pty);
             }
             Transport::Held(client) => {
                 sample_held_pty_facts(&self.shared, client, &self.manifest_id);
@@ -3107,6 +3128,7 @@ fn new_shared(
         child_pid: std::sync::atomic::AtomicI32::new(0),
         remote_grid: Mutex::new(None),
         remote_output_offset: AtomicU64::new(0),
+        held_screen_offset: AtomicU64::new(0),
         grid_wake: GridWake::new(),
         agent: spec.manifest_id.clone(),
         launched_at: fresh.then(Instant::now),
@@ -3355,7 +3377,26 @@ fn observe_foreground_program(
     if foreground.group != job {
         foreground.group = job;
         foreground.group_seen_at = Some(Instant::now());
+        foreground.ports_read_at = None;
         changed |= foreground.name.take().is_some();
+        changed |= !std::mem::take(&mut foreground.ports).is_empty();
+    }
+    // What the job serves, read on the same terms as its name: once it has
+    // held the foreground long enough to name the tab, then again while it
+    // runs, since a server listens a while after it starts.
+    let held = foreground
+        .group_seen_at
+        .is_some_and(|seen_at| seen_at.elapsed() >= JOB_NAME_DELAY);
+    let ports_due = foreground
+        .ports_read_at
+        .is_none_or(|read_at| read_at.elapsed() >= JOB_PORTS_REFRESH);
+    if let Some(group) = job.filter(|_| held && ports_due) {
+        foreground.ports_read_at = Some(Instant::now());
+        let ports = diri_pty::foreground::listening_ports(group as u32).unwrap_or_default();
+        if foreground.ports != ports {
+            foreground.ports = ports;
+            changed = true;
+        }
     }
     let naming = foreground.name.is_none()
         && foreground.group_seen_at.is_some_and(|seen_at| {
@@ -3414,7 +3455,13 @@ fn sample_held_pty_facts(
         record_secret_input(shared, false);
         return None;
     }
-    let stat = client.stat().ok()?;
+    let probe = shell && line_probe_due(shared) == Some(true);
+    let stat = if probe {
+        client.stat_with_line_probe()
+    } else {
+        client.stat()
+    }
+    .ok()?;
     if shell {
         shared.child_pid.store(stat.child_pid, Ordering::SeqCst);
         apply_foreground_sample(
@@ -3427,7 +3474,69 @@ fn sample_held_pty_facts(
     }
     // A Holder that predates the field omits it: not known to be secret.
     record_secret_input(shared, stat.secret_input == Some(true));
+    if shell {
+        match line_probe_due(shared) {
+            // Asked, and a Holder that predates the probe did not answer.
+            Some(true) if probe => match stat.awaiting_line {
+                // Output the Holder wrote before it answered has not reached
+                // the screen or the settle yet: the question, if it is one,
+                // is read on a later sample.
+                Some(true)
+                    if shared.held_screen_offset.load(Ordering::SeqCst) < stat.log_offset => {}
+                Some(awaiting) => apply_line_wait(shared, awaiting),
+                None => {}
+            },
+            Some(false) => apply_line_wait(shared, false),
+            _ => {}
+        }
+    }
     Some(stat.alive)
+}
+
+/// Whether a shell's reducer wants to know if its job waits on a line:
+/// `Some(true)` to ask the PTY owner, `Some(false)` when the answer is
+/// already "no" (a full-screen program owns the terminal), `None` when
+/// nothing needs asking.
+fn line_probe_due(shared: &Shared) -> Option<bool> {
+    let wanted = shared
+        .reducer
+        .lock()
+        .expect("reducer")
+        .wants_line_probe(SystemTime::now());
+    wanted.then(|| !shared.screen.lock().expect("screen").is_alt_screen())
+}
+
+/// Asks a directly owned PTY whether the shell's job waits on a line, when
+/// the reducer wants to know.
+fn probe_direct_line_wait(shared: &Shared, pty: &Mutex<Pty>) {
+    match line_probe_due(shared) {
+        Some(true) => {
+            let awaiting = pty.lock().is_ok_and(|pty| pty.job_awaits_line());
+            apply_line_wait(shared, awaiting);
+        }
+        Some(false) => apply_line_wait(shared, false),
+        None => {}
+    }
+}
+
+/// Folds a line-wait sample into the shell's status, with the question as
+/// the screen shows it. Nothing is read from the screen while echo is off.
+fn apply_line_wait(shared: &Shared, awaiting: bool) {
+    let prompt = awaiting.then(|| {
+        let secret = shared.secret_input.load(Ordering::SeqCst);
+        let line = (!secret).then(|| {
+            let screen = shared.screen.lock().expect("screen");
+            let (_, row, _) = screen.cursor();
+            screen.row_text(usize::from(row))
+        });
+        crate::status::TerminalPrompt { line, secret }
+    });
+    let outcome = shared
+        .reducer
+        .lock()
+        .expect("reducer")
+        .reduce(StatusSignal::TerminalLine(prompt), SystemTime::now());
+    apply(shared, &outcome);
 }
 
 /// A line-mode password prompt cannot coexist with the alternate screen or
@@ -4372,6 +4481,7 @@ fn pump(
             // takes is what notices.
             let reading_secret = pty.lock().is_ok_and(|pty| pty.secret_input());
             record_secret_input(&shared, reading_secret);
+            probe_direct_line_wait(&shared, &pty);
         }
     }
 
@@ -5039,6 +5149,7 @@ fn pump_held(
             marker_buffer.clear();
         }
         offset = start + chunk.len() as u64;
+        shared.held_screen_offset.store(offset, Ordering::SeqCst);
         last_liveness = Instant::now();
 
         // The floor is an incarnation boundary, so no marker straddles it:
@@ -6968,6 +7079,69 @@ mod foreground_program_tests {
         let sub = root.join("sub").to_string_lossy().into_owned();
         wait_until("cd to be followed", || {
             session.view().terminal_cwd.as_deref() == Some(sub.as_str())
+        });
+        let _ = session.terminate(Duration::from_secs(2));
+    }
+
+    /// A server started at the prompt reports the port its job listens on,
+    /// and stops reporting it when it is interrupted.
+    #[test]
+    fn a_shell_reports_the_port_its_foreground_job_serves() {
+        let python = [
+            "/usr/bin/python3",
+            "/usr/local/bin/python3",
+            "/opt/homebrew/bin/python3",
+        ]
+        .into_iter()
+        .find(|path| {
+            std::process::Command::new(path)
+                .args(["-c", ""])
+                .output()
+                .is_ok_and(|output| output.status.success())
+        });
+        let Some(python) = python else {
+            eprintln!("skipped: no python3 to serve a port");
+            return;
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (engine, _) = ManifestEngine::load_dir(&crate::detect::bundled_manifest_dir()).unwrap();
+        let logs = root.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let spec = SessionSpec {
+            id: "foreground-ports".into(),
+            pty: PtySpec::new(vec!["/bin/sh".into(), "-i".into()], &root)
+                .env("PATH", "/usr/bin:/bin")
+                .env("PS1", "$ ")
+                .size(80, 24),
+            manifest_id: "shell".into(),
+            authority: Authority::ProcessOnly,
+            logs_dir: logs,
+            holder: None,
+            remote: None,
+            defer_launch: false,
+        };
+        let mut session = Session::spawn(spec, Arc::new(engine)).expect("spawn");
+        wait_until("the prompt", || session.view().terminal_cwd.is_some());
+        // A free port, released for the server to take.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        session
+            .write_input(format!("{python} -m http.server {port} --bind 127.0.0.1\r").as_bytes())
+            .unwrap();
+        wait_until("the served port", || {
+            session
+                .view()
+                .foreground_ports
+                .iter()
+                .any(|info| info.port == i64::from(port))
+        });
+        session.write_input(b"\x03").unwrap();
+        wait_until("the port to leave with the job", || {
+            session.view().foreground_ports.is_empty()
         });
         let _ = session.terminate(Duration::from_secs(2));
     }

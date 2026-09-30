@@ -10,6 +10,9 @@
 //! `DIRI_TITLES_HORIZONTAL=1` renders the tab strip instead of the sidebar,
 //! `DIRI_TITLES_INSTANT=1` files every rename as the user's own, which
 //! commits at once: what a build without the settle paints.
+//! `DIRI_TITLES_TERMINALS=1` plays a terminal's Engine names instead: its
+//! folder, `npm`, the port it serves, the folder again, and a `vim` opened
+//! and quit inside one settle.
 
 use std::time::Duration;
 
@@ -29,12 +32,25 @@ const SCRIPT: [(u64, &str, &str); 4] = [
     (1960, "preview-spawned-review", "Audit the fixtures"),
 ];
 
+/// A terminal running a dev server, then a quick look in an editor.
+const TERMINAL_SCRIPT: [(u64, &str, &str); 6] = [
+    (300, "preview-shell", "npm"),
+    (800, "preview-shell", "localhost:3000"),
+    (1700, "preview-shell", "web"),
+    (2300, "preview-shell", "vim"),
+    // Quit before the fade landed: it turns back from where it stands.
+    (2380, "preview-shell", "web"),
+    (2380, "preview-cursor", "Fix tab focus after close"),
+];
+
 #[test]
 #[ignore = "writes agent renames, one PNG per frame, to the DIRI_VISUAL_OUTPUT directory"]
 fn render_title_settle_frames() {
     let output = std::path::PathBuf::from(std::env::var("DIRI_VISUAL_OUTPUT").unwrap());
     let horizontal = std::env::var_os("DIRI_TITLES_HORIZONTAL").is_some();
     let instant = std::env::var_os("DIRI_TITLES_INSTANT").is_some();
+    let terminals = std::env::var_os("DIRI_TITLES_TERMINALS").is_some();
+    let script: &[(u64, &str, &str)] = if terminals { &TERMINAL_SCRIPT } else { &SCRIPT };
     let frame = Duration::from_micros(1_000_000 / 60);
     std::fs::create_dir_all(&output).unwrap();
 
@@ -67,8 +83,20 @@ fn render_title_settle_frames() {
         .clone();
         refined.title = "Fix tab focus".into();
         store.upsert_session(refined);
+        let mut terminal = (**store
+            .sessions()
+            .get(&SessionId::new("preview-shell"))
+            .unwrap())
+        .clone();
+        terminal.title = "web".into();
+        terminal.title_source = TitleSource::TerminalTitle;
+        store.upsert_session(terminal);
         // The strip shows the selected session's project.
-        store.select(SessionId::new("preview-codex"));
+        store.select(SessionId::new(if terminals {
+            "preview-shell"
+        } else {
+            "preview-codex"
+        }));
     }
     let window = cx
         .open_window(size(px(1100.0), px(720.0)), |window, cx| {
@@ -110,12 +138,12 @@ fn render_title_settle_frames() {
         cx.run_until_parked();
     }
 
-    let length = Duration::from_millis(SCRIPT[SCRIPT.len() - 1].0 + 700);
+    let length = Duration::from_millis(script[script.len() - 1].0 + 700);
     let mut elapsed = Duration::ZERO;
     let mut applied = 0;
     let mut index = 0;
     while elapsed <= length {
-        while let Some((at, id, title)) = SCRIPT.get(applied)
+        while let Some((at, id, title)) = script.get(applied)
             && elapsed >= Duration::from_millis(*at)
         {
             applied += 1;
@@ -124,6 +152,8 @@ fn render_title_settle_frames() {
             session.title = (*title).into();
             session.title_source = if instant {
                 TitleSource::UserRename
+            } else if terminals {
+                TitleSource::TerminalTitle
             } else {
                 TitleSource::AgentProvided
             };

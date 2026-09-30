@@ -77,6 +77,26 @@ const TERMINAL_ONLY_METHODS: &[&str] = &[
     Method::SESSION_MIGRATE,
     Method::SESSION_CONTINUE_ACCOUNT,
 ];
+/// A terminal's shell: the user's own, as a login shell.
+fn login_shell_argv() -> Vec<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell().into());
+    vec![shell, "-l".into()]
+}
+
+/// Where a fresh shell for an existing local terminal starts: the directory it
+/// had `cd`'d to, while that is still an absolute directory on this host.
+/// `None` sends it to the launch `cwd`, as before. Remote shells and Agents
+/// always start in `cwd`.
+fn restored_terminal_directory(record: &diri_proto::SessionRecord) -> Option<PathBuf> {
+    if record.kind != diri_proto::AgentKind::SHELL || record.host.is_some() {
+        return None;
+    }
+    record
+        .terminal_cwd
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_dir())
+}
 
 pub struct ControlServer {
     engine_instance_id: String,
@@ -1082,10 +1102,7 @@ impl ControlServer {
                     let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell().into());
                     vec![shell, "-lc".into(), command.to_string()]
                 }
-                _ if kind == diri_proto::AgentKind::SHELL_ID => {
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell().into());
-                    vec![shell, "-l".into()]
-                }
+                _ if kind == diri_proto::AgentKind::SHELL_ID => login_shell_argv(),
                 _ => Vec::new(),
             }
         } else {
@@ -3067,9 +3084,15 @@ impl ControlServer {
             }
             record
         };
+        // A local terminal has no conversation to re-enter: it restarts as a
+        // fresh login shell, back in the directory it had `cd`'d to.
+        let restored_directory = restored_terminal_directory(&record);
         let mut spec = if record.host.is_some() {
             crate::telemetry::record_resume(&record, "remote", record.agent_session_id.as_deref());
             self.remote_resume_spec(&record)?
+        } else if record.kind == diri_proto::AgentKind::SHELL {
+            crate::telemetry::record_resume(&record, "shell", None);
+            self.shell_restart_spec(&record, restored_directory.as_deref())?
         } else {
             let registry = self.registry.lock().map_err(poisoned)?;
             match claude_resume_target(&record) {
@@ -3151,9 +3174,20 @@ impl ControlServer {
             // silently handing back the dead record it was asked to revive.
             let _ = registry.terminate(&p.session_id.0, std::time::Duration::from_millis(500));
         }
+        let local_shell = record.kind == diri_proto::AgentKind::SHELL && record.host.is_none();
         registry
             .respawn(spec)
             .map_err(|error| ControlError::internal(error.to_string()))?;
+        if local_shell {
+            // Report where the new shell actually starts before its first
+            // sample: the restored directory, or none when that directory is
+            // gone and the shell fell back to `cwd`.
+            registry.update_record(&p.session_id.0, |record| {
+                record.terminal_cwd = restored_directory
+                    .as_deref()
+                    .map(|path| path.to_string_lossy().into_owned());
+            });
+        }
         if let Some(persistence) = remote_persistence {
             registry.update_record(&p.session_id.0, |record| {
                 record.remote_persistence = Some(persistence);
@@ -3416,6 +3450,32 @@ impl ControlServer {
                 binding_store,
             }),
             defer_launch: false,
+        })
+    }
+
+    /// A fresh login shell under an existing local terminal's id, started in
+    /// `directory` when there is one and in the terminal's `cwd` otherwise.
+    /// It is launched exactly as `session.spawn` launches a new terminal.
+    fn shell_restart_spec(
+        &self,
+        record: &diri_proto::SessionRecord,
+        directory: Option<&Path>,
+    ) -> Result<crate::session::SessionSpec, ControlError> {
+        let registry = self.registry.lock().map_err(poisoned)?;
+        let kind = diri_proto::AgentKind::SHELL_ID;
+        let launch_path = directory.unwrap_or_else(|| Path::new(&record.cwd));
+        let mut pty = crate::pty::PtySpec::new(login_shell_argv(), launch_path);
+        pty.env = std::env::vars().collect();
+        crate::agent::assert_color_environment(&mut pty.env);
+        Ok(crate::session::SessionSpec {
+            id: record.id.0.clone(),
+            pty,
+            manifest_id: kind.to_owned(),
+            authority: crate::session::authority_for(kind, &registry.engine()),
+            logs_dir: self.logs_dir.clone(),
+            holder: self.holder.clone(),
+            remote: None,
+            defer_launch: true,
         })
     }
 
@@ -4449,6 +4509,7 @@ pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::Session
         foreground_agent: None,
         terminal_cwd: None,
         note_id: None,
+        foreground_ports: None,
     }
 }
 
@@ -5426,6 +5487,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             note_id: None,
+            foreground_ports: None,
         }
     }
 
@@ -5463,6 +5525,8 @@ mod tests {
 
     fn ended_resumable_record(id: &str, repo: &Path) -> diri_proto::SessionRecord {
         let mut record = test_record(id);
+        // An Agent's conversation: a terminal typed `exit` is closed for good.
+        record.kind = diri_proto::AgentKind::CLAUDE_CODE;
         record.cwd = repo.to_string_lossy().into_owned();
         record.project_id = crate::registry::session_project_id(&record.cwd, None);
         record.status = diri_proto::SessionStatus::Exited(diri_proto::ExitInfo {
@@ -6502,6 +6566,175 @@ mod tests {
         );
     }
 
+    /// A local terminal whose shell died under it (a crash, a reboot that
+    /// took its Holder) with `cwd` the project and `terminal_cwd` wherever it
+    /// had `cd`'d to. `/usr/bin/false` stands in for the shell that went away;
+    /// its non-zero exit is not the user closing the tab.
+    fn dead_terminal(
+        temp: &Path,
+        terminal_cwd: Option<&Path>,
+    ) -> (Arc<Mutex<Registry>>, Arc<ControlServer>, PathBuf) {
+        let project = temp.join("project").canonicalize().expect("project");
+        let registry = Arc::new(Mutex::new(Registry::new(engine(), temp.join("state.json"))));
+        {
+            let mut guard = registry.lock().expect("registry");
+            let mut record = test_record("s_term");
+            record.cwd = project.to_string_lossy().into_owned();
+            record.terminal_cwd = terminal_cwd.map(|path| path.to_string_lossy().into_owned());
+            guard
+                .spawn(
+                    crate::session::SessionSpec {
+                        id: "s_term".into(),
+                        pty: crate::pty::PtySpec::new(vec!["/usr/bin/false".into()], &project),
+                        manifest_id: diri_proto::AgentKind::SHELL_ID.into(),
+                        authority: crate::status::Authority::ProcessOnly,
+                        logs_dir: temp.join("logs"),
+                        holder: None,
+                        remote: None,
+                        defer_launch: false,
+                    },
+                    record,
+                )
+                .expect("spawn");
+        }
+        let exited = (0..200).any(|_| {
+            let exited = registry
+                .lock()
+                .expect("registry")
+                .record("s_term")
+                .is_some_and(|record| {
+                    matches!(record.status, diri_proto::SessionStatus::Exited(_))
+                });
+            if !exited {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            exited
+        });
+        assert!(exited, "the stand-in shell never exited");
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.join("daemon.sock"),
+        ));
+        (registry, server, project)
+    }
+
+    /// Where the resumed shell's own process sits, as the Engine samples it.
+    fn wait_for_live_directory(registry: &Arc<Mutex<Registry>>, expected: &Path) {
+        let expected = expected.to_string_lossy().into_owned();
+        let mut last = None;
+        for _ in 0..500 {
+            last = registry
+                .lock()
+                .expect("registry")
+                .get("s_term")
+                .and_then(|session| session.view().terminal_cwd);
+            if last.as_deref() == Some(expected.as_str()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the resumed shell runs in {last:?}, not {expected}");
+    }
+
+    fn stop_terminal(registry: &Arc<Mutex<Registry>>) {
+        let _ = registry
+            .lock()
+            .expect("registry")
+            .terminate("s_term", Duration::from_secs(2));
+    }
+
+    /// A terminal that comes back after its shell died starts in the directory
+    /// it had `cd`'d to, keeps its project, and says so before the new shell
+    /// has been sampled.
+    #[test]
+    fn a_resumed_terminal_starts_in_its_last_directory() {
+        let temp = tempfile::tempdir().expect("temp");
+        let sub = temp.path().join("project/crates/engine");
+        std::fs::create_dir_all(&sub).expect("sub");
+        let sub = sub.canonicalize().expect("sub");
+        let (registry, server, project) = dead_terminal(temp.path(), Some(&sub));
+        let record = registry
+            .lock()
+            .expect("registry")
+            .record("s_term")
+            .expect("record");
+        assert_eq!(
+            record.resumability,
+            diri_proto::Resumability::Resumable,
+            "a terminal whose shell died must offer to come back"
+        );
+
+        let result = ok_of(call(
+            &server,
+            "session.resume",
+            Some(json!({ "sessionID": "s_term" })),
+        ));
+        assert!(
+            result["status"].get("exited").is_none(),
+            "resume handed back the dead terminal: {}",
+            result["status"]
+        );
+        assert_eq!(result["terminalCwd"], sub.to_string_lossy().as_ref());
+        assert_eq!(result["cwd"], project.to_string_lossy().as_ref());
+        wait_for_live_directory(&registry, &sub);
+        stop_terminal(&registry);
+    }
+
+    /// A directory deleted while the terminal was down is not an error: the
+    /// shell starts in the project, as it always did, and stops claiming the
+    /// vanished directory.
+    #[test]
+    fn a_resumed_terminal_whose_directory_vanished_starts_in_its_project() {
+        let temp = tempfile::tempdir().expect("temp");
+        std::fs::create_dir_all(temp.path().join("project")).expect("project");
+        let gone = temp.path().join("project/gone");
+        let (registry, server, project) = dead_terminal(temp.path(), Some(&gone));
+
+        let result = ok_of(call(
+            &server,
+            "session.resume",
+            Some(json!({ "sessionID": "s_term" })),
+        ));
+        assert!(result.get("terminalCwd").is_none(), "{result}");
+        assert_eq!(result["cwd"], project.to_string_lossy().as_ref());
+        wait_for_live_directory(&registry, &project);
+        stop_terminal(&registry);
+    }
+
+    /// Only a local shell restarts in its last directory. Agents re-enter
+    /// their conversation in `cwd`, remote shells are left to the Helper, and
+    /// nothing but an existing absolute directory is trusted.
+    #[test]
+    fn only_a_local_terminal_restores_an_existing_absolute_directory() {
+        let temp = tempfile::tempdir().expect("temp");
+        let sub = temp.path().canonicalize().expect("temp").join("sub");
+        std::fs::create_dir_all(&sub).expect("sub");
+        let mut shell = test_record("shell");
+        shell.terminal_cwd = Some(sub.to_string_lossy().into_owned());
+        assert_eq!(restored_terminal_directory(&shell), Some(sub.clone()));
+
+        let mut agent = shell.clone();
+        agent.kind = diri_proto::AgentKind::CLAUDE_CODE;
+        assert_eq!(restored_terminal_directory(&agent), None);
+
+        let mut remote = shell.clone();
+        remote.host = Some("forge".into());
+        assert_eq!(restored_terminal_directory(&remote), None);
+
+        let mut relative = shell.clone();
+        relative.terminal_cwd = Some("sub".into());
+        assert_eq!(restored_terminal_directory(&relative), None);
+
+        let mut file = shell.clone();
+        let path = sub.join("notes.txt");
+        std::fs::write(&path, "").expect("file");
+        file.terminal_cwd = Some(path.to_string_lossy().into_owned());
+        assert_eq!(restored_terminal_directory(&file), None);
+
+        shell.terminal_cwd = None;
+        assert_eq!(restored_terminal_directory(&shell), None);
+    }
+
     fn check_resume_relaunches(archived: bool) {
         let temp = tempfile::tempdir().expect("temp");
         // A manifest that resumes by flag, onto a binary that outlives the
@@ -7133,7 +7366,11 @@ mod tests {
         registry
             .lock()
             .expect("registry")
-            .insert_record(test_record("s_gone"));
+            .insert_record(diri_proto::SessionRecord {
+                // An Agent with no resume grammar; a terminal restarts instead.
+                kind: diri_proto::AgentKind::new("amp"),
+                ..test_record("s_gone")
+            });
         let server = Arc::new(ControlServer::new(
             registry,
             temp.path().join("daemon.sock"),
@@ -7149,7 +7386,7 @@ mod tests {
 
         let reopened = ok_of(call(&server, "session.reopen_last", None));
         assert_eq!(reopened["id"], "s_gone");
-        // A shell cannot resume; it must come back exited, never still
+        // This Agent cannot resume; it must come back exited, never still
         // claiming the live status it had when closed.
         assert!(
             reopened["status"].get("exited").is_some(),

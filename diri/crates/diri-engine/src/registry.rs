@@ -1131,6 +1131,7 @@ impl Registry {
                     record.title.clone(),
                     record.title_source,
                     record.last_turn_completed_at,
+                    record.terminal_cwd.clone(),
                 );
                 fold_session_view(record, &view);
                 fold_record_lifecycle(&self.engine, record);
@@ -1144,6 +1145,9 @@ impl Registry {
                             record.title.clone(),
                             record.title_source,
                             record.last_turn_completed_at,
+                            // A terminal restarts where it was: a `cd` must
+                            // reach disk even when the tab keeps its name.
+                            record.terminal_cwd.clone(),
                         );
                 if record_persistence_changed {
                     record.updated_at = DateMillis::from(std::time::SystemTime::now());
@@ -1918,7 +1922,10 @@ impl Registry {
                 record.worktree_path.clone(),
                 record.git_branch.clone(),
                 record.updated_at,
+                record.terminal_cwd.take(),
             );
+            // A terminal moved to another checkout restarts there, not in
+            // the directory it had `cd`'d to in the old one.
             record.cwd.clone_from(&cwd);
             record.worktree_path = Some(cwd);
             record.git_branch = branch;
@@ -1938,6 +1945,7 @@ impl Registry {
             record.worktree_path = previous.1;
             record.git_branch = previous.2;
             record.updated_at = previous.3;
+            record.terminal_cwd = previous.4;
             self.dirty = was_dirty;
             return Err(error);
         }
@@ -2350,14 +2358,25 @@ fn fold_session_view(record: &mut SessionRecord, view: &SessionView) {
 }
 
 /// Names a shell after what it is doing, the way a terminal's own tab would:
-/// the Agent's task or the program in its foreground, else the directory its
-/// prompt sits in. A name the user or Diri gave it is never replaced.
+/// the Agent's task, the address a dev server in its foreground serves, or
+/// the program there, else the directory its prompt sits in. A name the user
+/// or Diri gave it is never replaced.
 ///
 /// A remote shell reports none of this and keeps its placeholder.
 fn fold_shell_view(record: &mut SessionRecord, view: &SessionView) {
     record.foreground_agent = view.foreground_agent.clone().map(AgentKind::new);
     if view.terminal_cwd.is_some() {
         record.terminal_cwd.clone_from(&view.terminal_cwd);
+    }
+    if record.host.is_none() {
+        fold_foreground_ports(
+            record,
+            if view.exited {
+                &[]
+            } else {
+                &view.foreground_ports
+            },
+        );
     }
     if matches!(
         record.title_source,
@@ -2373,6 +2392,7 @@ fn fold_shell_view(record: &mut SessionRecord, view: &SessionView) {
             let title = view.terminal_title.as_deref()?;
             normalize_terminal_title_for(title, agent, cwd)
         })
+        .or_else(|| serving_title(record.foreground_ports.as_deref().unwrap_or_default()))
         .or_else(|| view.foreground_program.clone())
         .or_else(|| record.terminal_cwd.as_deref().map(directory_title));
     if let Some(title) = title
@@ -2381,6 +2401,47 @@ fn fold_shell_view(record: &mut SessionRecord, view: &SessionView) {
         record.title = title;
         record.title_source = TitleSource::TerminalTitle;
     }
+}
+
+/// Keeps `listening_ports` current for what a shell's foreground job serves.
+/// The governor's own scan runs every couple of minutes and only while a
+/// client is attached; the job's ports join the list as they open and leave
+/// it with the job, so the preview link is never late or stale.
+fn fold_foreground_ports(record: &mut SessionRecord, ports: &[diri_proto::PortInfo]) {
+    let previous = record.foreground_ports.take().unwrap_or_default();
+    record.foreground_ports = (!ports.is_empty()).then(|| ports.to_vec());
+    if previous.as_slice() == ports {
+        return;
+    }
+    let mut listening = record.listening_ports.take().unwrap_or_default();
+    listening.retain(|known| !previous.iter().any(|old| old.port == known.port));
+    for port in ports {
+        if !listening.iter().any(|known| known.port == port.port) {
+            listening.push(port.clone());
+        }
+    }
+    listening.sort_by_key(|port| port.port);
+    record.listening_ports = Some(listening);
+}
+
+/// Ports from here up are the kernel's to hand out: a worker's or a
+/// debugger's, not a page anyone opens, so they never name a tab.
+const EPHEMERAL_PORTS: i64 = 32768;
+
+/// What a tab calls a dev server: the address it serves, `localhost:3000`.
+/// A job serving more than one names its lowest and counts the rest,
+/// `localhost:3000 +1`, since the tab has room for one address and the
+/// links menu lists them all.
+fn serving_title(ports: &[diri_proto::PortInfo]) -> Option<String> {
+    let mut served = ports
+        .iter()
+        .map(|info| info.port)
+        .filter(|port| (1..EPHEMERAL_PORTS).contains(port));
+    let first = served.next()?;
+    Some(match served.count() {
+        0 => format!("localhost:{first}"),
+        more => format!("localhost:{first} +{more}"),
+    })
 }
 
 /// A directory as a tab names it: its last component, or `~` for home.
@@ -2495,12 +2556,25 @@ fn fold_session_status(record: &mut SessionRecord, view: &SessionView) {
 /// Resolves status-dependent facts at the one seam shared by snapshots and
 /// incremental events, so clients never have to reconstruct Agent behavior.
 fn fold_record_lifecycle(engine: &ManifestEngine, record: &mut SessionRecord) {
-    // `Live` only records that the agent named its conversation while it was
-    // running. After exit, Resume needs the stronger answer: whether that
-    // conversation can actually be re-entered through its manifest.
-    if matches!(record.status, SessionStatus::Exited(_))
+    // A local terminal that did not close itself restarts: `session.resume`
+    // gives it a fresh login shell in the directory it had `cd`'d to. A
+    // clean `exit` stays final, which is what lets its tab close.
+    if let SessionStatus::Exited(exit) = &record.status
+        && record.kind == AgentKind::SHELL
+        && record.host.is_none()
+    {
+        let closed_itself = exit.reason == diri_proto::ExitReason::Exited && exit.code == Some(0);
+        record.resumability = if closed_itself {
+            diri_proto::Resumability::NotResumable
+        } else {
+            diri_proto::Resumability::Resumable
+        };
+    } else if matches!(record.status, SessionStatus::Exited(_))
         && record.resumability == diri_proto::Resumability::Live
     {
+        // `Live` only records that the agent named its conversation while it
+        // was running. After exit, Resume needs the stronger answer: whether
+        // that conversation can actually be re-entered through its manifest.
         record.resumability = if can_reenter(engine, record) {
             diri_proto::Resumability::Resumable
         } else {
@@ -2690,6 +2764,7 @@ fn recovered_record(capsule: diri_proto::recovery::SessionRecoveryCapsule) -> Se
         foreground_agent: None,
         terminal_cwd: None,
         note_id: None,
+        foreground_ports: None,
     }
 }
 
@@ -2917,6 +2992,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             note_id: None,
+            foreground_ports: None,
         }
     }
 
@@ -3179,6 +3255,7 @@ mod tests {
         original.worktree_path = Some("/repo/main".into());
         original.git_branch = Some("main".into());
         original.updated_at = DateMillis(42.0);
+        original.terminal_cwd = Some("/repo/main/src".into());
         registry.records.insert("s_move".into(), original.clone());
 
         let error = registry
@@ -3197,6 +3274,7 @@ mod tests {
         assert_eq!(current.worktree_path, original.worktree_path);
         assert_eq!(current.git_branch, original.git_branch);
         assert_eq!(current.updated_at, original.updated_at);
+        assert_eq!(current.terminal_cwd, original.terminal_cwd);
         assert!(!registry.dirty, "failed edit must not be flushed later");
     }
 
@@ -3937,6 +4015,7 @@ mod tests {
             foreground_program: program.map(str::to_owned),
             foreground_agent: agent.map(str::to_owned),
             terminal_cwd: Some("/work/diri/crates".to_owned()),
+            foreground_ports: Vec::new(),
             attention_state: None,
             terminal_title: title.map(str::to_owned),
             id: "shell".to_owned(),
@@ -4002,12 +4081,106 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_serving_a_port_is_named_after_its_address() {
+        let port = |port: i64| diri_proto::PortInfo {
+            port,
+            process_name: "node".to_owned(),
+        };
+        let view = |program: Option<&str>, ports: Vec<diri_proto::PortInfo>| SessionView {
+            remote_connection: None,
+            foreground_program: program.map(str::to_owned),
+            foreground_agent: None,
+            terminal_cwd: Some("/work/web".to_owned()),
+            foreground_ports: ports,
+            attention_state: None,
+            terminal_title: None,
+            id: "shell".to_owned(),
+            status: SessionStatus::Working,
+            status_evidence: None,
+            needs_input: None,
+            last_turn_completed_at: None,
+            title: None,
+            title_source: Some(TitleSource::TerminalTitle),
+            tail_offset: 0,
+            exited: false,
+        };
+        let mut shell = record("shell");
+        shell.cwd = "/work/web".into();
+        // A port the governor found elsewhere in the tree stays put.
+        shell.listening_ports = Some(vec![port(6006)]);
+
+        // `npm run dev` before its server listens is just `npm`.
+        fold_session_view(&mut shell, &view(Some("npm"), Vec::new()));
+        assert_eq!(shell.title, "npm");
+        assert_eq!(shell.foreground_ports, None);
+
+        fold_session_view(&mut shell, &view(Some("npm"), vec![port(3000)]));
+        assert_eq!(shell.title, "localhost:3000");
+        assert_eq!(shell.title_source, TitleSource::TerminalTitle);
+        assert_eq!(
+            shell.listening_ports,
+            Some(vec![port(3000), port(6006)]),
+            "the preview link appears with the name, not at the next governor scan"
+        );
+
+        // A second server counts; an inspector's ephemeral port does not.
+        fold_session_view(
+            &mut shell,
+            &view(Some("turbo"), vec![port(3000), port(3001), port(50123)]),
+        );
+        assert_eq!(shell.title, "localhost:3000 +1");
+
+        // The server stops: back to the folder, and its ports leave with it.
+        fold_session_view(&mut shell, &view(None, Vec::new()));
+        assert_eq!(shell.title, "web");
+        assert_eq!(shell.foreground_ports, None);
+        assert_eq!(shell.listening_ports, Some(vec![port(6006)]));
+
+        // Only an ephemeral port: named after the program.
+        fold_session_view(&mut shell, &view(Some("node"), vec![port(50123)]));
+        assert_eq!(shell.title, "node");
+
+        // The user's name wins; the port is still recorded for the link.
+        shell.title = "API".into();
+        shell.title_source = TitleSource::UserRename;
+        fold_session_view(&mut shell, &view(Some("npm"), vec![port(8080)]));
+        assert_eq!(shell.title, "API");
+        assert!(
+            shell
+                .listening_ports
+                .as_deref()
+                .unwrap()
+                .contains(&port(8080))
+        );
+
+        // A job that exits takes its ports with it.
+        let mut exited = view(Some("npm"), vec![port(8080)]);
+        exited.exited = true;
+        fold_session_view(&mut shell, &exited);
+        assert_eq!(shell.foreground_ports, None);
+        assert_eq!(shell.listening_ports, Some(vec![port(6006)]));
+
+        // A remote shell is left as it was, whatever a view claims.
+        let mut remote = record("remote");
+        remote.host = Some("forge".into());
+        remote.title = "shell".into();
+        remote.title_source = TitleSource::Placeholder;
+        let mut serving = view(None, vec![port(3000)]);
+        serving.terminal_cwd = None;
+        fold_session_view(&mut remote, &serving);
+        assert_eq!(remote.title_source, TitleSource::Placeholder);
+        assert_eq!(remote.foreground_ports, None);
+        assert_eq!(remote.listening_ports, None);
+    }
+
+    #[test]
     fn pty_titles_are_filtered_fallbacks_and_never_override_user_renames() {
         let view = SessionView {
             remote_connection: None,
             foreground_program: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: Vec::new(),
             attention_state: None,
             terminal_title: None,
             id: "claude".to_owned(),
@@ -4048,6 +4221,7 @@ mod tests {
             foreground_program: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: Vec::new(),
             title: Some("Implement terminal IME".to_owned()),
             title_source: Some(TitleSource::FirstPrompt),
             ..view.clone()
@@ -4064,6 +4238,7 @@ mod tests {
             foreground_program: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: Vec::new(),
             title: Some("diri".to_owned()),
             ..view
         };
@@ -4077,6 +4252,7 @@ mod tests {
             foreground_program: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: Vec::new(),
             title: Some("✳ Claude Code".to_owned()),
             ..generic_view.clone()
         };
@@ -4107,6 +4283,7 @@ mod tests {
             foreground_program: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: Vec::new(),
             title: Some("Cursor Agent - \u{2705} Ready".to_owned()),
             title_source: Some(TitleSource::AgentProvided),
             ..generic_view
@@ -4121,6 +4298,7 @@ mod tests {
             foreground_program: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: Vec::new(),
             title: Some("Fix the cursor session title".to_owned()),
             title_source: Some(TitleSource::FirstPrompt),
             ..cursor_ready.clone()
@@ -4136,6 +4314,7 @@ mod tests {
             foreground_program: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: Vec::new(),
             title: Some("Cursor Integration Fix - \u{23f3} Working ...".to_owned()),
             title_source: Some(TitleSource::AgentProvided),
             ..cursor_ready
@@ -4159,6 +4338,7 @@ mod tests {
             foreground_program: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: Vec::new(),
             attention_state: None,
             id: session.id.to_string(),
             status: SessionStatus::Working,
@@ -4277,6 +4457,7 @@ mod tests {
                 foreground_program: None,
                 foreground_agent: None,
                 terminal_cwd: None,
+                foreground_ports: Vec::new(),
                 attention_state: None,
                 terminal_title: None,
                 id: session.id.to_string(),
@@ -4304,6 +4485,7 @@ mod tests {
             foreground_program: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: Vec::new(),
             attention_state: None,
             id: session.id.to_string(),
             status: SessionStatus::Working,
@@ -4839,6 +5021,7 @@ mod tests {
             foreground_program: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: Vec::new(),
             attention_state: None,
             terminal_title: None,
             id: "completed".to_owned(),
@@ -4856,5 +5039,195 @@ mod tests {
 
         assert_eq!(session.last_turn_completed_at, Some(DateMillis(2_000.0)));
         assert_eq!(session.attention(), diri_proto::AttentionLevel::DoneUnseen);
+    }
+
+    /// A reboot takes every Holder with it. The directory a terminal had
+    /// `cd`'d to must outlive that: through the state file, through a first
+    /// live view that has not sampled a directory yet (an adopted Holder),
+    /// and into the exit that offers to bring the terminal back.
+    #[test]
+    fn a_terminal_keeps_its_last_directory_across_a_reboot() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = temp.path().join("state.json");
+        let mut shell = record("shell");
+        shell.status = SessionStatus::Idle;
+        shell.terminal_cwd = Some("/work/diri/crates".into());
+        let mut before = Registry::new(engine(), &state);
+        before.insert_record(shell);
+        before.persist_now().expect("persist");
+
+        let mut after = Registry::new(engine(), &state);
+        after.load().expect("load");
+        let mut adopted = after.record("shell").expect("record");
+        let unsampled = SessionView {
+            remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            attention_state: None,
+            terminal_title: None,
+            id: "shell".to_owned(),
+            status: SessionStatus::Idle,
+            status_evidence: None,
+            needs_input: None,
+            last_turn_completed_at: None,
+            title: None,
+            title_source: None,
+            tail_offset: 0,
+            exited: false,
+        };
+        fold_session_view(&mut adopted, &unsampled);
+        assert_eq!(adopted.terminal_cwd.as_deref(), Some("/work/diri/crates"));
+
+        after.reap_orphans();
+        let lost = after.record("shell").expect("record");
+        assert!(matches!(
+            lost.status,
+            SessionStatus::Exited(ExitInfo {
+                reason: ExitReason::DaemonRestart,
+                ..
+            })
+        ));
+        assert_eq!(lost.terminal_cwd.as_deref(), Some("/work/diri/crates"));
+        assert_eq!(lost.resumability, Resumability::Resumable);
+        assert!(lost.can_resume());
+    }
+
+    /// Typing `exit` closes a terminal for good, as it would a terminal tab;
+    /// anything else that ended its shell leaves it restartable. Remote
+    /// shells and Agents keep their own rules.
+    #[test]
+    fn only_a_terminal_that_did_not_close_itself_restarts() {
+        let engine = engine();
+        let exited = |reason, code| {
+            let mut shell = record("shell");
+            shell.status = SessionStatus::Exited(ExitInfo {
+                reason,
+                code,
+                signal: None,
+            });
+            shell
+        };
+        for (reason, code, expected) in [
+            (ExitReason::Exited, Some(0), Resumability::NotResumable),
+            (ExitReason::Exited, Some(1), Resumability::Resumable),
+            (ExitReason::Signaled, None, Resumability::Resumable),
+            (ExitReason::DaemonRestart, None, Resumability::Resumable),
+            (ExitReason::External, None, Resumability::Resumable),
+            (ExitReason::Archived, None, Resumability::Resumable),
+        ] {
+            let mut shell = exited(reason, code);
+            fold_record_lifecycle(&engine, &mut shell);
+            assert_eq!(shell.resumability, expected, "{reason:?} {code:?}");
+        }
+        // A restarted terminal that is then closed by hand still closes.
+        let mut restarted = exited(ExitReason::Exited, Some(0));
+        restarted.resumability = Resumability::Resumable;
+        fold_record_lifecycle(&engine, &mut restarted);
+        assert_eq!(restarted.resumability, Resumability::NotResumable);
+
+        let mut remote = exited(ExitReason::DaemonRestart, None);
+        remote.host = Some("forge".into());
+        fold_record_lifecycle(&engine, &mut remote);
+        assert_eq!(remote.resumability, Resumability::NotResumable);
+
+        let mut agent = exited(ExitReason::DaemonRestart, None);
+        agent.kind = AgentKind::new("amp");
+        fold_record_lifecycle(&engine, &mut agent);
+        assert_eq!(
+            agent.resumability,
+            Resumability::NotResumable,
+            "an Agent without a resumable conversation is untouched"
+        );
+    }
+
+    /// A terminal moved to another worktree restarts in that checkout, not in
+    /// a directory of the one it left.
+    #[test]
+    fn a_terminal_moved_to_another_worktree_forgets_its_old_directory() {
+        let temp = tempfile::tempdir().expect("temp");
+        let mut registry = Registry::new(engine(), temp.path().join("state.json"));
+        let mut shell = record("s_move");
+        shell.cwd = "/repo/main".into();
+        shell.terminal_cwd = Some("/repo/main/src".into());
+        registry.records.insert("s_move".into(), shell);
+        let moved = registry
+            .reparent_worktree("s_move", "/repo/feature".into(), Some("feature".into()))
+            .expect("move");
+        assert_eq!(moved.cwd, "/repo/feature");
+        assert_eq!(moved.terminal_cwd, None);
+    }
+
+    /// A `cd` is written to disk even when it does not rename the tab: a
+    /// renamed terminal, or two directories with the same last component.
+    #[test]
+    fn a_cd_reaches_the_state_file_without_a_new_title() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().canonicalize().expect("root");
+        std::fs::create_dir_all(root.join("sub")).expect("sub");
+        let mut registry = Registry::new(engine(), root.join("state.json"));
+        let mut shell = record("shell");
+        shell.cwd = root.to_string_lossy().into_owned();
+        shell.title = "Build server".into();
+        shell.title_source = TitleSource::UserRename;
+        registry
+            .spawn(
+                SessionSpec {
+                    id: "shell".into(),
+                    pty: crate::pty::PtySpec::new(vec!["/bin/sh".into(), "-i".into()], &root)
+                        .env("PS1", "$ ")
+                        .size(80, 24),
+                    manifest_id: AgentKind::SHELL_ID.into(),
+                    authority: crate::status::Authority::ProcessOnly,
+                    logs_dir: root.join("logs"),
+                    holder: None,
+                    remote: None,
+                    defer_launch: false,
+                },
+                shell,
+            )
+            .expect("spawn");
+        let mut published = HashMap::new();
+        let sampled = |registry: &Registry, path: &str| {
+            registry
+                .get("shell")
+                .and_then(|session| session.view().terminal_cwd)
+                .as_deref()
+                == Some(path)
+        };
+        let root_text = root.to_string_lossy().into_owned();
+        assert!(
+            (0..500).any(|_| sampled(&registry, &root_text) || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }),
+            "the shell's directory was never sampled"
+        );
+        registry.changed_since(&mut published);
+        registry.persist_now().expect("persist");
+
+        registry
+            .get("shell")
+            .expect("session")
+            .write_input(b"cd sub\r")
+            .expect("cd");
+        let sub = root.join("sub").to_string_lossy().into_owned();
+        assert!(
+            (0..500).any(|_| sampled(&registry, &sub) || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }),
+            "cd was never followed"
+        );
+        registry.changed_since(&mut published);
+        assert!(registry.dirty, "a cd must schedule a write");
+        registry.persist_now().expect("persist");
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("state.json")).expect("state"))
+                .expect("state JSON");
+        assert_eq!(saved["sessions"][0]["terminalCwd"], sub.as_str());
+        assert_eq!(saved["sessions"][0]["title"], "Build server");
+        let _ = registry.terminate("shell", std::time::Duration::from_secs(2));
     }
 }

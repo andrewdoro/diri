@@ -320,11 +320,14 @@ string_enum! {
 }
 
 string_enum! {
+    /// Where a needs-input detail came from. `TerminalLine` is a terminal's
+    /// foreground job blocked reading a line.
     pub enum NeedsInputSource {
         ClaudePermissionHook => "claudePermissionHook",
         ClaudeNotificationHook => "claudeNotificationHook",
         CodexNotify => "codexNotify",
         ScreenScrape => "screenScrape",
+        TerminalLine => "terminalLine",
     }
 }
 
@@ -395,6 +398,11 @@ pub struct NeedsInputDetail {
     pub options: Option<Vec<String>>,
     pub risk_hint: RiskHint,
     pub occurred_at: DateMillis,
+    /// The prompt reads with echo off, so it is asking for a password: the
+    /// detail carries no terminal text, and no reply may be typed into it
+    /// from a notification, where the answer would show in plain text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret: bool,
 }
 
 string_enum! {
@@ -833,6 +841,11 @@ pub struct SessionRecord {
     /// Markdown file in the notes store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_id: Option<String>,
+    /// The TCP ports a local shell's foreground job listens on, read live: a
+    /// dev server, which names the tab after its address. Also counted in
+    /// `listening_ports`, which it keeps current between governor scans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_ports: Option<Vec<PortInfo>>,
 }
 
 impl SessionRecord {

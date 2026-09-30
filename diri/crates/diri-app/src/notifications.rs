@@ -458,7 +458,8 @@ where
 /// session right now. Only a live session holding a free-form question
 /// qualifies: at a permission prompt the pasted text is ignored and the Enter
 /// picks whatever option is highlighted, which is exactly the delayed
-/// approval keystroke notifications must never send.
+/// approval keystroke notifications must never send. Nor does a terminal's
+/// password prompt: the banner's field would show the password as typed.
 #[must_use]
 pub fn accepts_reply(session: &SessionRecord) -> bool {
     !session.is_archived()
@@ -466,6 +467,10 @@ pub fn accepts_reply(session: &SessionRecord) -> bool {
             session.status,
             diri_proto::SessionStatus::NeedsInput(NeedsInputKind::Question)
         )
+        && !session
+            .needs_input
+            .as_ref()
+            .is_some_and(|detail| detail.secret)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -600,6 +605,34 @@ mod tests {
         );
     }
 
+    /// A terminal's line question takes a typed reply; its password
+    /// prompt never does.
+    #[test]
+    fn a_terminal_password_prompt_takes_no_banner_reply() {
+        let mut terminal = session(
+            AgentKind::SHELL,
+            SessionStatus::NeedsInput(NeedsInputKind::Question),
+        );
+        let mut detail = NeedsInputDetail {
+            kind: NeedsInputKind::Question,
+            source: NeedsInputSource::TerminalLine,
+            tool_name: None,
+            summary: "Proceed? [y/N]".to_owned(),
+            prompt_excerpt: Some("Proceed? [y/N]".to_owned()),
+            options: None,
+            risk_hint: RiskHint::Neutral,
+            occurred_at: DateMillis(1.0),
+            secret: false,
+        };
+        terminal.needs_input = Some(detail.clone());
+        assert!(accepts_reply(&terminal));
+        detail.secret = true;
+        detail.summary = "Waiting for a password".to_owned();
+        detail.prompt_excerpt = None;
+        terminal.needs_input = Some(detail);
+        assert!(!accepts_reply(&terminal));
+    }
+
     #[test]
     fn refused_reply_notice_names_the_session_not_the_text() {
         let notice = reply_refused_transition(Some("Refactor parser"), ReplyRefusal::Exited);
@@ -659,6 +692,7 @@ mod tests {
                 prompt_excerpt: None,
                 options: None,
                 risk_hint: RiskHint::Neutral,
+                secret: false,
                 occurred_at: DateMillis(1.0),
             }),
             resumability: Resumability::NotResumable,
@@ -681,6 +715,7 @@ mod tests {
             foreground_agent: None,
             terminal_cwd: None,
             note_id: None,
+            foreground_ports: None,
         }
     }
 

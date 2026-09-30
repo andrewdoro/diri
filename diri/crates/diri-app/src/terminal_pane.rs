@@ -4568,7 +4568,11 @@ impl TerminalPane {
                     .hover(move |style| style.bg(colors.primary.alpha(0.14)))
                     .cursor_pointer()
                     .text_color(colors.primary)
-                    .child("Resume")
+                    .child(if is_local_shell(session) {
+                        "Restart"
+                    } else {
+                        "Resume"
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.runtime
                             .store
@@ -4769,9 +4773,12 @@ impl TerminalPane {
             return Some(centered_message("◌", "Moving session…", colors).into_any_element());
         }
         if auto_resuming {
-            return Some(
-                centered_message("◌", "Resuming conversation…", colors).into_any_element(),
-            );
+            let message = if is_local_shell(session) {
+                "Restarting terminal…"
+            } else {
+                "Resuming conversation…"
+            };
+            return Some(centered_message("◌", message, colors).into_any_element());
         }
         if self
             .residents
@@ -4795,7 +4802,11 @@ impl TerminalPane {
             content
                 .child(primary_button(
                     "resume-conversation",
-                    "Resume Conversation",
+                    if is_local_shell(session) {
+                        "Restart Terminal"
+                    } else {
+                        "Resume Conversation"
+                    },
                     colors,
                     cx,
                     move |this, cx| {
@@ -5490,6 +5501,12 @@ fn clipboard_image(item: &ClipboardItem) -> Option<(&[u8], &'static str)> {
         ClipboardEntry::Image(image) => Some((image.bytes.as_slice(), image.format.extension())),
         ClipboardEntry::String(_) | ClipboardEntry::ExternalPaths(_) => None,
     })
+}
+
+/// A local terminal has no conversation to resume: the Engine restarts it
+/// as a fresh shell in the directory it had `cd`'d to.
+fn is_local_shell(session: &SessionRecord) -> bool {
+    session.kind == ProtoAgentKind::SHELL && session.host.is_none()
 }
 
 fn exit_description(session: &SessionRecord) -> String {
@@ -9602,6 +9619,7 @@ mod tests {
             prompt_excerpt: None,
             options: None,
             risk_hint: RiskHint::Destructive,
+            secret: false,
             occurred_at: DateMillis(2.0),
         });
         assert_eq!(

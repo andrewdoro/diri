@@ -1425,32 +1425,38 @@ impl HeadlessScreen {
 
     /// The visible grid as plain text, trailing blank lines removed.
     pub fn lines(&self) -> Vec<String> {
-        let grid = self.term.grid();
-        let mut lines: Vec<String> = Vec::with_capacity(self.geometry.rows);
-        for row in 0..self.geometry.rows {
-            let line = Line(row as i32);
-            let mut text = String::with_capacity(self.geometry.cols);
-            let source = &grid[line];
-            for column in 0..self.geometry.cols {
-                let cell = &source[Column(column)];
-                // These occupy terminal columns but are not textual spaces.
-                if cell
-                    .flags
-                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    continue;
-                }
-                text.push(cell.c);
-                if let Some(combining) = cell.zerowidth() {
-                    text.extend(combining.iter().copied());
-                }
-            }
-            lines.push(text.trim_end().to_string());
-        }
+        let mut lines: Vec<String> = (0..self.geometry.rows)
+            .map(|row| self.row_text(row))
+            .collect();
         while lines.last().is_some_and(|line| line.trim().is_empty()) {
             lines.pop();
         }
         lines
+    }
+
+    /// One visible row as plain text, trailing blanks removed; empty past
+    /// the bottom of the screen.
+    pub fn row_text(&self, row: usize) -> String {
+        if row >= self.geometry.rows {
+            return String::new();
+        }
+        let source = &self.term.grid()[Line(row as i32)];
+        let mut text = String::with_capacity(self.geometry.cols);
+        for column in 0..self.geometry.cols {
+            let cell = &source[Column(column)];
+            // These occupy terminal columns but are not textual spaces.
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            text.push(cell.c);
+            if let Some(combining) = cell.zerowidth() {
+                text.extend(combining.iter().copied());
+            }
+        }
+        text.trim_end().to_string()
     }
 
     /// What a link scanner needs from the screen and the newest `history_rows`

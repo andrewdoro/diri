@@ -73,6 +73,7 @@ fn record(id: &str) -> diri_proto::SessionRecord {
         foreground_agent: None,
         terminal_cwd: None,
         note_id: None,
+        foreground_ports: None,
     }
 }
 

@@ -323,6 +323,7 @@ impl AttentionLifecycle {
             && outcome.status_change.is_none()
             && !outcome.turn_completed
             && !evidence.completion
+            && !outcome.line_prompt_ended
             && identity.completion.is_none()
             && identity.resolved_request.is_none()
             && identity.started_tool.is_none()
@@ -330,6 +331,12 @@ impl AttentionLifecycle {
             return false;
         }
         let before = self.state.clone();
+        // A terminal job's question has no native identity and no turn that
+        // completes it: it is over when the job stops reading its line.
+        if outcome.line_prompt_ended {
+            self.resolve_inferred();
+            self.responding = false;
+        }
         if submitted {
             self.resolve(None);
             self.state.active_tools.clear();
@@ -411,6 +418,7 @@ impl AttentionLifecycle {
                     prompt_excerpt: None,
                     options: None,
                     risk_hint: diri_proto::RiskHint::Neutral,
+                    secret: false,
                     occurred_at: now.into(),
                 };
                 let queued = ReducerOutcome {

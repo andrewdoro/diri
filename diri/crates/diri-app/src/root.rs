@@ -9276,6 +9276,7 @@ mod tests {
             options: None,
             risk_hint: diri_proto::RiskHint::Neutral,
             occurred_at: diri_proto::DateMillis(1.0),
+            secret: false,
         });
         let mut faq = child("s_faq", AgentKind::CLAUDE_CODE, "Write the launch FAQ");
         faq.status = diri_proto::SessionStatus::Idle;
