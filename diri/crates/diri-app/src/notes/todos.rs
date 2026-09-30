@@ -93,7 +93,8 @@ impl TodosModel {
         model
     }
 
-    #[cfg(test)]
+    /// Only the macOS window screenshots install a fixture model.
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn install(model: Entity<Self>, cx: &mut App) {
         cx.set_global(TodosGlobal(model));
     }
