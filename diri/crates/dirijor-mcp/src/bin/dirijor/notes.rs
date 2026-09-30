@@ -11,6 +11,7 @@ use std::path::Path;
 
 use diri_notes::doc::Document;
 use diri_notes::handoff::{self, TodoSelector};
+use diri_notes::history::Author;
 use diri_notes::markdown;
 use diri_notes::mention::{self, MentionTarget};
 use diri_notes::store::{self, NoteMeta, NoteStore, Resolve};
@@ -154,7 +155,7 @@ fn add(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
     let id = create_note(store, &title, &body, &place, parent.as_deref())?;
     if flags.pin {
         store
-            .update(&id, |note| {
+            .update(&id, &Author::from_env(), |note| {
                 note.front.set_flag(diri_notes::store::KEY_PINNED, true);
                 Ok(())
             })
@@ -240,7 +241,7 @@ fn create_note(
     let (_, parsed) = markdown::parse(&format!("\n{body}"));
     let doc = Document::new(title, parsed.blocks);
     store
-        .create(doc, project)
+        .create_for_session(doc, project, None, &Author::from_env())
         .map(|(id, _)| id)
         .map_err(|e| CliError::failure(format!("cannot create note: {e}")))
 }
@@ -253,7 +254,7 @@ fn append(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
     let meta = resolve(store, target)?;
     let text = text_or_stdin(text)?;
     store
-        .append(&meta.id, &text)
+        .append(&meta.id, &text, &Author::from_env())
         .map_err(|e| CliError::failure(format!("cannot append: {e}")))?;
     println!("{}", meta.id);
     Ok(())
@@ -276,7 +277,7 @@ fn todo(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
         None => inbox_todos(store, &placement(&flags)?)?,
     };
     store
-        .append(&meta.id, &items.join("\n"))
+        .append(&meta.id, &items.join("\n"), &Author::from_env())
         .map_err(|e| CliError::failure(format!("cannot append: {e}")))?;
     println!("{}", meta.id);
     Ok(())
@@ -437,7 +438,7 @@ fn edit_todo(
         Err(_) => TodoSelector::Text(todo.to_owned()),
     };
     let (_, index) = store
-        .update(id, |note| {
+        .update(id, &Author::from_env(), |note| {
             let index = handoff::find_todo(note, &selector)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
             edit(note, index);

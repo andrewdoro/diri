@@ -82,7 +82,13 @@ fn outside_writes_reload_a_clean_note(cx: &mut gpui::TestAppContext) {
     let session = SessionId::new("s_note");
     pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
     // An agent appends through the CLI while the note is open and untouched.
-    store.append(&id, "- [ ] added by an agent").unwrap();
+    store
+        .append(
+            &id,
+            "- [ ] added by an agent",
+            &diri_notes::history::Author::Session("s_agent".into()),
+        )
+        .unwrap();
     pane.update(cx, |pane, cx| pane.reconcile(cx));
     let editor = editor(&pane, cx);
     let has = editor.read_with(cx, |view, _| {

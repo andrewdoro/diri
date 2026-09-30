@@ -1394,7 +1394,7 @@ impl ControlServer {
         let (_, parsed) = diri_notes::markdown::parse(&format!("\n{body}"));
         let doc = diri_notes::doc::Document::new(title.trim(), parsed.blocks);
         let (note_id, _) = store
-            .create_for_session(doc, Some(&cwd), Some(&id))
+            .create_for_session(doc, Some(&cwd), Some(&id), &note_author(p.parent.as_ref()))
             .map_err(io_control_error)?;
         let record = note_record(&id, &cwd, title.trim(), note_id, p.parent.clone());
         self.insert_note_record(record.clone())?;
@@ -1447,7 +1447,7 @@ impl ControlServer {
         if meta.session.as_deref() != Some(record.id.0.as_str()) {
             let session = record.id.0.clone();
             store
-                .update(note_id, |note| {
+                .update(note_id, &diri_notes::history::Author::User, |note| {
                     note.front
                         .set(diri_notes::store::KEY_SESSION, Some(session));
                     Ok(())
@@ -4309,6 +4309,14 @@ fn random_session_token() -> Result<diri_proto::remote_pty::SessionToken, Contro
         .map_err(|error| ControlError::internal(error.to_string()))
 }
 
+/// Who wrote a note the Engine creates: the agent it was created for, else
+/// the person at the app.
+fn note_author(parent: Option<&diri_proto::SessionId>) -> diri_notes::history::Author {
+    parent.map_or(diri_notes::history::Author::User, |parent| {
+        diri_notes::history::Author::Session(parent.0.clone())
+    })
+}
+
 /// The note Session showing `note_id`, if any.
 fn note_session_for(registry: &Registry, note_id: &str) -> Option<diri_proto::SessionRecord> {
     registry
@@ -5584,7 +5592,12 @@ mod tests {
         store.save(&archived, &note).unwrap();
         // Removed on purpose: stamped with a Session that no longer exists.
         let (removed, _) = store
-            .create_for_session(doc("Removed"), Some(&project), Some("s_gone"))
+            .create_for_session(
+                doc("Removed"),
+                Some(&project),
+                Some("s_gone"),
+                &diri_notes::history::Author::User,
+            )
             .unwrap();
         // Already a Session.
         let shown = ok_of(call(

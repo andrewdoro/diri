@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::doc::{BlockKind, Document};
+use crate::history::{self, Author, History, Reason};
 use crate::markdown::{self, FrontMatter};
 use crate::mention::MentionTarget;
 
@@ -259,15 +260,21 @@ impl NoteStore {
         }
         let source = note.to_markdown();
         self.write(id, &source)?;
+        let _ = self
+            .history()
+            .record(id, &source, &Author::User, Reason::Edit, history::now_ms());
         Ok(SaveOutcome::Saved { source })
     }
 
     /// Read-modify-write under the store lock: `edit` sees the note as it is
     /// on disk now, and the file is rewritten only if `edit` changed it.
-    /// Every writer outside the editor (CLI, agents) goes through here.
+    /// Every writer outside the editor (CLI, agents) goes through here, so
+    /// history keeps the note as it stood before the write and the result,
+    /// attributed to `author`.
     pub fn update<T>(
         &self,
         id: &str,
+        author: &Author,
         edit: impl FnOnce(&mut Note) -> io::Result<T>,
     ) -> io::Result<(Note, T)> {
         let _lock = self.lock()?;
@@ -275,9 +282,52 @@ impl NoteStore {
         let mut note = before.clone();
         let out = edit(&mut note)?;
         if note != before {
-            self.write(id, &note.to_markdown())?;
+            let history = self.history();
+            let now = history::now_ms();
+            // History is a safety net; a full disk must not block the write.
+            let _ = history.record(
+                id,
+                &before.to_markdown(),
+                &Author::User,
+                Reason::BeforeWrite,
+                now,
+            );
+            let source = note.to_markdown();
+            self.write(id, &source)?;
+            let _ = history.record(id, &source, author, Reason::Write, now);
         }
         Ok((note, out))
+    }
+
+    /// Puts back the text of `version`, keeping the note's current front
+    /// matter (project, pin, Session). The current text is kept as a version
+    /// first, so a restore can itself be undone.
+    pub fn restore_version(&self, id: &str, version: u64, author: &Author) -> io::Result<Note> {
+        let _lock = self.lock()?;
+        let history = self.history();
+        let old = parse_note(&history.read(id, version)?);
+        let current = self.load(id)?;
+        let now = history::now_ms();
+        let _ = history.record(
+            id,
+            &current.to_markdown(),
+            &Author::User,
+            Reason::BeforeRestore,
+            now,
+        );
+        let restored = Note {
+            front: current.front,
+            doc: old.doc,
+        };
+        let source = restored.to_markdown();
+        self.write(id, &source)?;
+        let _ = history.record(id, &source, author, Reason::Restore(version), now);
+        Ok(restored)
+    }
+
+    /// Every note's version history, beside the notes.
+    pub fn history(&self) -> History {
+        History::new(&self.dir)
     }
 
     /// An exclusive advisory lock over the whole store, held for one
@@ -323,7 +373,7 @@ impl NoteStore {
 
     /// Creates a note and returns its id. `project` is a project root path.
     pub fn create(&self, doc: Document, project: Option<&str>) -> io::Result<(String, Note)> {
-        self.create_for_session(doc, project, None)
+        self.create_for_session(doc, project, None, &Author::User)
     }
 
     /// Creates a note already stamped with the Session that will show it.
@@ -332,6 +382,7 @@ impl NoteStore {
         doc: Document,
         project: Option<&str>,
         session: Option<&str>,
+        author: &Author,
     ) -> io::Result<(String, Note)> {
         let now = SystemTime::now();
         let id = new_id(now);
@@ -342,12 +393,19 @@ impl NoteStore {
         front.set(KEY_SESSION, session.map(str::to_owned));
         let note = Note { front, doc };
         self.save(&id, &note)?;
+        let _ = self.history().record(
+            &id,
+            &note.to_markdown(),
+            author,
+            Reason::Write,
+            history::now_ms(),
+        );
         Ok((id, note))
     }
 
     /// Appends Markdown to a note's body (quick capture from the CLI).
-    pub fn append(&self, id: &str, markdown_body: &str) -> io::Result<Note> {
-        self.update(id, |note| {
+    pub fn append(&self, id: &str, markdown_body: &str, author: &Author) -> io::Result<Note> {
+        self.update(id, author, |note| {
             append_markdown(note, markdown_body);
             Ok(())
         })
@@ -572,7 +630,7 @@ mod tests {
         assert_eq!((meta.todos_done, meta.todos_total), (1, 2));
         assert_eq!(meta.open_todos, vec![(0, "milk".to_owned())]);
 
-        let note = store.append(&id, "- [ ] bread").unwrap();
+        let note = store.append(&id, "- [ ] bread", &Author::Cli).unwrap();
         assert_eq!(note.doc.todo_progress(), (1, 3));
         assert!(store.load(&id).unwrap().doc.same_content(&note.doc));
 
@@ -596,7 +654,9 @@ mod tests {
                     // A store per writer, as separate processes would have.
                     let store = NoteStore::open(store.dir()).unwrap();
                     for n in 0..10 {
-                        store.append(id, &format!("- w{writer} n{n}")).unwrap();
+                        store
+                            .append(id, &format!("- w{writer} n{n}"), &Author::Cli)
+                            .unwrap();
                     }
                 });
             }
@@ -614,7 +674,13 @@ mod tests {
         let loaded = note.to_markdown();
 
         // An agent appends while the editor has unsaved typing.
-        store.append(&id, "- [ ] from the agent").unwrap();
+        store
+            .append(
+                &id,
+                "- [ ] from the agent",
+                &Author::Session("s_agent".into()),
+            )
+            .unwrap();
         let mut typed = note.clone();
         append_markdown(&mut typed, "typed in the editor");
         let SaveOutcome::Conflict {
@@ -650,6 +716,84 @@ mod tests {
     }
 
     #[test]
+    fn outside_writes_and_restores_are_versioned_and_undoable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NoteStore::open(dir.path().join("notes")).unwrap();
+        let (id, _) = store
+            .create(Document::new("Launch", Vec::new()), None)
+            .unwrap();
+        // The person types (the editor saves, throttled).
+        let mut typed = store.load(&id).unwrap();
+        append_markdown(&mut typed, "Draft the announcement.");
+        let loaded = fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+        store.save_if_unchanged(&id, &typed, &loaded).unwrap();
+        // An agent adds a to-do.
+        let agent = Author::Session("s_agent".into());
+        store.append(&id, "- [ ] book the venue", &agent).unwrap();
+
+        let versions = store.history().list(&id).unwrap();
+        let newest = &versions[0];
+        assert_eq!(newest.author, agent);
+        assert_eq!(newest.reason, Reason::Write);
+        assert!(versions.iter().any(|v| {
+            v.reason == Reason::BeforeWrite
+                && store
+                    .history()
+                    .read(&id, v.id)
+                    .unwrap()
+                    .contains("Draft the announcement")
+        }));
+
+        // Restore the version before the agent wrote, then undo that restore.
+        let mut pinned = store.load(&id).unwrap();
+        pinned.front.set_flag(KEY_PINNED, true);
+        store.save(&id, &pinned).unwrap();
+        let before_agent = versions
+            .iter()
+            .find(|v| v.reason == Reason::BeforeWrite)
+            .unwrap()
+            .id;
+        let restored = store
+            .restore_version(&id, before_agent, &Author::User)
+            .unwrap();
+        assert!(!restored.to_markdown().contains("book the venue"));
+        assert!(
+            restored.front.flag(KEY_PINNED),
+            "a restore keeps the note's place and pin"
+        );
+        let latest = store.history().list(&id).unwrap();
+        assert_eq!(latest[0].reason, Reason::Restore(before_agent));
+        // The text before the restore is always in history: here it already
+        // was (the agent's write), so no duplicate was taken.
+        let undo = latest[1].id;
+        assert!(
+            store
+                .history()
+                .read(&id, undo)
+                .unwrap()
+                .contains("book the venue")
+        );
+        store.restore_version(&id, undo, &Author::User).unwrap();
+        assert!(
+            store
+                .load(&id)
+                .unwrap()
+                .to_markdown()
+                .contains("book the venue")
+        );
+
+        // History outlives the trash.
+        let count = store.history().list(&id).unwrap().len();
+        store.trash(&id).unwrap();
+        assert_eq!(store.history().list(&id).unwrap().len(), count);
+        store.restore(&id).unwrap();
+        assert!(
+            store.list().unwrap().iter().all(|n| n.id == id),
+            "history is not a note"
+        );
+    }
+
+    #[test]
     fn update_skips_unchanged_writes() {
         let dir = tempfile::tempdir().unwrap();
         let store = NoteStore::open(dir.path().join("notes")).unwrap();
@@ -659,7 +803,7 @@ mod tests {
         let path = store.path_for(&id).unwrap();
         let before = fs::metadata(&path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let (_, answer) = store.update(&id, |_| Ok(42)).unwrap();
+        let (_, answer) = store.update(&id, &Author::Cli, |_| Ok(42)).unwrap();
         assert_eq!(answer, 42);
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
     }
@@ -673,6 +817,7 @@ mod tests {
             .append(
                 &id,
                 "Ask [@Codex](diri://session/s_1) about [@PRD](diri://note/n1)",
+                &Author::Cli,
             )
             .unwrap();
         assert_eq!(

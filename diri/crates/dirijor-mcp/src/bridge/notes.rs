@@ -11,6 +11,7 @@
 
 use super::*;
 use diri_notes::handoff::{self, TodoSelector};
+use diri_notes::history::Author;
 use diri_notes::mention::{self, MentionTarget};
 use diri_notes::store::{self as note_store, Note, NoteMeta, NoteStore, Resolve};
 use diri_proto::ProjectId;
@@ -347,32 +348,36 @@ impl Bridge {
         };
 
         let (note, (index, changes)) = store
-            .update(&meta.id, |note: &mut Note| {
-                let index = match &todo {
-                    Some(selector) => {
-                        Some(handoff::find_todo(note, selector).map_err(|e| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
-                        })?)
+            .update(
+                &meta.id,
+                &Author::Session(self.require_caller()?.to_owned()),
+                |note: &mut Note| {
+                    let index = match &todo {
+                        Some(selector) => {
+                            Some(handoff::find_todo(note, selector).map_err(|e| {
+                                std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+                            })?)
+                        }
+                        None => None,
+                    };
+                    let mut changes = Vec::new();
+                    if let (Some(index), Some(checked)) = (index, checked)
+                        && handoff::set_checked(note, index, checked)
+                    {
+                        changes.push(if checked { "checked" } else { "unchecked" });
                     }
-                    None => None,
-                };
-                let mut changes = Vec::new();
-                if let (Some(index), Some(checked)) = (index, checked)
-                    && handoff::set_checked(note, index, checked)
-                {
-                    changes.push(if checked { "checked" } else { "unchecked" });
-                }
-                if let (Some(index), Some((id, label))) = (index, &link)
-                    && handoff::link_session(note, index, label, id)
-                {
-                    changes.push("linked");
-                }
-                if let Some(text) = &append {
-                    note_store::append_markdown(note, text);
-                    changes.push("appended");
-                }
-                Ok((index, changes))
-            })
+                    if let (Some(index), Some((id, label))) = (index, &link)
+                        && handoff::link_session(note, index, label, id)
+                    {
+                        changes.push("linked");
+                    }
+                    if let Some(text) = &append {
+                        note_store::append_markdown(note, text);
+                        changes.push("appended");
+                    }
+                    Ok((index, changes))
+                },
+            )
             .map_err(|e| format!("cannot write note {}: {e}", meta.id))?;
         let mut result = json!({"note": meta.id, "changes": changes});
         if let Some(index) = index
@@ -489,7 +494,7 @@ impl Bridge {
         );
         let mut place = handoff::UpdatePlace::Updates;
         store
-            .update(note_id, |doc| {
+            .update(note_id, &Author::Session(caller.id.0.clone()), |doc| {
                 place = handoff::append_update(doc, &date, &label, &caller.id.0, &text);
                 Ok(())
             })
@@ -594,7 +599,9 @@ mod tests {
             let (id, _) = store
                 .create(Document::new(title, Vec::new()), project)
                 .unwrap();
-            store.append(&id, body).unwrap();
+            store
+                .append(&id, body, &diri_notes::history::Author::Cli)
+                .unwrap();
             id
         }
     }
