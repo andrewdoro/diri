@@ -302,6 +302,21 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
             json!({"type": "object", "properties": {}}),
         ),
         ToolDefinition::new(
+            "list_notes",
+            "Find the user's Diri Notes (PRDs, plans, to-do lists). They live outside the repo, so use this rather than searching files. Defaults to notes for your project; project:\"all\" lists every note, or pass a project root path. mentions:\"me\" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body. session_id is the note's sidebar Session.",
+            json!({"type":"object","properties":{"project":{"type":"string","minLength":1},"mentions":{"type":"string","minLength":1},"query":{"type":"string","minLength":1},"include_archived":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200}}}),
+        ),
+        ToolDefinition::new(
+            "read_note",
+            "Read one Diri note as Markdown, with its to-dos (block index, checked, linked sessions and their live status) and its @-mentions resolved to sessions or notes. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, part of a title, a note Session id, or \"origin\": the note you were started from (whoami shows it as origin_note).",
+            json!({"type":"object","properties":{"note":{"type":"string","minLength":1}},"required":["note"]}),
+        ),
+        ToolDefinition::new(
+            "write_note",
+            "Add to a Diri note without rewriting it: append Markdown to the end, check or uncheck a to-do, or link a session to a to-do (it appears as an @-mention). Select the to-do by todo (its text or part of it) or todo_index (from read_note). Never deletes the user's text. Delegated agents may write only to notes that mention them or an ancestor.",
+            json!({"type":"object","properties":{"note":{"type":"string","minLength":1},"append":{"type":"string","minLength":1,"maxLength":65536},"todo":{"type":"string","minLength":1},"todo_index":{"type":"integer","minimum":0},"checked":{"type":"boolean"},"link_session":{"type":"string","minLength":1}},"required":["note"]}),
+        ),
+        ToolDefinition::new(
             "list_children",
             "List the sessions spawned by this one, optionally including the whole descendant tree.",
             json!({
