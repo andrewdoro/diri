@@ -64,10 +64,20 @@ function boundedString(value: unknown, field: string, max: number, required = fa
     if (required) throw new Reject(422, "bad_header", `${field} is required`);
     return null;
   }
-  if (typeof value !== "string" || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) {
-    throw new Reject(422, "bad_header", `${field} must be a string of at most ${max} characters`);
+  if (typeof value !== "string") {
+    throw new Reject(422, "bad_header", `${field} must be a string`);
   }
-  return value;
+  if (required) {
+    if (value.length > max || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new Reject(422, "bad_header", `${field} must be a string of at most ${max} characters`);
+    }
+    return value;
+  }
+  // Descriptive fields never cost a whole batch: 422 makes the client drop
+  // it for good, and 0.8.10's 90-character build id lost every batch that
+  // way. Strip control characters and truncate instead.
+  const clean = value.replace(/[\u0000-\u001f\u007f]/g, "");
+  return clean.length > max ? clean.slice(0, max) : clean;
 }
 
 export function parseHeader(line: string): BatchHeader {

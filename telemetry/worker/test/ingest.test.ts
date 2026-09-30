@@ -109,8 +109,6 @@ describe("ingest", () => {
       ["wrong type", (i) => header(i, { type: "record" }), 422],
       ["install not a uuid", (i) => header(i, { install: "alex" }), 422],
       ["bad support id", (i) => header(i, { support_id: "X-1" }), 422],
-      ["name too long", (i) => header(i, { name: "j".repeat(65) }), 422],
-      ["control characters", (i) => header(i, { app_version: "0.9\u0000" }), 422],
       ["sent_at missing", (i) => header(i, { sent_at: undefined }), 422],
     ];
     for (const [name, make, status] of cases) {
@@ -120,6 +118,21 @@ describe("ingest", () => {
         expect(res.status).toBe(status);
       });
     }
+
+    it("truncates over-long descriptive fields instead of dropping the batch", async () => {
+      // 0.8.10's Engine sends a 90-character build id; rejecting it lost
+      // every batch from every install.
+      const install = newInstall();
+      const build = "diri-engine-0.1.0+catalog.eba923e3392a2559bbe740ee39afd62ed1c98fdecc8b7dd178b1dd58fbfcb22d";
+      const res = await ingest(install, [rec(T0, "a.b", "info")], {
+        header: header(install, { build, name: "j".repeat(80), app_version: "0.9\u0000" }),
+      });
+      expect(res.status).toBe(202);
+      const row = await env.DB.prepare("SELECT build, name, app_version FROM installs WHERE install = ?1")
+        .bind(install)
+        .first<{ build: string; name: string; app_version: string }>();
+      expect(row).toEqual({ build: build.slice(0, 64), name: "j".repeat(64), app_version: "0.9" });
+    });
 
     it("install header must match the batch header", async () => {
       const install = newInstall();
