@@ -268,8 +268,8 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `pane.attached` | info | `session, reconnect, attempts, connect_ms, since_mount_ms` | attach latency, reattach loops |
 | `pane.attach_failing` | error | `session, attempts, reason, since_mount_ms` | a session that cannot be attached (3 failures) |
 | `pane.first_grid` | debug; warn if not a snapshot | `session, ms, snapshot` | first frame missing or a diff before a seed |
-| `pane.first_paint` | debug | `session, ms, grid_ms, parked` | attach → first painted content |
-| `pane.blank` | incident; warn if live with a (blank) grid | `session, agent, state, got_grid, frames, ms` | "session doesn't render": visible, running, nothing painted 10 s after mount |
+| `pane.first_paint` | debug | `session, ms, grid_ms, parked` | mount → the first frame that drew content, taken inside the terminal element's paint. A pane that is never drawn (the selection pane under a workspace workbench, a warm pane of another tab, a window the system stopped drawing) records none; before 2026-09-30 the blank watchdog recorded those as a ~10 s "first paint" |
+| `pane.blank` | incident; warn if live with a blank grid | `session, agent, state, got_grid, content, frames, ms` | "session doesn't render": drawn at least once since mount, running, and no content painted 10 s after mount. `content=true` means the grid holds content that was never painted (a missed repaint: always an incident). A pane never drawn since mount is not reported |
 | `pane.detached` | warn | `session, live_ms, grids, reseeds` | "Terminal connection interrupted" toast |
 | `pane.drain_interrupted` | warn | `session` | input possibly lost on detach |
 | `pane.input_rejected` | warn (≤ 1 per 5 s per session) | `session, input` (`input`\|`mouse`\|`mouse_motion`\|`scroll`), `reason` (`passive_view`\|`disconnected`\|`overloaded`) | typing that goes nowhere; lost lease |

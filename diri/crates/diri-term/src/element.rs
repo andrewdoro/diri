@@ -368,7 +368,18 @@ struct ElementSharedState {
     /// it without holding the rest of the view's state.
     cursor: Arc<Mutex<CursorDriver>>,
     scroll_glide: Mutex<GlideState>,
+    /// Frames GPUI painted this view in, including ones with nothing to draw
+    /// yet (no grid, suspended). Unlike `stats` it is never reset, so a host
+    /// can tell whether the view was on screen at all since a point it
+    /// remembered.
+    paints: AtomicU64,
+    /// Called once, from the first paint that puts non-blank content on
+    /// screen after it was armed; see [`TerminalElement::on_first_content_paint`].
+    content_paint: Mutex<Option<ContentPaintCallback>>,
 }
+
+/// Told when a view first painted content, with the instant it did.
+pub type ContentPaintCallback = Box<dyn FnOnce(Instant) + Send>;
 
 /// The glide to a find match, if one is running, and the clock it reads.
 #[derive(Default)]
@@ -707,6 +718,8 @@ impl TerminalElement {
                 metrics: Mutex::new(None),
                 cursor: Arc::new(Mutex::new(CursorDriver::default())),
                 scroll_glide: Mutex::new(GlideState::default()),
+                paints: AtomicU64::new(0),
+                content_paint: Mutex::new(None),
             }),
             theme: TermTheme::default(),
             background_opacity: 1.0,
@@ -897,6 +910,22 @@ impl TerminalElement {
             buffer: self.buffer.clone(),
             shared: self.shared.clone(),
         }
+    }
+
+    /// Frames GPUI painted this view (or a clone) in since it was built,
+    /// empty ones included. A view outside every drawn window, or in a window
+    /// the system stopped drawing, stays where it was.
+    #[must_use]
+    pub fn paint_count(&self) -> u64 {
+        self.shared.paints.load(Ordering::Relaxed)
+    }
+
+    /// Arms `callback` for the next paint that puts non-blank content on
+    /// screen, replacing whatever was armed before. It runs inside that
+    /// paint, so the instant it gets is when the content was drawn, not when
+    /// the host next looked.
+    pub fn on_first_content_paint(&self, callback: ContentPaintCallback) {
+        *mutex_lock(&self.shared.content_paint) = Some(callback);
     }
 
     #[must_use]
@@ -2439,6 +2468,7 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         let paint_started = Instant::now();
+        self.shared.paints.fetch_add(1, Ordering::Relaxed);
         if let (Some(focus_handle), Some(text_input)) = (&self.focus_handle, &self.text_input) {
             let (cursor_bounds, cell_width) = match (prepaint.metrics, prepaint.cursor.as_ref()) {
                 (Some(metrics), Some(cursor)) => (
@@ -2684,6 +2714,8 @@ impl Element for TerminalElement {
             }
         });
 
+        self.report_first_content_paint();
+
         if let Some(started_at) = prepaint.started_at {
             let elapsed = started_at.elapsed();
             let mut stats = mutex_lock(&self.shared.stats);
@@ -2703,6 +2735,22 @@ impl Element for TerminalElement {
                     (buffer.cols, buffer.rows)
                 },
             );
+        }
+    }
+}
+
+impl TerminalElement {
+    /// Hands the armed first-content callback the paint that just drew
+    /// content. The grid is only scanned while a callback is armed.
+    fn report_first_content_paint(&self) {
+        let mut armed = mutex_lock(&self.shared.content_paint);
+        if armed.is_none() || read_lock(&self.buffer).is_blank() {
+            return;
+        }
+        let callback = armed.take();
+        drop(armed);
+        if let Some(callback) = callback {
+            callback(Instant::now());
         }
     }
 }

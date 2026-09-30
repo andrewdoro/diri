@@ -106,6 +106,53 @@ the larger real saving. Not changed: the five-minute App poll itself (the App
 polls even with the Usage page closed; left to the App), `session.remove`
 holding the Registry through the 500 ms TERM escalation (hooks no longer wait
 on it; other Registry users still do), and process spawn cost per hook.
+## Telemetry truth: `pane.first_paint` tail and `workspace.mutate` errors (2026-09-30)
+
+Read from 4.7 h of the owner's local telemetry spool (0.8.10), aggregates only.
+
+**`pane.first_paint` at ~10 s (14 of 57) was a measurement artifact.** The
+pane recorded first paint from its own `render` and from the 10 s blank
+watchdog (`check_blank` called `trace_first_paint`). A resident can be
+mounted by a pane that is never drawn: the selection-following pane stays
+alive and attached while a workspace workbench is shown in its place, warm
+workbench panes of other tabs, a window the system stopped drawing. Such a
+pane never renders, so at 10 s the watchdog found content in the shared grid
+and recorded a "first paint" nobody saw. Evidence in the data: in 4 of the
+14, the same session had already recorded a first paint 0.4–0.6 ms after its
+mount in another pane, with `grid_ms` of 8–32 ms in the undrawn one; the other
+10 were remounts onto parked grids (`parked=true`) with no render for 10 s.
+Headless repro on origin/main: a `TerminalPane` held by a view that does not
+draw it, with content in its grid, reports `painted=true` after the watchdog
+while its element has 0 painted frames and the pane 0 renders.
+
+Now first paint is taken inside `TerminalElement::paint` (a one-shot callback
+armed per mount, fired by the first frame that draws a non-blank grid), and
+the watchdog never records a paint. `pane.blank` is only reported for a pane
+drawn at least once since its mount, and with `content=true` when the grid
+holds content that was never painted, which is the signature of a real
+missed repaint (the class of the old "blank until resize" bug). Cost per
+paint: one relaxed atomic add and one uncontended mutex lock; the grid is only
+scanned while a callback is armed, once per mount, and the scan stops at the
+first non-blank cell. Not claimed: that no real stall happened in that data;
+only that none of the 14 samples shows one, and that one would now be
+reported as `pane.blank content=true`.
+
+**`workspace.mutate` → `invalid_workspace` (19 of 57 mutations in the current
+spool files) was the 256-tab limit, already fixed on main by #575.** Every failure
+coincided with attaching one of 5 sessions, each failing on nearly every
+activation (9 of 10, 6 of 6, 3 of 3, …); the 8 sessions that never failed
+were ones the layout already held. Activation sends `openProjectAgent`,
+which only adds a tab for a session without one, and in 0.8.10 a tab count
+over `MAX_WORKSPACE_TABS` was reported as `invalid_workspace`. Tabs of deleted
+sessions were never reclaimed, so new agents could not be placed. #575
+reclaims them at the limit and reports a real limit as
+`workspace_limit_reached`. A randomized sequence of app-shaped mutations
+(openProjectAgent with preferred layouts, create/split/move/swap/zoom/focus/
+remove; 400 seeds × 60 edits) against the current Engine found no other
+`invalid_workspace` besides a self-dock the app already refuses to send. One
+more app-side sender was found by reading: dropping a tab on its own
+workspace's header sent `index = tabs.len()`, which is out of range once the
+Engine takes the tab out; it now sends the last slot.
 
 ## Cheap column changes: deferred history reflow (2026-09-29)
 
