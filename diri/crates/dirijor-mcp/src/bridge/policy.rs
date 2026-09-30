@@ -50,6 +50,10 @@ pub(super) enum WriteAction<'a> {
     ReportToParent {
         target: &'a str,
     },
+    /// An additive edit to a Diri note that mentions these session ids.
+    WriteNote {
+        mentions: &'a [String],
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -188,6 +192,20 @@ impl<'a> McpPolicy<'a> {
                 }
                 relation
             }
+            WriteAction::WriteNote { mentions } => {
+                // Notes are the user's. Root agents act for the user; a
+                // delegated agent may add only to notes about its own line.
+                let reachable = std::iter::once(self.caller)
+                    .chain(self.lineage.ancestors(&self.caller.id.0))
+                    .any(|record| mentions.contains(&record.id.0));
+                if !self.is_root() && !reachable {
+                    return Err(
+                        "write_note denied: delegated sessions may write only to notes that mention them or one of their ancestors"
+                            .into(),
+                    );
+                }
+                Relation::Unrelated
+            }
             WriteAction::ReportToParent { target } => {
                 let (_, relation) = self.target(target)?;
                 if relation != Relation::Parent {
@@ -265,7 +283,7 @@ impl<'a> McpPolicy<'a> {
     }
 }
 
-fn same_path(left: &str, right: &str) -> bool {
+pub(super) fn same_path(left: &str, right: &str) -> bool {
     let left = Path::new(left);
     let right = Path::new(right);
     left == right

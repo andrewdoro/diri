@@ -15,6 +15,7 @@ use crate::tools::{ToolDefinition, tool_definitions_for};
 
 #[cfg(test)]
 mod audit_tests;
+mod notes;
 mod orchestration;
 mod policy;
 mod tasks;
@@ -32,6 +33,8 @@ pub struct Bridge {
     socket_path: PathBuf,
     caller: Option<String>,
     cancellation: crate::cancellation::Cancellation,
+    /// Overrides where Diri Notes live (tests); `None` resolves it per call.
+    notes_dir: Option<PathBuf>,
 }
 
 impl Default for Bridge {
@@ -49,7 +52,13 @@ impl Bridge {
             socket_path,
             caller,
             cancellation: Default::default(),
+            notes_dir: None,
         }
+    }
+
+    pub fn with_notes_dir(mut self, dir: PathBuf) -> Self {
+        self.notes_dir = Some(dir);
+        self
     }
 
     pub fn with_cancellation(mut self, cancellation: crate::cancellation::Cancellation) -> Self {
@@ -131,6 +140,9 @@ impl Bridge {
             "wait_for_children" => self.wait_for_children(arguments),
             "summarize_children" => self.summarize_children(arguments),
             "report_to_parent" => self.report_to_parent(arguments),
+            "list_notes" => self.list_notes(arguments),
+            "read_note" => self.read_note(arguments),
+            "write_note" => self.write_note(arguments),
             other => Err(format!("unknown tool: {other}")),
         }
     }

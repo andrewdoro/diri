@@ -4,15 +4,15 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-struct Peer {
-    path: PathBuf,
+pub(super) struct Peer {
+    pub(super) path: PathBuf,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     _temp: tempfile::TempDir,
 }
 
 impl Peer {
-    fn new(respond: impl FnMut(&str) -> Value + Send + 'static) -> Self {
+    pub(super) fn new(respond: impl FnMut(&str) -> Value + Send + 'static) -> Self {
         Self::with_identity(
             respond,
             json!({"proto":diri_proto::WIRE_VERSION, "engineKind":diri_proto::RUST_ENGINE_KIND}),

@@ -369,7 +369,7 @@ pub fn append_markdown(note: &mut Note, markdown_body: &str) {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolve {
-    Found(NoteMeta),
+    Found(Box<NoteMeta>),
     NotFound,
     /// More than one note matches; each is listed so the caller can be exact.
     Ambiguous(Vec<NoteMeta>),
@@ -379,7 +379,7 @@ pub enum Resolve {
 /// single unarchived note whose title contains `query`.
 pub fn resolve(notes: &[NoteMeta], query: &str) -> Resolve {
     if let Some(exact) = notes.iter().find(|n| n.id == query) {
-        return Resolve::Found(exact.clone());
+        return Resolve::Found(Box::new(exact.clone()));
     }
     let needle = query.to_lowercase();
     let exact_title: Vec<&NoteMeta> = notes
@@ -387,7 +387,7 @@ pub fn resolve(notes: &[NoteMeta], query: &str) -> Resolve {
         .filter(|n| n.title.to_lowercase() == needle)
         .collect();
     if let [one] = exact_title.as_slice() {
-        return Resolve::Found((*one).clone());
+        return Resolve::Found(Box::new((*one).clone()));
     }
     let matches: Vec<NoteMeta> = notes
         .iter()
@@ -396,7 +396,7 @@ pub fn resolve(notes: &[NoteMeta], query: &str) -> Resolve {
         .collect();
     match matches.len() {
         0 => Resolve::NotFound,
-        1 => Resolve::Found(matches.into_iter().next().expect("one match")),
+        1 => Resolve::Found(Box::new(matches.into_iter().next().expect("one match"))),
         _ => Resolve::Ambiguous(matches),
     }
 }

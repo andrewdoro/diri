@@ -7,7 +7,9 @@ use std::io::{IsTerminal, Read};
 use std::path::Path;
 
 use diri_notes::doc::{Block, Document};
+use diri_notes::handoff::{self, TodoSelector};
 use diri_notes::markdown;
+use diri_notes::mentions::MentionTarget;
 use diri_notes::store::{self, NoteMeta, NoteStore, Resolve};
 
 use super::CliError;
@@ -16,7 +18,9 @@ pub(crate) const HELP: &str = "dirijor note TEXT                     capture a n
 dirijor note add [TEXT] [--title T] [--project PATH] [--pin]   create a note (reads stdin when TEXT is omitted)\n  \
 dirijor note append NOTE TEXT          append Markdown to a note (NOTE is an id or part of its title)\n  \
 dirijor note todo TEXT [--to NOTE] [--project PATH]   add a to-do (default: the Inbox note \"To-dos\")\n  \
-dirijor note list [--project PATH] [--all] [--json]\n  \
+dirijor note list [--project PATH] [--mentions SESSION|me] [--all] [--json]\n  \
+dirijor note check NOTE TODO [--undo]   check off a to-do (TODO is its text or part of it)\n  \
+dirijor note link NOTE TODO SESSION    link a session to a to-do as an @-mention\n  \
 dirijor note show NOTE                 print a note's Markdown\n  \
 dirijor note path                      print the notes directory";
 
@@ -37,6 +41,8 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), CliError> {
         "todo" => todo(&store, rest),
         "list" | "ls" => list(&store, rest),
         "show" | "cat" => show(&store, rest),
+        "check" | "done" => check(&store, rest),
+        "link" => link(&store, rest),
         "path" => {
             println!("{}", store.dir().display());
             Ok(())
@@ -56,7 +62,9 @@ struct Flags {
     title: Option<String>,
     project: Option<String>,
     to: Option<String>,
+    mentions: Option<String>,
     pin: bool,
+    undo: bool,
     all: bool,
     json: bool,
 }
@@ -67,7 +75,9 @@ fn flags(arguments: &[String]) -> Result<Flags, CliError> {
         title: None,
         project: None,
         to: None,
+        mentions: None,
         pin: false,
+        undo: false,
         all: false,
         json: false,
     };
@@ -82,6 +92,8 @@ fn flags(arguments: &[String]) -> Result<Flags, CliError> {
             "--title" | "-t" => out.title = Some(value("--title")?),
             "--project" | "-p" => out.project = Some(project_root(&value("--project")?)?),
             "--to" => out.to = Some(value("--to")?),
+            "--mentions" => out.mentions = Some(value("--mentions")?),
+            "--undo" => out.undo = true,
             "--pin" => out.pin = true,
             "--all" => out.all = true,
             "--json" => out.json = true,
@@ -208,7 +220,7 @@ fn resolve(store: &NoteStore, query: &str) -> Result<NoteMeta, CliError> {
         .list()
         .map_err(|e| CliError::failure(format!("cannot list notes: {e}")))?;
     match store::resolve(&notes, query) {
-        Resolve::Found(note) => Ok(note),
+        Resolve::Found(note) => Ok(*note),
         Resolve::NotFound => Err(CliError::not_found(format!("no note matches \"{query}\""))),
         Resolve::Ambiguous(many) => Err(CliError::failure(format!(
             "\"{query}\" matches {} notes: {}",
@@ -223,6 +235,18 @@ fn resolve(store: &NoteStore, query: &str) -> Result<NoteMeta, CliError> {
 
 fn list(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
     let flags = flags(arguments)?;
+    // Direct mentions only; the list_notes MCP tool also follows ancestors.
+    let mentioned = match flags.mentions.as_deref() {
+        None => None,
+        Some("me") => Some(
+            std::env::var(diri_proto::paths::ENV_SESSION_ID).map_err(|_| {
+                CliError::failure(
+                    "--mentions me needs DIRIJOR_SESSION_ID (run inside a Diri session)",
+                )
+            })?,
+        ),
+        Some(id) => Some(id.to_owned()),
+    };
     let notes = store
         .list()
         .map_err(|e| CliError::failure(format!("cannot list notes: {e}")))?;
@@ -230,6 +254,11 @@ fn list(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
         .iter()
         .filter(|n| flags.all || !n.archived)
         .filter(|n| flags.project.is_none() || n.project == flags.project)
+        .filter(|n| {
+            mentioned
+                .as_ref()
+                .is_none_or(|id| n.mentions.contains(&MentionTarget::Session(id.clone())))
+        })
         .collect();
     if flags.json {
         let rows: Vec<serde_json::Value> = notes
@@ -278,4 +307,73 @@ fn show(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
     let body = markdown::write(&Default::default(), &note.doc);
     print!("{body}");
     Ok(())
+}
+
+fn check(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
+    let flags = flags(arguments)?;
+    let [target, todo] = flags.positional.as_slice() else {
+        return Err(CliError::failure(
+            "usage: dirijor note check NOTE TODO [--undo]",
+        ));
+    };
+    let meta = resolve(store, target)?;
+    edit_todo(store, &meta.id, todo, |note, index| {
+        handoff::set_checked(note, index, !flags.undo);
+    })
+}
+
+fn link(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
+    let flags = flags(arguments)?;
+    let [target, todo, session] = flags.positional.as_slice() else {
+        return Err(CliError::failure(
+            "usage: dirijor note link NOTE TODO SESSION",
+        ));
+    };
+    let meta = resolve(store, target)?;
+    let label = session_label(session);
+    edit_todo(store, &meta.id, todo, |note, index| {
+        handoff::link_session(note, index, &label, session);
+    })
+}
+
+fn edit_todo(
+    store: &NoteStore,
+    id: &str,
+    todo: &str,
+    edit: impl FnOnce(&mut diri_notes::store::Note, usize),
+) -> Result<(), CliError> {
+    let selector = match todo.parse::<usize>() {
+        Ok(index) => TodoSelector::Index(index),
+        Err(_) => TodoSelector::Text(todo.to_owned()),
+    };
+    let (_, index) = store
+        .update(id, |note| {
+            let index = handoff::find_todo(note, &selector)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+            edit(note, index);
+            Ok(index)
+        })
+        .map_err(|e| CliError::failure(format!("cannot update note: {e}")))?;
+    println!("{id} {index}");
+    Ok(())
+}
+
+/// "kind: title" from the Engine when it is running, else the bare id.
+fn session_label(session: &str) -> String {
+    let listing = super::bridge().request(
+        diri_proto::Method::SESSION_LIST,
+        serde_json::json!({}),
+        std::time::Duration::from_secs(3),
+    );
+    listing
+        .ok()
+        .and_then(|listing| serde_json::from_value::<diri_proto::SessionListResult>(listing).ok())
+        .and_then(|listing| {
+            listing
+                .sessions
+                .into_iter()
+                .find(|record| record.id.0 == session)
+                .map(|record| format!("{}: {}", record.effective_kind().id(), record.title))
+        })
+        .unwrap_or_else(|| session.to_owned())
 }
