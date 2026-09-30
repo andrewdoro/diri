@@ -20,7 +20,9 @@ pub enum BlockKind {
     Heading(u8),
     Bullet,
     Numbered,
-    Todo { checked: bool },
+    Todo {
+        checked: bool,
+    },
     Quote,
     Code,
     Divider,
@@ -181,7 +183,9 @@ impl Block {
     fn remove_style_in(&mut self, range: Range<usize>, matches: impl Fn(&Style) -> bool) {
         let mut kept = Vec::with_capacity(self.marks.len() + 1);
         for mark in self.marks.drain(..) {
-            if !matches(&mark.style) || mark.range.end <= range.start || mark.range.start >= range.end
+            if !matches(&mark.style)
+                || mark.range.end <= range.start
+                || mark.range.start >= range.end
             {
                 kept.push(mark);
                 continue;
@@ -444,11 +448,23 @@ mod tests {
         b.add_mark(0..5, Style::Bold);
         let styles = b.styles_at(5);
         b.replace(5..5, "!", &styles);
-        assert_eq!(b.marks, vec![Mark { range: 0..6, style: Style::Bold }]);
+        assert_eq!(
+            b.marks,
+            vec![Mark {
+                range: 0..6,
+                style: Style::Bold
+            }]
+        );
         // Typing before the mark does not inherit it.
         let styles = b.styles_at(0);
         b.replace(0..0, ">", &styles);
-        assert_eq!(b.marks, vec![Mark { range: 1..7, style: Style::Bold }]);
+        assert_eq!(
+            b.marks,
+            vec![Mark {
+                range: 1..7,
+                style: Style::Bold
+            }]
+        );
     }
 
     #[test]
@@ -457,7 +473,13 @@ mod tests {
         b.add_mark(2..5, Style::Italic);
         b.replace(1..3, "", &[]);
         assert_eq!(b.text, "adef");
-        assert_eq!(b.marks, vec![Mark { range: 1..3, style: Style::Italic }]);
+        assert_eq!(
+            b.marks,
+            vec![Mark {
+                range: 1..3,
+                style: Style::Italic
+            }]
+        );
         b.replace(0..4, "", &[]);
         assert!(b.marks.is_empty());
     }
@@ -470,12 +492,24 @@ mod tests {
         assert_eq!(
             b.marks,
             vec![
-                Mark { range: 0..2, style: Style::Bold },
-                Mark { range: 4..6, style: Style::Bold }
+                Mark {
+                    range: 0..2,
+                    style: Style::Bold
+                },
+                Mark {
+                    range: 4..6,
+                    style: Style::Bold
+                }
             ]
         );
         b.toggle_mark(1..5, Style::Bold);
-        assert_eq!(b.marks, vec![Mark { range: 0..6, style: Style::Bold }]);
+        assert_eq!(
+            b.marks,
+            vec![Mark {
+                range: 0..6,
+                style: Style::Bold
+            }]
+        );
     }
 
     #[test]
@@ -484,11 +518,29 @@ mod tests {
         b.add_mark(3..8, Style::Code);
         let tail = b.split_off(5, 2, BlockKind::Paragraph);
         assert_eq!(b.text, "hello");
-        assert_eq!(b.marks, vec![Mark { range: 3..5, style: Style::Code }]);
+        assert_eq!(
+            b.marks,
+            vec![Mark {
+                range: 3..5,
+                style: Style::Code
+            }]
+        );
         assert_eq!(tail.text, " world");
-        assert_eq!(tail.marks, vec![Mark { range: 0..3, style: Style::Code }]);
+        assert_eq!(
+            tail.marks,
+            vec![Mark {
+                range: 0..3,
+                style: Style::Code
+            }]
+        );
         b.append(&tail);
-        assert_eq!(b.marks, vec![Mark { range: 3..8, style: Style::Code }]);
+        assert_eq!(
+            b.marks,
+            vec![Mark {
+                range: 3..8,
+                style: Style::Code
+            }]
+        );
     }
 
     #[test]

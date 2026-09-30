@@ -1545,6 +1545,7 @@ dependencies = [
  "block2 0.6.2",
  "diri-client",
  "diri-engine",
+ "diri-notes",
  "diri-proto",
  "diri-telemetry",
  "diri-term",
@@ -1760,6 +1761,7 @@ name = "dirijor-mcp"
 version = "0.1.0"
 dependencies = [
  "diri-engine",
+ "diri-notes",
  "diri-proto",
  "libc",
  "serde",

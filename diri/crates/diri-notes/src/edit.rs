@@ -679,7 +679,9 @@ impl Editor {
         if kind == BlockKind::Code {
             // Return on a blank last line leaves the code block.
             let at_end = pos.offset == block.text.len();
-            if at_end && (block.text.ends_with('\n') || block.text.is_empty()) && !block.text.is_empty()
+            if at_end
+                && (block.text.ends_with('\n') || block.text.is_empty())
+                && !block.text.is_empty()
             {
                 let len = block.text.len();
                 self.blocks[pos.block].replace(len - 1..len, "", &[]);
@@ -712,7 +714,15 @@ impl Editor {
             // Return at the start opens a line above and keeps this block.
             let block_indent = block.indent;
             let id = self.fresh_id();
-            let mut above = Block::new(id, if kind.is_list() { next_kind } else { BlockKind::Paragraph }, "");
+            let mut above = Block::new(
+                id,
+                if kind.is_list() {
+                    next_kind
+                } else {
+                    BlockKind::Paragraph
+                },
+                "",
+            );
             if kind.is_list() {
                 above.indent = block_indent;
             }
@@ -864,7 +874,10 @@ impl Editor {
 
     /// Clicking a checkbox.
     pub fn set_checked(&mut self, index: usize, checked: bool, now_ms: u64) {
-        if !matches!(self.blocks.get(index).map(|b| b.kind), Some(BlockKind::Todo { .. })) {
+        if !matches!(
+            self.blocks.get(index).map(|b| b.kind),
+            Some(BlockKind::Todo { .. })
+        ) {
             return;
         }
         self.checkpoint(EditKind::Other, now_ms);
@@ -919,7 +932,11 @@ impl Editor {
             block
                 .marks
                 .iter()
-                .filter(|m| matches!(m.style, Style::Link(_)) && m.range.start <= pos.offset && pos.offset <= m.range.end)
+                .filter(|m| {
+                    matches!(m.style, Style::Link(_))
+                        && m.range.start <= pos.offset
+                        && pos.offset <= m.range.end
+                })
                 .map(|m| (pos.block, m.range.clone()))
                 .collect()
         } else {
@@ -943,12 +960,15 @@ impl Editor {
     /// The link under the caret, if any.
     pub fn link_at_caret(&self) -> Option<String> {
         let pos = self.selection.head;
-        self.blocks[pos.block].marks.iter().find_map(|m| match &m.style {
-            Style::Link(url) if m.range.start <= pos.offset && pos.offset <= m.range.end => {
-                Some(url.clone())
-            }
-            _ => None,
-        })
+        self.blocks[pos.block]
+            .marks
+            .iter()
+            .find_map(|m| match &m.style {
+                Style::Link(url) if m.range.start <= pos.offset && pos.offset <= m.range.end => {
+                    Some(url.clone())
+                }
+                _ => None,
+            })
     }
 
     /// Styles the next typed character receives — for toolbar state.
@@ -979,7 +999,11 @@ impl Editor {
         (start.block..=end.block)
             .map(|index| {
                 let len = self.blocks[index].text.len();
-                let from = if index == start.block { start.offset } else { 0 };
+                let from = if index == start.block {
+                    start.offset
+                } else {
+                    0
+                };
                 let to = if index == end.block { end.offset } else { len };
                 (index, from..to)
             })
@@ -1282,9 +1306,18 @@ mod tests {
         assert_eq!(
             block.marks,
             vec![
-                Mark { range: 2..6, style: Style::Bold },
-                Mark { range: 11..15, style: Style::Code },
-                Mark { range: 20..22, style: Style::Italic },
+                Mark {
+                    range: 2..6,
+                    style: Style::Bold
+                },
+                Mark {
+                    range: 11..15,
+                    style: Style::Code
+                },
+                Mark {
+                    range: 20..22,
+                    style: Style::Italic
+                },
             ]
         );
         // Arithmetic is left alone.
@@ -1372,7 +1405,13 @@ mod tests {
             head: Pos::new(1, 6),
         });
         e.toggle_style(Style::Bold, 0);
-        assert_eq!(e.block(1).marks, vec![Mark { range: 0..5, style: Style::Bold }]);
+        assert_eq!(
+            e.block(1).marks,
+            vec![Mark {
+                range: 0..5,
+                style: Style::Bold
+            }]
+        );
         e.set_caret(Pos::new(1, 11));
         e.toggle_style(Style::Italic, 0);
         type_str(&mut e, "!");

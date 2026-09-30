@@ -5,6 +5,6 @@
 //! [`doc::Document`] values; everything else is conversion at the file edge.
 
 pub mod doc;
+pub mod edit;
 pub mod markdown;
 pub mod store;
-pub mod edit;

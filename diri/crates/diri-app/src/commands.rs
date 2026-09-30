@@ -61,6 +61,7 @@ actions!(
         MovePaneUp,
         MovePaneDown,
         OpenWorktrees,
+        OpenNotes,
         OpenSettings,
         // Palette destination: open Settings even when it is already visible.
         // OpenSettings retains the Cmd+, toggle behavior.
@@ -162,6 +163,7 @@ pub enum CommandId {
     MovePaneUp,
     MovePaneDown,
     OpenWorktrees,
+    OpenNotes,
     OpenSettings,
     ToggleSidebar,
     ToggleTabOrientation,
@@ -629,6 +631,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         "workspace move pane down dock"
     ),
     spec!(
+        OpenNotes,
+        "notes",
+        Some("cmd-shift-m"),
+        Some("⇧⌘M"),
+        Some(APP_CONTEXT),
+        "Notes",
+        "doc.text",
+        "notes note markdown todo todos write memo journal"
+    ),
+    spec!(
         OpenWorktrees,
         "worktrees",
         Some("cmd-alt-w"),
@@ -1041,6 +1053,9 @@ fn bind_active_keys(cx: &mut App, overrides: &ShortcutOverrides) {
             .iter()
             .flat_map(|command| command.key_bindings(overrides)),
     );
+    // The Notes window's editing keys live in their own key contexts, so
+    // they never shadow terminal or app shortcuts in the main window.
+    cx.bind_keys(crate::notes::key_bindings());
 }
 
 fn active_shortcut_overrides() -> &'static RwLock<ShortcutOverrides> {
@@ -1187,6 +1202,7 @@ impl CommandSpec {
             CommandId::MovePaneDown => KeyBinding::new(key, MovePaneDown, context),
 
             CommandId::OpenWorktrees => KeyBinding::new(key, OpenWorktrees, context),
+            CommandId::OpenNotes => KeyBinding::new(key, OpenNotes, context),
             CommandId::OpenSettings => KeyBinding::new(key, OpenSettings, context),
             CommandId::ToggleSidebar => KeyBinding::new(key, ToggleSidebar, context),
             CommandId::ToggleTabOrientation => KeyBinding::new(key, ToggleTabOrientation, context),
@@ -1607,6 +1623,11 @@ impl CommandId {
                 description: "Preview sessions across projects without changing work",
                 category: Navigation,
             },
+            Self::OpenNotes => ShortcutMetadata {
+                title: "Notes",
+                description: "Open the Notes window",
+                category: Navigation,
+            },
             Self::OpenWorktrees => ShortcutMetadata {
                 title: "Worktrees overview",
                 description: "Open the Git worktrees overview",
@@ -1850,6 +1871,7 @@ impl CommandId {
             Self::MovePaneDown => Box::new(MovePaneDown),
 
             Self::OpenWorktrees => Box::new(OpenWorktrees),
+            Self::OpenNotes => Box::new(OpenNotes),
             Self::OpenSettings => Box::new(OpenSettings),
             Self::ToggleSidebar => Box::new(ToggleSidebar),
             Self::ToggleTabOrientation => Box::new(ToggleTabOrientation),

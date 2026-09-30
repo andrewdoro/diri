@@ -125,6 +125,22 @@ impl NoteStore {
         diri_proto::paths::DirijorPaths::app_support(home).join("notes")
     }
 
+    /// Where this process should keep notes: `DIRI_NOTES_DIR` when set
+    /// (tests, fixtures), else beside the rest of Diri's state, honouring the
+    /// same `DIRIJOR_APP_SUPPORT` override every other component uses.
+    pub fn resolve_dir() -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("DIRI_NOTES_DIR").filter(|d| !d.is_empty()) {
+            return Some(PathBuf::from(dir));
+        }
+        if let Some(support) =
+            std::env::var_os(diri_proto::paths::ENV_APP_SUPPORT).filter(|d| !d.is_empty())
+        {
+            return Some(PathBuf::from(support).join("notes"));
+        }
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        Some(Self::default_dir(home))
+    }
+
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
@@ -152,7 +168,9 @@ impl NoteStore {
             let entry = entry?;
             let path = entry.path();
             let Some(id) = note_id(&path) else { continue };
-            let Ok(metadata) = entry.metadata() else { continue };
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
             if !metadata.is_file() || metadata.len() > MAX_NOTE_BYTES {
                 continue;
             }
@@ -194,9 +212,7 @@ impl NoteStore {
     pub fn save(&self, id: &str, note: &Note) -> io::Result<()> {
         let path = self.path_for(id)?;
         let contents = note.to_markdown();
-        let tmp = self
-            .dir
-            .join(format!(".{id}.{}.tmp", nonce()));
+        let tmp = self.dir.join(format!(".{id}.{}.tmp", nonce()));
         let result = (|| {
             let mut file = fs::OpenOptions::new()
                 .write(true)
@@ -241,7 +257,12 @@ impl NoteStore {
             .filter(|b| !(b.kind == BlockKind::Paragraph && b.text.is_empty()))
             .cloned()
             .collect();
-        blocks.extend(extra.blocks.into_iter().filter(|b| !b.text.is_empty() || b.kind == BlockKind::Divider));
+        blocks.extend(
+            extra
+                .blocks
+                .into_iter()
+                .filter(|b| !b.text.is_empty() || b.kind == BlockKind::Divider),
+        );
         note.doc = Document::new(note.doc.title.clone(), blocks);
         self.save(id, &note)?;
         Ok(note)
@@ -289,7 +310,10 @@ fn validate_id(id: &str) -> io::Result<()> {
     if ok {
         Ok(())
     } else {
-        Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid note id"))
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid note id",
+        ))
     }
 }
 

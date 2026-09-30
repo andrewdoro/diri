@@ -203,7 +203,8 @@ fn heading(line: &str) -> Option<(u8, &str)> {
     if rest.is_empty() {
         return Some((hashes as u8, ""));
     }
-    rest.strip_prefix(' ').map(|rest| (hashes as u8, rest.trim()))
+    rest.strip_prefix(' ')
+        .map(|rest| (hashes as u8, rest.trim()))
 }
 
 fn list_item(line: &str) -> Option<(BlockKind, &str)> {
@@ -415,13 +416,16 @@ fn resolve_emphasis(items: &mut [Item]) -> Vec<(usize, usize, Style)> {
             if !c.can_close || c.remaining == 0 {
                 break;
             }
-            let (cch, clen, cremaining, cboth) = (c.ch, c.len, c.remaining, c.can_open && c.can_close);
+            let (cch, clen, cremaining, cboth) =
+                (c.ch, c.len, c.remaining, c.can_open && c.can_close);
             let mut found = None;
             for &opener in runs.iter().rev().filter(|o| **o < closer) {
                 if !active[opener] {
                     continue;
                 }
-                let Item::Run(o) = &items[opener] else { continue };
+                let Item::Run(o) = &items[opener] else {
+                    continue;
+                };
                 if o.ch != cch || !o.can_open || o.remaining == 0 {
                     continue;
                 }
@@ -441,7 +445,11 @@ fn resolve_emphasis(items: &mut [Item]) -> Vec<(usize, usize, Style)> {
             }
             let Some(opener) = found else { break };
             let Item::Run(o) = &items[opener] else { break };
-            let used = if cch == '~' || (o.remaining >= 2 && cremaining >= 2) { 2 } else { 1 };
+            let used = if cch == '~' || (o.remaining >= 2 && cremaining >= 2) {
+                2
+            } else {
+                1
+            };
             let style = match (cch, used) {
                 ('~', _) => Style::Strike,
                 (_, 2) => Style::Bold,
@@ -680,7 +688,11 @@ fn write_block(out: &mut String, doc: &Document, index: usize, block: &Block) {
             out.push_str(&quoted.join("\n"));
         }
         BlockKind::Code => {
-            let fence = if block.text.contains("```") { "~~~" } else { "```" };
+            let fence = if block.text.contains("```") {
+                "~~~"
+            } else {
+                "```"
+            };
             out.push_str(fence);
             out.push('\n');
             out.push_str(&block.text);
@@ -830,13 +842,11 @@ fn delimiters(style: &Style, block: &Block, at: usize) -> (String, String) {
             let span = block
                 .marks
                 .iter()
-                .find(|mark| mark.style == Style::Code && mark.range.start <= at && at < mark.range.end)
+                .find(|mark| {
+                    mark.style == Style::Code && mark.range.start <= at && at < mark.range.end
+                })
                 .map_or("", |mark| &block.text[mark.range.clone()]);
-            let longest = span
-                .split(|c| c != '`')
-                .map(str::len)
-                .max()
-                .unwrap_or(0);
+            let longest = span.split(|c| c != '`').map(str::len).max().unwrap_or(0);
             let fence = "`".repeat(longest + 1);
             let pad = span.starts_with('`')
                 || span.ends_with('`')
@@ -847,10 +857,7 @@ fn delimiters(style: &Style, block: &Block, at: usize) -> (String, String) {
                 (fence.clone(), fence)
             }
         }
-        Style::Link(url) => (
-            "[".into(),
-            format!("]({})", write_url(url)),
-        ),
+        Style::Link(url) => ("[".into(), format!("]({})", write_url(url))),
     }
 }
 
@@ -952,7 +959,10 @@ mod tests {
         a.title == b.title
             && a.blocks.len() == b.blocks.len()
             && a.blocks.iter().zip(&b.blocks).all(|(x, y)| {
-                x.kind == y.kind && x.indent == y.indent && x.text == y.text && visible(x) == visible(y)
+                x.kind == y.kind
+                    && x.indent == y.indent
+                    && x.text == y.text
+                    && visible(x) == visible(y)
             })
     }
 
@@ -1112,10 +1122,19 @@ mod tests {
                     if style != Style::Code && !expressible(&text, range.clone()) {
                         continue;
                     }
-                    if style == Style::Code && block.marks.iter().any(|m| m.range.start < range.end && range.start < m.range.end) {
+                    if style == Style::Code
+                        && block
+                            .marks
+                            .iter()
+                            .any(|m| m.range.start < range.end && range.start < m.range.end)
+                    {
                         continue;
                     }
-                    if block.marks.iter().any(|m| m.style == Style::Code && m.range.start < range.end && range.start < m.range.end) {
+                    if block.marks.iter().any(|m| {
+                        m.style == Style::Code
+                            && m.range.start < range.end
+                            && range.start < m.range.end
+                    }) {
                         continue;
                     }
                     // Intraword crossings (`a*b**c*d**`) have no faithful
@@ -1140,12 +1159,17 @@ mod tests {
             let text = write(&FrontMatter::default(), &doc);
             let (_, parsed) = parse(&text);
             if !equivalent(&parsed, &doc) {
-                let bad = parsed
-                    .blocks
-                    .iter()
-                    .zip(&doc.blocks)
-                    .find(|(x, y)| !equivalent(&Document::new("", vec![(*x).clone()]), &Document::new("", vec![(*y).clone()])));
-                panic!("fuzz round trip failed.\n{text}\n{bad:?}\n{} vs {}", parsed.blocks.len(), doc.blocks.len());
+                let bad = parsed.blocks.iter().zip(&doc.blocks).find(|(x, y)| {
+                    !equivalent(
+                        &Document::new("", vec![(*x).clone()]),
+                        &Document::new("", vec![(*y).clone()]),
+                    )
+                });
+                panic!(
+                    "fuzz round trip failed.\n{text}\n{bad:?}\n{} vs {}",
+                    parsed.blocks.len(),
+                    doc.blocks.len()
+                );
             }
         }
     }

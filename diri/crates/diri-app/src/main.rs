@@ -37,6 +37,7 @@ mod markdown_view;
 #[cfg(any(target_os = "macos", test))]
 mod menu_inbox;
 pub mod navigation;
+mod notes;
 mod notification_feed;
 pub mod notifications;
 mod number_flow;

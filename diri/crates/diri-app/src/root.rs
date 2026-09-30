@@ -42,8 +42,8 @@ use crate::AppServices;
 use crate::commands::{
     self, APP_CONTEXT, ArchiveSelectedSession, CheckForUpdates, CloseSession, CommandId,
     DelegateSelectedSession, FocusSidebar, MoveSelectedSessionDown, MoveSelectedSessionUp,
-    NewCodexSession, NewDefaultSession, NewTerminal, OpenLauncher, OpenSettings, OpenWorktrees,
-    QuoteSelection, QuoteSelectionToSession, RenameSelectedSession, ReopenSession,
+    NewCodexSession, NewDefaultSession, NewTerminal, OpenLauncher, OpenNotes, OpenSettings,
+    OpenWorktrees, QuoteSelection, QuoteSelectionToSession, RenameSelectedSession, ReopenSession,
     SESSION_NAVIGATION_CONTEXT, SelectLastSession, SelectNextAttentionSession, SelectNextSession,
     SelectPreviousSession, SelectSession1, SelectSession2, SelectSession3, SelectSession4,
     SelectSession5, SelectSession6, SelectSession7, SelectSession8, ToggleAuxiliaryTerminal,
@@ -2235,6 +2235,12 @@ impl RootView {
                 if let Some(surfaces) = &self.session_surfaces {
                     surfaces.update(cx, |surfaces, cx| surfaces.toggle_overview(cx));
                 }
+            }
+            CommandId::OpenNotes => {
+                if let Some(navigation) = &self.navigation {
+                    navigation.update(cx, |navigation, cx| navigation.dismiss(cx));
+                }
+                crate::notes::open(self.services.store.clone(), cx);
             }
             CommandId::OpenWorktrees => {
                 if let Some(navigation) = &self.navigation {
@@ -4931,6 +4937,9 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(|this, _: &OpenWorktrees, window, cx| {
                 this.run_command(CommandId::OpenWorktrees, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenNotes, window, cx| {
+                this.run_command(CommandId::OpenNotes, window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.run_command(CommandId::OpenSettings, window, cx);
