@@ -754,7 +754,7 @@ impl NoteEditorView {
                     .text_size(px(11.0))
                     .line_height(px(PREVIEW_LINE))
                     .text_color(colors.primary.alpha(0.8))
-                    .child(brief.prompt.trim_end().to_owned()),
+                    .child(readable_brief(brief.prompt.trim_end())),
             );
         Some(list)
     }
@@ -1154,5 +1154,39 @@ fn state_word(state: &WorkState) -> &'static str {
         WorkState::Archived => "archived",
         WorkState::Missing => "unknown",
         WorkState::Done => "done",
+    }
+}
+
+/// The preview reads like the note: `[@Claude](diri://session/…)` shows as
+/// `@Claude`. The agent still receives the links, which carry the ids it
+/// needs to find those sessions and notes.
+fn readable_brief(prompt: &str) -> String {
+    let mut out = String::with_capacity(prompt.len());
+    let mut rest = prompt;
+    while let Some(at) = rest.find("](diri://") {
+        let Some(open) = rest[..at].rfind('[') else {
+            break;
+        };
+        let Some(close) = rest[at..].find(')') else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..at]);
+        rest = &rest[at + close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod readable_brief_tests {
+    #[test]
+    fn diri_links_read_as_their_labels() {
+        assert_eq!(
+            super::readable_brief(
+                "- [ ] Draft [@Claude](diri://session/s_1) and [spec](https://x.dev)"
+            ),
+            "- [ ] Draft @Claude and [spec](https://x.dev)"
+        );
     }
 }

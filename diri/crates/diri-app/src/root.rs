@@ -5034,11 +5034,9 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &NewNote, window, cx| {
                 this.run_command(CommandId::NewNote, window, cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &ShowTodos, window, cx| {
-                    this.run_command(CommandId::ShowTodos, window, cx);
-                }),
-            )
+            .on_action(cx.listener(|this, _: &ShowTodos, window, cx| {
+                this.run_command(CommandId::ShowTodos, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.run_command(CommandId::OpenSettings, window, cx);
             }))
