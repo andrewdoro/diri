@@ -1731,6 +1731,12 @@ impl SessionStore {
                     self.refresh_workspaces();
                 }
             }
+            EventName::SESSION_REVEAL => {
+                if let Ok(p) = serde_json::from_value::<diri_proto::SessionIdParams>(event.params) {
+                    self.select(p.session_id);
+                }
+                return StoreEventChange::Model;
+            }
             EventName::SESSION_CLIPBOARD => {
                 if let Ok(event) =
                     serde_json::from_value::<diri_proto::SessionClipboardEvent>(event.params)

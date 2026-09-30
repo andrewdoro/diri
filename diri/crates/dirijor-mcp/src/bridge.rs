@@ -144,6 +144,9 @@ impl Bridge {
             "list_notes" => self.list_notes(arguments),
             "read_note" => self.read_note(arguments),
             "write_note" => self.write_note(arguments),
+            "create_note" => self.create_note(arguments),
+            "start_from_note" => self.start_from_note(arguments),
+            "note_history" => self.note_history(arguments),
             other => Err(format!("unknown tool: {other}")),
         }
     }

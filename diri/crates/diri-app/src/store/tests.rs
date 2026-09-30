@@ -3511,3 +3511,28 @@ fn only_terminals_carry_a_location_for_their_hover() {
         None
     );
 }
+
+#[test]
+fn a_reveal_request_selects_the_session() {
+    let agent = session("codex", "p", 1.0);
+    let note = session("note", "p", 2.0);
+    let (mut store, _effects) = hydrated(
+        vec![agent.clone(), note.clone()],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    store.select(agent.id.clone());
+    store.handle_event(EventEnvelope {
+        name: diri_proto::EventName::SESSION_REVEAL.into(),
+        params: serde_json::json!({ "sessionID": note.id.0 }),
+        seq: 2,
+    });
+    assert_eq!(store.selected_session_id(), Some(&note.id));
+    // An unknown id is ignored rather than clearing the selection.
+    store.handle_event(EventEnvelope {
+        name: diri_proto::EventName::SESSION_REVEAL.into(),
+        params: serde_json::json!({ "sessionID": "s_gone" }),
+        seq: 3,
+    });
+    assert_eq!(store.selected_session_id(), Some(&note.id));
+}

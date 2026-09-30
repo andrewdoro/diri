@@ -20,6 +20,8 @@ const DEFAULT_NOTE_LIMIT: u64 = 50;
 const MAX_NOTE_LIMIT: u64 = 200;
 const MAX_APPEND_BYTES: usize = 64 * 1024;
 const ORIGIN: &str = "origin";
+const MAX_ENTRY_CHARS: usize = 500;
+const MAX_HISTORY_ROWS: usize = 50;
 const NOTE_SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What happened when the CLI asked the Engine to create a note Session.
@@ -284,6 +286,7 @@ impl Bridge {
 
     pub(super) fn write_note(&self, args: &Value) -> Result<Value, String> {
         let append = optional_string(args, "append");
+        let entry = optional_string(args, "entry");
         let checked = optional_bool(args, "checked");
         let link = optional_string(args, "link_session");
         let todo = match (args["todo_index"].as_u64(), optional_string(args, "todo")) {
@@ -292,20 +295,30 @@ impl Bridge {
             (None, None) => None,
             (Some(_), Some(_)) => return Err("pass todo or todo_index, not both".into()),
         };
-        if append.is_none() && checked.is_none() && link.is_none() {
-            return Err("write_note needs append, checked, or link_session".into());
+        if append.is_none() && entry.is_none() && checked.is_none() && link.is_none() {
+            return Err("write_note needs entry, checked, link_session, or append".into());
         }
         if todo.is_none() && (checked.is_some() || link.is_some()) {
             return Err("checked and link_session need todo or todo_index".into());
         }
-        if todo.is_some() && checked.is_none() && link.is_none() {
-            return Err("todo selects a to-do for checked or link_session; pass one".into());
+        if todo.is_some() && checked.is_none() && link.is_none() && entry.is_none() {
+            return Err(
+                "todo selects a to-do for entry, checked, or link_session; pass one".into(),
+            );
         }
         if append
             .as_ref()
             .is_some_and(|text| text.len() > MAX_APPEND_BYTES)
         {
             return Err(format!("append is larger than {MAX_APPEND_BYTES} bytes"));
+        }
+        if entry
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > MAX_ENTRY_CHARS)
+        {
+            return Err(format!(
+                "an entry is at most {MAX_ENTRY_CHARS} characters: one or two short sentences. Put longer write-ups in a note of their own with create_note."
+            ));
         }
 
         let store = self.note_store()?;
@@ -347,6 +360,11 @@ impl Bridge {
             None => None,
         };
 
+        let caller_record = self
+            .caller
+            .as_deref()
+            .and_then(|id| snapshot.sessions.iter().find(|r| r.id.0 == id))
+            .cloned();
         let (note, (index, changes)) = store
             .update(
                 &meta.id,
@@ -371,6 +389,34 @@ impl Bridge {
                     {
                         changes.push("linked");
                     }
+                    if let Some(text) = &entry {
+                        // Under the chosen to-do, else under the caller's own to-do,
+                        // else in the note's Updates section.
+                        let (label, id) = caller_record.as_ref().map_or_else(
+                            || ("@agent".to_owned(), String::new()),
+                            |r| {
+                                (
+                                    mention::session_label(
+                                        short_label(r.effective_kind().id()),
+                                        &r.title,
+                                    ),
+                                    r.id.0.clone(),
+                                )
+                            },
+                        );
+                        let date = handoff::entry_date();
+                        // A named to-do takes it; otherwise append_update files
+                        // it under the caller's own to-do, else in Updates.
+                        let placed = index.and_then(|todo| {
+                            diri_notes::work::append_todo_update(
+                                note, todo, &date, &label, &id, text,
+                            )
+                        });
+                        if placed.is_none() {
+                            handoff::append_update(note, &date, &label, &id, text);
+                        }
+                        changes.push("entry");
+                    }
                     if let Some(text) = &append {
                         note_store::append_markdown(note, text);
                         changes.push("appended");
@@ -391,6 +437,215 @@ impl Bridge {
             });
         }
         Ok(result)
+    }
+
+    /// A new note written by the calling agent, shown under it in the
+    /// sidebar, in its project (or `project`), optionally opened for the
+    /// person.
+    pub(super) fn create_note(&self, args: &Value) -> Result<Value, String> {
+        let title = required_string(args, "title")?;
+        let markdown = optional_string(args, "markdown").unwrap_or_default();
+        if markdown.len() > MAX_APPEND_BYTES {
+            return Err(format!("markdown is larger than {MAX_APPEND_BYTES} bytes"));
+        }
+        let caller = self.require_caller()?.to_owned();
+        let snapshot = self.snapshot()?;
+        McpPolicy::new(&snapshot.sessions, &snapshot.projects, Some(&caller))?
+            .authorize(WriteAction::CreateNote)?;
+        let folder = match optional_string(args, "project") {
+            Some(path) => {
+                if !Path::new(&path).is_dir() {
+                    return Err(format!("{path} is not a folder"));
+                }
+                path
+            }
+            None => self.caller_project(&snapshot)?.0,
+        };
+        let record = match self.spawn_note(&folder, &title, &markdown, Some(&caller))? {
+            NoteSpawn::Created(record) => record,
+            NoteSpawn::Unavailable(reason) => {
+                return Err(format!("cannot create the note: {reason}"));
+            }
+        };
+        let opened = optional_bool(args, "open").unwrap_or(false);
+        if opened {
+            self.request(
+                Method::SESSION_REVEAL,
+                json!({ "sessionID": record.id.0 }),
+                DEFAULT_TIMEOUT,
+            )?;
+        }
+        Ok(json!({
+            "note": record.note_id,
+            "session_id": record.id.0,
+            "title": record.title,
+            "opened": opened,
+        }))
+    }
+
+    /// Starts an agent on a note (or one of its to-dos) with the note as its
+    /// parent: it appears under the note, receives the note as its brief,
+    /// and its chip is added to the to-do.
+    pub(super) fn start_from_note(&self, args: &Value) -> Result<Value, String> {
+        let caller = self.require_caller()?.to_owned();
+        let store = self.note_store()?;
+        let snapshot = self.snapshot()?;
+        let meta = self.resolve_note(
+            &store,
+            &required_string(args, "note")?,
+            Some(&snapshot.sessions),
+        )?;
+        let existing = note_sessions(&snapshot.sessions)
+            .get(meta.id.as_str())
+            .map(|record| (*record).clone());
+        let (note_session, sessions) = match existing {
+            Some(record) => (record, snapshot.sessions.clone()),
+            // A note from before note sessions: give it one first.
+            None => (self.adopt_note_session(&meta.id)?, self.sessions()?),
+        };
+        McpPolicy::new(&sessions, &snapshot.projects, Some(&caller))?.authorize(
+            WriteAction::StartFromNote {
+                note_session: &note_session.id.0,
+            },
+        )?;
+
+        let note = store
+            .load(&meta.id)
+            .map_err(|e| format!("cannot read note {}: {e}", meta.id))?;
+        let todo = match (args["todo_index"].as_u64(), optional_string(args, "todo")) {
+            (Some(index), None) => Some(handoff::find_todo(
+                &note,
+                &TodoSelector::Index(index as usize),
+            )?),
+            (None, Some(text)) => Some(handoff::find_todo(&note, &TodoSelector::Text(text))?),
+            (None, None) => None,
+            (Some(_), Some(_)) => return Err("pass todo or todo_index, not both".into()),
+        };
+        let related: Vec<handoff::Related> = meta
+            .mentions
+            .iter()
+            .filter_map(|target| match target {
+                MentionTarget::Session(id) => sessions.iter().find(|r| &r.id.0 == id),
+                MentionTarget::Note(_) => None,
+            })
+            .filter(|record| !record.is_note())
+            .map(|record| handoff::Related {
+                session_id: record.id.0.clone(),
+                kind: short_label(record.effective_kind().id()).to_owned(),
+                title: record.title.clone(),
+                status: status_label(&record.status).to_owned(),
+            })
+            .collect();
+        let brief = handoff::prompt(
+            &meta.id,
+            &note,
+            todo,
+            &related,
+            optional_string(args, "prompt").as_deref(),
+        );
+        let kind = match optional_string(args, "kind") {
+            Some(kind) => kind,
+            None => sessions
+                .iter()
+                .find(|r| r.id.0 == caller)
+                .map(|r| short_label(r.effective_kind().id()).to_owned())
+                .ok_or("pass kind: which agent should do the work")?,
+        };
+        let name = todo
+            .and_then(|index| note.doc.blocks.get(index))
+            .map(|block| block.text.clone())
+            .unwrap_or_else(|| meta.display_title().to_owned());
+        let mut spawn = json!({
+            "kind": kind,
+            "cwd": note_session.cwd,
+            "name": name,
+            "prompt": brief,
+        });
+        if let Some(separate) = optional_bool(args, "separate_copy") {
+            spawn["worktree"] = json!(separate);
+        }
+        for key in ["task", "result_schema", "operation_id"] {
+            if let Some(value) = args.get(key) {
+                spawn[key] = value.clone();
+            }
+        }
+        let mut spawned = self.spawn_session(&spawn, Some(note_session.id.clone()))?;
+        let child = spawned["spawn_receipt"]["session_id"]
+            .as_str()
+            .or_else(|| spawned["id"].as_str())
+            .map(str::to_owned);
+        if let (Some(index), Some(child)) = (todo, child.as_deref())
+            && spawned["ok"] != false
+        {
+            let label = mention::session_label(&kind, &name);
+            store
+                .update(&meta.id, &Author::Session(caller.clone()), |note| {
+                    handoff::link_session(note, index, &label, child);
+                    Ok(())
+                })
+                .map_err(|e| format!("started {child}, but could not link it in the note: {e}"))?;
+        }
+        spawned["note"] = json!(meta.id);
+        spawned["note_session"] = json!(note_session.id.0);
+        if let Some(index) = todo {
+            spawned["todo"] = json!(index);
+        }
+        Ok(spawned)
+    }
+
+    /// Earlier versions of a note (newest first), or one version's text.
+    /// Read-only: restoring a version is for the person, in the app or CLI.
+    pub(super) fn note_history(&self, args: &Value) -> Result<Value, String> {
+        let store = self.note_store()?;
+        let sessions = self.sessions();
+        let meta = self.resolve_note(
+            &store,
+            &required_string(args, "note")?,
+            sessions.as_deref().ok(),
+        )?;
+        let history = store.history();
+        if let Some(version) = args["version"].as_u64() {
+            let markdown = history
+                .read(&meta.id, version)
+                .map_err(|e| format!("cannot read that version: {e}"))?;
+            return Ok(json!({
+                "note": meta.id,
+                "version": version,
+                "when": diri_notes::history::describe_time(version),
+                "markdown": markdown,
+            }));
+        }
+        let versions = history
+            .list(&meta.id)
+            .map_err(|e| format!("cannot read the history: {e}"))?;
+        let total = versions.len();
+        let rows: Vec<Value> = versions
+            .into_iter()
+            .take(MAX_HISTORY_ROWS)
+            .map(|v| {
+                json!({
+                    "version": v.id,
+                    "when": diri_notes::history::describe_time(v.id),
+                    "by": v.author.describe(),
+                    "size": v.bytes,
+                    "summary": v.summary,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "note": meta.id,
+            "title": meta.display_title(),
+            "versions": rows,
+            "total": total,
+            "times_are": "UTC",
+            "restore": "Only the person can restore a version, from the app (Version history…) or `dirijor note restore`.",
+        }))
+    }
+
+    /// Gives an orphan note file its Session (idempotent in the Engine).
+    fn adopt_note_session(&self, note_id: &str) -> Result<SessionRecord, String> {
+        let params = json!({"kind": AgentKind::NOTE_ID, "cwd": "", "noteId": note_id});
+        self.request_typed(Method::SESSION_SPAWN, params, NOTE_SPAWN_TIMEOUT)
     }
 
     fn note_store(&self) -> Result<NoteStore, String> {
@@ -575,14 +830,32 @@ mod tests {
 
     impl Fixture {
         fn new(sessions: Vec<SessionRecord>) -> Self {
+            Self::scripted(sessions, |_| None).0
+        }
+
+        /// Answers `session.list` from `sessions` and anything else from
+        /// `reply`; every method called is logged in order.
+        fn scripted(
+            sessions: Vec<SessionRecord>,
+            reply: impl Fn(&str) -> Option<Value> + Send + 'static,
+        ) -> (Self, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
             let listing = json!({
                 "sessions": sessions,
                 "projects": [{"id": "p", "root": "/work/diri", "name": "diri"}],
             });
-            Self {
-                peer: Peer::new(move |_| listing.clone()),
-                notes: tempfile::tempdir().unwrap(),
-            }
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let log = calls.clone();
+            let peer = Peer::new(move |method| {
+                log.lock().unwrap().push(method.to_owned());
+                reply(method).unwrap_or_else(|| listing.clone())
+            });
+            (
+                Self {
+                    peer,
+                    notes: tempfile::tempdir().unwrap(),
+                },
+                calls,
+            )
         }
 
         fn store(&self) -> NoteStore {
@@ -955,5 +1228,174 @@ mod tests {
         let wrong = Peer::new(move |_| serde_json::to_value(&shell).unwrap());
         let bridge = Bridge::new(wrong.path.clone(), None);
         assert!(bridge.spawn_note("/tmp", "t", "", None).is_err());
+    }
+
+    #[test]
+    fn create_note_makes_a_note_under_the_caller_and_can_open_it() {
+        let made = note_session("s_new", "n-new", Some("root"));
+        let (fixture, calls) = Fixture::scripted(sessions(), move |method| match method {
+            "session.spawn" => Some(serde_json::to_value(&made).unwrap()),
+            "session.reveal" => Some(json!({})),
+            _ => None,
+        });
+        let result = fixture
+            .bridge("root")
+            .call(
+                "create_note",
+                &json!({"title": "How sign-in works", "markdown": "## In short\n\nIt uses a magic link.", "open": true}),
+            )
+            .unwrap();
+        assert_eq!(result["session_id"], "s_new");
+        assert_eq!(result["opened"], true);
+        let calls = calls.lock().unwrap().clone();
+        let spawn = calls
+            .iter()
+            .position(|m| m == "session.spawn")
+            .expect("spawned");
+        let reveal = calls
+            .iter()
+            .position(|m| m == "session.reveal")
+            .expect("revealed");
+        assert!(spawn < reveal, "{calls:?}");
+    }
+
+    #[test]
+    fn entries_go_under_the_agents_todo_or_into_updates() {
+        let (fixture, note_id) = from_note();
+        let store = fixture.store();
+        store
+            .append(
+                &note_id,
+                "- [ ] Find the venue\n- [ ] Book flights",
+                &Author::Cli,
+            )
+            .unwrap();
+        store
+            .update(&note_id, &Author::Cli, |note| {
+                let index = handoff::find_todo(note, &TodoSelector::Text("venue".into())).unwrap();
+                handoff::link_session(note, index, "@codex: child", "child");
+                Ok(())
+            })
+            .unwrap();
+        let bridge = fixture.bridge("child");
+        bridge
+            .call(
+                "write_note",
+                &json!({"note": "origin", "entry": "Decision: the Hall, 300 seats."}),
+            )
+            .unwrap();
+        bridge
+            .call("write_note", &json!({"note": "origin", "todo": "flights", "checked": true, "entry": "Booked for the 12th."}))
+            .unwrap();
+        let text = store.load(&note_id).unwrap().to_markdown();
+        assert!(text.contains("- [ ] Find the venue [@codex: child](diri://session/child)\n  - [@codex: child](diri://session/child) "), "{text}");
+        assert!(text.contains("Decision: the Hall, 300 seats."), "{text}");
+        assert!(
+            text.contains("- [x] Book flights\n  - [@codex: child](diri://session/child) "),
+            "{text}"
+        );
+        let long = "word ".repeat(200);
+        let refused = bridge
+            .call("write_note", &json!({"note": "origin", "entry": long}))
+            .unwrap_err();
+        assert!(refused.contains("create_note"), "{refused}");
+    }
+
+    #[test]
+    fn start_from_note_spawns_under_the_note_and_links_the_todo() {
+        let notes = tempfile::tempdir().unwrap();
+        let (note_id, _) = NoteStore::open(notes.path())
+            .unwrap()
+            .create(Document::new("Offsite", Vec::new()), Some("/work/diri"))
+            .unwrap();
+        NoteStore::open(notes.path())
+            .unwrap()
+            .append(&note_id, "- [ ] Find a venue", &Author::User)
+            .unwrap();
+        let mut note = note_session("s_note", &note_id, None);
+        note.cwd = "/work/diri".into();
+        let spawned = json!({
+            "id": "s_worker", "ok": true,
+            "spawn_receipt": {"session_id": "s_worker", "outcome": "completed"},
+        });
+        let (mut fixture, calls) = Fixture::scripted(
+            vec![note, super::super::tests::record("root", None)],
+            move |method| match method {
+                "agent.readiness" => Some(json!({"agents": []})),
+                "session.spawn_tracked" => Some(spawned.clone()),
+                _ => None,
+            },
+        );
+        fixture.notes = notes;
+        let result = fixture
+            .bridge("root")
+            .call(
+                "start_from_note",
+                &json!({"note": "Offsite", "todo": "venue", "kind": "codex"}),
+            )
+            .unwrap();
+        assert_eq!(result["note_session"], "s_note");
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "session.spawn_tracked")
+        );
+        let text = fixture.store().load(&note_id).unwrap().to_markdown();
+        assert!(
+            text.contains("- [ ] Find a venue [@codex: Find a venue](diri://session/s_worker)"),
+            "{text}"
+        );
+
+        // A delegated agent may not start work from someone else's note.
+        let other_notes = tempfile::tempdir().unwrap();
+        let (other, _) = NoteStore::open(other_notes.path())
+            .unwrap()
+            .create(Document::new("Someone else's", Vec::new()), None)
+            .unwrap();
+        let mut denied = Fixture::new(vec![
+            note_session("s_note", &other, None),
+            super::super::tests::record("root", None),
+            super::super::tests::record("deep", Some("root")),
+        ]);
+        denied.notes = other_notes;
+        let error = denied
+            .bridge("deep")
+            .call(
+                "start_from_note",
+                &json!({"note": "s_note", "kind": "codex"}),
+            )
+            .unwrap_err();
+        assert!(error.contains("start_from_note denied"), "{error}");
+    }
+
+    #[test]
+    fn note_history_is_readable_but_not_restorable_by_agents() {
+        let fixture = Fixture::new(sessions());
+        let id = fixture.note("Plan", None, "first");
+        fixture
+            .bridge("root")
+            .call("write_note", &json!({"note": id, "append": "second"}))
+            .unwrap();
+        let history = fixture
+            .bridge("root")
+            .call("note_history", &json!({"note": id}))
+            .unwrap();
+        let versions = history["versions"].as_array().unwrap();
+        assert!(versions.len() >= 2, "{history}");
+        assert_eq!(versions[0]["by"], "root");
+        let version = versions.last().unwrap()["version"].as_u64().unwrap();
+        let old = fixture
+            .bridge("root")
+            .call("note_history", &json!({"note": id, "version": version}))
+            .unwrap();
+        assert!(!old["markdown"].as_str().unwrap().contains("second"));
+        assert!(
+            crate::tools::tool_definitions_for(&[])
+                .iter()
+                .all(|tool| !tool.name.contains("restore")),
+            "restoring stays with the person"
+        );
     }
 }

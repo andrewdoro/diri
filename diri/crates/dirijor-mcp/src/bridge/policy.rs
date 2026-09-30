@@ -50,6 +50,12 @@ pub(super) enum WriteAction<'a> {
     ReportToParent {
         target: &'a str,
     },
+    /// A new note under the caller (it runs nothing, so nothing is capped).
+    CreateNote,
+    /// Start an agent whose parent is this note Session.
+    StartFromNote {
+        note_session: &'a str,
+    },
     /// An additive edit to a Diri note that mentions these session ids.
     WriteNote {
         mentions: &'a [String],
@@ -216,6 +222,27 @@ impl<'a> McpPolicy<'a> {
                 }
                 Relation::Unrelated
             }
+            WriteAction::CreateNote => Relation::Unrelated,
+            WriteAction::StartFromNote { note_session } => {
+                let (note, _) = self.target(note_session)?;
+                if !note.is_note() {
+                    return Err(format!("{note_session} is not a note"));
+                }
+                let from_own_line = self
+                    .lineage
+                    .ancestors(&self.caller.id.0)
+                    .iter()
+                    .any(|record| record.id.0 == note_session);
+                if !self.is_root() && !from_own_line {
+                    return Err(
+                        "start_from_note denied: a delegated session may start work only from the note it was started from"
+                            .into(),
+                    );
+                }
+                self.check_depth()?;
+                self.check_live_children(note_session, 1)?;
+                Relation::Unrelated
+            }
             WriteAction::ReportToParent { target } => {
                 let (_, relation) = self.target(target)?;
                 if relation != Relation::Parent {
@@ -236,6 +263,11 @@ impl<'a> McpPolicy<'a> {
     /// Recursive delegation must terminate and a single orchestrator must not
     /// flood the machine. Both limits count live (unexited, unarchived) state.
     fn check_fan_out(&self, count: usize) -> Result<(), String> {
+        self.check_depth()?;
+        self.check_live_children(&self.caller.id.0, count)
+    }
+
+    fn check_depth(&self) -> Result<(), String> {
         // Notes are where the user starts work, not delegation levels.
         let depth = self
             .lineage
@@ -249,12 +281,19 @@ impl<'a> McpPolicy<'a> {
                 "spawn denied: this session is at delegation depth {depth} (limit {max_depth}); do the work here or report back to your parent"
             ));
         }
+        Ok(())
+    }
+
+    /// Notes run nothing, so they never count against the limit.
+    fn check_live_children(&self, parent: &str, count: usize) -> Result<(), String> {
         let live = self
             .lineage
-            .children(&self.caller.id.0)
+            .children(parent)
             .into_iter()
             .filter(|child| {
-                !child.is_archived() && !matches!(child.status, SessionStatus::Exited(_))
+                !child.is_note()
+                    && !child.is_archived()
+                    && !matches!(child.status, SessionStatus::Exited(_))
             })
             .count();
         let max_live = limit("DIRIJOR_MAX_LIVE_CHILDREN", DEFAULT_MAX_LIVE_CHILDREN);

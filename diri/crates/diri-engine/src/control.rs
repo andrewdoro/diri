@@ -974,6 +974,7 @@ impl ControlServer {
             Method::SESSION_FORK => self.session_fork(params),
             Method::SESSION_RESUME_FROM_HISTORY => self.session_resume_from_history(params),
             Method::SESSION_REOPEN_LAST => self.session_reopen_last(),
+            Method::SESSION_REVEAL => self.session_reveal(params),
             Method::AGENT_READINESS => self.agent_readiness(params),
             Method::AGENT_CONFIGURE => self.agent_configure(params),
             Method::PROJECT_ADD => self.project_add(params),
@@ -4125,6 +4126,27 @@ impl ControlServer {
     }
 
     /// Publishes `session.updated` with the session's current record.
+    /// Relays a request to show a Session to every app window.
+    fn session_reveal(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let id = p.session_id.0;
+        if self
+            .registry
+            .lock()
+            .map_err(poisoned)?
+            .record(&id)
+            .is_none()
+        {
+            return Err(ControlError::not_found(format!("no session {id}")));
+        }
+        self.events.publish_encoded(
+            diri_proto::EventName::SESSION_REVEAL,
+            &json!({ "sessionID": id }),
+            Some(&id),
+        );
+        Ok(json!({}))
+    }
+
     fn publish_updated(&self, registry: &Registry, id: &str) {
         // One folded record, not a folded copy of the whole table.
         if let Some(record) = registry.record(id) {

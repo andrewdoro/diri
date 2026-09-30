@@ -191,6 +191,11 @@ pub fn append_update(
     UpdatePlace::Updates
 }
 
+/// Today's date for entries, e.g. `2026-09-30`.
+pub fn entry_date() -> String {
+    crate::history::describe_time(crate::history::now_ms())[..10].to_owned()
+}
+
 /// A session a note mentions, as the handoff prompt describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Related {
@@ -260,10 +265,12 @@ pub fn prompt(
         }
     }
     out.push_str(&format!(
-        "\nThis note is your parent in Diri. Re-read it any time with read_note (note \"{note_id}\" \
-         or \"origin\"). Post progress and your final result with report_to_parent; reports \
-         appear under the to-do you were started from, or in the note's Updates section. \
-         Leave the to-do unticked; the person reviews your work and ticks it.\n"
+        "\nThis note is your parent in Diri, and people who are not developers read it, so write \
+         plainly. Re-read it any time with read_note (note \"{note_id}\" or \"origin\"). When you \
+         find something important (a decision, a finding, a blocker, a result, a link), add one \
+         short entry with write_note entry; keep entries sparing, with no progress chatter. Never \
+         rewrite the person's text. Tick your own sub-tasks as you finish them. Finish with a \
+         one-paragraph result through report_to_parent with status done: it is added to the note.\n"
     ));
     out
 }
@@ -392,6 +399,8 @@ mod tests {
         );
         assert!(text.contains("- s_other (codex, working): fix resize"));
         assert!(text.contains("report_to_parent"));
+        assert!(text.contains("one-paragraph result"));
+        assert!(text.contains("write_note entry"));
     }
 
     #[test]
