@@ -3481,3 +3481,30 @@ fn a_new_terminal_starts_where_the_last_terminal_in_its_project_was() {
         ("/work/p".into(), None)
     );
 }
+
+#[test]
+fn only_terminals_carry_a_location_for_their_hover() {
+    let mut terminal = SessionRecord {
+        kind: AgentKind::SHELL,
+        terminal_cwd: Some("/work/p/web".into()),
+        ..session("term", "p", 1.0)
+    };
+    assert_eq!(
+        crate::switcher::terminal_location(&terminal).as_deref(),
+        Some("/work/p/web")
+    );
+    terminal.terminal_cwd = None;
+    assert_eq!(
+        crate::switcher::terminal_location(&terminal).as_deref(),
+        Some("/work/p")
+    );
+    terminal.host = Some("forge".into());
+    assert_eq!(
+        crate::switcher::terminal_location(&terminal).as_deref(),
+        Some("forge: /work/p")
+    );
+    assert_eq!(
+        crate::switcher::terminal_location(&session("agent", "p", 1.0)),
+        None
+    );
+}

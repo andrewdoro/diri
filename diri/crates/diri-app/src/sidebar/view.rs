@@ -15,6 +15,7 @@ mod workspaces;
 pub(crate) use titles::testing as title_clock_for_test;
 
 use std::cell::{Cell, RefCell};
+
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
@@ -38,6 +39,8 @@ use gpui::{
     linear_color_stop, linear_gradient, point, prelude::*, px,
 };
 use tokio::sync::mpsc;
+
+use crate::tooltip_warmth::WarmTooltip;
 
 use crate::commands::{CommandId, OpenSettings, ToggleHistory};
 use crate::delegation::{HandoffProposal, handoff_proposal, sibling_proposal, validate_handoff};
@@ -3677,6 +3680,12 @@ impl Sidebar {
             .debug_selector({
                 let id = id.clone();
                 move || format!("SESSION_{}", id.0)
+            })
+            .when_some(crate::switcher::terminal_location(session), |row, place| {
+                row.warm_tooltip(move |_, cx| {
+                    cx.new(|_| crate::palette_chrome::PaletteTooltip(place.clone(), colors))
+                        .into()
+                })
             })
             // Account for the selection border when aligning with project icons.
             .pl(px(Space::ROW_H - 1.0))
@@ -11666,6 +11675,51 @@ mod tests {
                         }
                         store.upsert_session(session);
                     }
+                    // `DIRI_VISUAL_TERMINALS=1` adds terminals the Engine has
+                    // named: one at a prompt, one running a program, and one
+                    // running Claude Code typed at its prompt.
+                    if std::env::var_os("DIRI_VISUAL_TERMINALS").is_some() {
+                        let base = store
+                            .sessions()
+                            .get(&SessionId::new("preview-shell"))
+                            .map(|session| (**session).clone())
+                            .expect("fixture shell");
+                        let root = base.cwd.clone();
+                        for (id, title, folder, status, agent) in [
+                            (
+                                "preview-term-web",
+                                "web",
+                                "web",
+                                diri_proto::SessionStatus::Idle,
+                                None,
+                            ),
+                            (
+                                "preview-term-vim",
+                                "vim",
+                                "crates/diri-app",
+                                diri_proto::SessionStatus::Working,
+                                None,
+                            ),
+                            (
+                                "preview-term-claude",
+                                "Fix login redirect",
+                                "web",
+                                diri_proto::SessionStatus::Working,
+                                Some(ProtoAgentKind::CLAUDE_CODE),
+                            ),
+                        ] {
+                            let mut terminal = base.clone();
+                            terminal.id = SessionId::new(id);
+                            terminal.title = title.into();
+                            terminal.title_source = diri_proto::TitleSource::TerminalTitle;
+                            terminal.terminal_cwd = Some(format!("{root}/{folder}"));
+                            terminal.status = status;
+                            terminal.foreground_agent = agent;
+                            terminal.listening_ports = None;
+                            terminal.updated_at = diri_proto::DateMillis(now);
+                            store.upsert_session(terminal);
+                        }
+                    }
                     store
                         .update_preferences(|prefs| {
                             prefs.terminal_theme = if light {
@@ -11803,6 +11857,27 @@ mod tests {
             })
             .expect("hover menu row");
             cx.run_until_parked();
+        }
+        // `DIRI_VISUAL_POINTER=x,y` rests the pointer there long enough for
+        // a tooltip to open.
+        if let Some((x, y)) = std::env::var("DIRI_VISUAL_POINTER").ok().and_then(|value| {
+            let (x, y) = value.split_once(',')?;
+            Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+        }) {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.simulate_mouse_move(point(px(x), px(y)), cx);
+            })
+            .expect("rest the pointer");
+            // Tooltip timers run on the test dispatcher's clock; wall time
+            // is only for anything that reads `Instant::now`.
+            for _ in 0..8 {
+                std::thread::sleep(Duration::from_millis(20));
+                cx.advance_clock(Duration::from_millis(120));
+                cx.run_until_parked();
+                cx.update_window(window.into(), |_, window, _| window.refresh())
+                    .expect("refresh sidebar window");
+                cx.run_until_parked();
+            }
         }
         if std::env::var_os("DIRI_VISUAL_BENCH").is_some() {
             // Force exactly the same work in before/after runs; warm all eight

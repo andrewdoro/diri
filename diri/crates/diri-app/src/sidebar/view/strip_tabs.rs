@@ -54,6 +54,8 @@ pub(in crate::sidebar) struct StripTabProps {
     /// belongs to.
     pub(super) shift: Option<(f32, u64)>,
     pub(super) settling: bool,
+    /// A terminal's directory, shown when the pointer rests on its tab.
+    pub(super) location: Option<String>,
 }
 
 impl StripTabProps {
@@ -147,6 +149,7 @@ impl Sidebar {
             lift,
             shift,
             settling: self.settling_title(id, 0.0).is_some(),
+            location: crate::switcher::terminal_location(session),
         }
     }
 
