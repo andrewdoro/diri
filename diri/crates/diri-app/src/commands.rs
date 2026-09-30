@@ -63,6 +63,7 @@ actions!(
         OpenWorktrees,
         NewNote,
         ShowTodos,
+        NoteVersionHistory,
         OpenSettings,
         // Palette destination: open Settings even when it is already visible.
         // OpenSettings retains the Cmd+, toggle behavior.
@@ -166,6 +167,7 @@ pub enum CommandId {
     OpenWorktrees,
     NewNote,
     ShowTodos,
+    NoteVersionHistory,
     OpenSettings,
     ToggleSidebar,
     ToggleTabOrientation,
@@ -651,6 +653,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         "To-dos",
         "checklist",
         "todos to-dos tasks checklist open review notes"
+    ),
+    spec!(
+        NoteVersionHistory,
+        "note-version-history",
+        None,
+        None,
+        Some(APP_CONTEXT),
+        "Version History…",
+        "arrow.counterclockwise",
+        "note history versions earlier restore undo changes"
     ),
     spec!(
         OpenWorktrees,
@@ -1216,6 +1228,7 @@ impl CommandSpec {
             CommandId::OpenWorktrees => KeyBinding::new(key, OpenWorktrees, context),
             CommandId::NewNote => KeyBinding::new(key, NewNote, context),
             CommandId::ShowTodos => KeyBinding::new(key, ShowTodos, context),
+            CommandId::NoteVersionHistory => KeyBinding::new(key, NoteVersionHistory, context),
             CommandId::OpenSettings => KeyBinding::new(key, OpenSettings, context),
             CommandId::ToggleSidebar => KeyBinding::new(key, ToggleSidebar, context),
             CommandId::ToggleTabOrientation => KeyBinding::new(key, ToggleTabOrientation, context),
@@ -1656,6 +1669,11 @@ impl CommandId {
                 description: "Start a note in the current project, beside its agents",
                 category: Navigation,
             },
+            Self::NoteVersionHistory => ShortcutMetadata {
+                title: "Version history",
+                description: "See and restore earlier versions of the open note",
+                category: Navigation,
+            },
             Self::OpenWorktrees => ShortcutMetadata {
                 title: "Worktrees overview",
                 description: "Open the Git worktrees overview",
@@ -1901,6 +1919,7 @@ impl CommandId {
             Self::OpenWorktrees => Box::new(OpenWorktrees),
             Self::NewNote => Box::new(NewNote),
             Self::ShowTodos => Box::new(ShowTodos),
+            Self::NoteVersionHistory => Box::new(NoteVersionHistory),
             Self::OpenSettings => Box::new(OpenSettings),
             Self::ToggleSidebar => Box::new(ToggleSidebar),
             Self::ToggleTabOrientation => Box::new(ToggleTabOrientation),

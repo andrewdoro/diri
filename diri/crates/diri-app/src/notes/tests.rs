@@ -452,3 +452,66 @@ fn a_save_racing_an_agent_write_merges_before_writing(cx: &mut gpui::TestAppCont
             .any(|v| v.author == diri_notes::history::Author::Session("s_agent".into()))
     );
 }
+
+#[gpui::test]
+fn version_history_lists_previews_and_restores(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    agent_appends(&store, &id, "- Finding: the venue holds 300 people");
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    pane.update_in(cx, |pane, window, cx| {
+        pane.open_versions(&crate::commands::NoteVersionHistory, window, cx)
+    });
+    let (count, newest_by_agent, oldest) = pane.read_with(cx, |pane, _| {
+        let panel = pane.versions.as_ref().expect("panel open");
+        (
+            panel.versions.len(),
+            panel.versions[0].author == diri_notes::history::Author::Session("s_agent".into()),
+            panel.versions.last().unwrap().id,
+        )
+    });
+    assert!(count >= 2, "creation and the agent's write");
+    assert!(newest_by_agent);
+
+    // Selecting the oldest shows its text without the agent's line.
+    pane.update(cx, |pane, cx| pane.select_version(count - 1, cx));
+    pane.read_with(cx, |pane, _| {
+        let preview = &pane.versions.as_ref().unwrap().preview;
+        assert_eq!(preview.title, "Notes launch plan");
+        assert!(!preview.plain_text().contains("300 people"));
+    });
+
+    // Restore (the confirmation sheet is the system's; this is its OK path).
+    pane.update(cx, |pane, cx| pane.restore_version(oldest, cx));
+    let file = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(!file.contains("300 people"), "{file}");
+    assert!(
+        pane.read_with(cx, |pane, _| pane.versions.is_none()),
+        "panel closes"
+    );
+    let editor = editor(&pane, cx);
+    assert!(editor.read_with(cx, |view, _| {
+        !view
+            .editor
+            .blocks()
+            .iter()
+            .any(|b| b.text.contains("300 people"))
+    }));
+    // What the restore replaced is one version away.
+    let versions = store.history().list(&id).unwrap();
+    assert!(versions.iter().any(|v| {
+        store
+            .history()
+            .read(&id, v.id)
+            .unwrap()
+            .contains("300 people")
+    }));
+
+    // Escape closes the panel before it leaves the note.
+    pane.update_in(cx, |pane, window, cx| {
+        pane.open_versions(&crate::commands::NoteVersionHistory, window, cx)
+    });
+    editor.update(cx, |_, cx| cx.emit(EditorEvent::Dismiss));
+    assert!(pane.read_with(cx, |pane, _| pane.versions.is_none()));
+}

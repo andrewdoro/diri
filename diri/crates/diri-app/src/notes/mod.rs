@@ -14,6 +14,7 @@ pub(crate) mod todos;
 pub(crate) mod work_item;
 #[cfg(test)]
 pub(crate) mod work_item_tests;
+mod versions;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,6 +72,8 @@ pub(crate) struct NotePane {
     /// Keeps mention chips' session status and the `@` menu live.
     _sessions_task: Task<()>,
     error: Option<SharedString>,
+    /// The open note's Version History panel, while it is shown.
+    versions: Option<versions::VersionPanel>,
     /// Fixture palette; live panes follow the store's theme.
     colors_override: Option<SemanticColors>,
 }
@@ -136,6 +139,7 @@ impl NotePane {
             _watcher: watcher,
             _sessions_task: sessions_task,
             error: None,
+            versions: None,
             colors_override: None,
         }
     }
@@ -224,6 +228,7 @@ impl NotePane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.versions = None;
         let source = self
             .store
             .as_ref()
@@ -247,6 +252,11 @@ impl NotePane {
         let subscription = cx.subscribe_in(&editor, window, |this, _, event, _, cx| match event {
             EditorEvent::Changed => this.schedule_save(cx),
             EditorEvent::Dismiss => {
+                // Escape closes the history panel before it leaves the note.
+                if this.versions_open() {
+                    this.close_versions(cx);
+                    return;
+                }
                 this.save(cx);
                 cx.emit(NotePaneEvent::Dismiss);
             }
@@ -499,9 +509,11 @@ impl NotePane {
 impl Render for NotePane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors();
+        let versions = self.versions_element(_window, cx);
         let root = div()
             .relative()
             .size_full()
+            .on_action(cx.listener(Self::open_versions))
             .bg(colors.work_surface_nested())
             .font_family(crate::fonts::ui_family());
         let root = match &self.state {
@@ -529,6 +541,7 @@ impl Render for NotePane {
             ),
             PaneState::Empty => root.track_focus(&self.focus),
         };
+        let root = root.when_some(versions, |el, panel| el.child(panel));
         root.when_some(self.error.clone(), |el, error| {
             el.child(
                 div()

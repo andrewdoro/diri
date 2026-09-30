@@ -458,6 +458,13 @@ pub fn actions_for_default_host(
         }
     }
 
+    // The open note's earlier versions.
+    if let Some(session) = selected
+        && session.is_note()
+    {
+        result.push(registered_action(CommandId::NoteVersionHistory));
+    }
+
     // Session handoff: move the SELECTED Claude session across hosts (v1 is
     // Claude-only — other kinds have no reliable resume, so no entries).
     if let Some(session) = selected

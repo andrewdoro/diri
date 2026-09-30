@@ -9432,6 +9432,7 @@ mod tests {
             Arc::new(diri_notes::store::NoteStore::open(notes_dir.path().join("notes")).unwrap());
         let (_, doc) = diri_notes::markdown::parse(crate::notes::tests::PLAN);
         let (note_id, _) = note_store.create(doc, None).unwrap();
+        let history_note_id = note_id.clone();
 
         let services = test_services();
         let mut fixture = SidebarPreviewFixture::make(PreviewScenario::from_env(None));
@@ -9465,6 +9466,12 @@ mod tests {
         {
             child.parent = Some(note.id.clone());
         }
+        let history_agent = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|s| s.parent.as_ref() == Some(&note.id))
+            .map_or_else(|| template.id.0.clone(), |s| s.id.0.clone());
         fixture.list.sessions.insert(1, note);
         {
             let mut store = services.store.store.write().unwrap();
@@ -9610,6 +9617,50 @@ mod tests {
                         _ => {}
                     }
                     cx.notify();
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+        // `DIRI_VISUAL_NOTE_HISTORY=1` opens Version History with earlier
+        // versions a person, an agent, and the person again wrote.
+        if std::env::var_os("DIRI_VISUAL_NOTE_HISTORY").is_some() {
+            use diri_notes::history::{Author, History, Reason, now_ms};
+            let pane = note_pane.borrow().clone().expect("note pane");
+            let history = History::new(&notes_dir.path().join("notes"));
+            let note_id = history_note_id.clone();
+            // Replace the creation version with a believable past.
+            let _ = std::fs::remove_dir_all(notes_dir.path().join("notes/.history").join(&note_id));
+            let base = crate::notes::tests::PLAN;
+            let now = now_ms();
+            let agent = Author::Session(history_agent.clone());
+            for (age_ms, author, text) in [
+                (
+                    3 * 86_400_000,
+                    Author::User,
+                    base.replace("\n## Open questions", "\n## Open questions\n\n> Draft"),
+                ),
+                (
+                    2 * 3_600_000,
+                    agent,
+                    format!("{base}\n- Finding: quick capture needs a global hotkey\n"),
+                ),
+                (
+                    20 * 60_000,
+                    Author::User,
+                    format!(
+                        "{base}\n- Finding: quick capture needs a global hotkey\n- [ ] Pick the hotkey\n"
+                    ),
+                ),
+            ] {
+                history
+                    .record(&note_id, &text, &author, Reason::Write, now - age_ms)
+                    .unwrap();
+            }
+            cx.update_window(window.into(), |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.open_versions(&crate::commands::NoteVersionHistory, window, cx);
+                    pane.select_version(1, cx);
                 });
             })
             .unwrap();
