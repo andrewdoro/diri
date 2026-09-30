@@ -302,6 +302,9 @@ note ids.
 | kind | sev | fields | catches |
 |---|---|---|---|
 | `notes.link_editor.opened` | info | | ⌘K panel use |
+| `notes.link.pasted` | info | `kind` (as `notes.link.set`) | bare links pasted, by tool family |
+| `notes.mention.inserted` | info | `kind` (`session`\|`note`) | `@` use |
+| `notes.fold.toggled` | info | `kind` (`chevron`\|`keyboard`) | folding by hand (not the to-do handoff's programmatic folds) |
 | `notes.link.set` | info | `kind` (`notion`\|`google`\|`linear`\|`hubspot`\|`figma`\|`slack`\|`github`\|`dashboard`\|`mention`\|`web`) | which tools people link, to decide which chips matter |
 | `notes.link.removed` | info | | links taken back out |
 | `notes.image.added` | info | `kind` (`paste`\|`drop`\|`picker`) | how pictures get into notes |

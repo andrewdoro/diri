@@ -732,3 +732,247 @@ fn a_callout_glyph_cycles_its_tone(cx: &mut gpui::TestAppContext) {
         "{text}"
     );
 }
+
+/// A long, realistic note: sections of paragraphs with bold and links,
+/// to-dos, bullets with children, quotes, a code block, mention and tool
+/// chips, repeated to `blocks` blocks.
+pub(crate) fn big_note_markdown(blocks: usize) -> String {
+    let mut out = String::from("# Research log\n\n");
+    let mut count = 0;
+    let mut section = 0;
+    while count < blocks {
+        section += 1;
+        out.push_str(&format!("## Week {section}\n\n"));
+        out.push_str("Interviewed three **growth** leads about _activation_; notes in [the brief](https://www.notion.so/acme/Brief-1f2e3d4c5b6a79881f2e3d4c5b6a7988) and the [funnel sheet](https://docs.google.com/spreadsheets/d/1AbC/edit).\n\n");
+        out.push_str("- [ ] Follow up with [@Codex: fix resize flicker](diri://session/s_codex) on the export\n");
+        out.push_str("- [x] Ship the onboarding checklist `v2`\n");
+        out.push_str("- Retention is flat week over week\n  - but D7 improved for teams\n  - see [GRO-42](https://linear.app/acme/issue/GRO-42/launch-email)\n");
+        out.push_str("\n> Customers want the export to keep formatting.\n\n");
+        out.push_str("1. Draft the email\n2. Review with legal\n3. Schedule for Tuesday\n\n");
+        count += 12;
+        if section % 5 == 0 {
+            out.push_str("```\nSELECT week, count(*) FROM signups GROUP BY 1;\n```\n\n");
+            count += 1;
+        }
+    }
+    out
+}
+
+/// Measures the editor on a 2,000-block note: an idle re-render, one typed
+/// character, and one scroll step, each through a full frame.
+/// `DIRI_BENCH_BLOCKS` and `DIRI_BENCH_ITERATIONS` override the sizes.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "headless Metal render-cost bench for big notes; run explicitly"]
+fn big_note_render_cost() {
+    use gpui::{AppContext as _, HeadlessAppContext, px, size};
+    use std::time::{Duration, Instant};
+    let blocks: usize = std::env::var("DIRI_BENCH_BLOCKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let iterations: usize = std::env::var("DIRI_BENCH_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let platform = gpui_platform::current_platform(true);
+    let mut cx = HeadlessAppContext::with_platform(
+        platform.text_system(),
+        Arc::new(diri_ui::IconAssets),
+        gpui_platform::current_headless_renderer,
+    );
+    cx.update(|cx| crate::fonts::init(cx));
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(NoteStore::open(dir.path().join("notes")).unwrap());
+    let (_, doc) = markdown::parse(&big_note_markdown(blocks));
+    let actual = doc.blocks.len();
+    let (id, _) = store.create(doc, None).unwrap();
+    let runtime = Arc::new(StoreRuntime::inert());
+    let window = cx
+        .open_window(size(px(1240.0), px(780.0)), move |_, cx| {
+            cx.new(|cx| NotePane::with_store(runtime, Some(store), false, cx))
+        })
+        .unwrap();
+    let session = SessionId::new("s_note");
+    cx.update_window(window.into(), |root, window, cx| {
+        let pane = root.downcast::<NotePane>().unwrap();
+        pane.update(cx, |pane, cx| pane.show(&session, &id, window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let editor = cx
+        .update(|cx| {
+            window
+                .update(cx, |pane, _, _| pane.editor_for_test())
+                .ok()
+                .flatten()
+        })
+        .expect("editor");
+    let draw = |cx: &mut HeadlessAppContext| {
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+    };
+    draw(&mut cx);
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    // The debounced autosave, which runs while the user is typing.
+    let mut saves = Vec::new();
+    for i in 0..20 {
+        cx.update_window(window.into(), |root, window, cx| {
+            use gpui::EntityInputHandler as _;
+            editor.update(cx, |view, cx| {
+                view.replace_text_in_range(None, "s", window, cx)
+            });
+            let pane = root.downcast::<NotePane>().unwrap();
+            let start = Instant::now();
+            pane.update(cx, |pane, cx| pane.save_with(true, cx));
+            if i >= 2 {
+                saves.push(start.elapsed());
+            }
+        })
+        .unwrap();
+        // Let the background write land before the next save.
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(30));
+        cx.run_until_parked();
+    }
+    saves.sort();
+    eprintln!(
+        "notes-big autosave-main-thread: median_ms={:.2} max_ms={:.2}",
+        ms(saves[saves.len() / 2]),
+        ms(*saves.last().unwrap()),
+    );
+    // The same save as a flush, entirely on the main thread, for scale.
+    let mut flushes = Vec::new();
+    for i in 0..20 {
+        cx.update_window(window.into(), |root, window, cx| {
+            use gpui::EntityInputHandler as _;
+            editor.update(cx, |view, cx| {
+                view.replace_text_in_range(None, "f", window, cx)
+            });
+            let pane = root.downcast::<NotePane>().unwrap();
+            let start = Instant::now();
+            pane.update(cx, |pane, cx| pane.save(cx));
+            if i >= 2 {
+                flushes.push(start.elapsed());
+            }
+        })
+        .unwrap();
+    }
+    flushes.sort();
+    eprintln!(
+        "notes-big flush-save-main-thread: median_ms={:.2} max_ms={:.2}",
+        ms(flushes[flushes.len() / 2]),
+        ms(*flushes.last().unwrap()),
+    );
+    for case in ["idle", "type", "scroll"] {
+        let mut samples = Vec::with_capacity(iterations);
+        for i in 0..iterations + 5 {
+            let start = Instant::now();
+            cx.update_window(window.into(), |_, window, cx| {
+                editor.update(cx, |view, cx| match case {
+                    "type" => {
+                        use gpui::EntityInputHandler as _;
+                        if i == 0 {
+                            view.editor
+                                .set_caret(diri_notes::edit::Pos::new(actual / 2, 0));
+                        }
+                        view.replace_text_in_range(None, "a", window, cx);
+                    }
+                    "scroll" => view.scroll_by_for_test(px(-40.0), cx),
+                    _ => cx.notify(),
+                });
+            })
+            .unwrap();
+            draw(&mut cx);
+            if i >= 5 {
+                samples.push(start.elapsed());
+            }
+        }
+        samples.sort();
+        eprintln!(
+            "notes-big {case}: blocks={actual} frames={iterations} median_ms={:.2} p90_ms={:.2} max_ms={:.2}",
+            ms(samples[samples.len() / 2]),
+            ms(samples[samples.len() * 9 / 10]),
+            ms(*samples.last().unwrap()),
+        );
+    }
+}
+
+#[gpui::test]
+fn autosave_writes_off_the_main_thread_and_keeps_the_file_current(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        for ch in "typed".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+    });
+    pane.update(cx, |pane, cx| pane.save_with(true, cx));
+    cx.run_until_parked();
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(text.trim_end().ends_with("typed"), "{text}");
+    pane.read_with(cx, |pane, _| assert!(pane.error.is_none()));
+}
+
+#[gpui::test]
+fn the_caret_stops_blinking_without_focus(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store);
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    // Focused: typing restarts the blink, and it keeps going.
+    editor.update_in(cx, |view, window, cx| {
+        window.focus(&view.focus_handle(cx), cx);
+        view.replace_text_in_range(None, "a", window, cx);
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    editor.read_with(cx, |view, _| assert!(view.is_blinking()));
+    // Focus elsewhere: the loop ends instead of waking the window forever.
+    pane.update_in(cx, |pane, window, cx| {
+        let other = cx.focus_handle();
+        window.focus(&other, cx);
+        let _ = pane;
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    editor.read_with(cx, |view, _| assert!(!view.is_blinking()));
+}
+
+#[gpui::test]
+fn a_background_autosave_merges_an_outside_write_it_races(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        for ch in "mine".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+    });
+    // An agent appends before the watcher has told the pane.
+    agent_appends(&store, &id, "- [ ] added by an agent");
+    pane.update(cx, |pane, cx| pane.save_with(true, cx));
+    cx.run_until_parked();
+    // The conflict merged the agent's line in and queued another save.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(text.contains("added by an agent"), "{text}");
+    assert!(text.contains("mine"), "{text}");
+}

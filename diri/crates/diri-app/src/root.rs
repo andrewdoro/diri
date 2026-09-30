@@ -9530,7 +9530,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
             cx.run_until_parked();
         }
-        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold|links|link-editor|media` types
+        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold|links|link-editor|media|big|select|empty` types
         // into the note:
         // mention chips beside a to-do, then the `/` or `@` menu open at the
         // caret, to judge the menus beside the rest of diri's chrome.
@@ -9583,6 +9583,41 @@ mod tests {
                     let end = view.editor.block(quick).text.len();
                     view.editor.set_caret(Pos::new(quick, end));
                     match scene.as_str() {
+                        "select" => {
+                            // A selection across blocks, over bold, a link
+                            // and chips.
+                            let intro = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.text.starts_with("A rich"))
+                                .expect("intro");
+                            view.editor.set_selection(diri_notes::edit::Selection {
+                                anchor: Pos::new(intro, 2),
+                                head: Pos::new(row, 30),
+                            });
+                            window.focus(&view.focus_handle(cx), cx);
+                        }
+                        "empty" => {
+                            view.reload(
+                                diri_notes::edit::Editor::new(&diri_notes::doc::Document::new(
+                                    "",
+                                    Vec::new(),
+                                )),
+                                cx,
+                            );
+                            view.editor.set_caret(Pos::new(1, 0));
+                            window.focus(&view.focus_handle(cx), cx);
+                        }
+                        "big" => {
+                            // A long note, scrolled deep: only nearby blocks
+                            // are laid out.
+                            let (_, doc) = diri_notes::markdown::parse(
+                                &crate::notes::tests::big_note_markdown(2000),
+                            );
+                            view.reload(diri_notes::edit::Editor::new(&doc), cx);
+                            view.editor.set_caret(Pos::new(0, 0));
+                        }
                         "media" => {
                             // A picture and every callout tone.
                             let picture = notes_dir.path().join("funnel.png");
@@ -9737,6 +9772,23 @@ mod tests {
             })
             .unwrap();
             cx.run_until_parked();
+        }
+        if std::env::var("DIRI_VISUAL_NOTE_MENU").as_deref() == Ok("big") {
+            let pane = note_pane.borrow().clone().expect("note pane");
+            let editor = cx
+                .update(|cx| pane.read(cx).editor_for_test())
+                .expect("open note editor");
+            // Scroll like a trackpad: many steps, a frame each, so heights
+            // are measured as blocks come into view.
+            for _ in 0..150 {
+                cx.update_window(window.into(), |_, _, cx| {
+                    editor.update(cx, |view, cx| view.scroll_by_for_test(px(-120.0), cx));
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+            }
         }
         for _ in 0..3 {
             cx.update_window(window.into(), |_, window, _| window.refresh())

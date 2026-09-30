@@ -52,6 +52,11 @@ struct OpenNote {
     dirty: bool,
     /// The title last pushed to the Session, so renames go out once.
     synced_title: String,
+    /// Markdown an autosave is writing off the main thread right now: the
+    /// watcher and a flush take the file holding it as our own write.
+    in_flight: Option<String>,
+    /// Typing arrived while a write was in flight: save again when it lands.
+    resave: bool,
     _subscription: Subscription,
 }
 
@@ -288,6 +293,8 @@ impl NotePane {
             saved: source,
             dirty: false,
             synced_title,
+            in_flight: None,
+            resave: false,
             _subscription: subscription,
         });
         self.push_mentions(cx);
@@ -405,7 +412,7 @@ impl NotePane {
         let Ok(source) = std::fs::read_to_string(&path) else {
             return;
         };
-        if source == open.saved {
+        if source == open.saved || open.in_flight.as_deref() == Some(source.as_str()) {
             return;
         }
         self.absorb_outside(source, cx);
@@ -440,11 +447,23 @@ impl NotePane {
         }
         self.save_task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DEBOUNCE).await;
-            let _ = this.update(cx, |this, cx| this.save(cx));
+            let _ = this.update(cx, |this, cx| this.save_with(true, cx));
         });
     }
 
+    /// Writes the open note now, on this thread: before switching notes and
+    /// on the way out, where the file must be current when this returns.
     pub(crate) fn save(&mut self, cx: &mut Context<Self>) {
+        self.save_with(false, cx);
+    }
+
+    /// `background`: the autosave, whose store write runs off the main
+    /// thread. Otherwise a flush, done here and now.
+    fn save_with(&mut self, background: bool, cx: &mut Context<Self>) {
+        if background {
+            self.save_in_background(cx);
+            return;
+        }
         let Some(store) = self.store.clone() else {
             return;
         };
@@ -476,6 +495,12 @@ impl NotePane {
                 }
                 Ok(store::SaveOutcome::Conflict {
                     current: Some(outside),
+                }) if open.in_flight.as_deref() == Some(outside.as_str()) => {
+                    // Our own autosave landed first: it is the known version.
+                    open.saved = outside;
+                }
+                Ok(store::SaveOutcome::Conflict {
+                    current: Some(outside),
                 }) => {
                     open.dirty = true;
                     self.absorb_outside(outside, cx);
@@ -496,11 +521,15 @@ impl NotePane {
         let Some(note) = note else {
             return;
         };
-        // The sidebar row is the Session's title; keep it the note's title.
+        self.sync_title(&note.doc.title, cx);
+    }
+
+    /// The sidebar row is the Session's title; keep it the note's title.
+    fn sync_title(&mut self, title: &str, cx: &mut Context<Self>) {
         let PaneState::Open(open) = &mut self.state else {
             return;
         };
-        let title = note.doc.title.trim();
+        let title = title.trim();
         let title = if title.is_empty() { "Untitled" } else { title };
         if title != open.synced_title {
             open.synced_title = title.to_owned();
@@ -509,6 +538,98 @@ impl NotePane {
                 .write()
                 .expect("store")
                 .rename(open.session.clone(), title);
+        }
+        cx.notify();
+    }
+
+    /// The autosave. The note is serialized here, but the store's
+    /// merge-safe write (compare, atomic rename, fsync, history: several ms
+    /// on a long note) runs off the main thread, so it never lands inside a
+    /// keystroke's frame. One write is in flight at a time, so writes cannot
+    /// land out of order; typing meanwhile saves again when it lands.
+    fn save_in_background(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let PaneState::Open(open) = &mut self.state else {
+            return;
+        };
+        if open.in_flight.is_some() {
+            open.resave = true;
+            return;
+        }
+        let current = Note {
+            front: open.front.clone(),
+            doc: open.editor.read(cx).editor.document(),
+        };
+        let markdown = current.to_markdown();
+        if markdown == open.saved {
+            open.dirty = false;
+            let title = current.doc.title.clone();
+            self.sync_title(&title, cx);
+            return;
+        }
+        let expected = open.saved.clone();
+        let id = open.id.clone();
+        open.in_flight = Some(markdown);
+        let title = current.doc.title.clone();
+        let write_id = id.clone();
+        let write =
+            cx.background_spawn(
+                async move { store.save_if_unchanged(&write_id, &current, &expected) },
+            );
+        cx.spawn(async move |this, cx| {
+            let outcome = write.await;
+            let _ = this.update(cx, |this, cx| {
+                this.finish_background_save(&id, &title, outcome, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn finish_background_save(
+        &mut self,
+        id: &str,
+        title: &str,
+        outcome: std::io::Result<store::SaveOutcome>,
+        cx: &mut Context<Self>,
+    ) {
+        let PaneState::Open(open) = &mut self.state else {
+            return;
+        };
+        if open.id != id {
+            return;
+        }
+        let written = open.in_flight.take();
+        let resave = std::mem::take(&mut open.resave);
+        match outcome {
+            Ok(store::SaveOutcome::Saved { source }) => {
+                open.saved = source;
+                self.error = None;
+                self.sync_title(title, cx);
+            }
+            Ok(store::SaveOutcome::Conflict {
+                current: Some(outside),
+            }) => {
+                if written.as_deref() != Some(outside.as_str()) {
+                    open.dirty = true;
+                    self.absorb_outside(outside, cx);
+                }
+                self.schedule_save(cx);
+                return;
+            }
+            Ok(store::SaveOutcome::Conflict { current: None }) => {
+                self.error = Some(
+                    "This note's file was moved or deleted outside Diri; your text is still here."
+                        .into(),
+                );
+            }
+            Err(err) => {
+                self.error = Some(format!("Couldn't save this note: {err}").into());
+            }
+        }
+        if resave {
+            self.schedule_save(cx);
         }
         cx.notify();
     }

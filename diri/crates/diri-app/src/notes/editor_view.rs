@@ -230,6 +230,8 @@ const MENTION_LIMIT: usize = 8;
 /// A query this long without a match is prose, not a mention.
 const MENTION_QUERY_MAX: usize = 40;
 
+type RowHeights = Rc<std::cell::RefCell<std::collections::HashMap<u64, f32>>>;
+
 /// Each image block's on-screen bounds, written while painting and read by
 /// hit testing.
 type ImageRects = Rc<std::cell::RefCell<Vec<(usize, Bounds<Pixels>)>>>;
@@ -276,6 +278,8 @@ struct MentionMenu {
 const CARET_BLINK: Duration = Duration::from_millis(530);
 pub(super) const MARKER_WIDTH: f32 = 26.0;
 const INDENT_STEP: f32 = 24.0;
+/// Space above the title inside the scroll area.
+const PAGE_TOP: f32 = 56.0;
 /// Gutter width left of a list item that holds its fold chevron.
 const DISCLOSURE_WIDTH: f32 = 20.0;
 pub(crate) const MEASURE: f32 = 700.0;
@@ -420,7 +424,8 @@ pub(crate) struct NoteEditorView {
     focus: FocusHandle,
     colors: SemanticColors,
     /// One layout per block from the last frame, valid for `layout_revision`.
-    layouts: Vec<TextLayout>,
+    /// `None` for blocks this frame did not lay out (off screen or folded).
+    layouts: Vec<Option<TextLayout>>,
     /// Each block's laid-out text, parallel to `layouts`.
     shown: Vec<Shown>,
     layout_revision: u64,
@@ -433,6 +438,9 @@ pub(crate) struct NoteEditorView {
     autoscroll: bool,
     caret_visible: bool,
     blink_epoch: usize,
+    blinking: bool,
+    /// Whether the last frame had focus: the blink loop's cue to stop.
+    focused_last_frame: bool,
     _blink: Task<()>,
     slash: Option<SlashMenu>,
     mention: Option<MentionMenu>,
@@ -445,6 +453,9 @@ pub(crate) struct NoteEditorView {
     /// final size before it loads.
     image_sizes:
         std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, Option<(u32, u32)>>>,
+    /// Each block's rendered height by id, measured the last time it was on
+    /// screen: what an off-screen block's spacer is sized from.
+    row_heights: RowHeights,
     caret_bounds: Option<Bounds<Pixels>>,
     /// Checkboxes ticked this session, for their pop animation.
     ticked: Vec<(u64, Instant)>,
@@ -483,6 +494,8 @@ impl NoteEditorView {
             autoscroll: true,
             caret_visible: true,
             blink_epoch: 0,
+            blinking: false,
+            focused_last_frame: false,
             _blink: Task::ready(()),
             slash: None,
             mention: None,
@@ -491,6 +504,7 @@ impl NoteEditorView {
             assets: None,
             image_rects: Rc::default(),
             image_sizes: Default::default(),
+            row_heights: Rc::default(),
             caret_bounds: None,
             ticked: Vec::new(),
             work: super::work_item::WorkView::default(),
@@ -510,6 +524,20 @@ impl NoteEditorView {
 
     pub(crate) fn set_colors(&mut self, colors: SemanticColors) {
         self.colors = colors;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_blinking(&self) -> bool {
+        self.blinking
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scroll_by_for_test(&mut self, dy: Pixels, cx: &mut Context<Self>) {
+        let offset = self.scroll.offset();
+        let max = self.scroll.max_offset().y;
+        self.scroll
+            .set_offset(point(offset.x, (offset.y + dy).clamp(-max, px(0.0))));
+        cx.notify();
     }
 
     /// Where this note's pictures are saved and resolved from.
@@ -620,8 +648,12 @@ impl NoteEditorView {
         self.touched(cx);
     }
 
+    /// Blinks the caret while the editor has focus. An unfocused editor
+    /// shows no caret, so the loop ends instead of scheduling frames for
+    /// nothing; the next focused render starts it again.
     fn restart_blink(&mut self, cx: &mut Context<Self>) {
         self.caret_visible = true;
+        self.blinking = true;
         self.blink_epoch += 1;
         let epoch = self.blink_epoch;
         self._blink = cx.spawn(async move |this, cx| {
@@ -630,6 +662,11 @@ impl NoteEditorView {
                 let alive = this
                     .update(cx, |this, cx| {
                         if this.blink_epoch != epoch {
+                            return false;
+                        }
+                        if !this.focused_last_frame {
+                            this.blinking = false;
+                            this.caret_visible = true;
                             return false;
                         }
                         this.caret_visible = !this.caret_visible;
@@ -647,7 +684,7 @@ impl NoteEditorView {
     fn layout(&self, index: usize) -> Option<&TextLayout> {
         (self.layout_revision == self.editor.revision
             && self.layout_count == self.editor.blocks().len())
-        .then(|| self.layouts.get(index))
+        .then(|| self.layouts.get(index).and_then(Option::as_ref))
         .flatten()
     }
 
@@ -690,7 +727,10 @@ impl NoteEditorView {
         // Folded blocks keep a layout but take no space; only visible
         // blocks can be hit.
         for index in (0..hidden.len()).filter(|i| !hidden[*i]) {
-            let layout = self.layout(index)?;
+            // Off-screen blocks have no layout; a click never lands there.
+            let Some(layout) = self.layout(index) else {
+                continue;
+            };
             let bounds = layout.bounds();
             chosen = Some(index);
             if point_at.y <= bounds.bottom() {
@@ -1060,6 +1100,13 @@ impl NoteEditorView {
             &entry.candidate.label,
             now_ms(),
         );
+        crate::telemetry::notes_event(
+            "notes.mention.inserted",
+            match entry.candidate.target {
+                MentionTarget::Session(_) => "session",
+                MentionTarget::Note(_) => "note",
+            },
+        );
         self.edited(cx);
     }
 
@@ -1377,6 +1424,7 @@ impl NoteEditorView {
         // A bare URL becomes a link, titled when it opens a known tool.
         if is_url(trimmed) {
             let url = trimmed.to_owned();
+            crate::telemetry::notes_event("notes.link.pasted", link_kind(&url));
             self.run(cx, |e, now| e.paste_url(&url, now));
             return;
         }
@@ -1600,6 +1648,7 @@ impl NoteEditorView {
                     && (*i == head || self.editor.children(*i).contains(&head))
             });
         if let Some(index) = target {
+            crate::telemetry::notes_event("notes.fold.toggled", "keyboard");
             self.set_folded(index, !self.editor.is_collapsed(index), cx);
         }
     }
@@ -2139,8 +2188,8 @@ fn placeholder(kind: BlockKind, only_block: bool) -> &'static str {
         BlockKind::Quote => "Quote",
         BlockKind::Code => "Code",
         BlockKind::Callout(tone) => tone.label(),
-        BlockKind::Paragraph if only_block => "Start writing, or type / for blocks",
-        _ => "Type / for blocks",
+        BlockKind::Paragraph if only_block => "Start writing. Type / for blocks, @ to mention",
+        _ => "Type / for blocks, @ to mention",
     }
 }
 
@@ -2275,6 +2324,10 @@ impl Render for NoteEditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
         let focused = self.focus.is_focused(window);
+        self.focused_last_frame = focused;
+        if focused && !self.blinking {
+            self.restart_blink(cx);
+        }
         let ui = crate::fonts::ui_family();
         let mono = crate::fonts::mono_family();
         let head = self.editor.selection.head;
@@ -2288,7 +2341,26 @@ impl Render for NoteEditorView {
         let mut shown_all = Vec::with_capacity(self.editor.blocks().len());
         let hidden = self.editor.hidden();
         let mut column = div().flex().flex_col().w_full();
+        // Only blocks near the viewport are laid out; the rest are spacers
+        // sized from their last measured (or estimated) height. The caret's
+        // and the anchor's blocks are always laid out so motion, autoscroll
+        // and menus have their geometry.
+        let rendered = self.visible_blocks(&hidden);
+        let heights = Rc::clone(&self.row_heights);
+        let mut spacer = 0.0f32;
         for (index, block) in self.editor.blocks().iter().enumerate() {
+            if !rendered[index] {
+                layouts.push(None);
+                shown_all.push(Shown::default());
+                if !hidden[index] {
+                    spacer += self.row_height(block);
+                }
+                continue;
+            }
+            if spacer > 0.0 {
+                column = column.child(div().flex_none().h(px(spacer)));
+                spacer = 0.0;
+            }
             let look = look(block.kind);
             let checked = block.kind == BlockKind::Todo { checked: true };
             let shown = if block.kind.is_atomic() {
@@ -2317,7 +2389,7 @@ impl Render for NoteEditorView {
             if !code_ranges.is_empty() {
                 styled = styled.with_font_family_overrides(code_ranges);
             }
-            layouts.push(styled.layout().clone());
+            layouts.push(Some(styled.layout().clone()));
             shown_all.push(shown);
 
             let show_placeholder = block.text.is_empty()
@@ -2487,10 +2559,27 @@ impl Render for NoteEditorView {
                 colors,
                 cx,
             ));
+            let id = block.id;
+            let heights = Rc::clone(&heights);
+            let row = row.child(
+                canvas(
+                    move |bounds, _, _| {
+                        heights
+                            .borrow_mut()
+                            .insert(id, f32::from(bounds.size.height));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
             column = column.child(row);
             if !folded_away && let Some(status) = self.work_status_line(block, indent, colors, cx) {
                 column = column.child(status);
             }
+        }
+        if spacer > 0.0 {
+            column = column.child(div().flex_none().h(px(spacer)));
         }
         self.layouts = layouts.clone();
         self.shown = shown_all.clone();
@@ -2499,7 +2588,7 @@ impl Render for NoteEditorView {
 
         let mut chips = Vec::new();
         for (index, block) in self.editor.blocks().iter().enumerate() {
-            if hidden[index] {
+            if hidden[index] || !rendered[index] {
                 continue;
             }
             let shown = &shown_all[index];
@@ -2533,7 +2622,7 @@ impl Render for NoteEditorView {
             |_, _, _| {},
             move |_, _, window, cx| {
                 for chip in &chips {
-                    let Some(layout) = chip_layouts.get(chip.block) else {
+                    let Some(Some(layout)) = chip_layouts.get(chip.block) else {
                         continue;
                     };
                     for rect in chip_rects(layout, &chip.text, chip.range.clone()) {
@@ -2629,7 +2718,7 @@ impl Render for NoteEditorView {
                 if !selection.is_collapsed() {
                     #[allow(clippy::needless_range_loop)]
                     for index in start.block..=end.block {
-                        let Some(layout) = layouts.get(index) else {
+                        let Some(Some(layout)) = layouts.get(index) else {
                             continue;
                         };
                         if folded_away[index] {
@@ -2651,16 +2740,20 @@ impl Render for NoteEditorView {
                 // anchor to it, autoscroll follows it); only a collapsed one
                 // paints a caret.
                 let caret = {
-                    layouts.get(selection.head.block).and_then(|layout| {
-                        let (_, empty) = blocks_meta[selection.head.block];
-                        let offset = if empty {
-                            0
-                        } else {
-                            overlay_shown[selection.head.block].to_display(selection.head.offset)
-                        };
-                        let at = layout.position_for_index(offset)?;
-                        Some(Bounds::new(at, size(px(2.0), layout.line_height())))
-                    })
+                    layouts
+                        .get(selection.head.block)
+                        .and_then(Option::as_ref)
+                        .and_then(|layout| {
+                            let (_, empty) = blocks_meta[selection.head.block];
+                            let offset = if empty {
+                                0
+                            } else {
+                                overlay_shown[selection.head.block]
+                                    .to_display(selection.head.offset)
+                            };
+                            let at = layout.position_for_index(offset)?;
+                            Some(Bounds::new(at, size(px(2.0), layout.line_height())))
+                        })
                 };
                 PaintState {
                     selection: rects,
@@ -2670,7 +2763,7 @@ impl Render for NoteEditorView {
             move |bounds, state, window, cx| {
                 window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
                 for rect in &state.selection {
-                    window.paint_quad(fill(*rect, selection_color));
+                    window.paint_quad(fill(*rect, selection_color).corner_radii(px(3.0)));
                 }
                 if let Some(caret) = state.caret {
                     if caret_on && selection.is_collapsed() && !head_atomic {
@@ -2820,7 +2913,7 @@ impl Render for NoteEditorView {
                             .flex()
                             .justify_center()
                             .px(px(48.0))
-                            .pt(px(56.0))
+                            .pt(px(PAGE_TOP))
                             .pb(px(240.0))
                             .child(
                                 div()
@@ -2978,6 +3071,63 @@ impl NoteEditorView {
         self.insert_image_files(paths.paths(), "drop", cx);
     }
 
+    /// Which blocks this frame lays out: those within a screen of the
+    /// viewport (found by walking measured or estimated heights), the title,
+    /// and the blocks holding the selection's ends. Folded blocks never are.
+    fn visible_blocks(&self, hidden: &[bool]) -> Vec<bool> {
+        let blocks = self.editor.blocks();
+        let viewport = f32::from(self.scroll.bounds().size.height);
+        let viewport = if viewport > 0.0 { viewport } else { 1200.0 };
+        let top = -f32::from(self.scroll.offset().y) - PAGE_TOP;
+        let (lo, hi) = (top - viewport, top + 2.0 * viewport);
+        let selection = self.editor.selection;
+        let mut y = 0.0;
+        let mut rendered = vec![false; blocks.len()];
+        for (index, block) in blocks.iter().enumerate() {
+            if hidden[index] {
+                continue;
+            }
+            let height = self.row_height(block);
+            rendered[index] = (y + height >= lo && y <= hi)
+                || index == 0
+                || index == selection.head.block
+                || index == selection.anchor.block;
+            y += height;
+        }
+        rendered
+    }
+
+    /// A block's height from its last paint, or an estimate from its kind
+    /// and text length until it has been on screen.
+    fn row_height(&self, block: &Block) -> f32 {
+        if let Some(height) = self.row_heights.borrow().get(&block.id) {
+            return *height;
+        }
+        let look = look(block.kind);
+        let chrome = look.top + look.bottom;
+        match block.kind {
+            BlockKind::Divider => chrome + look.line,
+            BlockKind::Image => chrome + 2.0 * IMAGE_RING + image_fit(None, 2.0).1,
+            BlockKind::Code => {
+                chrome + 20.0 + look.line * (block.text.lines().count().max(1) as f32)
+            }
+            _ => {
+                let per_line = (MEASURE / (look.size * 0.5)).max(1.0);
+                let lines: f32 = block
+                    .text
+                    .split('\n')
+                    .map(|line| (line.chars().count() as f32 / per_line).ceil().max(1.0))
+                    .sum();
+                let callout = if matches!(block.kind, BlockKind::Callout(_)) {
+                    20.0
+                } else {
+                    0.0
+                };
+                chrome + callout + look.line * lines
+            }
+        }
+    }
+
     /// The fold chevron in the gutter left of a list item with children:
     /// shown while the row is hovered, and always while folded.
     fn disclosure(
@@ -3020,6 +3170,7 @@ impl NoteEditorView {
                     cx.stop_propagation();
                     if let Some(index) = this.editor.blocks().iter().position(|b| b.id == id) {
                         let folded = this.editor.is_collapsed(index);
+                        crate::telemetry::notes_event("notes.fold.toggled", "chevron");
                         this.set_folded(index, !folded, cx);
                     }
                 }),
