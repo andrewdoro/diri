@@ -4450,13 +4450,25 @@ fn initial_prompt_control_error(session_id: &str, failure: InitialPromptFailure)
 /// directory the session was pointed at. That is defensible when the user
 /// picked the directory in the UI, and weaker when they did not — an
 /// orchestrator spawning into a freshly cloned repository gets trust without
-/// anyone affirming it. The window is bounded (20s, and it stops at the first
-/// non-matching screen), but a session whose own output contains the matched
-/// phrases inside that window would also receive the keystroke.
+/// anyone affirming it. The window is bounded (20s), but a session whose own
+/// output contains the matched phrases inside that window would also receive
+/// the keystroke.
+///
+/// The watch ends as soon as a Claude hook reports: Claude runs no hooks
+/// until the workspace is trusted, so a hook proves the picker is not coming.
+/// Without that exit an already-trusted folder — the common case — held a
+/// spawn's initial prompt, and the spawn RPC with it, for the full 20s.
 fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
     for _ in 0..200 {
-        let Some((exited, screen)) = with_session(registry, session_id, |session| {
-            (session.view().exited, session.screen_lines().join("\n"))
+        let Some((exited, screen, hooked)) = with_session(registry, session_id, |session| {
+            let view = session.view();
+            (
+                view.exited,
+                session.screen_lines().join("\n"),
+                view.status_evidence.is_some_and(|evidence| {
+                    evidence.source == diri_proto::StatusEvidenceSource::Hook
+                }),
+            )
         }) else {
             return;
         };
@@ -4481,6 +4493,9 @@ fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &s
                     return;
                 }
             }
+            return;
+        }
+        if hooked {
             return;
         }
         std::thread::sleep(Duration::from_millis(100));

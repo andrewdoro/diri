@@ -1,5 +1,45 @@
 # diri performance record
 
+## Remote usage polls only while the Usage page is open (2026-09-30)
+
+`rpc.slow method=host.usage` was the author's most frequent slow RPC: 161 in
+3 days (0.8.10, one host), p50 966 ms, p90 1.8 s, p99 4.7 s, max 11.9 s (a
+one-off Helper upload after an app update). It is not a stall: `host.usage`
+already runs on a background request thread, holds no lock across SSH, and
+the client multiplexes requests, so nothing else waited on it. It was waste:
+the App polled every host every five minutes for as long as it ran, while
+remote usage is shown only on Settings > Usage (the sidebar's cost is local
+only). Each poll paid a cold SSH connection, since the 60 s ControlPersist
+expires between five-minute polls.
+
+Measured from the author's Mac against the real host over Tailscale:
+
+| | wall |
+|---|---|
+| cold `ssh true` | 410–630 ms (p50 430) |
+| multiplexed `ssh true` | 130–150 ms |
+| one fused probe + `usage` poll (after #577), cold | 516–564 ms |
+| pre-#577 poll: cached probe, then `usage` (telemetry) | p50 670 + 285 ms |
+
+The fused poll is still above the Engine's 250 ms `rpc.slow` threshold on
+every call, and ~80% of it is the SSH handshake, which only a permanent
+ControlMaster could remove (not permitted: masters are finite-lived).
+
+Change: a view holds a `RemoteUsageViewer` while it renders the Usage tab
+(released on tab change, close or drop). The poller waits for a viewer,
+refreshes at once when the previous refresh is at least five minutes old,
+and repeats every five minutes only while a viewer remains.
+
+| App running, Usage page closed | before | after |
+|---|---|---|
+| SSH commands per host per day | 288 (576 before #577) | 0 |
+| `host.usage` calls / `rpc.slow` per day | 288 | 0 |
+| Data age when the page opens | ≤ 5 min (always polled) | shown from cache; refreshed at once if ≥ 5 min |
+| Refresh cadence while the page is open | 5 min | 5 min |
+
+Verified with paused-time pacer tests (`usage::remote::tests`) and the
+Usage settings UI test (viewer held on the tab, released on leaving it).
+
 ## Agent hooks and remote usage polls (2026-09-30)
 
 Real telemetry (4.7 h of the author's 0.8.10 use, aggregates only): 1,928
@@ -106,6 +146,54 @@ the larger real saving. Not changed: the five-minute App poll itself (the App
 polls even with the Usage page closed; left to the App), `session.remove`
 holding the Registry through the 500 ms TERM escalation (hooks no longer wait
 on it; other Registry users still do), and process spawn cost per hook.
+
+### Fleet follow-up: every slow `hook.report` is a Registry wait
+
+Three days of uploaded telemetry from three installs (0.8.9 and 0.8.10, both
+before the change above) hold 52 `rpc.slow method=hook.report`, 260–688 ms,
+median ~450 ms. Each one lines up with something else holding the Registry:
+50 finish within one `session.remove` (43), `session.kill` (5) or
+`session.archive` (2), the TERM escalation above, which archive and kill also
+go through. The remaining two (giga,
+496 ms and 688 ms) overlap no RPC: one is the UserPromptSubmit of a session
+whose tracked spawn was still delivering its prompt, the other a lone
+PreToolUse. The pre-change handler waited on the Registry mutex whoever held
+it, and then ran `persist()` under it. The change above never waits for any
+holder, so it covers these two as well. No other cost showed up: on this Mac
+`fdatasync` on the state volume is ~0.02 ms p50 / 0.1 ms max over 300 appends
+(so the activity log's per-transition `sync_data` is noise). Hello is
+~0.02 ms, and Hello plus `hook.report` measured from a raw client *during*
+the background removes stays at or under 17 ms at the maximum.
+
+A/B with `scripts/hook-bench.py --pad 800 --sessions 30 --bg-remove 8 --hooks
+300` on a loaded machine (other agents compiling), `f47c8203^` vs `f47c8203`,
+three runs each:
+
+| | Before | After |
+| --- | ---: | ---: |
+| Hook wall p99 | 567–653 ms | 65–118 ms |
+| Hook wall max | 589–902 ms | 127–271 ms |
+| Engine `rpc.slow method=hook.report` in the fixture spool | present | none |
+
+The remaining wall tail after the change is process spawn on a loaded machine
+(the same run's raw-client Hello + `hook.report` p99 was 14 ms). Quiet runs
+(no removes) are equal: p99 24 vs 27 ms.
+
+Uploaded metrics had only the all-methods `rpc` timing, so the full
+hook distribution was invisible below the 250 ms `rpc.slow` bar. The Engine
+now also records `rpc.hook_report` (the reply the Agent waits on) and
+`hook.apply_wait` (how long a queued report waited for the Registry, which is
+now status staleness rather than Agent latency).
+
+In a deliberately extreme run of the same bench (`--hooks 3500 --bg-remove
+60`, so the Registry is held about two thirds of the time), one 60 s metrics
+window read `rpc.hook_report` n 3,896, p99 8 ms, max 54 ms, with no
+`rpc.slow` for it. It also read `hook.apply_wait` n 3,430, avg 421 ms, max
+4.0 s. Once one report is queued, every later one queues behind it until the
+applier catches up. The Agent no longer waits, but status can lag by the
+length of a close. This goes away only when `session.remove` stops holding
+the Registry through the TERM escalation.
+
 ## Telemetry truth: `pane.first_paint` tail and `workspace.mutate` errors (2026-09-30)
 
 Read from 4.7 h of the owner's local telemetry spool (0.8.10), aggregates only.

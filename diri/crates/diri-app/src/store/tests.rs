@@ -28,7 +28,7 @@ fn pid(value: &str) -> ProjectId {
     ProjectId::new(value)
 }
 
-fn session(value: &str, project: &str, created: f64) -> SessionRecord {
+pub(super) fn session(value: &str, project: &str, created: f64) -> SessionRecord {
     SessionRecord {
         attention_state: None,
         id: id(value),
