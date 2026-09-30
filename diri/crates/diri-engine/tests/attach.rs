@@ -839,6 +839,27 @@ fn percentile(samples: &mut [Duration], q: f64) -> Duration {
     samples[((samples.len() - 1) as f64 * q).round() as usize]
 }
 
+/// A synchronized redraw is complete by the child's own declaration, so a
+/// keystroke answered by one is published at once even when the answer
+/// removed cells (Claude Code's placeholder and shortcut hint disappearing as
+/// typing starts). Before, such an echo looked like a half-erased repaint and
+/// waited out the 8 ms output batch.
+#[test]
+fn a_synchronized_redraw_that_removes_cells_answers_a_keystroke_at_once() {
+    let mut latencies = fake_tui_redraw_latencies("sync", 0, 21);
+    let median = percentile(&mut latencies, 0.5);
+    let p90 = percentile(&mut latencies, 0.9);
+    eprintln!(
+        "sync redraw: median {}us p90 {}us",
+        median.as_micros(),
+        p90.as_micros()
+    );
+    assert!(
+        median <= Duration::from_millis(5),
+        "a synchronized echo that removed cells took {median:?} (median); it must not wait out the 8 ms batch"
+    );
+}
+
 /// An unsynchronized redraw split into three writes: the last write should
 /// reach the client about when it lands, not a batch later.
 #[test]

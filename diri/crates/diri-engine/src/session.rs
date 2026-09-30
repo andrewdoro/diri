@@ -150,13 +150,27 @@ const ECHO_WINDOW: Duration = Duration::from_millis(100);
 /// which put ~9 ms of pure waiting between every keypress and its character.
 /// Output that answers recent input is published the moment it is parsed,
 /// provided the screen did not lose content doing it, since that is the
-/// half-erased repaint batching exists to hide.
+/// half-erased repaint batching exists to hide. A synchronized update
+/// (DECSET 2026) the child closed is complete by its own declaration, so it
+/// answers even when the redraw removed cells: Claude Code's placeholder and
+/// shortcut hint disappearing as typing starts, a completion menu closing.
+///
+/// A TUI often answers one key in several writes (erase, redraw, then a
+/// status row), so a keystroke buys up to [`ECHO_PUBLICATIONS`] immediate
+/// publications within [`ECHO_WINDOW`], not one. Output that keeps coming
+/// after that is batched as before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EchoRequest {
     at: Instant,
     /// The input was an editing key, whose echo legitimately removes cells.
     erases: bool,
+    /// Immediate publications this input may still buy.
+    publications: u8,
 }
+
+/// How many immediate publications one keystroke buys: an erase-and-redraw
+/// answer plus a status row or two, the most a TUI writes for one key.
+pub(crate) const ECHO_PUBLICATIONS: u8 = 4;
 
 impl EchoRequest {
     fn for_input(bytes: &[u8], at: Instant) -> Self {
@@ -164,26 +178,39 @@ impl EchoRequest {
         let erases = bytes
             .iter()
             .any(|byte| matches!(byte, 0x7f | 0x08 | 0x17 | 0x15));
-        Self { at, erases }
+        Self {
+            at,
+            erases,
+            publications: ECHO_PUBLICATIONS,
+        }
     }
 
     fn expired(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.at) > ECHO_WINDOW
     }
 
+    /// This request after one immediate publication, or `None` once it has
+    /// bought all it may.
+    fn spend(mut self) -> Option<Self> {
+        self.publications = self.publications.saturating_sub(1);
+        (self.publications > 0).then_some(self)
+    }
+
     /// Whether output that took the screen from `filled_before` to
     /// `filled_after` filled cells is this input's complete answer. An
     /// editing key may clear up to one row, the most a line editor erases
-    /// for one keypress; anything else that lost cells is mid-repaint.
+    /// for one keypress; anything else that lost cells is mid-repaint,
+    /// unless it ended on a closed synchronized update (`complete`).
     fn answered_by(
         &self,
         now: Instant,
         filled_before: usize,
         filled_after: usize,
         cols: usize,
+        complete: bool,
     ) -> bool {
         let allowance = if self.erases { cols } else { 0 };
-        !self.expired(now) && filled_after + allowance >= filled_before
+        !self.expired(now) && (complete || filled_after + allowance >= filled_before)
     }
 }
 
@@ -463,15 +490,16 @@ impl Shared {
             Some(EchoRequest::for_input(bytes, Instant::now()));
     }
 
-    /// Consumes the pending keystroke when `answered` says this output is its
-    /// echo. An expired request is dropped either way.
+    /// Spends one of the pending keystroke's immediate publications when
+    /// `answered` says this output answers it. An expired request is dropped
+    /// either way.
     fn take_echo_if(&self, answered: impl FnOnce(&EchoRequest) -> bool) -> bool {
         let mut request = self.echo_request.lock().expect("echo request");
         let Some(pending) = *request else {
             return false;
         };
         if answered(&pending) {
-            *request = None;
+            *request = pending.spend();
             return true;
         }
         if pending.expired(Instant::now()) {
@@ -643,7 +671,11 @@ struct GridWakeState {
     interactive_budget: u8,
 }
 
-const INTERACTIVE_GRID_BUDGET: u8 = 2;
+/// Publications per input that may bypass the attach pump's coalescing: one
+/// can be a trailing change already in flight, the rest are the terminal's
+/// response, which the session pump publishes in up to
+/// [`ECHO_PUBLICATIONS`] parts.
+const INTERACTIVE_GRID_BUDGET: u8 = 1 + ECHO_PUBLICATIONS;
 
 impl GridWake {
     #[cfg(test)]
@@ -4435,12 +4467,20 @@ fn feed_output_batch(
         let (mid_repaint, blank_repaint) = {
             let mut screen = shared.screen.lock().expect("screen");
             let before = *filled_before.get_or_insert_with(|| screen.filled_cells());
+            let synchronized = screen.synchronized_updates_completed();
             screen.feed(&buffer[..count]);
             if screen.has_notifications() {
                 shared.bump_state_version();
             }
             let after = screen.filled_cells();
-            (after < before, after == 0 && before != 0)
+            // A closed synchronized update is a whole frame, however much
+            // it erased: nothing is left to wait for.
+            let complete = screen.synchronized_updates_completed() != synchronized
+                && !screen.in_synchronized_update();
+            (
+                !complete && after < before,
+                !complete && after == 0 && before != 0,
+            )
         };
         total += count;
 
@@ -4981,12 +5021,15 @@ fn pump_held(
             // catches up it runs again, so a settled screen is never stale.
             let evaluate_now = last_eval_at.is_none_or(|at: Instant| at.elapsed() >= EVAL_INTERVAL);
             eval_dirty = !evaluate_now;
-            let (observation, replies, filled_after, cols) = {
+            let (observation, replies, filled_after, cols, complete) = {
                 let mut screen = shared.screen.lock().expect("screen");
                 let historical_bytes =
                     replay_until.saturating_sub(start).min(output.len() as u64) as usize;
                 batch_filled.get_or_insert(screen.filled_cells());
+                let synchronized = screen.synchronized_updates_completed();
                 screen.feed_with_history(output, historical_bytes);
+                let complete = screen.synchronized_updates_completed() != synchronized
+                    && !screen.in_synchronized_update();
                 if screen.has_notifications() {
                     shared.bump_state_version();
                 }
@@ -5003,7 +5046,13 @@ fn pump_held(
                 } else {
                     None
                 };
-                (observation, replies, screen.filled_cells(), screen.size().0)
+                (
+                    observation,
+                    replies,
+                    screen.filled_cells(),
+                    screen.size().0,
+                    complete,
+                )
             };
             // The child is blocked reading the answer to its query, so send it
             // through the holder's input path before publishing anything.
@@ -5033,7 +5082,7 @@ fn pump_held(
                 && batch_filled.is_some_and(|filled_before| {
                     let now = Instant::now();
                     shared.take_echo_if(|request| {
-                        request.answered_by(now, filled_before, filled_after, cols)
+                        request.answered_by(now, filled_before, filled_after, cols, complete)
                     })
                 });
             if caught_up || answers_input || batch_started.elapsed() >= OUTPUT_BATCH_CEILING {
@@ -6606,16 +6655,16 @@ mod echo_request_tests {
         let at = Instant::now();
         let request = EchoRequest::for_input(b"a", at);
         assert!(!request.erases);
-        assert!(request.answered_by(at, 10, 11, 80));
-        assert!(request.answered_by(at, 10, 10, 80), "a cursor move alone");
+        assert!(request.answered_by(at, 10, 11, 80, false));
+        assert!(request.answered_by(at, 10, 10, 80, false), "a cursor move alone");
     }
 
     #[test]
     fn output_that_loses_cells_after_a_typed_key_is_a_repaint_in_progress() {
         let at = Instant::now();
         let request = EchoRequest::for_input(b"a", at);
-        assert!(!request.answered_by(at, 400, 399, 80));
-        assert!(!request.answered_by(at, 400, 0, 80));
+        assert!(!request.answered_by(at, 400, 399, 80, false));
+        assert!(!request.answered_by(at, 400, 0, 80, false));
     }
 
     #[test]
@@ -6624,10 +6673,10 @@ mod echo_request_tests {
         for key in [&b"\x7f"[..], b"\x08", b"\x17", b"\x15"] {
             let request = EchoRequest::for_input(key, at);
             assert!(request.erases, "{key:?}");
-            assert!(request.answered_by(at, 100, 99, 80), "{key:?}");
-            assert!(request.answered_by(at, 100, 20, 80), "{key:?}");
+            assert!(request.answered_by(at, 100, 99, 80, false), "{key:?}");
+            assert!(request.answered_by(at, 100, 20, 80, false), "{key:?}");
             assert!(
-                !request.answered_by(at, 100, 19, 80),
+                !request.answered_by(at, 100, 19, 80, false),
                 "{key:?}: more than a row is a repaint"
             );
         }
@@ -6639,8 +6688,29 @@ mod echo_request_tests {
         let request = EchoRequest::for_input(b"a", at);
         let late = at + ECHO_WINDOW + Duration::from_millis(1);
         assert!(request.expired(late));
-        assert!(!request.answered_by(late, 10, 11, 80));
-        assert!(request.answered_by(at + ECHO_WINDOW, 10, 11, 80));
+        assert!(!request.answered_by(late, 10, 11, 80, false));
+        assert!(request.answered_by(at + ECHO_WINDOW, 10, 11, 80, false));
+    }
+
+    #[test]
+    fn a_keystroke_buys_a_bounded_number_of_immediate_publications() {
+        let mut request = Some(EchoRequest::for_input(b"a", Instant::now()));
+        let mut bought = 0;
+        while let Some(pending) = request {
+            request = pending.spend();
+            bought += 1;
+        }
+        assert_eq!(bought, ECHO_PUBLICATIONS);
+    }
+
+    #[test]
+    fn a_closed_synchronized_update_answers_even_when_it_removed_cells() {
+        let at = Instant::now();
+        let request = EchoRequest::for_input(b"a", at);
+        assert!(request.answered_by(at, 400, 120, 80, true));
+        assert!(request.answered_by(at, 400, 0, 80, true));
+        let late = at + ECHO_WINDOW + Duration::from_millis(1);
+        assert!(!request.answered_by(late, 400, 120, 80, true));
     }
 }
 
