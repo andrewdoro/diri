@@ -19,15 +19,17 @@ use dirijor_mcp::bridge::NoteSpawn;
 
 use super::CliError;
 
-pub(crate) const HELP: &str = "dirijor note TEXT                     capture a note in this project (first line is the title)\n  \
-dirijor note add [TEXT] [--title T] [--project PATH | --inbox] [--pin]   create a note in this project (reads stdin when TEXT is omitted)\n  \
-dirijor note append NOTE TEXT          append Markdown to a note (NOTE is an id or part of its title)\n  \
-dirijor note todo TEXT [--to NOTE] [--project PATH | --inbox]   add a to-do (default: this project's note \"To-dos\")\n  \
-dirijor note list [--project PATH] [--mentions SESSION|me] [--all] [--json]\n  \
-dirijor note check NOTE TODO [--undo]   check off a to-do (TODO is its text or part of it)\n  \
-dirijor note link NOTE TODO SESSION    link a session to a to-do as an @-mention\n  \
-dirijor note show NOTE                 print a note's Markdown\n  \
-dirijor note path                      print the notes directory";
+pub(crate) const HELP: &str = "dirijor note TEXT                     write a quick note for this project (the first line is its title)\n  \
+dirijor note add [TEXT] [--title T] [--project FOLDER | --inbox] [--pin] [--open]\n                                        write a note (Markdown; reads what you pipe in when TEXT is left out).\n                                        It appears in the sidebar under the agent that wrote it; --open shows it\n  \
+dirijor note append NOTE TEXT          add Markdown to the end of a note (NOTE is its id or part of its title)\n  \
+dirijor note todo TEXT [--to NOTE] [--project FOLDER | --inbox]   add a to-do (to this project's \"To-dos\" note unless --to)\n  \
+dirijor note list [--project FOLDER] [--mentions SESSION|me] [--all] [--json]\n  \
+dirijor note check NOTE TODO [--undo]   tick a to-do (TODO is its text or part of it)\n  \
+dirijor note link NOTE TODO SESSION    put a session's @-chip on a to-do\n  \
+dirijor note show NOTE                 print a note as Markdown\n  \
+dirijor note history NOTE [VERSION]    list a note's earlier versions, or print one\n  \
+dirijor note restore NOTE VERSION      bring back an earlier version (the current text is kept in history)\n  \
+dirijor note path                      print the folder where notes are kept";
 
 pub(crate) fn run(arguments: &[String]) -> Result<(), CliError> {
     let store = open_store()?;
@@ -41,7 +43,9 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), CliError> {
             println!("{HELP}");
             Ok(())
         }
-        "add" | "new" => add(&store, rest),
+        "add" | "new" | "create" => add(&store, rest),
+        "history" | "versions" => history(&store, rest),
+        "restore" => restore(&store, rest),
         "append" => append(&store, rest),
         "todo" => todo(&store, rest),
         "list" | "ls" => list(&store, rest),
@@ -71,6 +75,7 @@ struct Flags {
     pin: bool,
     undo: bool,
     inbox: bool,
+    open: bool,
     all: bool,
     json: bool,
 }
@@ -85,6 +90,7 @@ fn flags(arguments: &[String]) -> Result<Flags, CliError> {
         pin: false,
         undo: false,
         inbox: false,
+        open: false,
         all: false,
         json: false,
     };
@@ -102,6 +108,7 @@ fn flags(arguments: &[String]) -> Result<Flags, CliError> {
             "--mentions" => out.mentions = Some(value("--mentions")?),
             "--undo" => out.undo = true,
             "--inbox" => out.inbox = true,
+            "--open" => out.open = true,
             "--pin" => out.pin = true,
             "--all" => out.all = true,
             "--json" => out.json = true,
@@ -152,7 +159,23 @@ fn add(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
     };
     let place = placement(&flags)?;
     let parent = std::env::var(diri_proto::paths::ENV_SESSION_ID).ok();
-    let id = create_note(store, &title, &body, &place, parent.as_deref())?;
+    let (id, session) = create_note(store, &title, &body, &place, parent.as_deref())?;
+    if flags.open {
+        match &session {
+            Some(session) => {
+                super::bridge()
+                    .request(
+                        diri_proto::Method::SESSION_REVEAL,
+                        serde_json::json!({ "sessionID": session }),
+                        std::time::Duration::from_secs(3),
+                    )
+                    .map_err(|e| {
+                        CliError::failure(format!("wrote the note but could not open it: {e}"))
+                    })?;
+            }
+            None => eprintln!("dirijor: the note is saved, but Diri isn't running to show it"),
+        }
+    }
     if flags.pin {
         store
             .update(&id, &Author::from_env(), |note| {
@@ -218,7 +241,7 @@ fn create_note(
     body: &str,
     place: &Placement,
     parent: Option<&str>,
-) -> Result<String, CliError> {
+) -> Result<(String, Option<String>), CliError> {
     let project = match place {
         Placement::Project(root) => {
             match super::bridge()
@@ -226,7 +249,8 @@ fn create_note(
                 .map_err(|e| CliError::failure(format!("cannot create note: {e}")))?
             {
                 NoteSpawn::Created(record) => {
-                    return Ok(record.note_id.expect("spawn_note checks note_id"));
+                    let id = record.note_id.expect("spawn_note checks note_id");
+                    return Ok((id, Some(record.id.0)));
                 }
                 NoteSpawn::Unavailable(reason) => {
                     eprintln!(
@@ -242,7 +266,7 @@ fn create_note(
     let doc = Document::new(title, parsed.blocks);
     store
         .create_for_session(doc, project, None, &Author::from_env())
-        .map(|(id, _)| id)
+        .map(|(id, _)| (id, None))
         .map_err(|e| CliError::failure(format!("cannot create note: {e}")))
 }
 
@@ -299,7 +323,7 @@ fn inbox_todos(store: &NoteStore, place: &Placement) -> Result<NoteMeta, CliErro
     {
         return Ok(found);
     }
-    let id = create_note(store, "To-dos", "", place, None)?;
+    let (id, _) = create_note(store, "To-dos", "", place, None)?;
     store
         .meta(&id)
         .map_err(|e| CliError::failure(format!("cannot read note: {e}")))
@@ -467,4 +491,121 @@ fn session_label(session: &str) -> String {
                 .map(|record| mention::session_label(record.effective_kind().id(), &record.title))
         })
         .unwrap_or_else(|| mention::session_label("", session))
+}
+
+fn history(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
+    let flags = flags(arguments)?;
+    let (target, version) = match flags.positional.as_slice() {
+        [target] => (target, None),
+        [target, version] => (target, Some(parse_version(version)?)),
+        _ => {
+            return Err(CliError::failure(
+                "usage: dirijor note history NOTE [VERSION]",
+            ));
+        }
+    };
+    let meta = resolve(store, target)?;
+    let history = store.history();
+    if let Some(version) = version {
+        let text = history
+            .read(&meta.id, version)
+            .map_err(|e| CliError::not_found(format!("{e}")))?;
+        print!("{}", diri_notes::history::body(&text));
+        return Ok(());
+    }
+    let versions = history
+        .list(&meta.id)
+        .map_err(|e| CliError::failure(format!("cannot read the history: {e}")))?;
+    if flags.json {
+        let rows: Vec<serde_json::Value> = versions
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "version": v.id,
+                    "when": diri_notes::history::describe_time(v.id),
+                    "by": v.author.describe(),
+                    "size": v.bytes,
+                    "summary": v.summary,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).unwrap_or_default()
+        );
+        return Ok(());
+    }
+    if versions.is_empty() {
+        println!("{} has no earlier versions yet.", meta.display_title());
+        return Ok(());
+    }
+    println!(
+        "Versions of \"{}\" (newest first, times in UTC):",
+        meta.display_title()
+    );
+    for v in versions {
+        println!(
+            "  {}  {}  by {:<16}  {}",
+            v.id,
+            diri_notes::history::describe_time(v.id),
+            v.author.describe(),
+            v.summary
+        );
+    }
+    println!("Print one with: dirijor note history NOTE VERSION");
+    Ok(())
+}
+
+/// Restoring is the person's call, never an agent's: refused inside an
+/// agent's session, allowed from a plain terminal.
+fn restore(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
+    let flags = flags(arguments)?;
+    let [target, version] = flags.positional.as_slice() else {
+        return Err(CliError::failure(
+            "usage: dirijor note restore NOTE VERSION",
+        ));
+    };
+    let version = parse_version(version)?;
+    if let Some(agent) = calling_agent() {
+        return Err(CliError::failure(format!(
+            "only the person restores versions; {agent} is an agent. Ask them to use Version history in the note, or run this in their own terminal."
+        )));
+    }
+    let meta = resolve(store, target)?;
+    store
+        .restore_version(&meta.id, version, &Author::from_env())
+        .map_err(|e| CliError::failure(format!("cannot restore: {e}")))?;
+    println!(
+        "Restored \"{}\" to the version from {} (UTC). The text it replaced is in its history.",
+        meta.display_title(),
+        diri_notes::history::describe_time(version)
+    );
+    Ok(())
+}
+
+fn parse_version(text: &str) -> Result<u64, CliError> {
+    text.parse().map_err(|_| {
+        CliError::failure(format!(
+            "{text} is not a version number (see dirijor note history)"
+        ))
+    })
+}
+
+/// The agent Session this command runs in, if any. A terminal tab is the
+/// person's own; without the Engine an unknown Session counts as an agent.
+fn calling_agent() -> Option<String> {
+    let caller = std::env::var(diri_proto::paths::ENV_SESSION_ID).ok()?;
+    let listing = super::bridge()
+        .request(
+            diri_proto::Method::SESSION_LIST,
+            serde_json::json!({}),
+            std::time::Duration::from_secs(3),
+        )
+        .ok()
+        .and_then(|value| serde_json::from_value::<diri_proto::SessionListResult>(value).ok());
+    let is_terminal = listing
+        .as_ref()
+        .and_then(|listing| listing.sessions.iter().find(|r| r.id.0 == caller))
+        .is_some_and(|record| record.kind.id() == diri_proto::AgentKind::SHELL_ID);
+    (!is_terminal).then_some(caller)
 }

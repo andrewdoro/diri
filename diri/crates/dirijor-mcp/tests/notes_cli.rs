@@ -233,3 +233,43 @@ fn inbox_notes_and_a_missing_engine_write_files_only() {
     );
     assert!(server.notes().is_empty());
 }
+
+#[test]
+fn create_open_history_and_a_restore_only_the_person_may_run() {
+    let setup = setup();
+    let server = Server::start(setup._temp.path(), &setup.notes);
+    let run = |caller: Option<&str>, words: &[&str]| {
+        dirijor(&server.socket, &setup.notes, &setup.project, caller, words)
+    };
+    let id = stdout(&run(
+        None,
+        &["note", "create", "--open", "Offsite\n\n- [ ] find a venue"],
+    ));
+    stdout(&run(None, &["note", "append", &id, "Budget: 5k"]));
+
+    let listing = stdout(&run(None, &["note", "history", &id]));
+    assert!(listing.contains("Versions of \"Offsite\""), "{listing}");
+    assert!(listing.contains("by the command line"), "{listing}");
+    let first: String = listing
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("  "))
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap()
+        .to_owned();
+    let old = stdout(&run(None, &["note", "history", &id, &first]));
+    assert!(!old.contains("Budget"), "{old}");
+
+    // An agent's session may read history but not restore it.
+    let agent = server.notes()[0].id.0.clone(); // any non-terminal Session
+    let refused = run(Some(&agent), &["note", "restore", &id, &first]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("only the person restores"));
+
+    let restored = stdout(&run(None, &["note", "restore", &id, &first]));
+    assert!(restored.starts_with("Restored \"Offsite\""), "{restored}");
+    let file = std::fs::read_to_string(setup.notes.join(format!("{id}.md"))).unwrap();
+    assert!(!file.contains("Budget"), "{file}");
+    let after = stdout(&run(None, &["note", "history", &id]));
+    assert!(after.contains("restored the version from"), "{after}");
+}
