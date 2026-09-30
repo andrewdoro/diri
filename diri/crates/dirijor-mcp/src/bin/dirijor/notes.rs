@@ -9,7 +9,7 @@ use std::path::Path;
 use diri_notes::doc::{Block, Document};
 use diri_notes::handoff::{self, TodoSelector};
 use diri_notes::markdown;
-use diri_notes::mentions::MentionTarget;
+use diri_notes::mention::{self, MentionTarget};
 use diri_notes::store::{self, NoteMeta, NoteStore, Resolve};
 
 use super::CliError;
@@ -373,7 +373,7 @@ fn session_label(session: &str) -> String {
                 .sessions
                 .into_iter()
                 .find(|record| record.id.0 == session)
-                .map(|record| format!("{}: {}", record.effective_kind().id(), record.title))
+                .map(|record| mention::session_label(record.effective_kind().id(), &record.title))
         })
-        .unwrap_or_else(|| session.to_owned())
+        .unwrap_or_else(|| mention::session_label("", session))
 }

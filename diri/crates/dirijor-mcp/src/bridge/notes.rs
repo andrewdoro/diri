@@ -8,7 +8,7 @@
 
 use super::*;
 use diri_notes::handoff::{self, TodoSelector};
-use diri_notes::mentions::{self, MentionTarget};
+use diri_notes::mention::{self, MentionTarget};
 use diri_notes::store::{self as note_store, Note, NoteMeta, NoteStore, Resolve};
 
 const DEFAULT_NOTE_LIMIT: u64 = 50;
@@ -145,10 +145,18 @@ impl Bridge {
             })
             .collect();
         let notes = store.list().unwrap_or_default();
-        let mentions: Vec<Value> = mentions::mentions(&note.doc)
-            .into_iter()
-            .map(|mention| {
-                let mut value = json!({"label": mention.label, "block": mention.block});
+        let mentions: Vec<Value> = note
+            .doc
+            .blocks
+            .iter()
+            .enumerate()
+            .flat_map(|(index, block)| {
+                mention::in_block(block)
+                    .into_iter()
+                    .map(move |chip| (index, block.text[chip.range.clone()].to_owned(), chip))
+            })
+            .map(|(block, label, mention)| {
+                let mut value = json!({"label": label, "block": block});
                 match &mention.target {
                     MentionTarget::Session(id) => {
                         value["session"] = session_value(id);
@@ -223,10 +231,9 @@ impl Bridge {
         let link = match link {
             Some(id) => {
                 let record = find_session(&snapshot.sessions, &id)?;
-                let label = format!(
-                    "{}: {}",
+                let label = mention::session_label(
                     short_label(record.effective_kind().id()),
-                    record.title
+                    &record.title,
                 );
                 Some((id, label))
             }

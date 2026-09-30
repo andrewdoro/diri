@@ -5,9 +5,9 @@
 //! editor. Agents only ever add to a note: check a to-do, link a session to
 //! it, or append an update. Nothing here deletes user text.
 
-use crate::doc::{Block, BlockKind};
+use crate::doc::{Block, BlockKind, Style};
 use crate::markdown;
-use crate::mentions::{self, MentionTarget};
+use crate::mention::{self, MentionTarget};
 use crate::store::{Note, append_markdown};
 
 /// Initial prompts carry at most this much of the note; the rest is one
@@ -47,8 +47,9 @@ pub fn todos(note: &Note) -> Vec<TodoRef> {
                 index,
                 text: block.text.clone(),
                 checked,
-                sessions: mentions::block_mentions(block)
-                    .filter_map(|(_, target)| match target {
+                sessions: mention::in_block(block)
+                    .into_iter()
+                    .filter_map(|mention| match mention.target {
                         MentionTarget::Session(id) => Some(id),
                         MentionTarget::Note(_) => None,
                     })
@@ -113,15 +114,38 @@ pub fn set_checked(note: &mut Note, index: usize, checked: bool) -> bool {
     true
 }
 
-/// Links a session to a to-do by appending its mention. Returns whether
-/// anything changed (a session is linked at most once).
+/// Links a session to a to-do by appending a mention chip labelled `label`
+/// (see [`mention::session_label`]). Returns whether anything changed: a
+/// session is linked to a to-do at most once.
 pub fn link_session(note: &mut Note, index: usize, label: &str, session_id: &str) -> bool {
+    let target = MentionTarget::Session(session_id.to_owned());
     match note.doc.blocks.get_mut(index) {
         Some(block) if matches!(block.kind, BlockKind::Todo { .. }) => {
-            mentions::append(block, label, &MentionTarget::Session(session_id.to_owned()))
+            append_chip(block, label, &target)
         }
         _ => false,
     }
+}
+
+fn append_chip(block: &mut Block, label: &str, target: &MentionTarget) -> bool {
+    if mention::in_block(block).iter().any(|m| &m.target == target) {
+        return false;
+    }
+    if !block.text.is_empty() && !block.text.ends_with(' ') {
+        let end = block.text.len();
+        block.replace(end..end, " ", &[]);
+    }
+    let start = block.text.len();
+    block.replace(start..start, label, &[]);
+    block.add_mark(start..block.text.len(), Style::Link(target.url()));
+    true
+}
+
+/// The Markdown for one mention chip, e.g. `[@Codex](diri://session/s_1)`.
+fn chip_markdown(label: &str, target: &MentionTarget) -> String {
+    let mut block = Block::new(0, BlockKind::Paragraph, "");
+    append_chip(&mut block, label, target);
+    markdown::write_inline(&block, false)
 }
 
 /// Appends a dated, attributed line under the note's `## Updates` heading,
@@ -134,7 +158,7 @@ pub fn append_update(note: &mut Note, date: &str, label: &str, session_id: &str,
     if !has_heading {
         append_markdown(note, &format!("## {UPDATES_HEADING}"));
     }
-    let author = mentions::markdown_link(label, &MentionTarget::Session(session_id.to_owned()));
+    let author = chip_markdown(label, &MentionTarget::Session(session_id.to_owned()));
     let body = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut line = Block::new(0, BlockKind::Bullet, "");
     line.text = format!("{date} {body}");
@@ -273,8 +297,13 @@ mod tests {
     fn links_and_checks_survive_a_round_trip() {
         let mut note = note(PRD);
         let index = find_todo(&note, &TodoSelector::Text("flicker".into())).unwrap();
-        assert!(link_session(&mut note, index, "Claude: flicker", "s_child"));
-        assert!(!link_session(&mut note, index, "again", "s_child"));
+        assert!(link_session(
+            &mut note,
+            index,
+            "@Claude: flicker",
+            "s_child"
+        ));
+        assert!(!link_session(&mut note, index, "@again", "s_child"));
         assert!(set_checked(&mut note, index, true));
         assert!(!set_checked(&mut note, index, true));
 
@@ -294,14 +323,14 @@ mod tests {
         append_update(
             &mut note,
             "2026-09-30 14:02",
-            "Claude",
+            "@Claude",
             "s_c",
             "Found *the* cause.\nFixing.",
         );
         append_update(
             &mut note,
             "2026-09-30 15:10",
-            "Claude",
+            "@Claude",
             "s_c",
             "Done: PR #600",
         );

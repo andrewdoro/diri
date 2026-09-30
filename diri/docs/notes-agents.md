@@ -57,19 +57,11 @@ Wire form, stored verbatim in the note body:
   link and is not treated as a mention.
 
 The codec already round-trips links (`Style::Link(url)`), so this needs no
-Markdown change. New module `diri_notes::mentions`:
-
-```rust
-pub enum MentionTarget { Session(String), Note(String) }
-pub struct Mention { pub block: usize, pub range: Range<usize>, pub label: String, pub target: MentionTarget }
-pub fn parse_target(url: &str) -> Option<MentionTarget>;
-pub fn mentions(doc: &Document) -> Vec<Mention>;
-pub fn link(label: &str, target: &MentionTarget) -> String; // Markdown
-```
-
-`NoteMeta` gains `mentions: Vec<MentionTarget>` (deduplicated), which
-`list()` computes during its existing read, so "notes that mention me" costs
-no extra I/O.
+Markdown change. The model is `diri_notes::mention` from the rich-nodes work
+(PR #600): `MentionTarget`, `in_block`, `Document::mentions()`,
+`session_label`. This work adds no second copy. `NoteMeta.mentions` holds
+`Document::mentions()`, which `list()` computes during its existing read,
+so "notes that mention me" costs no extra I/O.
 
 ### What an agent does with mentions
 
@@ -240,9 +232,17 @@ that lands during typing is overwritten.
   archive ↔ `archived: true`, and remove → trash. Both are done by the app,
   not the Engine.
 
+## Status
+
+Built on `notes/engine-agents` (stacked on PR #600): steps 1–4 below, plus
+`dirijor note check|link|list --mentions`. `read_note` rejects
+`"origin"` with a clear error until note sessions land. Verified against the
+live Engine: a note mentioning the calling session is found by
+`list_notes mentions:"me"`, and its to-do resolves to that live session.
+
 ## Build order (this work)
 
-1. `diri_notes::mentions` + `NoteMeta.mentions` + tests (no dependencies).
+1. `NoteMeta.mentions` on the shared `diri_notes::mention` model + tests.
 2. `NoteStore::update` with lock + `save_if_unchanged` + race test.
 3. `diri_notes::handoff` (prompt builder, to-do link insertion) + tests.
 4. MCP `list_notes` / `read_note` / `write_note` + CLI parity. Discovery by

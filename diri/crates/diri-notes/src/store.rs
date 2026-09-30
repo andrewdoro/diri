@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::doc::{BlockKind, Document};
 use crate::markdown::{self, FrontMatter};
-use crate::mentions::{self, MentionTarget};
+use crate::mention::MentionTarget;
 
 /// Notes larger than this are listed but not loaded into the editor.
 pub const MAX_NOTE_BYTES: u64 = 4 * 1024 * 1024;
@@ -114,7 +114,7 @@ impl NoteMeta {
             todos_done,
             todos_total,
             open_todos,
-            mentions: mentions::targets(&note.doc),
+            mentions: note.doc.mentions(),
             haystack: format!("{}\n{}", note.doc.title, body).to_lowercase(),
         }
     }
