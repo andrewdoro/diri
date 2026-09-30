@@ -80,6 +80,7 @@ actions!(
         Strike,
         Link,
         ToggleTodo,
+        ToggleFold,
         TurnParagraph,
         TurnHeading1,
         TurnHeading2,
@@ -161,6 +162,7 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-x", Strike, c),
         KeyBinding::new("cmd-k", Link, c),
         KeyBinding::new("cmd-enter", ToggleTodo, c),
+        KeyBinding::new("cmd-alt-enter", ToggleFold, c),
         KeyBinding::new(KEY_TURN_PARAGRAPH, TurnParagraph, c),
         KeyBinding::new(KEY_TURN_H1, TurnHeading1, c),
         KeyBinding::new(KEY_TURN_H2, TurnHeading2, c),
@@ -230,6 +232,8 @@ struct MentionMenu {
 const CARET_BLINK: Duration = Duration::from_millis(530);
 const MARKER_WIDTH: f32 = 26.0;
 const INDENT_STEP: f32 = 24.0;
+/// Gutter width left of a list item that holds its fold chevron.
+const DISCLOSURE_WIDTH: f32 = 20.0;
 pub(crate) const MEASURE: f32 = 700.0;
 /// Mention chips grow this far past their text on each side.
 const CHIP_PAD_X: f32 = 3.0;
@@ -428,6 +432,18 @@ impl NoteEditorView {
     /// Replaces the content after an outside change, keeping the caret close.
     pub(crate) fn reload(&mut self, editor: Editor, cx: &mut Context<Self>) {
         let selection = self.editor.selection;
+        // Folds are view state keyed by runtime ids; carry each one to the
+        // block at the same place with the same text.
+        let folded: Vec<(usize, String)> = (0..self.editor.blocks().len())
+            .filter(|i| self.editor.is_collapsed(*i))
+            .map(|i| (i, self.editor.block(i).text.clone()))
+            .collect();
+        let mut editor = editor;
+        for (index, text) in folded {
+            if editor.blocks().get(index).is_some_and(|b| b.text == text) {
+                editor.set_collapsed(index, true);
+            }
+        }
         self.editor = editor;
         self.editor.set_selection(selection);
         self.slash = None;
@@ -512,21 +528,27 @@ impl NoteEditorView {
 
     fn hit(&self, at: Point<Pixels>) -> Option<Pos> {
         let point_at = at;
-        let count = self.editor.blocks().len();
+        let hidden = self.editor.hidden();
         let mut chosen = None;
-        for index in 0..count {
+        let mut previous: Option<usize> = None;
+        // Folded blocks keep a layout but take no space; only visible
+        // blocks can be hit.
+        for index in (0..hidden.len()).filter(|i| !hidden[*i]) {
             let layout = self.layout(index)?;
             let bounds = layout.bounds();
             chosen = Some(index);
             if point_at.y <= bounds.bottom() {
-                if index > 0 && point_at.y < bounds.top() {
-                    let previous = self.layout(index - 1)?.bounds();
-                    if point_at.y - previous.bottom() < bounds.top() - point_at.y {
-                        chosen = Some(index - 1);
+                if let Some(previous) = previous
+                    && point_at.y < bounds.top()
+                {
+                    let above = self.layout(previous)?.bounds();
+                    if point_at.y - above.bottom() < bounds.top() - point_at.y {
+                        chosen = Some(previous);
                     }
                 }
                 break;
             }
+            previous = Some(index);
         }
         let index = chosen?;
         let block = self.editor.block(index);
@@ -578,7 +600,8 @@ impl NoteEditorView {
                 }
                 index -= 1;
             }
-            if self.editor.block(index).kind != BlockKind::Divider {
+            if self.editor.block(index).kind != BlockKind::Divider && !self.editor.is_hidden(index)
+            {
                 break;
             }
         }
@@ -800,9 +823,10 @@ impl NoteEditorView {
 
     /// The mention chip under a window point, if any.
     fn chip_at(&self, at: Point<Pixels>) -> Option<MentionTarget> {
+        let hidden = self.editor.hidden();
         for (index, block) in self.editor.blocks().iter().enumerate() {
             let chips = mention::in_block(block);
-            if chips.is_empty() {
+            if chips.is_empty() || hidden[index] {
                 continue;
             }
             let layout = self.layout(index)?;
@@ -1129,6 +1153,32 @@ impl NoteEditorView {
             });
         })
         .detach();
+    }
+
+    /// ⌥⌘↩ folds or unfolds the list item under the caret, or the nearest
+    /// list item above it that has children.
+    pub(super) fn toggle_fold(&mut self, _: &ToggleFold, _: &mut Window, cx: &mut Context<Self>) {
+        let head = self.editor.selection.head.block;
+        let target = (1..=head)
+            .rev()
+            .take_while(|i| self.editor.block(*i).kind.is_list())
+            .find(|i| {
+                self.editor.has_children(*i)
+                    && (*i == head || self.editor.children(*i).contains(&head))
+            });
+        if let Some(index) = target {
+            self.set_folded(index, !self.editor.is_collapsed(index), cx);
+        }
+    }
+
+    /// Folds or unfolds the children of the list item at `index`. View
+    /// state only: nothing is saved and undo is untouched. Other note
+    /// features (a to-do's work context) build on this.
+    pub(crate) fn set_folded(&mut self, index: usize, folded: bool, cx: &mut Context<Self>) {
+        self.editor.set_collapsed(index, folded);
+        self.slash = None;
+        self.mention = None;
+        self.moved(cx);
     }
 
     fn toggle_todo(&mut self, _: &ToggleTodo, _: &mut Window, cx: &mut Context<Self>) {
@@ -1713,6 +1763,7 @@ impl Render for NoteEditorView {
             .retain(|(_, at)| at.elapsed() < Duration::from_millis(600));
 
         let mut layouts = Vec::with_capacity(self.editor.blocks().len());
+        let hidden = self.editor.hidden();
         let mut column = div().flex().flex_col().w_full();
         for (index, block) in self.editor.blocks().iter().enumerate() {
             let look = look(block.kind);
@@ -1780,15 +1831,29 @@ impl Render for NoteEditorView {
             }
 
             let indent = f32::from(block.indent) * INDENT_STEP;
+            let folded_away = hidden[index];
+            let group: SharedString = format!("note-row-{}", block.id).into();
             let row = div()
                 .id(("block", block.id))
+                .group(group.clone())
+                .relative()
                 .flex()
                 .flex_row()
                 .items_start()
                 .w_full()
-                .pt(px(look.top))
-                .pb(px(look.bottom))
                 .pl(px(indent));
+            // A folded-away block still lays out its text, so every block
+            // keeps a layout, but it takes no space and cannot be seen.
+            let row = if folded_away {
+                row.h(px(0.0)).overflow_hidden().opacity(0.0)
+            } else {
+                row.pt(px(look.top)).pb(px(look.bottom))
+            };
+            let row = if !folded_away && self.editor.has_children(index) {
+                row.child(self.disclosure(index, indent, look.top, look.line, group, cx))
+            } else {
+                row
+            };
             let row = match block.kind {
                 BlockKind::Bullet | BlockKind::Numbered | BlockKind::Todo { .. } => {
                     let marker = self.marker(index, block, look.line, cx);
@@ -1849,6 +1914,9 @@ impl Render for NoteEditorView {
 
         let mut chips = Vec::new();
         for (index, block) in self.editor.blocks().iter().enumerate() {
+            if hidden[index] {
+                continue;
+            }
             for chip in mention::in_block(block) {
                 let dot = match &chip.target {
                     MentionTarget::Note(_) => None,
@@ -1933,6 +2001,7 @@ impl Render for NoteEditorView {
             .iter()
             .map(|b| (b.text.len(), b.text.is_empty()))
             .collect();
+        let folded_away = hidden.clone();
         let autoscroll = std::mem::take(&mut self.autoscroll);
         let scroll = self.scroll.clone();
         let overlay = canvas(
@@ -1946,6 +2015,9 @@ impl Render for NoteEditorView {
                         let Some(layout) = layouts.get(index) else {
                             continue;
                         };
+                        if folded_away[index] {
+                            continue;
+                        }
                         let (len, empty) = blocks_meta[index];
                         let from = if index == start.block {
                             start.offset
@@ -2085,6 +2157,7 @@ impl Render for NoteEditorView {
             .on_action(cx.listener(Self::strike))
             .on_action(cx.listener(Self::link))
             .on_action(cx.listener(Self::toggle_todo))
+            .on_action(cx.listener(Self::toggle_fold))
             .on_action(cx.listener(Self::turn_paragraph))
             .on_action(cx.listener(Self::turn_h1))
             .on_action(cx.listener(Self::turn_h2))
@@ -2135,6 +2208,55 @@ impl Render for NoteEditorView {
 }
 
 impl NoteEditorView {
+    /// The fold chevron in the gutter left of a list item with children:
+    /// shown while the row is hovered, and always while folded.
+    fn disclosure(
+        &self,
+        index: usize,
+        indent: f32,
+        top: f32,
+        line: f32,
+        group: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let folded = self.editor.is_collapsed(index);
+        let id = self.editor.block(index).id;
+        let colors = self.colors;
+        div()
+            .id(("fold", id))
+            .absolute()
+            .left(px(indent - DISCLOSURE_WIDTH))
+            .top(px(top))
+            .w(px(DISCLOSURE_WIDTH))
+            .h(px(line))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .opacity(if folded { 1.0 } else { 0.0 })
+            .group_hover(group, |chevron| chevron.opacity(1.0))
+            .child(crate::icons::sf_symbol(
+                if folded {
+                    "chevron.right"
+                } else {
+                    "chevron.down"
+                },
+                9.0,
+                colors.tertiary,
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(index) = this.editor.blocks().iter().position(|b| b.id == id) {
+                        let folded = this.editor.is_collapsed(index);
+                        this.set_folded(index, !folded, cx);
+                    }
+                }),
+            )
+            .into_any_element()
+    }
+
     fn marker(
         &self,
         index: usize,
@@ -2156,11 +2278,22 @@ impl NoteEditorView {
                     1 => "◦",
                     _ => "▪",
                 };
-                base.pl(px(4.0))
-                    .text_size(px(18.0))
-                    .text_color(colors.secondary)
-                    .child(glyph)
-                    .into_any_element()
+                // A folded bullet wears a soft ring, the outliner convention
+                // for "there is more in here".
+                let folded = self.editor.is_collapsed(index);
+                base.child(
+                    div()
+                        .size(px(18.0))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(folded, |ring| ring.bg(colors.primary.alpha(0.1)))
+                        .text_size(px(18.0))
+                        .text_color(colors.secondary)
+                        .child(glyph),
+                )
+                .into_any_element()
             }
             BlockKind::Numbered => base
                 .text_size(px(14.0))

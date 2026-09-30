@@ -267,3 +267,52 @@ fn hover_and_arrow_keys_share_one_menu_highlight(cx: &mut gpui::TestAppContext) 
         );
     });
 }
+
+#[gpui::test]
+fn folding_is_view_state_that_survives_outside_writes(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    let parent = editor.update_in(cx, |view, window, cx| {
+        let parent = view
+            .editor
+            .blocks()
+            .iter()
+            .position(|b| b.text == "Quick capture from anywhere")
+            .unwrap();
+        let end = view.editor.block(parent).text.len();
+        view.editor
+            .set_caret(diri_notes::edit::Pos::new(parent, end));
+        view.newline(&editor_view::Newline, window, cx);
+        view.indent(&editor_view::Indent, window, cx);
+        for ch in "a global hotkey".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+        // ⌥⌘↩ inside the child folds the item that holds it.
+        view.toggle_fold(&editor_view::ToggleFold, window, cx);
+        assert!(view.editor.is_collapsed(parent));
+        assert!(view.editor.is_hidden(parent + 1));
+        assert_eq!(view.editor.selection.head.block, parent);
+        parent
+    });
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(
+        text.contains("- [ ] Quick capture from anywhere\n  - [ ] a global hotkey\n"),
+        "folding never changes the file:\n{text}"
+    );
+    // An agent appends while the item is folded; the fold survives the reload.
+    store.append(&id, "- [ ] added by an agent").unwrap();
+    pane.update(cx, |pane, cx| pane.reconcile(cx));
+    editor.read_with(cx, |view, _| {
+        assert!(view.editor.is_collapsed(parent));
+        assert!(
+            view.editor
+                .blocks()
+                .iter()
+                .any(|b| b.text == "added by an agent")
+        );
+    });
+}

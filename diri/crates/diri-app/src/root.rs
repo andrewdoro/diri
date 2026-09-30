@@ -9299,7 +9299,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
             cx.run_until_parked();
         }
-        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips` types into the note:
+        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold` types into the note:
         // mention chips beside a to-do, then the `/` or `@` menu open at the
         // caret, to judge the menus beside the rest of diri's chrome.
         if let Ok(scene) = std::env::var("DIRI_VISUAL_NOTE_MENU") {
@@ -9351,6 +9351,28 @@ mod tests {
                     let end = view.editor.block(quick).text.len();
                     view.editor.set_caret(Pos::new(quick, end));
                     match scene.as_str() {
+                        "fold" => {
+                            // Two nested items under "Quick capture", folded
+                            // under "Agents can append".
+                            view.editor.enter(0);
+                            view.editor.indent(false, 0);
+                            view.editor.insert_text("Global hotkey", 0);
+                            view.editor.enter(0);
+                            view.editor.insert_text("Capture panel", 0);
+                            let agents = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.text.starts_with("Agents can"))
+                                .expect("fixture to-do");
+                            view.editor.set_caret(Pos::new(agents, 0));
+                            let end = view.editor.block(agents).text.len();
+                            view.editor.set_caret(Pos::new(agents, end));
+                            view.editor.enter(0);
+                            view.editor.indent(false, 0);
+                            view.editor.insert_text("Hidden while folded", 0);
+                            view.set_folded(agents, true, cx);
+                        }
                         "slash" => {
                             view.editor.enter(0);
                             view.editor
