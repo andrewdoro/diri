@@ -6901,7 +6901,9 @@ mod foreground_program_tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(root.join("sub")).unwrap();
         let fake_claude = bin.join("claude");
-        std::fs::write(&fake_claude, "#!/bin/sh\necho ready\nexec sleep 30\n").unwrap();
+        // The script itself stays the job's leader, as a real Agent does:
+        // `exec sleep` would rename the job `sleep`, correctly.
+        std::fs::write(&fake_claude, "#!/bin/sh\necho ready\nread -r line\n").unwrap();
         std::fs::set_permissions(
             &fake_claude,
             std::os::unix::fs::PermissionsExt::from_mode(0o755),
