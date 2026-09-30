@@ -11,10 +11,10 @@ pub(crate) mod editor_view;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod todos;
+mod versions;
 pub(crate) mod work_item;
 #[cfg(test)]
 pub(crate) mod work_item_tests;
-mod versions;
 
 use std::sync::Arc;
 use std::time::Duration;

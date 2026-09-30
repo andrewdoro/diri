@@ -311,7 +311,11 @@ fn folding_is_view_state_that_survives_outside_writes(cx: &mut gpui::TestAppCont
     );
     // An agent appends while the item is folded; the fold survives the reload.
     store
-        .append(&id, "- [ ] added by an agent", &diri_notes::history::Author::Session("s_agent".into()))
+        .append(
+            &id,
+            "- [ ] added by an agent",
+            &diri_notes::history::Author::Session("s_agent".into()),
+        )
         .unwrap();
     pane.update(cx, |pane, cx| pane.reconcile(cx));
     editor.read_with(cx, |view, _| {
