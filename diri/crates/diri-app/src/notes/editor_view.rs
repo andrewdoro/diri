@@ -16,7 +16,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use diri_notes::doc::{Block, BlockKind, Style};
+use diri_notes::doc::{Block, BlockKind, Mark, Style, Tone};
 use diri_notes::edit::{Editor, Granularity, Pos, Selection, Turn};
 use diri_notes::mention::{self, Candidate, MentionTarget};
 use diri_ui::{
@@ -26,15 +26,18 @@ use diri_ui::{
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight,
-    HighlightStyle, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Render, ScrollHandle, SharedString, StrikethroughStyle, StyledText, Task, TextLayout,
-    UTF16Selection, UnderlineStyle, Window, actions, anchored, canvas, deferred, div, fill, point,
-    prelude::*, px, size,
+    HighlightStyle, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, ScrollHandle, SharedString, StrikethroughStyle,
+    StyledText, Task, TextLayout, UTF16Selection, UnderlineStyle, Window, actions, anchored,
+    canvas, deferred, div, fill, point, prelude::*, px, size,
 };
 
 use crate::floating;
 
 pub(crate) const EDITOR_CONTEXT: &str = "DiriNoteEditor";
+/// The editor's context while the ⌘K link panel owns the keyboard: none of
+/// the editor's bindings match, so keys reach the panel's field.
+const LINK_EDITOR_CONTEXT: &str = "DiriNoteLinkEditor";
 
 actions!(
     diri_notes,
@@ -213,7 +216,7 @@ pub(crate) struct MentionDirectory {
 }
 
 impl MentionDirectory {
-    fn find(&self, target: &MentionTarget) -> Option<&MentionEntry> {
+    pub(crate) fn find(&self, target: &MentionTarget) -> Option<&MentionEntry> {
         self.entries.iter().find(|e| &e.candidate.target == target)
     }
 
@@ -227,6 +230,44 @@ const MENTION_LIMIT: usize = 8;
 /// A query this long without a match is prose, not a mention.
 const MENTION_QUERY_MAX: usize = 40;
 
+type RowHeights = Rc<std::cell::RefCell<std::collections::HashMap<u64, f32>>>;
+
+/// Each image block's on-screen bounds, written while painting and read by
+/// hit testing.
+type ImageRects = Rc<std::cell::RefCell<Vec<(usize, Bounds<Pixels>)>>>;
+
+/// Where a note's pictures live: the store that writes them and the note
+/// they belong to. Set by the host; without it paste and drop insert no
+/// images and relative images do not resolve.
+#[derive(Clone)]
+pub(crate) struct AssetHome {
+    pub(crate) store: std::sync::Arc<diri_notes::store::NoteStore>,
+    pub(crate) note_id: String,
+}
+
+/// The ⌘K panel: a URL field over the selection or the link at the caret,
+/// and what Return does with it.
+struct LinkEditor {
+    query: crate::query_editor::QueryEditor,
+    /// The selection ⌘K was pressed on, restored when the link applies.
+    selection: Selection,
+    /// The link being edited: (block, range, url).
+    existing: Option<(usize, Range<usize>, String)>,
+    selected: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum LinkRow {
+    Apply { url: String },
+    Open { url: String },
+    Remove,
+}
+
+enum ChipHit {
+    Mention(MentionTarget),
+    Link(String),
+}
+
 struct MentionMenu {
     block_id: u64,
     /// Byte offset of the `@`.
@@ -237,12 +278,14 @@ struct MentionMenu {
 const CARET_BLINK: Duration = Duration::from_millis(530);
 pub(super) const MARKER_WIDTH: f32 = 26.0;
 const INDENT_STEP: f32 = 24.0;
+/// Space above the title inside the scroll area.
+const PAGE_TOP: f32 = 56.0;
 /// Gutter width left of a list item that holds its fold chevron.
 const DISCLOSURE_WIDTH: f32 = 20.0;
 pub(crate) const MEASURE: f32 = 700.0;
-/// Mention chips grow this far past their text on each side.
-const CHIP_PAD_X: f32 = 3.0;
-const CHIP_DOT: f32 = 7.0;
+use super::chip::{DOT as CHIP_DOT, PAD_X as CHIP_PAD_X};
+/// A tool chip's glyph.
+const CHIP_ICON: f32 = 13.0;
 
 /// The notes accent: Diri's ember, shared with the brand mark.
 pub(crate) fn accent() -> gpui::Rgba {
@@ -251,12 +294,19 @@ pub(crate) fn accent() -> gpui::Rgba {
 
 /// One row of the `/` menu: a block kind, its glyph, and the key equivalent
 /// that turns the current block into it, printed like a native menu's.
+#[derive(Clone, Copy, PartialEq)]
+enum SlashAction {
+    Turn(Turn),
+    /// Pick picture files and insert them.
+    Image,
+}
+
 #[derive(Clone, Copy)]
 struct SlashItem {
     label: &'static str,
     icon: &'static str,
     keys: Option<&'static str>,
-    turn: Turn,
+    action: SlashAction,
     /// Rows in different groups are divided by a separator: text, lists,
     /// then blocks that set content apart.
     group: u8,
@@ -268,7 +318,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Text",
         icon: "textformat",
         keys: Some(KEY_TURN_PARAGRAPH),
-        turn: Turn::Kind(BlockKind::Paragraph),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Paragraph)),
         group: 0,
         keywords: "text paragraph plain",
     },
@@ -276,7 +326,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Heading 1",
         icon: "textformat.h1",
         keys: Some(KEY_TURN_H1),
-        turn: Turn::Kind(BlockKind::Heading(1)),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Heading(1))),
         group: 0,
         keywords: "heading h1 title big",
     },
@@ -284,7 +334,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Heading 2",
         icon: "textformat.h2",
         keys: Some(KEY_TURN_H2),
-        turn: Turn::Kind(BlockKind::Heading(2)),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Heading(2))),
         group: 0,
         keywords: "heading h2 subtitle",
     },
@@ -292,7 +342,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Heading 3",
         icon: "textformat.h3",
         keys: Some(KEY_TURN_H3),
-        turn: Turn::Kind(BlockKind::Heading(3)),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Heading(3))),
         group: 0,
         keywords: "heading h3 small",
     },
@@ -300,7 +350,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "To-do",
         icon: "checkmark.square",
         keys: Some(KEY_TURN_TODO),
-        turn: Turn::Kind(BlockKind::Todo { checked: false }),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Todo { checked: false })),
         group: 1,
         keywords: "todo task checkbox check list",
     },
@@ -308,7 +358,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Bulleted list",
         icon: "list.bullet",
         keys: Some(KEY_TURN_BULLET),
-        turn: Turn::Kind(BlockKind::Bullet),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Bullet)),
         group: 1,
         keywords: "bullet list unordered",
     },
@@ -316,7 +366,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Numbered list",
         icon: "list.number",
         keys: Some(KEY_TURN_NUMBERED),
-        turn: Turn::Kind(BlockKind::Numbered),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Numbered)),
         group: 1,
         keywords: "numbered list ordered",
     },
@@ -324,7 +374,7 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Quote",
         icon: "text.quote",
         keys: Some(KEY_TURN_QUOTE),
-        turn: Turn::Kind(BlockKind::Quote),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Quote)),
         group: 2,
         keywords: "quote blockquote citation",
     },
@@ -332,17 +382,33 @@ const SLASH_ITEMS: &[SlashItem] = &[
         label: "Code",
         icon: "chevron.left.forwardslash.chevron.right",
         keys: Some(KEY_TURN_CODE),
-        turn: Turn::Kind(BlockKind::Code),
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Code)),
         group: 2,
         keywords: "code snippet monospace",
+    },
+    SlashItem {
+        label: "Callout",
+        icon: "info.circle",
+        keys: None,
+        action: SlashAction::Turn(Turn::Kind(BlockKind::Callout(Tone::Note))),
+        group: 2,
+        keywords: "callout note tip important warning caution aside info alert",
     },
     SlashItem {
         label: "Divider",
         icon: "divider",
         keys: None,
-        turn: Turn::Divider,
+        action: SlashAction::Turn(Turn::Divider),
         group: 2,
         keywords: "divider rule line separator",
+    },
+    SlashItem {
+        label: "Image",
+        icon: "photo",
+        keys: None,
+        action: SlashAction::Image,
+        group: 3,
+        keywords: "image picture photo screenshot upload",
     },
 ];
 
@@ -358,7 +424,10 @@ pub(crate) struct NoteEditorView {
     focus: FocusHandle,
     colors: SemanticColors,
     /// One layout per block from the last frame, valid for `layout_revision`.
-    layouts: Vec<TextLayout>,
+    /// `None` for blocks this frame did not lay out (off screen or folded).
+    layouts: Vec<Option<TextLayout>>,
+    /// Each block's laid-out text, parallel to `layouts`.
+    shown: Vec<Shown>,
     layout_revision: u64,
     layout_count: usize,
     /// IME composition range, in bytes of the caret's block.
@@ -369,14 +438,27 @@ pub(crate) struct NoteEditorView {
     autoscroll: bool,
     caret_visible: bool,
     blink_epoch: usize,
+    blinking: bool,
+    /// Whether the last frame had focus: the blink loop's cue to stop.
+    focused_last_frame: bool,
     _blink: Task<()>,
     slash: Option<SlashMenu>,
     mention: Option<MentionMenu>,
+    link_editor: Option<LinkEditor>,
     mentions: Rc<MentionDirectory>,
+    assets: Option<AssetHome>,
+    /// Each image's on-screen bounds from the last paint, for clicks.
+    image_rects: ImageRects,
+    /// Pixel sizes read from picture headers, so an image lays out at its
+    /// final size before it loads.
+    image_sizes:
+        std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, Option<(u32, u32)>>>,
+    /// Each block's rendered height by id, measured the last time it was on
+    /// screen: what an off-screen block's spacer is sized from.
+    row_heights: RowHeights,
     caret_bounds: Option<Bounds<Pixels>>,
     /// Checkboxes ticked this session, for their pop animation.
     ticked: Vec<(u64, Instant)>,
-    link_hint: Option<SharedString>,
     /// To-dos as agent work: folds, starts in flight, their panels.
     pub(super) work: super::work_item::WorkView,
 }
@@ -402,6 +484,7 @@ impl NoteEditorView {
             focus: cx.focus_handle(),
             colors,
             layouts: Vec::new(),
+            shown: Vec::new(),
             layout_revision: u64::MAX,
             layout_count: 0,
             marked: None,
@@ -411,13 +494,19 @@ impl NoteEditorView {
             autoscroll: true,
             caret_visible: true,
             blink_epoch: 0,
+            blinking: false,
+            focused_last_frame: false,
             _blink: Task::ready(()),
             slash: None,
             mention: None,
+            link_editor: None,
             mentions: Rc::default(),
+            assets: None,
+            image_rects: Rc::default(),
+            image_sizes: Default::default(),
+            row_heights: Rc::default(),
             caret_bounds: None,
             ticked: Vec::new(),
-            link_hint: None,
             work: super::work_item::WorkView::default(),
         }
     }
@@ -435,6 +524,68 @@ impl NoteEditorView {
 
     pub(crate) fn set_colors(&mut self, colors: SemanticColors) {
         self.colors = colors;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_blinking(&self) -> bool {
+        self.blinking
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scroll_by_for_test(&mut self, dy: Pixels, cx: &mut Context<Self>) {
+        let offset = self.scroll.offset();
+        let max = self.scroll.max_offset().y;
+        self.scroll
+            .set_offset(point(offset.x, (offset.y + dy).clamp(-max, px(0.0))));
+        cx.notify();
+    }
+
+    /// Where this note's pictures are saved and resolved from.
+    pub(crate) fn set_asset_home(&mut self, home: AssetHome) {
+        self.assets = Some(home);
+    }
+
+    /// What `@` offers and what chips read their live status from.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "API for the to-do handoff (notes/todo-handoff)")
+    )]
+    pub(crate) fn mentions(&self) -> &MentionDirectory {
+        &self.mentions
+    }
+
+    /// The live chip for session `id`, for any note surface outside the
+    /// text flow (a to-do's work state, say): status from the same
+    /// directory the inline chips use, hollow once the session is gone.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "API for the to-do handoff (notes/todo-handoff)")
+    )]
+    pub(crate) fn session_chip(&self, id: &str, fallback: &str) -> super::chip::SessionChip {
+        super::chip::SessionChip::for_session(id, fallback, &self.mentions, self.colors)
+    }
+
+    /// Inserts a live session chip at `pos`, as if picked from `@`.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "API for the to-do handoff (notes/todo-handoff)")
+    )]
+    pub(crate) fn insert_session_mention(
+        &mut self,
+        pos: diri_notes::edit::Pos,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let target = MentionTarget::Session(id.to_owned());
+        let label = self
+            .mentions
+            .find(&target)
+            .map(|e| e.candidate.label.clone())
+            .unwrap_or_else(|| mention::session_label("", "Session"));
+        self.editor.set_caret(pos);
+        self.editor
+            .insert_mention(pos.offset..pos.offset, &target, &label, now_ms());
+        self.edited(cx);
     }
 
     /// Replaces what `@` offers and what chips show. Cheap when unchanged,
@@ -497,8 +648,12 @@ impl NoteEditorView {
         self.touched(cx);
     }
 
+    /// Blinks the caret while the editor has focus. An unfocused editor
+    /// shows no caret, so the loop ends instead of scheduling frames for
+    /// nothing; the next focused render starts it again.
     fn restart_blink(&mut self, cx: &mut Context<Self>) {
         self.caret_visible = true;
+        self.blinking = true;
         self.blink_epoch += 1;
         let epoch = self.blink_epoch;
         self._blink = cx.spawn(async move |this, cx| {
@@ -507,6 +662,11 @@ impl NoteEditorView {
                 let alive = this
                     .update(cx, |this, cx| {
                         if this.blink_epoch != epoch {
+                            return false;
+                        }
+                        if !this.focused_last_frame {
+                            this.blinking = false;
+                            this.caret_visible = true;
                             return false;
                         }
                         this.caret_visible = !this.caret_visible;
@@ -524,7 +684,7 @@ impl NoteEditorView {
     fn layout(&self, index: usize) -> Option<&TextLayout> {
         (self.layout_revision == self.editor.revision
             && self.layout_count == self.editor.blocks().len())
-        .then(|| self.layouts.get(index))
+        .then(|| self.layouts.get(index).and_then(Option::as_ref))
         .flatten()
     }
 
@@ -542,11 +702,24 @@ impl NoteEditorView {
         } else {
             pos.offset
         };
+        let offset = self
+            .shown
+            .get(pos.block)
+            .map_or(offset, |s| s.to_display(offset));
         let point = layout.position_for_index(offset)?;
         Some((point, layout.line_height()))
     }
 
     fn hit(&self, at: Point<Pixels>) -> Option<Pos> {
+        // A click anywhere on a picture selects it.
+        if let Some((index, _)) = self
+            .image_rects
+            .borrow()
+            .iter()
+            .find(|(_, bounds)| bounds.contains(&at))
+        {
+            return Some(Pos::new(*index, 0));
+        }
         let point_at = at;
         let hidden = self.editor.hidden();
         let mut chosen = None;
@@ -554,7 +727,10 @@ impl NoteEditorView {
         // Folded blocks keep a layout but take no space; only visible
         // blocks can be hit.
         for index in (0..hidden.len()).filter(|i| !hidden[*i]) {
-            let layout = self.layout(index)?;
+            // Off-screen blocks have no layout; a click never lands there.
+            let Some(layout) = self.layout(index) else {
+                continue;
+            };
             let bounds = layout.bounds();
             chosen = Some(index);
             if point_at.y <= bounds.bottom() {
@@ -584,6 +760,7 @@ impl NoteEditorView {
         let offset = match layout.index_for_position(clamped) {
             Ok(i) | Err(i) => i,
         };
+        let offset = self.shown.get(index).map_or(offset, |s| s.to_model(offset));
         let text = &block.text;
         let mut offset = offset.min(text.len());
         while !text.is_char_boundary(offset) {
@@ -738,8 +915,93 @@ impl NoteEditorView {
             head,
         });
         self.editor.delete_selection(now);
-        self.editor.turn_into(item.turn, now);
+        match item.action {
+            SlashAction::Turn(turn) => {
+                if let Turn::Kind(BlockKind::Callout(_)) = turn {
+                    crate::telemetry::notes_event("notes.callout.added", "");
+                }
+                self.editor.turn_into(turn, now);
+            }
+            SlashAction::Image => self.pick_images(cx),
+        }
         self.edited(cx);
+    }
+
+    /// `/image`: a native Open panel for pictures, inserted at the caret.
+    fn pick_images(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Insert".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.insert_image_files(&paths, "picker", cx));
+        })
+        .detach();
+    }
+
+    /// Copies picture files into the note's assets and inserts them after
+    /// the caret, in order. Anything that is not a picture is skipped.
+    pub(crate) fn insert_image_files(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let Some(home) = self.assets.clone() else {
+            return 0;
+        };
+        let mut inserted = 0;
+        for path in paths.iter().filter(|p| diri_notes::store::is_image_path(p)) {
+            match home.store.import_asset(&home.note_id, path) {
+                Ok(src) => {
+                    self.editor.insert_image(&src, "", now_ms());
+                    inserted += 1;
+                }
+                Err(_) => crate::telemetry::notes_event("notes.image.failed", source),
+            }
+        }
+        if inserted > 0 {
+            crate::telemetry::notes_event("notes.image.added", source);
+            self.edited(cx);
+        }
+        inserted
+    }
+
+    /// A picture on the pasteboard (a screenshot, an image copied from a
+    /// browser) becomes an image in the note.
+    fn paste_image(&mut self, image: &gpui::Image, cx: &mut Context<Self>) -> bool {
+        let Some(home) = self.assets.clone() else {
+            return false;
+        };
+        let extension = match image.format {
+            gpui::ImageFormat::Png => "png",
+            gpui::ImageFormat::Jpeg => "jpg",
+            gpui::ImageFormat::Webp => "webp",
+            gpui::ImageFormat::Gif => "gif",
+            gpui::ImageFormat::Svg => "svg",
+            gpui::ImageFormat::Bmp => "bmp",
+            gpui::ImageFormat::Tiff => "tiff",
+            _ => return false,
+        };
+        match home
+            .store
+            .save_asset(&home.note_id, &image.bytes, extension)
+        {
+            Ok(src) => {
+                self.run(cx, |e, now| e.insert_image(&src, "", now));
+                crate::telemetry::notes_event("notes.image.added", "paste");
+                true
+            }
+            Err(_) => {
+                crate::telemetry::notes_event("notes.image.failed", "paste");
+                false
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -838,25 +1100,42 @@ impl NoteEditorView {
             &entry.candidate.label,
             now_ms(),
         );
+        crate::telemetry::notes_event(
+            "notes.mention.inserted",
+            match entry.candidate.target {
+                MentionTarget::Session(_) => "session",
+                MentionTarget::Note(_) => "note",
+            },
+        );
         self.edited(cx);
     }
 
-    /// The mention chip under a window point, if any.
-    fn chip_at(&self, at: Point<Pixels>) -> Option<MentionTarget> {
+    /// The chip under a window point, if any: a mention or a tool link.
+    fn chip_at(&self, at: Point<Pixels>) -> Option<ChipHit> {
         let hidden = self.editor.hidden();
         for (index, block) in self.editor.blocks().iter().enumerate() {
-            let chips = mention::in_block(block);
-            if chips.is_empty() || hidden[index] {
+            if hidden[index] || block.marks.is_empty() {
                 continue;
             }
             let layout = self.layout(index)?;
-            for chip in chips {
-                let text = &block.text;
-                let hit = chip_rects(layout, text, chip.range.clone())
+            let shown = self.shown.get(index)?;
+            let hits = |range: &Range<usize>| {
+                chip_rects(layout, &shown.text, shown.range(range))
                     .iter()
-                    .any(|rect| rect.dilate(px(CHIP_PAD_X)).contains(&at));
-                if hit {
-                    return Some(chip.target);
+                    .any(|rect| rect.dilate(px(CHIP_PAD_X)).contains(&at))
+            };
+            for chip in mention::in_block(block) {
+                if hits(&chip.range) {
+                    return Some(ChipHit::Mention(chip.target));
+                }
+            }
+            for (range, _) in link_chips(block) {
+                if hits(&range) {
+                    let url = block.marks.iter().find_map(|m| match &m.style {
+                        Style::Link(url) if m.range == range => Some(url.clone()),
+                        _ => None,
+                    })?;
+                    return Some(ChipHit::Link(url));
                 }
             }
         }
@@ -1107,8 +1386,32 @@ impl NoteEditorView {
         self.run(cx, |e, now| e.delete_selection(now));
     }
 
-    fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+    pub(super) fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        let image = item.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::Image(image) => Some(image.clone()),
+            _ => None,
+        });
+        if let Some(image) = image
+            && self.paste_image(&image, cx)
+        {
+            return;
+        }
+        let files: Vec<std::path::PathBuf> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                gpui::ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if !files.is_empty() && self.insert_image_files(&files, "paste", cx) > 0 {
+            return;
+        }
+        let Some(text) = item.text() else {
             return;
         };
         // Pasting a URL over a selection links it, as Notion and Bear do.
@@ -1116,6 +1419,13 @@ impl NoteEditorView {
         if !self.editor.selection.is_collapsed() && is_url(trimmed) {
             let url = trimmed.to_owned();
             self.run(cx, |e, now| e.toggle_style(Style::Link(url), now));
+            return;
+        }
+        // A bare URL becomes a link, titled when it opens a known tool.
+        if is_url(trimmed) {
+            let url = trimmed.to_owned();
+            crate::telemetry::notes_event("notes.link.pasted", link_kind(&url));
+            self.run(cx, |e, now| e.paste_url(&url, now));
             return;
         }
         self.run(cx, |e, now| e.paste(&text, now));
@@ -1152,38 +1462,178 @@ impl NoteEditorView {
     }
 
     /// ⌘K links the selection to the URL on the clipboard, or unlinks.
-    fn link(&mut self, _: &Link, _: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.link_at_caret().is_some() && self.editor.selection.is_collapsed() {
-            self.run(cx, |e, now| e.remove_link(now));
-            self.flash_hint("Link removed", cx);
-            return;
+    /// ⌘K opens the link panel on the selection, or on the link at the
+    /// caret, prefilled with that link's URL (or a URL on the clipboard).
+    pub(crate) fn link(&mut self, _: &Link, _: &mut Window, cx: &mut Context<Self>) {
+        let selection = self.editor.selection;
+        let existing = if selection.is_collapsed() {
+            self.editor.link_at(selection.head)
+        } else {
+            self.editor.link_at(selection.start())
+        };
+        let prefill = existing
+            .as_ref()
+            .map(|(_, _, url)| url.clone())
+            .or_else(|| {
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .map(|t| t.trim().to_owned())
+                    .filter(|t| is_url(t))
+            });
+        let mut query = crate::query_editor::QueryEditor::default();
+        if let Some(url) = prefill {
+            query.insert(&url);
+            query.select_all();
         }
-        let clip = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .map(|t| t.trim().to_owned())
-            .filter(|t| is_url(t));
-        match clip {
-            Some(url) if !self.editor.selection.is_collapsed() => {
-                self.run(cx, |e, now| e.toggle_style(Style::Link(url), now));
+        self.slash = None;
+        self.mention = None;
+        self.link_editor = Some(LinkEditor {
+            query,
+            selection,
+            existing,
+            selected: 0,
+        });
+        crate::telemetry::notes_event("notes.link_editor.opened", "");
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(super) fn link_row_labels(&self) -> Vec<String> {
+        self.link_rows()
+            .iter()
+            .map(|row| match row {
+                LinkRow::Apply { url } => format!("apply {url}"),
+                LinkRow::Open { url } => format!("open {url}"),
+                LinkRow::Remove => "remove".to_owned(),
+            })
+            .collect()
+    }
+
+    fn link_rows(&self) -> Vec<LinkRow> {
+        let Some(editor) = &self.link_editor else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        if let Some(url) = normalize_url(editor.query.text()) {
+            let unchanged = editor.existing.as_ref().is_some_and(|(_, _, u)| *u == url);
+            if !unchanged {
+                rows.push(LinkRow::Apply { url });
             }
-            _ => self.flash_hint("Copy a URL, select text, then ⌘K", cx),
+        }
+        if let Some((_, _, url)) = &editor.existing {
+            rows.push(LinkRow::Open { url: url.clone() });
+            rows.push(LinkRow::Remove);
+        }
+        rows
+    }
+
+    fn close_link_editor(&mut self, cx: &mut Context<Self>) {
+        if self.link_editor.take().is_some() {
+            cx.notify();
         }
     }
 
-    fn flash_hint(&mut self, hint: &'static str, cx: &mut Context<Self>) {
-        self.link_hint = Some(hint.into());
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(1600))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.link_hint = None;
+    pub(super) fn apply_link_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.link_rows().get(index).cloned() else {
+            return;
+        };
+        let Some(editor) = self.link_editor.take() else {
+            return;
+        };
+        let now = now_ms();
+        let target = match (&editor.existing, editor.selection.is_collapsed()) {
+            (Some((block, range, _)), true) => Selection {
+                anchor: Pos::new(*block, range.start),
+                head: Pos::new(*block, range.end),
+            },
+            _ => editor.selection,
+        };
+        match row {
+            LinkRow::Open { url } => {
+                cx.open_url(&url);
                 cx.notify();
-            });
-        })
-        .detach();
+                return;
+            }
+            LinkRow::Remove => {
+                self.editor.set_selection(target);
+                self.editor.remove_link(now);
+                self.editor.set_caret(target.end());
+                crate::telemetry::notes_event("notes.link.removed", "");
+            }
+            LinkRow::Apply { url } => {
+                self.editor.set_selection(target);
+                let kind = link_kind(&url);
+                if target.is_collapsed() {
+                    self.editor.paste_url(&url, now);
+                } else {
+                    self.editor.set_link(&url, now);
+                    self.editor.set_caret(target.end());
+                }
+                crate::telemetry::notes_event("notes.link.set", kind);
+            }
+        }
+        self.edited(cx);
+    }
+
+    /// Keys while the link panel is open: its field edits with the shared
+    /// query-field map; typed text arrives through the input handler.
+    fn link_editor_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::query_editor::{self, ClipboardEdit, Edit, LocalEdit};
+        if self.link_editor.is_none() {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        let rows = self.link_rows().len().max(1);
+        let editor = self.link_editor.as_mut().expect("checked above");
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.link_editor = None;
+            }
+            "enter" if keystroke.modifiers.platform => {
+                if let Some(index) = self
+                    .link_rows()
+                    .iter()
+                    .position(|row| matches!(row, LinkRow::Open { .. }))
+                {
+                    self.apply_link_row(index, cx);
+                }
+            }
+            "enter" => {
+                let selected = editor.selected;
+                self.apply_link_row(selected, cx);
+            }
+            "up" => editor.selected = (editor.selected + rows - 1) % rows,
+            "down" => editor.selected = (editor.selected + 1) % rows,
+            _ => match query_editor::edit_for(keystroke) {
+                // Text goes through the input handler, like every field.
+                None | Some(Edit::Local(LocalEdit::Insert(_))) => return,
+                Some(Edit::Local(local)) => {
+                    editor.query.apply(local);
+                    editor.selected = 0;
+                }
+                Some(Edit::Clipboard(ClipboardEdit::Copy)) => {
+                    query_editor::copy_selection(&editor.query, cx);
+                }
+                Some(Edit::Clipboard(ClipboardEdit::Cut)) => {
+                    query_editor::cut_selection(&mut editor.query, cx);
+                }
+                Some(Edit::Clipboard(ClipboardEdit::Paste)) => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        editor
+                            .query
+                            .insert(text.trim().lines().next().unwrap_or_default());
+                        editor.selected = 0;
+                    }
+                }
+            },
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
 
     /// ⌥⌘↩ folds or unfolds the list item under the caret, or the nearest
@@ -1198,6 +1648,7 @@ impl NoteEditorView {
                     && (*i == head || self.editor.children(*i).contains(&head))
             });
         if let Some(index) = target {
+            crate::telemetry::notes_event("notes.fold.toggled", "keyboard");
             self.set_folded(index, !self.editor.is_collapsed(index), cx);
         }
     }
@@ -1267,7 +1718,10 @@ impl NoteEditorView {
         if self.work_panel_key(super::work_item::PanelKey::Escape, cx) {
             return;
         }
-        if self.slash.take().is_some() || self.mention.take().is_some() {
+        if self.slash.take().is_some()
+            || self.mention.take().is_some()
+            || self.link_editor.take().is_some()
+        {
             cx.notify();
             return;
         }
@@ -1334,11 +1788,14 @@ impl NoteEditorView {
         window.focus(&self.focus, cx);
         if event.click_count == 1
             && !event.modifiers.shift
-            && let Some(target) = self.chip_at(event.position)
+            && let Some(hit) = self.chip_at(event.position)
         {
             self.mention = None;
             self.slash = None;
-            cx.emit(EditorEvent::OpenMention(target));
+            match hit {
+                ChipHit::Mention(target) => cx.emit(EditorEvent::OpenMention(target)),
+                ChipHit::Link(url) => cx.open_url(&url),
+            }
             return;
         }
         let Some(pos) = self.hit(event.position) else {
@@ -1492,6 +1949,12 @@ impl EntityInputHandler for NoteEditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(editor) = self.link_editor.as_mut() {
+            editor.query.insert(text);
+            editor.selected = 0;
+            cx.notify();
+            return;
+        }
         let block = self.ime_block();
         let range = range_utf16
             .as_ref()
@@ -1524,6 +1987,11 @@ impl EntityInputHandler for NoteEditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A composition in the link field lands when it commits.
+        if self.link_editor.is_some() {
+            let _ = (new_text, new_selected_range_utf16);
+            return;
+        }
         let block = self.ime_block();
         let range = range_utf16
             .as_ref()
@@ -1662,7 +2130,50 @@ fn look(kind: BlockKind) -> BlockLook {
             bottom: 10.0,
             ..body
         },
+        BlockKind::Image | BlockKind::Callout(_) => BlockLook {
+            top: 8.0,
+            bottom: 8.0,
+            ..body
+        },
         _ => body,
+    }
+}
+
+/// Pictures never grow taller than this; wider ones fit the column.
+const IMAGE_MAX_HEIGHT: f32 = 480.0;
+/// The ring around an image: padding plus border on each side.
+const IMAGE_RING: f32 = 5.0;
+
+/// A picture's size in the note: its natural size in points (pixels over
+/// the display scale), shrunk to fit the column and the height cap, aspect
+/// kept. An unknown size gets a 16:9 frame the width of the column.
+fn image_fit(pixels: Option<(u32, u32)>, scale: f32) -> (f32, f32) {
+    let column = MEASURE - 2.0 * IMAGE_RING;
+    let Some((w, h)) = pixels.filter(|(w, h)| *w > 0 && *h > 0) else {
+        return (column, column * 9.0 / 16.0);
+    };
+    let (w, h) = (w as f32, h as f32);
+    let mut width = (w / scale.max(1.0)).min(column);
+    let mut height = width * h / w;
+    if height > IMAGE_MAX_HEIGHT {
+        height = IMAGE_MAX_HEIGHT;
+        width = height * w / h;
+    }
+    (width.max(1.0), height.max(1.0))
+}
+
+/// A callout tone's glyph and ink: GitHub's alert palette in diri's inks.
+fn callout_look(tone: Tone, colors: SemanticColors) -> (&'static str, gpui::Rgba) {
+    let purple = diri_ui::rgba_f32(0.56, 0.38, 0.93, 1.0);
+    match tone {
+        Tone::Note => ("info.circle", Ink::on_surface(Palette::GEMINI_BLUE, colors)),
+        Tone::Tip => ("sparkle", Ink::on_surface(Ink::FRESH, colors)),
+        Tone::Important => ("bell", Ink::on_surface(purple, colors)),
+        Tone::Warning => (
+            "exclamationmark.triangle",
+            Ink::on_surface(Ink::ATTENTION, colors),
+        ),
+        Tone::Caution => ("xmark.circle", Ink::on_surface(Ink::DANGER, colors)),
     }
 }
 
@@ -1676,29 +2187,42 @@ fn placeholder(kind: BlockKind, only_block: bool) -> &'static str {
         BlockKind::Bullet | BlockKind::Numbered => "List",
         BlockKind::Quote => "Quote",
         BlockKind::Code => "Code",
-        BlockKind::Paragraph if only_block => "Start writing, or type / for blocks",
-        _ => "Type / for blocks",
+        BlockKind::Callout(tone) => tone.label(),
+        BlockKind::Paragraph if only_block => "Start writing. Type / for blocks, @ to mention",
+        _ => "Type / for blocks, @ to mention",
     }
 }
 
+/// Highlight runs for a block as laid out (`shown`): its marks moved to
+/// layout offsets, plus `fades`, the laid-out ranges drawn faded (a chip's
+/// padding and glyph room, a session chip's `@` under its dot).
 fn highlights(
     block: &Block,
+    shown: &Shown,
     colors: SemanticColors,
     faded: bool,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     if block.marks.is_empty() && !faded {
         return Vec::new();
     }
-    let text = &block.text;
-    let chips = mention::in_block(block);
+    let text = &shown.text;
+    let marks: Vec<Mark> = block
+        .marks
+        .iter()
+        .map(|m| Mark {
+            range: shown.range(&m.range),
+            style: m.style.clone(),
+        })
+        .collect();
+    let fades = shown.fades(block);
     let mut cuts: Vec<usize> = vec![0, text.len()];
-    for mark in &block.marks {
+    for mark in &marks {
         cuts.push(mark.range.start);
         cuts.push(mark.range.end);
     }
-    // The chip's `@` is its own run: a session paints its status dot there.
-    for chip in &chips {
-        cuts.push((chip.range.start + 1).min(chip.range.end));
+    for (range, _) in &fades {
+        cuts.push(range.start);
+        cuts.push(range.end);
     }
     cuts.sort_unstable();
     cuts.dedup();
@@ -1716,8 +2240,7 @@ fn highlights(
                 color: Some(colors.tertiary.into()),
             });
         }
-        for mark in block
-            .marks
+        for mark in marks
             .iter()
             .filter(|m| m.range.start <= a && b <= m.range.end)
         {
@@ -1736,7 +2259,10 @@ fn highlights(
                         style.color = Some(accent().into());
                     }
                 }
-                Style::Link(url) if MentionTarget::parse(url).is_some() => {
+                Style::Link(url)
+                    if MentionTarget::parse(url).is_some()
+                        || diri_notes::links::recognize(url).is_some() =>
+                {
                     style.font_weight = Some(FontWeight::MEDIUM);
                     if !faded {
                         style.color = Some(colors.primary.into());
@@ -1755,28 +2281,13 @@ fn highlights(
             }
         }
         // Highlight colors blend over the base, so only `fade_out` can hide
-        // the session `@` under its status dot.
-        if let Some(chip) = chips.iter().find(|c| c.range.start == a) {
-            style.fade_out = Some(match chip.target {
-                MentionTarget::Session(_) => 1.0,
-                MentionTarget::Note(_) => 0.55,
-            });
+        // text: chip padding, glyph room, the session `@` under its dot.
+        if let Some((_, fade)) = fades.iter().find(|(r, _)| r.start <= a && b <= r.end) {
+            style.fade_out = Some(*fade);
         }
         out.push((a..b, style));
     }
     out
-}
-
-/// A session's live status as one ink, for the dot at the head of its chip.
-fn status_ink(agent: UiAgentKind, state: StatusState, colors: SemanticColors) -> gpui::Rgba {
-    match state {
-        StatusState::Working => Ink::working(agent, colors),
-        StatusState::NeedsInput { destructive: false } => Ink::on_surface(Ink::ATTENTION, colors),
-        StatusState::NeedsInput { destructive: true } => Ink::on_surface(Ink::DANGER, colors),
-        StatusState::DoneUnseen => Ink::on_surface(Ink::FRESH, colors),
-        StatusState::IdleSeen => colors.secondary,
-        StatusState::None | StatusState::Hibernated => colors.tertiary,
-    }
 }
 
 /// What one chip paints behind its text.
@@ -1784,8 +2295,11 @@ struct ChipPaint {
     block: usize,
     text: String,
     range: Range<usize>,
-    /// Session chips: the status dot's ink, hollow when the session is gone.
-    dot: Option<(gpui::Rgba, bool)>,
+    /// Layout offset of the chip's first stored character.
+    head: usize,
+    dot: super::chip::ChipDot,
+    /// A tool link's glyph, painted in the room laid out before its title.
+    icon: Option<&'static str>,
 }
 
 trait AlphaExt {
@@ -1810,6 +2324,10 @@ impl Render for NoteEditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
         let focused = self.focus.is_focused(window);
+        self.focused_last_frame = focused;
+        if focused && !self.blinking {
+            self.restart_blink(cx);
+        }
         let ui = crate::fonts::ui_family();
         let mono = crate::fonts::mono_family();
         let head = self.editor.selection.head;
@@ -1818,32 +2336,61 @@ impl Render for NoteEditorView {
             .retain(|(_, at)| at.elapsed() < Duration::from_millis(600));
 
         self.anchor_work_menu();
+        self.image_rects.borrow_mut().clear();
         let mut layouts = Vec::with_capacity(self.editor.blocks().len());
+        let mut shown_all = Vec::with_capacity(self.editor.blocks().len());
         let hidden = self.editor.hidden();
         let mut column = div().flex().flex_col().w_full();
+        // Only blocks near the viewport are laid out; the rest are spacers
+        // sized from their last measured (or estimated) height. The caret's
+        // and the anchor's blocks are always laid out so motion, autoscroll
+        // and menus have their geometry.
+        let rendered = self.visible_blocks(&hidden);
+        let heights = Rc::clone(&self.row_heights);
+        let mut spacer = 0.0f32;
         for (index, block) in self.editor.blocks().iter().enumerate() {
+            if !rendered[index] {
+                layouts.push(None);
+                shown_all.push(Shown::default());
+                if !hidden[index] {
+                    spacer += self.row_height(block);
+                }
+                continue;
+            }
+            if spacer > 0.0 {
+                column = column.child(div().flex_none().h(px(spacer)));
+                spacer = 0.0;
+            }
             let look = look(block.kind);
             let checked = block.kind == BlockKind::Todo { checked: true };
-            let text: SharedString = if block.text.is_empty() {
+            let shown = if block.kind.is_atomic() {
+                Shown::default()
+            } else {
+                Shown::of(block)
+            };
+            let text: SharedString = if block.text.is_empty() || block.kind.is_atomic() {
                 "\u{200B}".into()
             } else {
-                block.text.clone().into()
+                shown.text.clone().into()
             };
-            let mut styled = StyledText::new(text).with_highlights(if block.text.is_empty() {
-                Vec::new()
-            } else {
-                highlights(block, colors, checked)
-            });
+            let mut styled = StyledText::new(text).with_highlights(
+                if block.text.is_empty() || block.kind.is_atomic() {
+                    Vec::new()
+                } else {
+                    highlights(block, &shown, colors, checked)
+                },
+            );
             let code_ranges: Vec<(Range<usize>, SharedString)> = block
                 .marks
                 .iter()
                 .filter(|m| m.style == Style::Code)
-                .map(|m| (m.range.clone(), SharedString::from(mono)))
+                .map(|m| (shown.range(&m.range), SharedString::from(mono)))
                 .collect();
             if !code_ranges.is_empty() {
                 styled = styled.with_font_family_overrides(code_ranges);
             }
-            layouts.push(styled.layout().clone());
+            layouts.push(Some(styled.layout().clone()));
+            shown_all.push(shown);
 
             let show_placeholder = block.text.is_empty()
                 && block.kind != BlockKind::Divider
@@ -1960,6 +2507,48 @@ impl Render for NoteEditorView {
                                 .child(content.opacity(0.0)),
                         ),
                 ),
+                BlockKind::Image => {
+                    let selected =
+                        focused && self.editor.selection.is_collapsed() && head.block == index;
+                    let scale = window.scale_factor();
+                    row.child(self.image_row(index, block, selected, scale, content, cx))
+                }
+                BlockKind::Callout(tone) => {
+                    let (icon, ink) = callout_look(tone, colors);
+                    let id = block.id;
+                    row.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(10.0))
+                            .px(px(14.0))
+                            .py(px(10.0))
+                            .rounded(px(10.0))
+                            .bg(ink.alpha(0.08))
+                            .border_1()
+                            .border_color(ink.alpha(0.16))
+                            .child(
+                                div()
+                                    .id(("callout-tone", id))
+                                    .flex_none()
+                                    .h(px(look.line))
+                                    .flex()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .child(crate::icons::sf_symbol(icon, 13.0, ink))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.cycle_callout(id, cx);
+                                        }),
+                                    ),
+                            )
+                            .child(content),
+                    )
+                }
                 _ => row.child(content),
             };
             let row = row.children(self.work_accessory(
@@ -1970,68 +2559,115 @@ impl Render for NoteEditorView {
                 colors,
                 cx,
             ));
+            let id = block.id;
+            let heights = Rc::clone(&heights);
+            let row = row.child(
+                canvas(
+                    move |bounds, _, _| {
+                        heights
+                            .borrow_mut()
+                            .insert(id, f32::from(bounds.size.height));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
             column = column.child(row);
             if !folded_away && let Some(status) = self.work_status_line(block, indent, colors, cx) {
                 column = column.child(status);
             }
         }
+        if spacer > 0.0 {
+            column = column.child(div().flex_none().h(px(spacer)));
+        }
         self.layouts = layouts.clone();
+        self.shown = shown_all.clone();
         self.layout_revision = self.editor.revision;
         self.layout_count = self.editor.blocks().len();
 
         let mut chips = Vec::new();
         for (index, block) in self.editor.blocks().iter().enumerate() {
-            if hidden[index] {
+            if hidden[index] || !rendered[index] {
                 continue;
             }
+            let shown = &shown_all[index];
             for chip in mention::in_block(block) {
-                let dot = match &chip.target {
-                    MentionTarget::Note(_) => None,
-                    MentionTarget::Session(_) => Some(
-                        match self
-                            .mentions
-                            .find(&chip.target)
-                            .and_then(|e| e.agent.zip(e.status))
-                        {
-                            Some((agent, state)) => (status_ink(agent, state, colors), false),
-                            None => (colors.tertiary, true),
-                        },
-                    ),
-                };
+                let dot = super::chip::ChipDot::for_target(&chip.target, &self.mentions, colors);
                 chips.push(ChipPaint {
                     block: index,
-                    text: block.text.clone(),
-                    range: chip.range,
+                    text: shown.text.clone(),
+                    range: shown.range(&chip.range),
+                    head: shown.head_of(chip.range.start),
                     dot,
+                    icon: None,
+                });
+            }
+            for (range, found) in link_chips(block) {
+                chips.push(ChipPaint {
+                    block: index,
+                    text: shown.text.clone(),
+                    range: shown.range(&range),
+                    head: shown.head_of(range.start),
+                    dot: super::chip::ChipDot::None,
+                    icon: Some(service_icon(found.service)),
                 });
             }
         }
+        let icon_ink = colors.secondary;
         let chip_layouts = layouts.clone();
-        let chip_fill = colors.primary.alpha(0.07);
-        let chip_border = colors.primary.alpha(0.1);
+        let chip_fill = super::chip::fill(colors);
+        let chip_border = super::chip::border(colors);
         let chip_backdrop = canvas(
             |_, _, _| {},
-            move |_, _, window, _| {
+            move |_, _, window, cx| {
                 for chip in &chips {
-                    let Some(layout) = chip_layouts.get(chip.block) else {
+                    let Some(Some(layout)) = chip_layouts.get(chip.block) else {
                         continue;
                     };
                     for rect in chip_rects(layout, &chip.text, chip.range.clone()) {
                         let rect = Bounds::from_corners(
-                            point(rect.left() - px(CHIP_PAD_X), rect.top() + px(1.0)),
-                            point(rect.right() + px(CHIP_PAD_X), rect.bottom() - px(1.0)),
+                            point(rect.left(), rect.top() + px(1.0)),
+                            point(rect.right(), rect.bottom() - px(1.0)),
                         );
                         window.paint_quad(
                             fill(rect, chip_fill)
-                                .corner_radii(px(5.0))
-                                .border_widths(px(0.5))
+                                .corner_radii(px(super::chip::RADIUS))
+                                .border_widths(px(super::chip::BORDER))
                                 .border_color(chip_border),
                         );
                     }
-                    let Some((ink, hollow)) = chip.dot else {
+                    if let Some(icon) = chip.icon
+                        && let Some(room) = chip_rects(
+                            layout,
+                            &chip.text,
+                            chip.range.start + CHIP_EDGE.len()
+                                ..chip.range.start + CHIP_EDGE.len() + CHIP_ICON_ROOM.len(),
+                        )
+                        .first()
+                    {
+                        let side = px(CHIP_ICON);
+                        let center = room.center();
+                        let bounds = Bounds::new(
+                            point(center.x - side / 2.0, center.y - side / 2.0),
+                            size(side, side),
+                        );
+                        let _ = window.paint_svg(
+                            bounds,
+                            icon.into(),
+                            None,
+                            gpui::TransformationMatrix::unit(),
+                            icon_ink.into(),
+                            cx,
+                        );
                         continue;
+                    }
+                    let (ink, hollow) = match chip.dot {
+                        super::chip::ChipDot::Status(ink) => (ink, false),
+                        super::chip::ChipDot::Gone => (colors.tertiary, true),
+                        super::chip::ChipDot::None => continue,
                     };
-                    let Some(at) = char_rect(layout, &chip.text, chip.range.start) else {
+                    let Some(at) = char_rect(layout, &chip.text, chip.head) else {
                         continue;
                     };
                     let center = at.center();
@@ -2069,6 +2705,9 @@ impl Render for NoteEditorView {
             .map(|b| (b.text.len(), b.text.is_empty()))
             .collect();
         let folded_away = hidden.clone();
+        // A selected image or divider shows as selected, not with a caret.
+        let head_atomic = self.editor.block(selection.head.block).kind.is_atomic();
+        let overlay_shown = shown_all;
         let autoscroll = std::mem::take(&mut self.autoscroll);
         let scroll = self.scroll.clone();
         let overlay = canvas(
@@ -2079,7 +2718,7 @@ impl Render for NoteEditorView {
                 if !selection.is_collapsed() {
                     #[allow(clippy::needless_range_loop)]
                     for index in start.block..=end.block {
-                        let Some(layout) = layouts.get(index) else {
+                        let Some(Some(layout)) = layouts.get(index) else {
                             continue;
                         };
                         if folded_away[index] {
@@ -2092,18 +2731,29 @@ impl Render for NoteEditorView {
                             0
                         };
                         let to = if index == end.block { end.offset } else { len };
+                        let shown = &overlay_shown[index];
+                        let (from, to) = (shown.to_display(from), shown.to_display(to));
                         rects.extend(selection_rects(layout, from, to, empty, index != end.block));
                     }
                 }
-                let caret = if selection.is_collapsed() {
-                    layouts.get(selection.head.block).and_then(|layout| {
-                        let (_, empty) = blocks_meta[selection.head.block];
-                        let offset = if empty { 0 } else { selection.head.offset };
-                        let at = layout.position_for_index(offset)?;
-                        Some(Bounds::new(at, size(px(2.0), layout.line_height())))
-                    })
-                } else {
-                    None
+                // The head's position is tracked for every selection (menus
+                // anchor to it, autoscroll follows it); only a collapsed one
+                // paints a caret.
+                let caret = {
+                    layouts
+                        .get(selection.head.block)
+                        .and_then(Option::as_ref)
+                        .and_then(|layout| {
+                            let (_, empty) = blocks_meta[selection.head.block];
+                            let offset = if empty {
+                                0
+                            } else {
+                                overlay_shown[selection.head.block]
+                                    .to_display(selection.head.offset)
+                            };
+                            let at = layout.position_for_index(offset)?;
+                            Some(Bounds::new(at, size(px(2.0), layout.line_height())))
+                        })
                 };
                 PaintState {
                     selection: rects,
@@ -2113,10 +2763,10 @@ impl Render for NoteEditorView {
             move |bounds, state, window, cx| {
                 window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
                 for rect in &state.selection {
-                    window.paint_quad(fill(*rect, selection_color));
+                    window.paint_quad(fill(*rect, selection_color).corner_radii(px(3.0)));
                 }
                 if let Some(caret) = state.caret {
-                    if caret_on {
+                    if caret_on && selection.is_collapsed() && !head_atomic {
                         window.paint_quad(fill(caret, caret_color));
                     }
                     if autoscroll {
@@ -2144,6 +2794,19 @@ impl Render for NoteEditorView {
         } else {
             None
         };
+        let link_menu = if self.link_editor.is_some() {
+            let height = self.link_menu_height();
+            self.host_menu(
+                LINK_MENU,
+                Self::link_menu_rows,
+                LINK_MENU_WIDTH,
+                height,
+                window,
+                cx,
+            )
+        } else {
+            None
+        };
         let mention_menu = if self.mention.is_some() {
             let height = self.mention_menu_height();
             self.host_menu(
@@ -2158,29 +2821,15 @@ impl Render for NoteEditorView {
             None
         };
         let work_menu = self.work_menu(window, cx);
-        let hint = self.link_hint.clone().map(|hint| {
-            div()
-                .absolute()
-                .bottom(px(18.0))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded(px(8.0))
-                        .bg(colors.primary.alpha(0.85))
-                        .text_color(colors.background)
-                        .text_size(px(12.0))
-                        .child(hint),
-                )
-        });
 
         div()
             .id("note-editor")
-            .key_context(EDITOR_CONTEXT)
+            .key_context(if self.link_editor.is_some() {
+                LINK_EDITOR_CONTEXT
+            } else {
+                EDITOR_CONTEXT
+            })
+            .on_key_down(cx.listener(Self::link_editor_key_down))
             .track_focus(&self.focus)
             .relative()
             .size_full()
@@ -2251,13 +2900,20 @@ impl Render for NoteEditorView {
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .drag_over::<gpui::ExternalPaths>(|area, _, _, _| area.bg(accent().alpha(0.04)))
+                    .on_drop(
+                        cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                            cx.stop_propagation();
+                            this.drop_files(paths, window, cx);
+                        }),
+                    )
                     .child(
                         div()
                             .w_full()
                             .flex()
                             .justify_center()
                             .px(px(48.0))
-                            .pt(px(56.0))
+                            .pt(px(PAGE_TOP))
                             .pb(px(240.0))
                             .child(
                                 div()
@@ -2273,11 +2929,205 @@ impl Render for NoteEditorView {
             .children(slash_menu)
             .children(mention_menu)
             .children(work_menu)
-            .children(hint)
+            .children(link_menu)
     }
 }
 
 impl NoteEditorView {
+    /// A picture: the file fitted to the column, a ring while selected, and
+    /// a quiet placeholder when the file is missing or lives on the web.
+    fn image_row(
+        &self,
+        index: usize,
+        block: &Block,
+        selected: bool,
+        scale: f32,
+        content: gpui::Div,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use gpui::StyledImage as _;
+        let colors = self.colors;
+        let _ = cx;
+        let path = self
+            .assets
+            .as_ref()
+            .and_then(|home| home.store.resolve_asset(&block.src));
+        let placeholder = |label: String| {
+            div()
+                .h(px(44.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .rounded(px(8.0))
+                .bg(colors.primary.alpha(0.05))
+                .border_1()
+                .border_color(colors.primary.alpha(0.08))
+                .text_size(px(13.0))
+                .text_color(colors.tertiary)
+                .child(crate::icons::sf_symbol("photo", 13.0, colors.tertiary))
+                .child(label)
+                .into_any_element()
+        };
+        let picture = match path {
+            Some(path) => {
+                let missing = placeholder("This picture's file is missing".into());
+                let missing = std::cell::RefCell::new(Some(missing));
+                let pixels = *self
+                    .image_sizes
+                    .borrow_mut()
+                    .entry(path.clone())
+                    .or_insert_with(|| diri_notes::store::image_size(&path));
+                let (width, height) = image_fit(pixels, scale);
+                gpui::img(path)
+                    .w(px(width))
+                    .h(px(height))
+                    .object_fit(gpui::ObjectFit::Contain)
+                    .rounded(px(8.0))
+                    .with_fallback(move || {
+                        missing
+                            .borrow_mut()
+                            .take()
+                            .unwrap_or_else(|| div().into_any_element())
+                    })
+                    .into_any_element()
+            }
+            None => {
+                let label = if block.src.contains("://") {
+                    format!("Picture on the web · {}", short_url(&block.src))
+                } else {
+                    "This picture's file is missing".to_owned()
+                };
+                placeholder(label)
+            }
+        };
+        let rects = Rc::clone(&self.image_rects);
+        div()
+            .relative()
+            .flex()
+            .flex_row()
+            .items_start()
+            .flex_1()
+            .min_w_0()
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .p(px(3.0))
+                    .rounded(px(11.0))
+                    .border_2()
+                    .border_color(if selected {
+                        accent().alpha(0.7)
+                    } else {
+                        accent().alpha(0.0)
+                    })
+                    .child(picture)
+                    .child(
+                        canvas(
+                            move |bounds, _, _| rects.borrow_mut().push((index, bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .child(content.opacity(0.0)),
+            )
+            .into_any_element()
+    }
+
+    /// Clicking a callout's glyph steps it to the next tone.
+    pub(super) fn cycle_callout(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.editor.blocks().iter().position(|b| b.id == id) else {
+            return;
+        };
+        let BlockKind::Callout(tone) = self.editor.block(index).kind else {
+            return;
+        };
+        let at = Tone::ALL.iter().position(|t| *t == tone).unwrap_or(0);
+        let next = Tone::ALL[(at + 1) % Tone::ALL.len()];
+        self.run(cx, |e, now| {
+            e.set_block_kind(index, BlockKind::Callout(next), now)
+        });
+    }
+
+    /// Pictures dropped from Finder land after the block under the pointer.
+    fn drop_files(
+        &mut self,
+        paths: &gpui::ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pos) = self.hit(window.mouse_position()) {
+            self.editor
+                .set_caret(Pos::new(pos.block, self.text_len(pos.block)));
+        }
+        self.insert_image_files(paths.paths(), "drop", cx);
+    }
+
+    /// Which blocks this frame lays out: those within a screen of the
+    /// viewport (found by walking measured or estimated heights), the title,
+    /// and the blocks holding the selection's ends. Folded blocks never are.
+    fn visible_blocks(&self, hidden: &[bool]) -> Vec<bool> {
+        let blocks = self.editor.blocks();
+        let viewport = f32::from(self.scroll.bounds().size.height);
+        let viewport = if viewport > 0.0 { viewport } else { 1200.0 };
+        let top = -f32::from(self.scroll.offset().y) - PAGE_TOP;
+        let (lo, hi) = (top - viewport, top + 2.0 * viewport);
+        let selection = self.editor.selection;
+        let mut y = 0.0;
+        let mut rendered = vec![false; blocks.len()];
+        for (index, block) in blocks.iter().enumerate() {
+            if hidden[index] {
+                continue;
+            }
+            let height = self.row_height(block);
+            rendered[index] = (y + height >= lo && y <= hi)
+                || index == 0
+                || index == selection.head.block
+                || index == selection.anchor.block;
+            y += height;
+        }
+        rendered
+    }
+
+    /// A block's height from its last paint, or an estimate from its kind
+    /// and text length until it has been on screen.
+    fn row_height(&self, block: &Block) -> f32 {
+        if let Some(height) = self.row_heights.borrow().get(&block.id) {
+            return *height;
+        }
+        let look = look(block.kind);
+        let chrome = look.top + look.bottom;
+        match block.kind {
+            BlockKind::Divider => chrome + look.line,
+            BlockKind::Image => chrome + 2.0 * IMAGE_RING + image_fit(None, 2.0).1,
+            BlockKind::Code => {
+                chrome + 20.0 + look.line * (block.text.lines().count().max(1) as f32)
+            }
+            _ => {
+                let per_line = (MEASURE / (look.size * 0.5)).max(1.0);
+                let lines: f32 = block
+                    .text
+                    .split('\n')
+                    .map(|line| (line.chars().count() as f32 / per_line).ceil().max(1.0))
+                    .sum();
+                let callout = if matches!(block.kind, BlockKind::Callout(_)) {
+                    20.0
+                } else {
+                    0.0
+                };
+                chrome + callout + look.line * lines
+            }
+        }
+    }
+
     /// The fold chevron in the gutter left of a list item with children:
     /// shown while the row is hovered, and always while folded.
     fn disclosure(
@@ -2320,6 +3170,7 @@ impl NoteEditorView {
                     cx.stop_propagation();
                     if let Some(index) = this.editor.blocks().iter().position(|b| b.id == id) {
                         let folded = this.editor.is_collapsed(index);
+                        crate::telemetry::notes_event("notes.fold.toggled", "chevron");
                         this.set_folded(index, !folded, cx);
                     }
                 }),
@@ -2682,6 +3533,195 @@ impl NoteEditorView {
     }
 }
 
+impl NoteEditorView {
+    fn link_menu_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.link_menu_rows(cx)?;
+        Some(
+            floating::surface(self.colors, floating::MENU_RADIUS, LINK_MENU_WIDTH, rows)
+                .into_any_element(),
+        )
+    }
+
+    fn link_menu_rows(&mut self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let editor = self.link_editor.as_ref()?;
+        let colors = self.colors;
+        let field = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(7.0))
+            .h(px(LINK_FIELD_HEIGHT))
+            .mx(px(floating::MENU_ROW_MARGIN))
+            .px(px(floating::MENU_ROW_INSET))
+            .rounded(px(floating::MENU_ROW_RADIUS))
+            .bg(colors.primary.alpha(0.06))
+            .text_size(px(Typo::ROW.size))
+            .text_color(colors.primary)
+            .child(crate::icons::sf_symbol("link", MENU_ICON, colors.tertiary))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(if editor.query.is_empty() {
+                        div()
+                            .text_color(colors.tertiary)
+                            .child(format!("{}Paste or type a link", crate::navigation::CARET))
+                            .into_any_element()
+                    } else {
+                        crate::navigation::query_label(&field_view(&editor.query))
+                    }),
+            );
+        let selected = editor.selected;
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .py(px(floating::MENU_PADDING_Y))
+            .child(field);
+        let rows = self.link_rows();
+        if !rows.is_empty() {
+            list = list.child(floating::menu_separator(colors));
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let (icon, label, keys): (AnyElement, SharedString, &str) = match row {
+                LinkRow::Apply { url } => {
+                    let found = diri_notes::links::recognize(url);
+                    let icon = found.as_ref().map_or_else(
+                        || crate::icons::sf_symbol("link", MENU_ICON, colors.secondary),
+                        |found| {
+                            gpui::svg()
+                                .path(service_icon(found.service))
+                                .size(px(CHIP_ICON))
+                                .text_color(colors.secondary)
+                                .into_any_element()
+                        },
+                    );
+                    let label = match (&found, self.editor.selection.is_collapsed()) {
+                        (Some(found), true) => format!("Insert {}", found.title),
+                        (Some(found), false) => format!("Link to {}", found.name),
+                        (None, _) => format!("Link to {}", short_url(url)),
+                    };
+                    (icon, label.into(), "↩")
+                }
+                LinkRow::Open { url } => (
+                    crate::icons::sf_symbol("square.and.arrow.up", MENU_ICON, colors.secondary),
+                    format!("Open {}", short_url(url)).into(),
+                    "⌘↩",
+                ),
+                LinkRow::Remove => (
+                    crate::icons::sf_symbol("xmark", MENU_ICON, colors.secondary),
+                    "Remove link".into(),
+                    "",
+                ),
+            };
+            let item = floating::menu_row(("note-link-row", i), icon, colors, i == selected)
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered
+                        && let Some(editor) = &mut this.link_editor
+                        && editor.selected != i
+                    {
+                        editor.selected = i;
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.apply_link_row(i, cx);
+                    }),
+                )
+                .child(menu_label(label, colors))
+                .when(!keys.is_empty(), |item| {
+                    item.child(floating::menu_shortcut(keys, colors))
+                });
+            list = list.child(item);
+        }
+        Some(list)
+    }
+
+    fn link_menu_height(&self) -> f32 {
+        let rows = self.link_rows().len();
+        let separator = if rows > 0 { MENU_SEPARATOR_HEIGHT } else { 0.0 };
+        menu_height(rows, 0) + LINK_FIELD_HEIGHT + separator
+    }
+}
+
+const LINK_MENU: floating::Target<NoteEditorView> = floating::Target {
+    key: "note-link-editor",
+    radius: floating::MENU_RADIUS,
+    content: NoteEditorView::link_menu_content,
+    dismiss: |this, _, cx| this.close_link_editor(cx),
+};
+const LINK_MENU_WIDTH: f32 = 340.0;
+const LINK_FIELD_HEIGHT: f32 = 32.0;
+
+/// The link field as drawn: a long URL with the caret at its end shows its
+/// tail, the way a native field scrolls to keep the caret in view.
+fn field_view(query: &crate::query_editor::QueryEditor) -> crate::query_editor::QueryEditor {
+    const VISIBLE: usize = 38;
+    let text = query.text();
+    let count = text.chars().count();
+    if count <= VISIBLE || query.selection().is_some() || query.cursor() != text.len() {
+        return query.clone();
+    }
+    let tail: String = text.chars().skip(count - (VISIBLE - 1)).collect();
+    let mut shown = crate::query_editor::QueryEditor::default();
+    shown.insert(&format!("…{tail}"));
+    shown
+}
+
+/// What ⌘K's field holds as a link: a URL, a `diri://` mention, or a bare
+/// domain (`notion.so/…`), which gets `https://`.
+fn normalize_url(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return None;
+    }
+    if is_url(text) || MentionTarget::parse(text).is_some() {
+        return Some(text.to_owned());
+    }
+    let host = text.split('/').next().unwrap_or_default();
+    (host.contains('.') && !host.starts_with('.') && !host.ends_with('.'))
+        .then(|| format!("https://{text}"))
+}
+
+/// `https://www.notion.so/acme/Q4…` → `notion.so/acme/Q4…`, cut to fit a row.
+fn short_url(url: &str) -> String {
+    let bare = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.");
+    if bare.chars().count() > 34 {
+        format!("{}…", bare.chars().take(33).collect::<String>())
+    } else {
+        bare.to_owned()
+    }
+}
+
+/// A link's kind for counts-only telemetry: the tool family, never the URL.
+fn link_kind(url: &str) -> &'static str {
+    use diri_notes::links::Service;
+    match diri_notes::links::recognize(url).map(|r| r.service) {
+        Some(Service::Notion) => "notion",
+        Some(
+            Service::GoogleDocs
+            | Service::GoogleSheets
+            | Service::GoogleSlides
+            | Service::GoogleDrive,
+        ) => "google",
+        Some(Service::Linear) => "linear",
+        Some(Service::HubSpot) => "hubspot",
+        Some(Service::Figma) => "figma",
+        Some(Service::Slack) => "slack",
+        Some(Service::GitHub) => "github",
+        Some(Service::Dashboard) => "dashboard",
+        None if MentionTarget::parse(url).is_some() => "mention",
+        None => "web",
+    }
+}
+
 const SLASH_MENU: floating::Target<NoteEditorView> = floating::Target {
     key: "note-slash-menu",
     radius: floating::MENU_RADIUS,
@@ -2765,6 +3805,169 @@ fn menu_placement(
             point(left, caret.top() - px(MENU_GAP)),
             gpui::Anchor::BottomLeft,
         )
+    }
+}
+
+/// A block's text as laid out: the stored text plus room inside each chip.
+/// Every chip gets a thin space at each end, so its pill has padding without
+/// reaching into the space beside it, and a tool chip gets room for its
+/// glyph. Offsets in the note (model) and in the layout (display) differ only
+/// by those inserts, and every layout lookup goes through
+/// [`Shown::to_display`] / [`Shown::to_model`].
+#[derive(Clone, Debug, Default)]
+struct Shown {
+    text: String,
+    /// Ascending by model offset, a trailing insert before a leading one.
+    inserts: Vec<Insert>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Insert {
+    at: usize,
+    text: &'static str,
+    /// Belongs to the chip ending at `at` (a caret there sits after it)
+    /// rather than the chip starting there (a caret there sits before it).
+    trailing: bool,
+}
+
+// Chip inserts are word characters drawn fully faded, not spaces: gpui's
+// line wrapper may break before any non-word character, which split a
+// chip's padding or glyph room from its title across lines.
+/// A chip's inner padding at either end.
+const CHIP_EDGE: &str = ".";
+/// Room for a tool chip's glyph: two digits, about a 13 pt icon at body size.
+const CHIP_ICON_ROOM: &str = "00";
+/// What leads a tool chip: its edge, then its glyph room.
+const CHIP_LEAD: &str = ".00";
+
+impl Shown {
+    fn of(block: &Block) -> Self {
+        let mut inserts = Vec::new();
+        for chip in mention::in_block(block) {
+            inserts.push(Insert {
+                at: chip.range.start,
+                text: CHIP_EDGE,
+                trailing: false,
+            });
+            inserts.push(Insert {
+                at: chip.range.end,
+                text: CHIP_EDGE,
+                trailing: true,
+            });
+        }
+        for (range, _) in link_chips(block) {
+            inserts.push(Insert {
+                at: range.start,
+                text: CHIP_LEAD,
+                trailing: false,
+            });
+            inserts.push(Insert {
+                at: range.end,
+                text: CHIP_EDGE,
+                trailing: true,
+            });
+        }
+        if inserts.is_empty() {
+            return Self {
+                text: block.text.clone(),
+                inserts,
+            };
+        }
+        inserts.sort_by_key(|i| (i.at, !i.trailing));
+        inserts.dedup();
+        let extra: usize = inserts.iter().map(|i| i.text.len()).sum();
+        let mut text = String::with_capacity(block.text.len() + extra);
+        let mut last = 0;
+        for insert in &inserts {
+            text.push_str(&block.text[last..insert.at]);
+            text.push_str(insert.text);
+            last = insert.at;
+        }
+        text.push_str(&block.text[last..]);
+        Self { text, inserts }
+    }
+
+    fn to_display(&self, model: usize) -> usize {
+        model
+            + self
+                .inserts
+                .iter()
+                .filter(|i| i.at < model || (i.trailing && i.at == model))
+                .map(|i| i.text.len())
+                .sum::<usize>()
+    }
+
+    fn to_model(&self, display: usize) -> usize {
+        let mut shift = 0;
+        for insert in &self.inserts {
+            let start = insert.at + shift;
+            if display < start {
+                break;
+            }
+            if display < start + insert.text.len() {
+                return insert.at;
+            }
+            shift += insert.text.len();
+        }
+        display - shift
+    }
+
+    /// A chip's model range in the layout, including its inserts.
+    fn range(&self, range: &Range<usize>) -> Range<usize> {
+        self.to_display(range.start)..self.to_display(range.end)
+    }
+
+    /// Laid-out ranges drawn faded, with how much: every insert fully, and
+    /// a mention's `@` (hidden under a session's dot, softened for a note).
+    fn fades(&self, block: &Block) -> Vec<(Range<usize>, f32)> {
+        let mut shift = 0;
+        let mut fades = Vec::with_capacity(self.inserts.len());
+        for insert in &self.inserts {
+            let start = insert.at + shift;
+            fades.push((start..start + insert.text.len(), 1.0));
+            shift += insert.text.len();
+        }
+        for chip in mention::in_block(block) {
+            let head = self.head_of(chip.range.start);
+            let fade = match chip.target {
+                MentionTarget::Session(_) => 1.0,
+                MentionTarget::Note(_) => 0.55,
+            };
+            fades.push((head..head + 1, fade));
+        }
+        fades
+    }
+
+    /// Where a chip's first stored character (a mention's `@`) is laid out.
+    fn head_of(&self, chip_start: usize) -> usize {
+        self.to_display(chip_start + 1) - 1
+    }
+}
+
+/// Links that open a known tool, which render as chips with its glyph.
+fn link_chips(
+    block: &Block,
+) -> impl Iterator<Item = (Range<usize>, diri_notes::links::Recognized)> + '_ {
+    block.marks.iter().filter_map(|mark| match &mark.style {
+        Style::Link(url) => diri_notes::links::recognize(url).map(|r| (mark.range.clone(), r)),
+        _ => None,
+    })
+}
+
+fn service_icon(service: diri_notes::links::Service) -> &'static str {
+    use diri_notes::links::Service;
+    match service {
+        Service::Notion => "icons/notion.svg",
+        Service::GoogleDocs => "icons/google-doc.svg",
+        Service::GoogleSheets => "icons/google-sheet.svg",
+        Service::GoogleSlides => "icons/google-slides.svg",
+        Service::GoogleDrive => "icons/google-drive.svg",
+        Service::Linear => "icons/linear.svg",
+        Service::HubSpot => "icons/hubspot.svg",
+        Service::Figma => "icons/figma.svg",
+        Service::Slack => "icons/slack.svg",
+        Service::GitHub => "icons/github.svg",
+        Service::Dashboard => "icons/chart-bar.svg",
     }
 }
 
@@ -2864,4 +4067,38 @@ pub(crate) fn editor_entity_focus(
 ) {
     let focus = editor.read(cx).focus.clone();
     window.focus(&focus, cx);
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::*;
+
+    #[test]
+    fn chips_get_edges_and_glyph_room_and_offsets_map_both_ways() {
+        let mut block = Block::new(1, BlockKind::Paragraph, "see ENG-7 and @Plan!");
+        block.add_mark(4..9, Style::Link("https://linear.app/a/issue/ENG-7".into()));
+        block.add_mark(14..19, Style::Link("diri://note/n-1".into()));
+        block.add_mark(0..3, Style::Link("https://diri.sh".into()));
+        let shown = Shown::of(&block);
+        assert_eq!(
+            shown.text,
+            format!("see {CHIP_LEAD}ENG-7{CHIP_EDGE} and {CHIP_EDGE}@Plan{CHIP_EDGE}!"),
+            "plain links get nothing"
+        );
+        // A caret before a chip sits outside it; right after, outside too.
+        assert_eq!(shown.to_display(4), 4);
+        assert_eq!(
+            &shown.text[shown.to_display(9)..shown.to_display(9) + 1],
+            " "
+        );
+        for model in 0..=block.text.len() {
+            assert_eq!(shown.to_model(shown.to_display(model)), model);
+        }
+        // A click on the glyph lands before the chip.
+        assert_eq!(shown.to_model(5), 4);
+        let chip = shown.range(&(14..19));
+        assert!(shown.text[chip.clone()].starts_with(CHIP_EDGE));
+        assert!(shown.text[chip].ends_with(CHIP_EDGE));
+        assert_eq!(&shown.text[shown.head_of(14)..shown.head_of(14) + 1], "@");
+    }
 }

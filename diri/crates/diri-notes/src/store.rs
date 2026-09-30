@@ -20,6 +20,14 @@ pub const MAX_NOTE_BYTES: u64 = 4 * 1024 * 1024;
 const SNIPPET_CHARS: usize = 140;
 const TRASH_DIR: &str = ".trash";
 const LOCK_FILE: &str = ".lock";
+/// Pictures pasted or dropped into notes: `assets/<note id>/<hash>.<ext>`.
+pub const ASSETS_DIR: &str = "assets";
+/// The largest picture a note takes in: a screenshot, not a video.
+pub const MAX_ASSET_BYTES: usize = 25 * 1024 * 1024;
+/// Picture formats a note stores and shows.
+pub const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp", "svg",
+];
 
 pub const KEY_ID: &str = "id";
 pub const KEY_CREATED: &str = "created";
@@ -371,6 +379,71 @@ impl NoteStore {
             let _ = fs::remove_file(&tmp);
         }
         result
+    }
+
+    /// Stores a picture for note `id` and returns the path a note links it
+    /// by, relative to the notes folder. Content-addressed, so pasting the
+    /// same screenshot twice keeps one file; written atomically.
+    pub fn save_asset(&self, id: &str, bytes: &[u8], extension: &str) -> io::Result<String> {
+        validate_id(id)?;
+        let extension = extension.to_ascii_lowercase();
+        if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a picture format notes keep",
+            ));
+        }
+        if bytes.is_empty() || bytes.len() > MAX_ASSET_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "picture is empty or too large",
+            ));
+        }
+        let folder = self.dir.join(ASSETS_DIR).join(id);
+        fs::create_dir_all(&folder)?;
+        let name = format!("{:016x}.{extension}", fnv1a(bytes));
+        let path = folder.join(&name);
+        if !path.exists() {
+            let tmp = folder.join(format!(".{name}.{}.tmp", nonce()));
+            let result = (|| {
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&tmp)?;
+                file.write_all(bytes)?;
+                file.sync_data()?;
+                fs::rename(&tmp, &path)
+            })();
+            if result.is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+            result?;
+        }
+        Ok(format!("{ASSETS_DIR}/{id}/{name}"))
+    }
+
+    /// Copies a picture file into note `id`'s assets (a Finder drop).
+    pub fn import_asset(&self, id: &str, source: &Path) -> io::Result<String> {
+        let extension = source
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let size = fs::metadata(source)?.len();
+        if size > MAX_ASSET_BYTES as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "picture is too large",
+            ));
+        }
+        self.save_asset(id, &fs::read(source)?, &extension)
+    }
+
+    /// The file a note's image `src` names, when it is a relative path that
+    /// stays inside the notes folder. URLs and escapes (`..`, absolute
+    /// paths) resolve to nothing.
+    pub fn resolve_asset(&self, src: &str) -> Option<PathBuf> {
+        resolve_asset(&self.dir, src)
     }
 
     /// Creates a note and returns its id. `project` is a project root path.
@@ -838,5 +911,155 @@ mod tests {
         for id in ["../x", "a/b", ".hidden", ""] {
             assert!(store.path_for(id).is_err(), "{id}");
         }
+    }
+}
+
+/// See [`NoteStore::resolve_asset`].
+pub fn resolve_asset(dir: &Path, src: &str) -> Option<PathBuf> {
+    if src.is_empty() || src.contains("://") || src.starts_with('/') || src.starts_with('~') {
+        return None;
+    }
+    let relative = Path::new(src);
+    let safe = relative
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)));
+    safe.then(|| dir.join(relative))
+}
+
+/// Whether `path` names a picture a note can hold.
+pub fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// A picture's pixel size from its file header: PNG, GIF, JPEG and WebP.
+/// Reads at most 64 KiB and decodes nothing, so a view can size an image
+/// before (or without) loading it.
+pub fn image_size(path: &Path) -> Option<(u32, u32)> {
+    use std::io::Read as _;
+    let mut head = Vec::with_capacity(64 * 1024);
+    fs::File::open(path)
+        .ok()?
+        .take(64 * 1024)
+        .read_to_end(&mut head)
+        .ok()?;
+    image_size_of(&head)
+}
+
+fn image_size_of(b: &[u8]) -> Option<(u32, u32)> {
+    let be16 = |i: usize| Some(u32::from(u16::from_be_bytes([*b.get(i)?, *b.get(i + 1)?])));
+    let le16 = |i: usize| Some(u32::from(u16::from_le_bytes([*b.get(i)?, *b.get(i + 1)?])));
+    let be32 = |i: usize| Some(u32::from_be_bytes(b.get(i..i + 4)?.try_into().ok()?));
+    let le24 = |i: usize| {
+        Some(
+            u32::from(*b.get(i)?)
+                | u32::from(*b.get(i + 1)?) << 8
+                | u32::from(*b.get(i + 2)?) << 16,
+        )
+    };
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some((be32(16)?, be32(20)?));
+    }
+    if b.starts_with(b"GIF8") {
+        return Some((le16(6)?, le16(8)?));
+    }
+    if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
+        return match b.get(12..16)? {
+            b"VP8X" => Some((le24(24)? + 1, le24(27)? + 1)),
+            b"VP8 " => Some((le16(26)? & 0x3fff, le16(28)? & 0x3fff)),
+            b"VP8L" => {
+                let bits = u32::from_le_bytes(b.get(21..25)?.try_into().ok()?);
+                Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+            }
+            _ => None,
+        };
+    }
+    if b.starts_with(&[0xff, 0xd8]) {
+        let mut i = 2;
+        while i + 9 < b.len() {
+            if b[i] != 0xff {
+                i += 1;
+                continue;
+            }
+            let marker = b[i + 1];
+            let length = be16(i + 2)? as usize;
+            // Start-of-frame markers carry the size; C4, C8 and CC do not.
+            if (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+                return Some((be16(i + 7)?, be16(i + 5)?));
+            }
+            i += 2 + length;
+        }
+    }
+    None
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+
+    #[test]
+    fn pictures_are_stored_once_beside_the_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NoteStore::open(dir.path().join("notes")).unwrap();
+        let (id, _) = store.create(Document::new("T", Vec::new()), None).unwrap();
+        let png = b"\x89PNG fake";
+        let a = store.save_asset(&id, png, "PNG").unwrap();
+        let b = store.save_asset(&id, png, "png").unwrap();
+        assert_eq!(a, b, "same bytes, same file");
+        assert!(a.starts_with(&format!("assets/{id}/")) && a.ends_with(".png"));
+        let path = store.resolve_asset(&a).unwrap();
+        assert_eq!(fs::read(path).unwrap(), png);
+        // Assets never show up as notes.
+        assert_eq!(store.list().unwrap().len(), 1);
+        assert!(store.save_asset(&id, png, "exe").is_err());
+        assert!(store.save_asset("../x", png, "png").is_err());
+        assert!(store.save_asset(&id, b"", "png").is_err());
+    }
+
+    #[test]
+    fn picture_sizes_come_from_headers() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend_from_slice(&1200u32.to_be_bytes());
+        png.extend_from_slice(&520u32.to_be_bytes());
+        assert_eq!(image_size_of(&png), Some((1200, 520)));
+        let gif = b"GIF89a\x40\x01\xf0\x00";
+        assert_eq!(image_size_of(gif), Some((320, 240)));
+        let jpeg = [
+            0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01,
+            0xe0, 0x02, 0x80, 0x03, 0, 0, 0, 0,
+        ];
+        assert_eq!(image_size_of(&jpeg), Some((640, 480)));
+        assert_eq!(image_size_of(b"not a picture"), None);
+    }
+
+    #[test]
+    fn only_relative_paths_inside_the_folder_resolve() {
+        let dir = Path::new("/notes");
+        assert_eq!(
+            resolve_asset(dir, "assets/n/a.png"),
+            Some(PathBuf::from("/notes/assets/n/a.png"))
+        );
+        for bad in [
+            "../secret.png",
+            "/etc/x.png",
+            "~/x.png",
+            "https://a.b/c.png",
+            "a/../../b.png",
+            "",
+        ] {
+            assert_eq!(resolve_asset(dir, bad), None, "{bad}");
+        }
+        assert!(is_image_path(Path::new("Shot.JPEG")));
+        assert!(!is_image_path(Path::new("notes.md")));
     }
 }

@@ -126,6 +126,11 @@ fn parse_blocks(lines: &[&str]) -> Vec<Block> {
             i += 1;
             continue;
         }
+        if let Some((alt, src)) = image_line(trimmed) {
+            blocks.push(Block::image(0, src, alt));
+            i += 1;
+            continue;
+        }
         if let Some(rest) = quote_line(trimmed) {
             let mut text = vec![rest];
             i += 1;
@@ -135,7 +140,17 @@ fn parse_blocks(lines: &[&str]) -> Vec<Block> {
                 text.push(rest);
                 i += 1;
             }
-            blocks.push(inline_block(BlockKind::Quote, &text.join("\n")));
+            // `> [!NOTE]` opens a callout; Obsidian allows text after the tag.
+            if let Some((tone, first)) = callout_tag(text[0]) {
+                if first.is_empty() {
+                    text.remove(0);
+                } else {
+                    text[0] = first;
+                }
+                blocks.push(inline_block(BlockKind::Callout(tone), &text.join("\n")));
+            } else {
+                blocks.push(inline_block(BlockKind::Quote, &text.join("\n")));
+            }
             continue;
         }
         let mut text = vec![line.trim()];
@@ -148,6 +163,7 @@ fn parse_blocks(lines: &[&str]) -> Vec<Block> {
                 || heading(next).is_some()
                 || list_item(next).is_some()
                 || quote_line(next).is_some()
+                || image_line(next).is_some()
             {
                 break;
             }
@@ -239,6 +255,52 @@ fn list_item(line: &str) -> Option<(BlockKind, &str)> {
         }
     }
     None
+}
+
+/// `![alt](src)` alone on a line, with an optional `<…>` destination and
+/// `"title"` (dropped). Anything else, including an image inside text, is
+/// read as text.
+fn image_line(line: &str) -> Option<(String, String)> {
+    let rest = line.trim_end().strip_prefix("![")?.strip_suffix(')')?;
+    // The alt text ends at the `](` whose `]` is not escaped.
+    let bytes = rest.as_bytes();
+    let mut split = None;
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 1,
+            b']' if bytes[i + 1] == b'(' => {
+                split = Some(i);
+                break;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let split = split?;
+    let alt = parse_inline(&rest[..split]).0;
+    let mut dest = rest[split + 2..].trim();
+    if let Some(inner) = dest.strip_prefix('<') {
+        dest = inner.split_once('>').map(|(src, _)| src)?;
+    } else if let Some((src, title)) = dest.split_once(char::is_whitespace)
+        && title.trim_start().starts_with('"')
+    {
+        dest = src;
+    }
+    if dest.is_empty()
+        || dest.contains(char::is_whitespace) && !rest[split + 2..].trim().starts_with('<')
+    {
+        return None;
+    }
+    Some((alt, dest.to_owned()))
+}
+
+/// `[!TIP] rest` → (Tip, "rest").
+fn callout_tag(line: &str) -> Option<(crate::doc::Tone, &str)> {
+    let rest = line.trim_start().strip_prefix("[!")?;
+    let (tag, after) = rest.split_once(']')?;
+    let tone = crate::doc::Tone::from_tag(tag)?;
+    Some((tone, after.trim()))
 }
 
 fn quote_line(line: &str) -> Option<&str> {
@@ -700,6 +762,31 @@ fn write_block(out: &mut String, doc: &Document, index: usize, block: &Block) {
             out.push_str(fence);
         }
         BlockKind::Divider => out.push_str("---"),
+        BlockKind::Image => {
+            out.push_str("![");
+            out.push_str(&escape_text(&block.text.replace('\n', " "), false));
+            out.push_str("](");
+            if block.src.contains([' ', '(', ')', '<', '>']) {
+                out.push('<');
+                out.push_str(&block.src.replace(['<', '>'], ""));
+                out.push('>');
+            } else {
+                out.push_str(&block.src);
+            }
+            out.push(')');
+        }
+        BlockKind::Callout(tone) => {
+            out.push_str("> [!");
+            out.push_str(tone.tag());
+            out.push(']');
+            let text = write_inline(block, false);
+            if !block.text.is_empty() {
+                for line in text.split('\n') {
+                    out.push_str("\n> ");
+                    out.push_str(line);
+                }
+            }
+        }
     }
 }
 
@@ -1073,6 +1160,61 @@ mod tests {
     }
 
     #[test]
+    fn images_and_callouts_round_trip() {
+        use crate::doc::Tone;
+        let mut callout = b(
+            BlockKind::Callout(Tone::Warning),
+            "Budget is capped\nat $5k",
+        );
+        callout.add_mark(10..16, Style::Bold);
+        let doc = Document::new(
+            "Launch",
+            vec![
+                Block::image(0, "assets/n-1/3fa9c0.png", "Funnel, week 3"),
+                Block::image(0, "assets/My Shots/a (1).png", ""),
+                Block::image(0, "https://example.com/chart.png", "chart [v2]"),
+                callout,
+                b(BlockKind::Callout(Tone::Note), ""),
+                b(BlockKind::Paragraph, "![not an image](inline) in text"),
+                b(BlockKind::Quote, "[!NOTE] is just text in a quote"),
+            ],
+        );
+        let text = write(&FrontMatter::default(), &doc);
+        assert!(
+            text.contains("![Funnel, week 3](assets/n-1/3fa9c0.png)"),
+            "{text}"
+        );
+        assert!(text.contains("![](<assets/My Shots/a (1).png>)"), "{text}");
+        assert!(
+            text.contains("> [!WARNING]\n> Budget is **capped**\n> at $5k"),
+            "{text}"
+        );
+        round_trip(&doc);
+    }
+
+    #[test]
+    fn reads_hand_written_images_and_alerts() {
+        use crate::doc::Tone;
+        let (_, doc) = parse(
+            "# T\n\n![Screenshot](img/a.png \"title\")\n\n> [!tip] Use the sheet\n> for numbers\n\n> [!CAUTION]\n> Irreversible\n\n> [!unknown] stays a quote\n",
+        );
+        let kinds: Vec<BlockKind> = doc.blocks.iter().map(|b| b.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                BlockKind::Image,
+                BlockKind::Callout(Tone::Tip),
+                BlockKind::Callout(Tone::Caution),
+                BlockKind::Quote,
+            ]
+        );
+        assert_eq!(doc.blocks[0].src, "img/a.png");
+        assert_eq!(doc.blocks[0].text, "Screenshot");
+        assert_eq!(doc.blocks[1].text, "Use the sheet\nfor numbers");
+        assert_eq!(doc.blocks[2].text, "Irreversible");
+    }
+
+    #[test]
     fn random_notes_round_trip() {
         // A tiny deterministic generator keeps the fuzz reproducible without
         // a proptest dependency.
@@ -1091,6 +1233,8 @@ mod tests {
             BlockKind::Numbered,
             BlockKind::Todo { checked: true },
             BlockKind::Quote,
+            BlockKind::Callout(crate::doc::Tone::Tip),
+            BlockKind::Callout(crate::doc::Tone::Warning),
         ];
         // Mentions are plain links with `diri:` targets; the fuzz covers them
         // beside an ordinary URL so both survive every nesting.

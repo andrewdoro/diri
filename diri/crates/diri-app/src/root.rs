@@ -9530,7 +9530,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
             cx.run_until_parked();
         }
-        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold` types into the note:
+        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold|links|link-editor|media|big|select|empty` types
+        // into the note:
         // mention chips beside a to-do, then the `/` or `@` menu open at the
         // caret, to judge the menus beside the rest of diri's chrome.
         if let Ok(scene) = std::env::var("DIRI_VISUAL_NOTE_MENU") {
@@ -9582,6 +9583,112 @@ mod tests {
                     let end = view.editor.block(quick).text.len();
                     view.editor.set_caret(Pos::new(quick, end));
                     match scene.as_str() {
+                        "select" => {
+                            // A selection across blocks, over bold, a link
+                            // and chips.
+                            let intro = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.text.starts_with("A rich"))
+                                .expect("intro");
+                            view.editor.set_selection(diri_notes::edit::Selection {
+                                anchor: Pos::new(intro, 2),
+                                head: Pos::new(row, 30),
+                            });
+                            window.focus(&view.focus_handle(cx), cx);
+                        }
+                        "empty" => {
+                            view.reload(
+                                diri_notes::edit::Editor::new(&diri_notes::doc::Document::new(
+                                    "",
+                                    Vec::new(),
+                                )),
+                                cx,
+                            );
+                            view.editor.set_caret(Pos::new(1, 0));
+                            window.focus(&view.focus_handle(cx), cx);
+                        }
+                        "big" => {
+                            // A long note, scrolled deep: only nearby blocks
+                            // are laid out.
+                            let (_, doc) = diri_notes::markdown::parse(
+                                &crate::notes::tests::big_note_markdown(2000),
+                            );
+                            view.reload(diri_notes::edit::Editor::new(&doc), cx);
+                            view.editor.set_caret(Pos::new(0, 0));
+                        }
+                        "media" => {
+                            // A picture and every callout tone.
+                            let picture = notes_dir.path().join("funnel.png");
+                            std::fs::write(&picture, crate::notes::tests::chart_png(1200, 520))
+                                .expect("fixture picture");
+                            view.editor.enter(0);
+                            view.editor.turn_into(
+                                diri_notes::edit::Turn::Kind(diri_notes::doc::BlockKind::Paragraph),
+                                0,
+                            );
+                            view.insert_image_files(&[picture], "drop", cx);
+                            for (tone, text) in [
+                                (diri_notes::doc::Tone::Tip, "Paste a screenshot straight into a note."),
+                                (diri_notes::doc::Tone::Warning, "Q4 budget is capped at $5k."),
+                            ] {
+                                view.editor.insert_text(text, 0);
+                                view.editor.turn_into(
+                                    diri_notes::edit::Turn::Kind(diri_notes::doc::BlockKind::Callout(tone)),
+                                    0,
+                                );
+                                view.editor.enter(0);
+                            }
+                            let first = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.kind == diri_notes::doc::BlockKind::Image)
+                                .expect("image");
+                            view.editor.set_caret(Pos::new(first, 0));
+                        }
+                        "link-editor" => {
+                            // ⌘K on "calm" with a Notion URL typed in.
+                            let intro = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.text.starts_with("A rich"))
+                                .expect("intro");
+                            let calm = view.editor.block(intro).text.find("calm").unwrap_or(0);
+                            view.editor.set_selection(diri_notes::edit::Selection {
+                                anchor: Pos::new(intro, calm),
+                                head: Pos::new(intro, calm + 4),
+                            });
+                            view.link(&crate::notes::editor_view::Link, window, cx);
+                            view.replace_text_in_range(
+                                None,
+                                "notion.so/acme/Calm-writing-1f2e3d4c5b6a79881f2e3d4c5b6a7988",
+                                window,
+                                cx,
+                            );
+                        }
+                        "links" => {
+                            // A research line a PM would write: tool links
+                            // pasted bare become titled chips.
+                            view.editor.enter(0);
+                            view.editor.turn_into(diri_notes::edit::Turn::Kind(diri_notes::doc::BlockKind::Paragraph), 0);
+                            view.editor.insert_text("Sources: ", 0);
+                            for url in [
+                                "https://www.notion.so/acme/Q4-campaign-brief-1f2e3d4c5b6a79881f2e3d4c5b6a7988",
+                                "https://docs.google.com/spreadsheets/d/1AbC/edit",
+                                "https://linear.app/acme/issue/GRO-42/launch-email",
+                                "https://www.figma.com/design/AbC123/Onboarding-v2",
+                                "https://app.hubspot.com/contacts/1/record/0-3/2",
+                                "https://acme.slack.com/archives/C024BE91L/p1700000000000100",
+                                "https://app.amplitude.com/analytics/acme/chart/abc",
+                                "https://github.com/cristicretu/diri/pull/600",
+                            ] {
+                                view.editor.paste_url(url, 0);
+                                view.editor.insert_text(" ", 0);
+                            }
+                        }
                         "fold" => {
                             // Two nested items under "Quick capture", folded
                             // under "Agents can append".
@@ -9665,6 +9772,23 @@ mod tests {
             })
             .unwrap();
             cx.run_until_parked();
+        }
+        if std::env::var("DIRI_VISUAL_NOTE_MENU").as_deref() == Ok("big") {
+            let pane = note_pane.borrow().clone().expect("note pane");
+            let editor = cx
+                .update(|cx| pane.read(cx).editor_for_test())
+                .expect("open note editor");
+            // Scroll like a trackpad: many steps, a frame each, so heights
+            // are measured as blocks come into view.
+            for _ in 0..150 {
+                cx.update_window(window.into(), |_, _, cx| {
+                    editor.update(cx, |view, cx| view.scroll_by_for_test(px(-120.0), cx));
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+            }
         }
         for _ in 0..3 {
             cx.update_window(window.into(), |_, window, _| window.refresh())

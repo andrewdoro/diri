@@ -8,6 +8,7 @@ pub mod doc;
 pub mod edit;
 pub mod handoff;
 pub mod history;
+pub mod links;
 pub mod markdown;
 pub mod mention;
 pub mod merge;

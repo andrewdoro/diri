@@ -519,3 +519,460 @@ fn version_history_lists_previews_and_restores(cx: &mut gpui::TestAppContext) {
     editor.update(cx, |_, cx| cx.emit(EditorEvent::Dismiss));
     assert!(pane.read_with(cx, |pane, _| pane.versions.is_none()));
 }
+
+#[gpui::test]
+fn the_session_chip_api_reads_live_status_and_inserts_links(cx: &mut gpui::TestAppContext) {
+    use super::chip::ChipDot;
+    use diri_notes::mention::MentionTarget;
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update(cx, |view, cx| {
+        view.set_mentions(
+            editor_view::MentionDirectory {
+                entries: fixture_mentions(),
+            },
+            cx,
+        );
+        // A live session's dot carries its status ink; an unknown one is gone.
+        let live = ChipDot::for_target(
+            &MentionTarget::Session("s_codex".into()),
+            view.mentions(),
+            crate::app_theme::colors("dirijor-light"),
+        );
+        assert!(matches!(live, ChipDot::Status(_)));
+        let gone = ChipDot::for_target(
+            &MentionTarget::Session("s_missing".into()),
+            view.mentions(),
+            crate::app_theme::colors("dirijor-light"),
+        );
+        assert_eq!(gone, ChipDot::Gone);
+        let _chip = view.session_chip("s_codex", "fix resize flicker");
+        // Inserting programmatically writes the same link `@` would.
+        let last = view.editor.blocks().len() - 1;
+        view.insert_session_mention(diri_notes::edit::Pos::new(last, 0), "s_codex", cx);
+    });
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(
+        text.contains("[@Codex: fix resize flicker](diri://session/s_codex)"),
+        "{text}"
+    );
+}
+
+#[gpui::test]
+fn the_link_panel_edits_links_through_its_own_field(cx: &mut gpui::TestAppContext) {
+    use diri_notes::edit::{Pos, Selection};
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update_in(cx, |view, window, cx| {
+        let intro = view
+            .editor
+            .blocks()
+            .iter()
+            .position(|b| b.text.starts_with("A rich"))
+            .unwrap();
+        let text = view.editor.block(intro).text.clone();
+        // 1. On an existing link: the panel offers to open or remove it.
+        let spec = text.find("the spec").unwrap();
+        view.editor.set_caret(Pos::new(intro, spec + 2));
+        view.link(&editor_view::Link, window, cx);
+        assert_eq!(
+            view.link_row_labels(),
+            ["open https://diri.sh/notes", "remove"]
+        );
+        // Typing goes to the field, not the note.
+        view.replace_text_in_range(None, "x.dev", window, cx);
+        assert_eq!(view.editor.block(intro).text, text);
+        assert_eq!(view.link_row_labels()[0], "apply https://x.dev");
+        // Remove is the last row.
+        view.apply_link_row(2, cx);
+        assert!(view.editor.link_at(Pos::new(intro, spec + 2)).is_none());
+
+        // 2. A selection linked by typing a bare domain.
+        let calm = text.find("calm").unwrap();
+        view.editor.set_selection(Selection {
+            anchor: Pos::new(intro, calm),
+            head: Pos::new(intro, calm + 4),
+        });
+        view.link(&editor_view::Link, window, cx);
+        for ch in "notion.so/acme/Calm-1f2e3d4c5b6a79881f2e3d4c5b6a7988".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+        view.apply_link_row(0, cx);
+
+        // 3. At a bare caret, a tool URL inserts its titled chip.
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(Pos::new(last, 0));
+        view.link(&editor_view::Link, window, cx);
+        for ch in "https://linear.app/acme/issue/GRO-9/pricing-page".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+        view.apply_link_row(0, cx);
+    });
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(text.contains("— see the spec."), "{text}");
+    assert!(
+        text.contains("[_calm_](https://notion.so/acme/Calm-1f2e3d4c5b6a79881f2e3d4c5b6a7988)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[GRO-9 Pricing page](https://linear.app/acme/issue/GRO-9/pricing-page)"),
+        "{text}"
+    );
+}
+
+/// A small bar chart, the kind of picture a PM pastes into a note.
+pub(crate) fn chart_png(width: u32, height: u32) -> Vec<u8> {
+    let bars = [0.35f32, 0.55, 0.48, 0.72, 0.9];
+    let image = image::RgbaImage::from_fn(width, height, |x, y| {
+        let slot = width / bars.len() as u32;
+        let bar = (x / slot) as usize;
+        let inset = slot / 5;
+        let top = height as f32 * (1.0 - bars[bar.min(bars.len() - 1)] * 0.85);
+        if x % slot > inset && x % slot < slot - inset && (y as f32) >= top {
+            image::Rgba([217, 119, 87, 255])
+        } else {
+            image::Rgba([246, 244, 239, 255])
+        }
+    });
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encode png");
+    bytes
+}
+
+#[gpui::test]
+fn pasted_and_dropped_pictures_become_image_blocks(cx: &mut gpui::TestAppContext) {
+    use diri_notes::doc::BlockKind;
+    let (dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    let png = chart_png(40, 20);
+    cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(
+        gpui::ImageFormat::Png,
+        png.clone(),
+    )));
+    let picture = dir.path().join("Q3 funnel.png");
+    std::fs::write(&picture, &png).unwrap();
+    let not_a_picture = dir.path().join("notes.txt");
+    std::fs::write(&not_a_picture, "hi").unwrap();
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        view.paste(&editor_view::Paste, window, cx);
+        // A Finder drop of the same bytes reuses the stored file.
+        let inserted =
+            view.insert_image_files(&[picture.clone(), not_a_picture.clone()], "drop", cx);
+        assert_eq!(inserted, 1, "only pictures are taken in");
+        let images: Vec<&diri_notes::doc::Block> = view
+            .editor
+            .blocks()
+            .iter()
+            .filter(|b| b.kind == BlockKind::Image)
+            .collect();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].src, images[1].src, "content-addressed");
+    });
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    let src = format!("assets/{id}/");
+    assert_eq!(text.matches(&format!("![]({src}")).count(), 2, "{text}");
+    let stored = std::fs::read_dir(store.dir().join("assets").join(&id))
+        .unwrap()
+        .count();
+    assert_eq!(stored, 1);
+}
+
+#[gpui::test]
+fn a_callout_glyph_cycles_its_tone(cx: &mut gpui::TestAppContext) {
+    use diri_notes::doc::{BlockKind, Tone};
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        view.replace_text_in_range(None, "/", window, cx);
+        for ch in "callout".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+        view.newline(&editor_view::Newline, window, cx);
+        for ch in "Budget is capped".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+        let block = view.editor.block(last).clone();
+        assert_eq!(block.kind, BlockKind::Callout(Tone::Note));
+        view.cycle_callout(block.id, cx);
+        view.cycle_callout(block.id, cx);
+        view.cycle_callout(block.id, cx);
+        assert_eq!(
+            view.editor.block(last).kind,
+            BlockKind::Callout(Tone::Warning)
+        );
+    });
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(
+        text.ends_with("> [!WARNING]\n> Budget is capped\n"),
+        "{text}"
+    );
+}
+
+/// A long, realistic note: sections of paragraphs with bold and links,
+/// to-dos, bullets with children, quotes, a code block, mention and tool
+/// chips, repeated to `blocks` blocks.
+pub(crate) fn big_note_markdown(blocks: usize) -> String {
+    let mut out = String::from("# Research log\n\n");
+    let mut count = 0;
+    let mut section = 0;
+    while count < blocks {
+        section += 1;
+        out.push_str(&format!("## Week {section}\n\n"));
+        out.push_str("Interviewed three **growth** leads about _activation_; notes in [the brief](https://www.notion.so/acme/Brief-1f2e3d4c5b6a79881f2e3d4c5b6a7988) and the [funnel sheet](https://docs.google.com/spreadsheets/d/1AbC/edit).\n\n");
+        out.push_str("- [ ] Follow up with [@Codex: fix resize flicker](diri://session/s_codex) on the export\n");
+        out.push_str("- [x] Ship the onboarding checklist `v2`\n");
+        out.push_str("- Retention is flat week over week\n  - but D7 improved for teams\n  - see [GRO-42](https://linear.app/acme/issue/GRO-42/launch-email)\n");
+        out.push_str("\n> Customers want the export to keep formatting.\n\n");
+        out.push_str("1. Draft the email\n2. Review with legal\n3. Schedule for Tuesday\n\n");
+        count += 12;
+        if section % 5 == 0 {
+            out.push_str("```\nSELECT week, count(*) FROM signups GROUP BY 1;\n```\n\n");
+            count += 1;
+        }
+    }
+    out
+}
+
+/// Measures the editor on a 2,000-block note: an idle re-render, one typed
+/// character, and one scroll step, each through a full frame.
+/// `DIRI_BENCH_BLOCKS` and `DIRI_BENCH_ITERATIONS` override the sizes.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "headless Metal render-cost bench for big notes; run explicitly"]
+fn big_note_render_cost() {
+    use gpui::{AppContext as _, HeadlessAppContext, px, size};
+    use std::time::{Duration, Instant};
+    let blocks: usize = std::env::var("DIRI_BENCH_BLOCKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let iterations: usize = std::env::var("DIRI_BENCH_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let platform = gpui_platform::current_platform(true);
+    let mut cx = HeadlessAppContext::with_platform(
+        platform.text_system(),
+        Arc::new(diri_ui::IconAssets),
+        gpui_platform::current_headless_renderer,
+    );
+    cx.update(|cx| crate::fonts::init(cx));
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(NoteStore::open(dir.path().join("notes")).unwrap());
+    let (_, doc) = markdown::parse(&big_note_markdown(blocks));
+    let actual = doc.blocks.len();
+    let (id, _) = store.create(doc, None).unwrap();
+    let runtime = Arc::new(StoreRuntime::inert());
+    let window = cx
+        .open_window(size(px(1240.0), px(780.0)), move |_, cx| {
+            cx.new(|cx| NotePane::with_store(runtime, Some(store), false, cx))
+        })
+        .unwrap();
+    let session = SessionId::new("s_note");
+    cx.update_window(window.into(), |root, window, cx| {
+        let pane = root.downcast::<NotePane>().unwrap();
+        pane.update(cx, |pane, cx| pane.show(&session, &id, window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let editor = cx
+        .update(|cx| {
+            window
+                .update(cx, |pane, _, _| pane.editor_for_test())
+                .ok()
+                .flatten()
+        })
+        .expect("editor");
+    let draw = |cx: &mut HeadlessAppContext| {
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+    };
+    draw(&mut cx);
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    // The debounced autosave, which runs while the user is typing.
+    let mut saves = Vec::new();
+    for i in 0..20 {
+        cx.update_window(window.into(), |root, window, cx| {
+            use gpui::EntityInputHandler as _;
+            editor.update(cx, |view, cx| {
+                view.replace_text_in_range(None, "s", window, cx)
+            });
+            let pane = root.downcast::<NotePane>().unwrap();
+            let start = Instant::now();
+            pane.update(cx, |pane, cx| pane.save_with(true, cx));
+            if i >= 2 {
+                saves.push(start.elapsed());
+            }
+        })
+        .unwrap();
+        // Let the background write land before the next save.
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(30));
+        cx.run_until_parked();
+    }
+    saves.sort();
+    eprintln!(
+        "notes-big autosave-main-thread: median_ms={:.2} max_ms={:.2}",
+        ms(saves[saves.len() / 2]),
+        ms(*saves.last().unwrap()),
+    );
+    // The same save as a flush, entirely on the main thread, for scale.
+    let mut flushes = Vec::new();
+    for i in 0..20 {
+        cx.update_window(window.into(), |root, window, cx| {
+            use gpui::EntityInputHandler as _;
+            editor.update(cx, |view, cx| {
+                view.replace_text_in_range(None, "f", window, cx)
+            });
+            let pane = root.downcast::<NotePane>().unwrap();
+            let start = Instant::now();
+            pane.update(cx, |pane, cx| pane.save(cx));
+            if i >= 2 {
+                flushes.push(start.elapsed());
+            }
+        })
+        .unwrap();
+    }
+    flushes.sort();
+    eprintln!(
+        "notes-big flush-save-main-thread: median_ms={:.2} max_ms={:.2}",
+        ms(flushes[flushes.len() / 2]),
+        ms(*flushes.last().unwrap()),
+    );
+    for case in ["idle", "type", "scroll"] {
+        let mut samples = Vec::with_capacity(iterations);
+        for i in 0..iterations + 5 {
+            let start = Instant::now();
+            cx.update_window(window.into(), |_, window, cx| {
+                editor.update(cx, |view, cx| match case {
+                    "type" => {
+                        use gpui::EntityInputHandler as _;
+                        if i == 0 {
+                            view.editor
+                                .set_caret(diri_notes::edit::Pos::new(actual / 2, 0));
+                        }
+                        view.replace_text_in_range(None, "a", window, cx);
+                    }
+                    "scroll" => view.scroll_by_for_test(px(-40.0), cx),
+                    _ => cx.notify(),
+                });
+            })
+            .unwrap();
+            draw(&mut cx);
+            if i >= 5 {
+                samples.push(start.elapsed());
+            }
+        }
+        samples.sort();
+        eprintln!(
+            "notes-big {case}: blocks={actual} frames={iterations} median_ms={:.2} p90_ms={:.2} max_ms={:.2}",
+            ms(samples[samples.len() / 2]),
+            ms(samples[samples.len() * 9 / 10]),
+            ms(*samples.last().unwrap()),
+        );
+    }
+}
+
+#[gpui::test]
+fn autosave_writes_off_the_main_thread_and_keeps_the_file_current(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        for ch in "typed".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+    });
+    pane.update(cx, |pane, cx| pane.save_with(true, cx));
+    cx.run_until_parked();
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(text.trim_end().ends_with("typed"), "{text}");
+    pane.read_with(cx, |pane, _| assert!(pane.error.is_none()));
+}
+
+#[gpui::test]
+fn the_caret_stops_blinking_without_focus(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store);
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    // Focused: typing restarts the blink, and it keeps going.
+    editor.update_in(cx, |view, window, cx| {
+        window.focus(&view.focus_handle(cx), cx);
+        view.replace_text_in_range(None, "a", window, cx);
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    editor.read_with(cx, |view, _| assert!(view.is_blinking()));
+    // Focus elsewhere: the loop ends instead of waking the window forever.
+    pane.update_in(cx, |pane, window, cx| {
+        let other = cx.focus_handle();
+        window.focus(&other, cx);
+        let _ = pane;
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    editor.read_with(cx, |view, _| assert!(!view.is_blinking()));
+}
+
+#[gpui::test]
+fn a_background_autosave_merges_an_outside_write_it_races(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        for ch in "mine".chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+    });
+    // An agent appends before the watcher has told the pane.
+    agent_appends(&store, &id, "- [ ] added by an agent");
+    pane.update(cx, |pane, cx| pane.save_with(true, cx));
+    cx.run_until_parked();
+    // The conflict merged the agent's line in and queued another save.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(text.contains("added by an agent"), "{text}");
+    assert!(text.contains("mine"), "{text}");
+}

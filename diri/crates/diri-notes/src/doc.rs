@@ -26,6 +26,59 @@ pub enum BlockKind {
     Quote,
     Code,
     Divider,
+    /// A picture. `Block::src` is its path (relative to the notes folder) or
+    /// URL; `text` is its alt text, which the editor never lays out.
+    Image,
+    /// A highlighted aside, stored as a GitHub-style alert (`> [!NOTE]`).
+    Callout(Tone),
+}
+
+/// A callout's kind, GitHub's alert set: each has a glyph and a tint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tone {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl Tone {
+    pub const ALL: [Self; 5] = [
+        Self::Note,
+        Self::Tip,
+        Self::Important,
+        Self::Warning,
+        Self::Caution,
+    ];
+
+    /// The alert tag Markdown stores: `NOTE` in `> [!NOTE]`.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Note => "NOTE",
+            Self::Tip => "TIP",
+            Self::Important => "IMPORTANT",
+            Self::Warning => "WARNING",
+            Self::Caution => "CAUTION",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Note => "Note",
+            Self::Tip => "Tip",
+            Self::Important => "Important",
+            Self::Warning => "Warning",
+            Self::Caution => "Caution",
+        }
+    }
+
+    /// Reads a tag case-insensitively, as GitHub and Obsidian both do.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|tone| tone.tag().eq_ignore_ascii_case(tag))
+    }
 }
 
 impl BlockKind {
@@ -39,7 +92,12 @@ impl BlockKind {
     }
 
     pub fn has_text(self) -> bool {
-        !matches!(self, Self::Divider)
+        !self.is_atomic()
+    }
+
+    /// Blocks the caret can select but not type into: a divider, an image.
+    pub fn is_atomic(self) -> bool {
+        matches!(self, Self::Divider | Self::Image)
     }
 }
 
@@ -81,6 +139,8 @@ pub struct Block {
     pub text: String,
     /// Sorted by start, non-empty, merged per style.
     pub marks: Vec<Mark>,
+    /// An image's path or URL; empty for every other kind.
+    pub src: String,
 }
 
 pub const MAX_INDENT: u8 = 6;
@@ -93,6 +153,15 @@ impl Block {
             indent: 0,
             text: text.into(),
             marks: Vec::new(),
+            src: String::new(),
+        }
+    }
+
+    /// An image block: `src` is a path relative to the notes folder or a URL.
+    pub fn image(id: BlockId, src: impl Into<String>, alt: impl Into<String>) -> Self {
+        Self {
+            src: src.into(),
+            ..Self::new(id, BlockKind::Image, alt)
         }
     }
 
@@ -264,6 +333,7 @@ impl Block {
             indent: if kind.is_list() { self.indent } else { 0 },
             text: tail_text,
             marks: tail_marks,
+            src: String::new(),
         };
         tail.normalize();
         tail
@@ -293,6 +363,9 @@ impl Block {
         if matches!(kind, BlockKind::Divider) {
             self.text.clear();
             self.marks.clear();
+        }
+        if kind != BlockKind::Image {
+            self.src.clear();
         }
     }
 
@@ -429,7 +502,11 @@ impl Document {
         self.title == other.title
             && self.blocks.len() == other.blocks.len()
             && self.blocks.iter().zip(&other.blocks).all(|(a, b)| {
-                a.kind == b.kind && a.indent == b.indent && a.text == b.text && a.marks == b.marks
+                a.kind == b.kind
+                    && a.indent == b.indent
+                    && a.text == b.text
+                    && a.marks == b.marks
+                    && a.src == b.src
             })
     }
 }
