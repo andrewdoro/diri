@@ -11719,6 +11719,31 @@ mod tests {
                             terminal.updated_at = diri_proto::DateMillis(now);
                             store.upsert_session(terminal);
                         }
+                        // And one whose script stopped at a question, which
+                        // the Engine flags as it flags an Agent's prompt.
+                        let mut asking = base.clone();
+                        asking.id = SessionId::new("preview-term-deploy");
+                        asking.title = "deploy".into();
+                        asking.title_source = diri_proto::TitleSource::TerminalTitle;
+                        asking.terminal_cwd = Some(format!("{root}/infra"));
+                        asking.status = diri_proto::SessionStatus::NeedsInput(
+                            diri_proto::NeedsInputKind::Question,
+                        );
+                        asking.needs_input = Some(diri_proto::NeedsInputDetail {
+                            kind: diri_proto::NeedsInputKind::Question,
+                            source: diri_proto::NeedsInputSource::TerminalLine,
+                            tool_name: None,
+                            summary: "Deploy to production? [y/N]".into(),
+                            prompt_excerpt: Some("Deploy to production? [y/N]".into()),
+                            options: None,
+                            risk_hint: diri_proto::RiskHint::Neutral,
+                            occurred_at: diri_proto::DateMillis(now),
+                            secret: false,
+                        });
+                        asking.foreground_agent = None;
+                        asking.listening_ports = None;
+                        asking.updated_at = diri_proto::DateMillis(now);
+                        store.upsert_session(asking);
                     }
                     store
                         .update_preferences(|prefs| {

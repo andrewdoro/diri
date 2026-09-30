@@ -95,6 +95,15 @@ impl HolderClient {
             .ok_or_else(|| HolderError::Transport("stat response omitted stat".into()))
     }
 
+    /// [`Self::stat`], also asking whether the shell's job waits on a line.
+    pub fn stat_with_line_probe(&self) -> HolderResult<HolderStat> {
+        let mut request = HolderRequest::op(HolderOperation::Stat);
+        request.line_probe = Some(true);
+        self.request(&request)?
+            .stat
+            .ok_or_else(|| HolderError::Transport("stat response omitted stat".into()))
+    }
+
     /// On-demand inspection shares one caller deadline across connection,
     /// write, partial reads and verification. No existing input/stat loop uses
     /// this stronger request path implicitly.

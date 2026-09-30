@@ -2750,6 +2750,7 @@ impl Session {
                     SampleHost::Local,
                 );
                 record_secret_input(&self.shared, reading_secret);
+                probe_direct_line_wait(&self.shared, pty);
             }
             Transport::Held(client) => {
                 sample_held_pty_facts(&self.shared, client, &self.manifest_id);
@@ -3414,7 +3415,13 @@ fn sample_held_pty_facts(
         record_secret_input(shared, false);
         return None;
     }
-    let stat = client.stat().ok()?;
+    let probe = shell && line_probe_due(shared) == Some(true);
+    let stat = if probe {
+        client.stat_with_line_probe()
+    } else {
+        client.stat()
+    }
+    .ok()?;
     if shell {
         shared.child_pid.store(stat.child_pid, Ordering::SeqCst);
         apply_foreground_sample(
@@ -3427,7 +3434,65 @@ fn sample_held_pty_facts(
     }
     // A Holder that predates the field omits it: not known to be secret.
     record_secret_input(shared, stat.secret_input == Some(true));
+    if shell {
+        match line_probe_due(shared) {
+            // Asked, and a Holder that predates the probe did not answer.
+            Some(true) if probe => {
+                if let Some(awaiting) = stat.awaiting_line {
+                    apply_line_wait(shared, awaiting);
+                }
+            }
+            Some(false) => apply_line_wait(shared, false),
+            _ => {}
+        }
+    }
     Some(stat.alive)
+}
+
+/// Whether a shell's reducer wants to know if its job waits on a line:
+/// `Some(true)` to ask the PTY owner, `Some(false)` when the answer is
+/// already "no" (a full-screen program owns the terminal), `None` when
+/// nothing needs asking.
+fn line_probe_due(shared: &Shared) -> Option<bool> {
+    let wanted = shared
+        .reducer
+        .lock()
+        .expect("reducer")
+        .wants_line_probe(SystemTime::now());
+    wanted.then(|| !shared.screen.lock().expect("screen").is_alt_screen())
+}
+
+/// Asks a directly owned PTY whether the shell's job waits on a line, when
+/// the reducer wants to know.
+fn probe_direct_line_wait(shared: &Shared, pty: &Mutex<Pty>) {
+    match line_probe_due(shared) {
+        Some(true) => {
+            let awaiting = pty.lock().is_ok_and(|pty| pty.job_awaits_line());
+            apply_line_wait(shared, awaiting);
+        }
+        Some(false) => apply_line_wait(shared, false),
+        None => {}
+    }
+}
+
+/// Folds a line-wait sample into the shell's status, with the question as
+/// the screen shows it. Nothing is read from the screen while echo is off.
+fn apply_line_wait(shared: &Shared, awaiting: bool) {
+    let prompt = awaiting.then(|| {
+        let secret = shared.secret_input.load(Ordering::SeqCst);
+        let line = (!secret).then(|| {
+            let screen = shared.screen.lock().expect("screen");
+            let (_, row, _) = screen.cursor();
+            screen.row_text(usize::from(row))
+        });
+        crate::status::TerminalPrompt { line, secret }
+    });
+    let outcome = shared
+        .reducer
+        .lock()
+        .expect("reducer")
+        .reduce(StatusSignal::TerminalLine(prompt), SystemTime::now());
+    apply(shared, &outcome);
 }
 
 /// A line-mode password prompt cannot coexist with the alternate screen or
@@ -4372,6 +4437,7 @@ fn pump(
             // takes is what notices.
             let reading_secret = pty.lock().is_ok_and(|pty| pty.secret_input());
             record_secret_input(&shared, reading_secret);
+            probe_direct_line_wait(&shared, &pty);
         }
     }
 

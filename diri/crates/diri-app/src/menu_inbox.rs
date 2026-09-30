@@ -334,6 +334,7 @@ mod tests {
                 prompt_excerpt: None,
                 options: None,
                 risk_hint: RiskHint::Neutral,
+                secret: false,
                 occurred_at: DateMillis(1.0),
             });
         }

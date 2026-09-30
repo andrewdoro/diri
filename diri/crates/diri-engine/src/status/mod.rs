@@ -48,6 +48,10 @@ pub struct ReducerTiming {
     pub startup_grace: Duration,
     pub blocker_clear_scans: u32,
     pub staleness_timeout: Duration,
+    /// How long a shell job's terminal must have been still before a line
+    /// read counts as a question. A prompt is printed and then waits; a job
+    /// that reads between bursts of output is not asking anything.
+    pub line_prompt_settle: Duration,
 }
 
 impl Default for ReducerTiming {
@@ -59,6 +63,7 @@ impl Default for ReducerTiming {
             startup_grace: Duration::from_secs(3),
             blocker_clear_scans: 2,
             staleness_timeout: Duration::from_secs(60),
+            line_prompt_settle: Duration::from_millis(750),
         }
     }
 }
@@ -116,8 +121,22 @@ pub enum StatusSignal {
     },
     /// Transport failed without evidence that the Agent process exited.
     TransportUnavailable,
+    /// Whether a shell's foreground job is blocked reading a line from the
+    /// terminal (`Proceed? [y/N]`, `Password:`, a script's `read`), sampled
+    /// from the PTY owner. `None` when it is not.
+    TerminalLine(Option<TerminalPrompt>),
     /// Periodic tick driving the debounce timers.
     Tick,
+}
+
+/// What a shell job waiting on a line shows, for the needs-input detail.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalPrompt {
+    /// The cursor's row up to the cursor: the question as printed. Always
+    /// `None` while echo is off.
+    pub line: Option<String>,
+    /// Echo is off: a password is being typed.
+    pub secret: bool,
 }
 
 /// What reducing one signal produced.
@@ -134,6 +153,9 @@ pub struct ReducerOutcome {
     /// Set when a turn just completed.
     pub turn_completed: bool,
     pub attention_changed: bool,
+    /// A shell job stopped waiting on its line: answered, interrupted or
+    /// gone. Settles the request it raised, which no turn completion will.
+    pub line_prompt_ended: bool,
 }
 
 /// The mutable belief and debounce tracking for one session.
@@ -183,6 +205,9 @@ struct InternalState {
     /// the transcript shows work again — cursor-agent does not update the
     /// title to Ready at end of turn.
     hold_idle_against_screen: bool,
+    /// The last output or keystroke on a shell's terminal, which a line
+    /// read must outlast by [`ReducerTiming::line_prompt_settle`].
+    terminal_active_at: SystemTime,
 }
 
 impl InternalState {
@@ -208,6 +233,7 @@ impl InternalState {
             responding_since: None,
             pending_needs_input: None,
             hold_idle_against_screen: false,
+            terminal_active_at: spawned_at,
         }
     }
 }
@@ -316,6 +342,8 @@ impl StatusReducer {
                 self.manifest_version.take(),
             ));
         }
+        // A shell question the Agent's arrival interrupted is over.
+        outcome.line_prompt_ended = matches!(self.status, SessionStatus::NeedsInput(_));
         self.authority = Authority::ScreenPrimary;
         self.manifest_id = Some(manifest_id.to_owned());
         self.manifest_version = manifest_version.map(str::to_owned);
@@ -502,13 +530,14 @@ impl StatusReducer {
             | StatusSignal::UserKeystroke
             | StatusSignal::UserSubmission
             | StatusSignal::ForegroundJob { .. }
+            | StatusSignal::TerminalLine(_)
             | StatusSignal::ProcessExit { .. }
             | StatusSignal::TransportUnavailable => None,
         };
 
         match signal {
             StatusSignal::ProcessExit { .. } | StatusSignal::TransportUnavailable => {} // handled above
-            StatusSignal::ForegroundJob { .. } => {}
+            StatusSignal::ForegroundJob { .. } | StatusSignal::TerminalLine(_) => {}
             StatusSignal::PtyOutputActivity => {
                 // Bytes alone do not establish work: late terminal repaints,
                 // title updates and status lines continue after a turn ends.
@@ -672,10 +701,39 @@ impl StatusReducer {
         match signal {
             StatusSignal::ForegroundJob { running } if self.tracks_shell_jobs() => {
                 self.state.last_signal_at = now;
+                if running && matches!(self.status, SessionStatus::NeedsInput(_)) {
+                    // The job is still there, still waiting on its line.
+                    return;
+                }
+                outcome.line_prompt_ended = matches!(self.status, SessionStatus::NeedsInput(_));
                 self.apply_shell_job(running, now, outcome);
+            }
+            StatusSignal::TerminalLine(prompt) if self.tracks_shell_jobs() => {
+                self.apply_line_prompt(prompt, now, outcome);
+            }
+            StatusSignal::UserKeystroke | StatusSignal::UserSubmission
+                if self.tracks_shell_jobs() =>
+            {
+                self.state.terminal_active_at = now;
+                // The user is answering. The request it raised stays open
+                // until the job stops reading (or Enter is pressed, which the
+                // attention lifecycle sees), so a pause mid-answer marks the
+                // terminal again without announcing a second question.
+                if matches!(self.status, SessionStatus::NeedsInput(_)) {
+                    self.state.pending_needs_input = None;
+                    self.set_status(SessionStatus::Working, outcome);
+                    self.publish_evidence(
+                        StatusEvidenceSource::ProcessLiveness,
+                        None,
+                        Some(StatusFallbackReason::ProcessOnly),
+                        now,
+                        outcome,
+                    );
+                }
             }
             StatusSignal::PtyOutputActivity => {
                 self.state.last_signal_at = now;
+                self.state.terminal_active_at = now;
                 if self.tracks_shell_jobs() {
                     // Prompt output is not a job. Drop Starting so an older
                     // Helper that never sends ForegroundJob cannot sit on
@@ -701,6 +759,83 @@ impl StatusReducer {
 
     fn tracks_shell_jobs(&self) -> bool {
         self.manifest_id.as_deref() == Some("shell")
+    }
+
+    /// Whether the session should ask its PTY owner if the shell's job is
+    /// waiting on a line: a job has run with its terminal still for the
+    /// settle, or the question it asked is still up. Asking costs a walk of
+    /// the job's processes, so a streaming or idle terminal never asks.
+    pub fn wants_line_probe(&self, now: SystemTime) -> bool {
+        if !self.tracks_shell_jobs() || self.lent_from.is_some() {
+            return false;
+        }
+        match self.status {
+            SessionStatus::Working => {
+                now.duration_since(self.state.terminal_active_at)
+                    .unwrap_or_default()
+                    >= self.timing.line_prompt_settle
+            }
+            SessionStatus::NeedsInput(_) => true,
+            _ => false,
+        }
+    }
+
+    fn apply_line_prompt(
+        &mut self,
+        prompt: Option<TerminalPrompt>,
+        now: SystemTime,
+        outcome: &mut ReducerOutcome,
+    ) {
+        let waiting = matches!(self.status, SessionStatus::NeedsInput(_));
+        let Some(prompt) = prompt else {
+            if waiting {
+                // Read, interrupted, or timed out without a keystroke here.
+                outcome.line_prompt_ended = true;
+                self.state.pending_needs_input = None;
+                self.set_status(SessionStatus::Working, outcome);
+                self.publish_evidence(
+                    StatusEvidenceSource::ProcessLiveness,
+                    None,
+                    Some(StatusFallbackReason::ProcessOnly),
+                    now,
+                    outcome,
+                );
+            }
+            return;
+        };
+        let settled = now
+            .duration_since(self.state.terminal_active_at)
+            .unwrap_or_default()
+            >= self.timing.line_prompt_settle;
+        let asking = self.status == SessionStatus::Working && settled;
+        if !(waiting || asking) {
+            return;
+        }
+        let detail = line_prompt_detail(&prompt, now);
+        // Occurrence time is not news: re-sampling the same question must
+        // not rewrite the record every tick.
+        let unchanged = self
+            .state
+            .pending_needs_input
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.summary == detail.summary
+                    && pending.prompt_excerpt == detail.prompt_excerpt
+                    && pending.secret == detail.secret
+            });
+        if waiting && unchanged {
+            return;
+        }
+        self.state.pending_needs_input = Some(detail.clone());
+        outcome.needs_input = Some(detail);
+        self.set_status(SessionStatus::NeedsInput(NeedsInputKind::Question), outcome);
+        self.publish_evidence(
+            StatusEvidenceSource::ProcessLiveness,
+            None,
+            Some(StatusFallbackReason::ProcessOnly),
+            now,
+            outcome,
+        );
     }
 
     fn apply_shell_job(&mut self, running: bool, now: SystemTime, outcome: &mut ReducerOutcome) {
@@ -941,6 +1076,7 @@ impl StatusReducer {
                     prompt_excerpt: None,
                     options: None,
                     risk_hint: classify_risk(&text),
+                    secret: false,
                     occurred_at: now.into(),
                 };
                 self.state.pending_needs_input = Some(detail.clone());
@@ -975,6 +1111,7 @@ impl StatusReducer {
                     prompt_excerpt: None,
                     options: None,
                     risk_hint: classify_risk(&text),
+                    secret: false,
                     occurred_at: now.into(),
                 };
                 self.state.pending_needs_input = Some(detail.clone());
@@ -1210,7 +1347,46 @@ fn permission_detail(
         prompt_excerpt: input_summary.as_deref().map(redact),
         options: None,
         risk_hint: classify_risk(&risk_source),
+        secret: false,
         occurred_at: now.into(),
+    }
+}
+
+/// The longest question a detail carries; the rest of a very long prompt
+/// line is not what a notification needs to show.
+const LINE_PROMPT_MAX_CHARS: usize = 160;
+
+fn line_prompt_detail(prompt: &TerminalPrompt, now: SystemTime) -> NeedsInputDetail {
+    let line = prompt
+        .line
+        .as_deref()
+        .filter(|_| !prompt.secret)
+        .map(|line| {
+            let line = redact(line.trim());
+            match line.char_indices().nth(LINE_PROMPT_MAX_CHARS) {
+                Some((end, _)) => format!("{}…", &line[..end]),
+                None => line,
+            }
+        })
+        .filter(|line| !line.is_empty());
+    let summary = if prompt.secret {
+        "Waiting for a password".to_owned()
+    } else {
+        line.clone()
+            .unwrap_or_else(|| "Waiting for input".to_owned())
+    };
+    NeedsInputDetail {
+        kind: NeedsInputKind::Question,
+        source: NeedsInputSource::TerminalLine,
+        tool_name: None,
+        risk_hint: line
+            .as_deref()
+            .map_or(diri_proto::RiskHint::Neutral, classify_risk),
+        summary,
+        prompt_excerpt: line,
+        options: None,
+        occurred_at: now.into(),
+        secret: prompt.secret,
     }
 }
 
@@ -1239,6 +1415,7 @@ fn screen_detail(
         prompt_excerpt: observation.prompt_excerpt.clone(),
         options: observation.options.clone(),
         risk_hint: classify_risk(&risk_source),
+        secret: false,
         occurred_at: now.into(),
     }
 }

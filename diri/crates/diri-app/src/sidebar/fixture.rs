@@ -236,6 +236,7 @@ tokio::spawn(async move { clone_repository(request).await });
             prompt_excerpt: None,
             options: None,
             risk_hint: RiskHint::Network,
+            secret: false,
             occurred_at: DateMillis(now - 45_000.0),
         })
         .into();
@@ -320,6 +321,7 @@ tokio::spawn(async move { clone_repository(request).await });
             prompt_excerpt: None,
             options: Some(vec!["Editorial".into(), "Compact".into()]),
             risk_hint: RiskHint::Neutral,
+            secret: false,
             occurred_at: DateMillis(now - 120_000.0),
         })
         .into();

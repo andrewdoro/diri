@@ -315,11 +315,14 @@ string_enum! {
 }
 
 string_enum! {
+    /// Where a needs-input detail came from. `TerminalLine` is a terminal's
+    /// foreground job blocked reading a line.
     pub enum NeedsInputSource {
         ClaudePermissionHook => "claudePermissionHook",
         ClaudeNotificationHook => "claudeNotificationHook",
         CodexNotify => "codexNotify",
         ScreenScrape => "screenScrape",
+        TerminalLine => "terminalLine",
     }
 }
 
@@ -390,6 +393,11 @@ pub struct NeedsInputDetail {
     pub options: Option<Vec<String>>,
     pub risk_hint: RiskHint,
     pub occurred_at: DateMillis,
+    /// The prompt reads with echo off, so it is asking for a password: the
+    /// detail carries no terminal text, and no reply may be typed into it
+    /// from a notification, where the answer would show in plain text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret: bool,
 }
 
 string_enum! {

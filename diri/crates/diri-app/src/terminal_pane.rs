@@ -9453,6 +9453,7 @@ mod tests {
             prompt_excerpt: None,
             options: None,
             risk_hint: RiskHint::Destructive,
+            secret: false,
             occurred_at: DateMillis(2.0),
         });
         assert_eq!(
