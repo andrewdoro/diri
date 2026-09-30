@@ -7,6 +7,24 @@ use diri_proto::workspace::{
 use groups::{WorkspaceRowKey, project_groups};
 use project_agents::{ProjectAgentOpen, first_agent, focused_agent};
 
+/// The Engine inserts a moved tab after taking it out, so a destination
+/// index counts the destination's tabs without the moved one. Dropping a tab
+/// on its own workspace's header asks for "after the last tab", which is one
+/// past the end once the tab is out; the Engine rightly rejects that as
+/// `invalid_workspace`, so the drop sends the last valid slot instead.
+fn tab_move_index(
+    snapshot: &diri_proto::workspace::WorkspaceSnapshot,
+    tab: &TabId,
+    destination: &WorkspaceId,
+    index: usize,
+) -> usize {
+    let Some(workspace) = snapshot.workspaces.iter().find(|w| &w.id == destination) else {
+        return index;
+    };
+    let remaining = workspace.tabs.iter().filter(|t| &t.id != tab).count();
+    index.min(remaining)
+}
+
 #[derive(Clone)]
 pub(super) struct DraggedWorkspaceTab {
     tab: TabId,
@@ -255,12 +273,12 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         let mut store = self.store.write().expect("store");
-        if store
+        let index = store
             .workspace_catalog()
             .snapshot()
-            .map(|snapshot| snapshot.revision)
-            == Some(dragged.revision)
-        {
+            .filter(|snapshot| snapshot.revision == dragged.revision)
+            .map(|snapshot| tab_move_index(snapshot, &dragged.tab, &workspace, index));
+        if let Some(index) = index {
             store.edit_workspace(WorkspaceMutation::MoveTab {
                 tab_id: dragged.tab.clone(),
                 workspace_id: workspace,
@@ -1468,5 +1486,46 @@ impl Sidebar {
             .iter()
             .find(|tab| Some(&tab.id) == workspace.selected_tab.as_ref())?;
         find(&tab.layout, &tab.focused_pane)
+    }
+}
+
+#[cfg(test)]
+mod tab_move_tests {
+    use super::*;
+    use diri_proto::workspace::{LayoutNode, WorkspaceSnapshot, WorkspaceTab};
+
+    fn tab(id: &str) -> WorkspaceTab {
+        WorkspaceTab {
+            id: TabId::new(id),
+            title: None,
+            layout: LayoutNode::Pane {
+                id: PaneId::new(format!("pane-{id}")),
+                session_id: SessionId::new(format!("session-{id}")),
+            },
+            focused_pane: PaneId::new(format!("pane-{id}")),
+            zoomed_pane: None,
+        }
+    }
+
+    #[test]
+    fn a_tab_dropped_on_its_own_workspace_header_stays_in_range() {
+        let workspace = |id: &str, tabs: &[&str]| WorkspaceRecord {
+            project_id: None,
+            id: WorkspaceId::new(id),
+            name: id.into(),
+            tabs: tabs.iter().map(|id| tab(id)).collect(),
+            selected_tab: tabs.first().map(|id| TabId::new(*id)),
+        };
+        let snapshot = WorkspaceSnapshot {
+            workspaces: vec![workspace("one", &["a", "b", "c"]), workspace("two", &["d"])],
+            ..Default::default()
+        };
+        let (one, two) = (WorkspaceId::new("one"), WorkspaceId::new("two"));
+        // The header drop asks for `tabs.len()`: one past the end once the
+        // moved tab is out, which the Engine rejects as invalid_workspace.
+        assert_eq!(tab_move_index(&snapshot, &TabId::new("a"), &one, 3), 2);
+        assert_eq!(tab_move_index(&snapshot, &TabId::new("a"), &one, 1), 1);
+        // Into another workspace every slot up to its end is valid.
+        assert_eq!(tab_move_index(&snapshot, &TabId::new("a"), &two, 1), 1);
     }
 }
