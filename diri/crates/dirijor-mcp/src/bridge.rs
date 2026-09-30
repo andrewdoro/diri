@@ -233,6 +233,7 @@ impl Bridge {
             host: optional_string(arguments, "host"),
             account_profile_id: None,
             same_repo_as: None,
+            start_directory: None,
         };
         let params = serde_json::to_value(params).map_err(|error| error.to_string())?;
         if !tracked {
@@ -1342,6 +1343,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
             scheduled_run: None,
         }
     }

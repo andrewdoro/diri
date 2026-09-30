@@ -602,6 +602,7 @@ pub(crate) mod plan {
                 initial_rows: None,
                 host: None,
                 same_repo_as: None,
+                start_directory: None,
             },
             catch_up_window_ms: if catch_up {
                 DEFAULT_CATCH_UP_WINDOW_MS

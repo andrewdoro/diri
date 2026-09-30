@@ -530,12 +530,30 @@ pub fn display_title_str(session: &SessionRecord) -> &str {
     if session.title_source == TitleSource::Placeholder {
         if matches!(session.status, SessionStatus::Exited(_)) {
             "Ended"
+        } else if session.kind == diri_proto::AgentKind::SHELL {
+            // Until the Engine names it after its program or folder, and for
+            // a remote shell, which reports neither.
+            "Terminal"
         } else {
             "Untitled"
         }
     } else {
         &session.title
     }
+}
+
+/// Where a terminal is, for the hover on its row and tab: the directory its
+/// prompt is in (`~/fun/diri/web`), or where a remote one was opened
+/// (`forge: ~/code`). `None` for Agents, whose title already says enough.
+pub fn terminal_location(session: &SessionRecord) -> Option<String> {
+    if session.kind != diri_proto::AgentKind::SHELL {
+        return None;
+    }
+    let path = session.terminal_cwd.as_deref().unwrap_or(&session.cwd);
+    Some(match &session.host {
+        Some(host) => format!("{host}: {path}"),
+        None => crate::quick_open::home_relative(std::path::Path::new(path)),
+    })
 }
 
 fn fuzzy_matches(query: &str, candidate: &str) -> bool {
@@ -597,6 +615,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
             scheduled_run: None,
         }
     }

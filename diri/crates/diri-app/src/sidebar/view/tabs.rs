@@ -551,8 +551,15 @@ impl Sidebar {
             Some(settling) => settling.into_any_element(),
             None => title_fade(title.clone()).into_any_element(),
         };
+        let location = props.location.clone();
         let tab = session_tab_face(mark, face, active, colors)
             .id(SharedString::from(format!("horizontal-tab-{}", id.0)))
+            .when_some(location, |tab, place| {
+                tab.warm_tooltip(move |_, cx| {
+                    cx.new(|_| crate::palette_chrome::PaletteTooltip(place.clone(), colors))
+                        .into()
+                })
+            })
             .debug_selector(move || format!("horizontal-tab-{}", debug_id))
             .role(Role::Tab)
             .aria_label(title.clone())

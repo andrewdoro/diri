@@ -4579,6 +4579,11 @@ impl UtilitySurfaces {
                         .child(toggle_row("Review command pastes", "Ask before pasting multiple lines into a shell or text with control characters.", self.prefs.terminal_paste_protection, "terminal_paste_protection", colors, cx, |this,cx| {
                             let enabled = !this.prefs.terminal_paste_protection;
                             this.update_prefs(move |prefs| prefs.terminal_paste_protection = enabled); cx.notify();
+                        }))
+                        .child(appearance_divider(colors))
+                        .child(toggle_row("Open new terminals in the last folder", "Start where your last terminal was, instead of the project folder.", self.prefs.terminal_follows_last_directory, "terminal_follows_last_directory", colors, cx, |this,cx| {
+                            let enabled = !this.prefs.terminal_follows_last_directory;
+                            this.update_prefs(move |prefs| prefs.terminal_follows_last_directory = enabled); cx.notify();
                         })),
                 ),
             colors,

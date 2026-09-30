@@ -815,8 +815,15 @@ pub struct SessionRecord {
     pub pull_requests: Option<Vec<PullRequestStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub listening_ports: Option<Vec<PortInfo>>,
+    /// An Agent recognised in a shell's foreground, started there by hand.
+    /// It borrows the Agent's icon and status reading, not its identity:
+    /// `kind` stays `shell`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreground_agent: Option<AgentKind>,
+    /// A local shell's live working directory, which `cd` moves. `cwd` stays
+    /// the launch directory, which owns the Session's project and worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_cwd: Option<String>,
     /// Present when a Diri schedule opened this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_run: Option<crate::schedules::ScheduledRunInfo>,

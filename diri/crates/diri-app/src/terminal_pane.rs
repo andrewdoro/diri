@@ -4259,6 +4259,12 @@ impl TerminalPane {
                                 .select(id_for_focus.clone());
                         }
                     }
+                    // `focus` claims only in an active window, and the click
+                    // that activates one lands before GPUI hears the window
+                    // became key (macOS delivers that callback on a later
+                    // turn). A press is the "focus it here" the passive notice
+                    // asks for, so it takes the lease itself.
+                    this.claim_selected_control();
                     this.handle_pointer_down(event, window, cx);
                 }),
             )
@@ -7367,6 +7373,35 @@ mod tests {
         });
     }
 
+    /// macOS reports a window became key on a later turn than the click that
+    /// activated it, so that click reaches the pane while GPUI still calls
+    /// the window inactive, and focus alone does not claim the lease.
+    #[gpui::test]
+    fn the_click_that_activates_a_window_takes_the_lease(cx: &mut TestAppContext) {
+        let (pane, id, cx) = drop_target_pane(cx);
+        cx.deactivate_window();
+        pane.update_in(cx, |pane, window, cx| {
+            pane.focus(window, cx);
+            assert!(!window.is_window_active());
+            assert!(
+                !pane.residents[&id].attachment.is_controller(),
+                "inactive focus cannot claim"
+            );
+        });
+        cx.simulate_mouse_down(
+            gpui::point(px(200.0), px(150.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        pane.update_in(cx, |pane, window, _| {
+            assert!(!window.is_window_active(), "activation not delivered yet");
+            assert!(
+                pane.residents[&id].attachment.is_controller(),
+                "the press is the focus the passive notice asks for"
+            );
+        });
+    }
+
     /// A pane on a local session, filling a window, ready to take a drop.
     fn drop_target_pane(
         cx: &mut TestAppContext,
@@ -8185,6 +8220,10 @@ mod tests {
             let resident = pane.residents.get_mut(&id).unwrap();
             resident.attachment_state = AttachmentState::Live;
             resident.element.apply_damage(grid_frame(200, true));
+            // The pane a user searches is the one in control; a click on the
+            // bar would claim it otherwise, and that first owned measure is
+            // not a resize caused by Find.
+            resident.attachment.claim();
             cx.notify();
         });
         let surface = cx.debug_bounds("terminal-grid-surface").unwrap();

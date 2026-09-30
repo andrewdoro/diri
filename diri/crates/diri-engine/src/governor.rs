@@ -1027,6 +1027,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
             scheduled_run: None,
         }
     }

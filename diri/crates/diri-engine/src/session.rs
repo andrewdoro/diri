@@ -276,6 +276,13 @@ pub struct SessionView {
     pub title_source: Option<diri_proto::TitleSource>,
     /// Raw OSC title, kept separate so a captured prompt cannot hide a later name.
     pub terminal_title: Option<String>,
+    /// A local shell's foreground program name (`vim`, `claude`), never its
+    /// arguments. `None` at the prompt.
+    pub foreground_program: Option<String>,
+    /// The Agent manifest a shell's foreground program was recognised as.
+    pub foreground_agent: Option<String>,
+    /// A local shell's live working directory, which `cd` moves.
+    pub terminal_cwd: Option<String>,
     pub tail_offset: u64,
     pub exited: bool,
 }
@@ -407,7 +414,52 @@ struct Shared {
     agent_exit: Mutex<Option<i32>>,
     /// The latest keystroke whose echo the held pump has not published yet.
     echo_request: Mutex<Option<EchoRequest>>,
+    /// What a local shell is running and where it is. Stays empty for Agent
+    /// sessions and for remote shells, whose processes are not on this host.
+    foreground: Mutex<ForegroundProgram>,
+    /// Agents a shell recognises in its foreground, by the program name a
+    /// user types to start them. Empty for every session but a shell.
+    known_agents: Vec<KnownAgent>,
 }
+
+/// A shell's foreground program and live directory, as last sampled.
+#[derive(Default)]
+struct ForegroundProgram {
+    /// The foreground job's process group; `None` at the prompt.
+    group: Option<i32>,
+    group_seen_at: Option<Instant>,
+    /// The job's program name, read once per group.
+    name: Option<String>,
+    cwd: Option<String>,
+    cwd_read_at: Option<Instant>,
+    /// The Agent manifest the screen is read with while the reducer is lent.
+    read_as: Option<String>,
+}
+
+/// An Agent a shell can recognise in its foreground.
+struct KnownAgent {
+    binary: String,
+    manifest_id: String,
+    manifest_version: String,
+    /// Whether the manifest has screen rules to read the Agent's status by.
+    /// Without them the shell's own job tracking is the better answer.
+    reads_screen: bool,
+}
+
+/// How long a job holds the foreground before the tab is named after it.
+/// Tab titles animate when they change; `git status` or `ls` would otherwise
+/// flash their name and animate straight back to the folder's.
+const JOB_NAME_DELAY: Duration = Duration::from_millis(300);
+
+/// How long a new job's name is retried while its leader still carries the
+/// shell's own name, having forked but not yet exec'd. A job that really is
+/// the shell (`zsh` typed in zsh) stays unnamed after this.
+const JOB_NAME_SETTLE: Duration = Duration::from_secs(2);
+
+/// How often an idle shell's working directory is read again. `cd` moves no
+/// process group, so this is what notices it; a user cannot type a command
+/// and look at the tab faster than this.
+const SHELL_CWD_REFRESH: Duration = Duration::from_millis(500);
 
 struct RemoteGridState {
     reset_required: bool,
@@ -1927,6 +1979,17 @@ impl Session {
             .lock()
             .expect("prompt title")
             .clone();
+        let (foreground_program, foreground_agent, terminal_cwd) = {
+            let foreground = self.shared.foreground.lock().expect("foreground");
+            let agent = foreground.name.as_deref().and_then(|name| {
+                self.shared
+                    .known_agents
+                    .iter()
+                    .find(|agent| agent.binary == name)
+                    .map(|agent| agent.manifest_id.clone())
+            });
+            (foreground.name.clone(), agent, foreground.cwd.clone())
+        };
         let (title, title_source) = if let Some(title) = prompt_title {
             (Some(title), Some(diri_proto::TitleSource::FirstPrompt))
         } else {
@@ -1953,6 +2016,9 @@ impl Session {
             attention_state,
             id: self.shared.id.clone(),
             terminal_title,
+            foreground_program,
+            foreground_agent,
+            terminal_cwd,
             status: self.shared.status.lock().expect("status").clone(),
             status_evidence,
             needs_input: self.shared.needs_input.lock().expect("needs input").clone(),
@@ -2676,7 +2742,13 @@ impl Session {
                     let pty = pty.lock().expect("pty");
                     (pty.pid() as i32, pty.foreground_pgid(), pty.secret_input())
                 };
-                apply_foreground_sample(&self.shared, &self.manifest_id, child_pid, pgid);
+                apply_foreground_sample(
+                    &self.shared,
+                    &self.manifest_id,
+                    child_pid,
+                    pgid,
+                    SampleHost::Local,
+                );
                 record_secret_input(&self.shared, reading_secret);
             }
             Transport::Held(client) => {
@@ -3042,7 +3114,31 @@ fn new_shared(
         exit_recorded: AtomicBool::new(false),
         agent_exit: Mutex::new(None),
         echo_request: Mutex::new(None),
+        foreground: Mutex::new(ForegroundProgram::default()),
+        known_agents: if spec.manifest_id == "shell" {
+            known_agents(engine)
+        } else {
+            Vec::new()
+        },
     })
+}
+
+fn known_agents(engine: &ManifestEngine) -> Vec<KnownAgent> {
+    engine
+        .ids()
+        .into_iter()
+        .filter_map(|id| engine.manifest(id))
+        .filter(|manifest| !matches!(manifest.id.as_str(), "shell" | "generic"))
+        .filter_map(|manifest| {
+            let binary = manifest.agent.as_ref()?.binary.clone()?;
+            Some(KnownAgent {
+                binary,
+                manifest_id: manifest.id.clone(),
+                manifest_version: manifest.version.clone(),
+                reads_screen: !manifest.rules.is_empty(),
+            })
+        })
+        .collect()
 }
 
 /// Waits for a freshly launched holder and returns the exit-marker floor:
@@ -3196,11 +3292,20 @@ fn apply(shared: &Shared, outcome: &ReducerOutcome) {
     }
 }
 
+/// Where a foreground sample's process ids live. Only a local shell's can be
+/// inspected; a remote one names processes on another host.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SampleHost {
+    Local,
+    Remote,
+}
+
 fn apply_foreground_sample(
     shared: &Shared,
     manifest_id: &str,
     child_pid: i32,
     foreground_pgid: Option<i32>,
+    host: SampleHost,
 ) {
     if manifest_id != "shell" {
         return;
@@ -3208,12 +3313,85 @@ fn apply_foreground_sample(
     let Some(running) = crate::status::foreground_job_running(child_pid, foreground_pgid) else {
         return;
     };
-    let outcome = shared
-        .reducer
-        .lock()
-        .expect("reducer")
-        .reduce(StatusSignal::ForegroundJob { running }, SystemTime::now());
+    let agent = match host {
+        SampleHost::Local => {
+            observe_foreground_program(shared, child_pid, foreground_pgid, running)
+        }
+        SampleHost::Remote => None,
+    };
+    let now = SystemTime::now();
+    let outcome = {
+        let mut reducer = shared.reducer.lock().expect("reducer");
+        let outcome = match agent {
+            Some(agent) => {
+                reducer.lend_to_agent(&agent.manifest_id, Some(&agent.manifest_version), now)
+            }
+            None if reducer.foreground_agent().is_some() => reducer.return_from_agent(running, now),
+            None => reducer.reduce(StatusSignal::ForegroundJob { running }, now),
+        };
+        let read_as = reducer.foreground_agent().map(str::to_owned);
+        shared.foreground.lock().expect("foreground").read_as = read_as;
+        outcome
+    };
     apply(shared, &outcome);
+}
+
+/// Names a local shell's foreground job and reads its working directory,
+/// returning the Agent that job is when it is one whose screen can be read.
+///
+/// A job's name is read once per process group. A group seen before its
+/// leader has exec'd still carries the shell's own name; that read is not
+/// kept, so samples in the next [`JOB_NAME_SETTLE`] try again. Nothing is
+/// read until the job has lasted [`JOB_NAME_DELAY`].
+fn observe_foreground_program(
+    shared: &Shared,
+    child_pid: i32,
+    foreground_pgid: Option<i32>,
+    running: bool,
+) -> Option<&KnownAgent> {
+    let job = foreground_pgid.filter(|_| running);
+    let mut changed = false;
+    let mut foreground = shared.foreground.lock().expect("foreground");
+    if foreground.group != job {
+        foreground.group = job;
+        foreground.group_seen_at = Some(Instant::now());
+        changed |= foreground.name.take().is_some();
+    }
+    let naming = foreground.name.is_none()
+        && foreground.group_seen_at.is_some_and(|seen_at| {
+            let held = seen_at.elapsed();
+            held >= JOB_NAME_DELAY && held < JOB_NAME_DELAY + JOB_NAME_SETTLE
+        });
+    if let Some(group) = job.filter(|_| naming)
+        && let Ok(name) = diri_pty::foreground::program_name(group as u32)
+        && diri_pty::foreground::program_name(child_pid as u32).ok() != Some(name.clone())
+    {
+        foreground.name = Some(name);
+        changed = true;
+    }
+    let cwd_due = foreground
+        .cwd_read_at
+        .is_none_or(|read_at| read_at.elapsed() >= SHELL_CWD_REFRESH);
+    if !running && child_pid > 0 && cwd_due {
+        foreground.cwd_read_at = Some(Instant::now());
+        if let Ok(cwd) = diri_pty::foreground::working_directory(child_pid as u32)
+            && foreground.cwd.as_deref() != Some(cwd.as_str())
+        {
+            foreground.cwd = Some(cwd);
+            changed = true;
+        }
+    }
+    let agent = foreground.name.as_deref().and_then(|name| {
+        shared
+            .known_agents
+            .iter()
+            .find(|agent| agent.binary == name && agent.reads_screen)
+    });
+    drop(foreground);
+    if changed {
+        shared.bump_state_version();
+    }
+    agent
 }
 
 /// One Holder stat answers both questions the pump has about the PTY itself:
@@ -3239,7 +3417,13 @@ fn sample_held_pty_facts(
     let stat = client.stat().ok()?;
     if shell {
         shared.child_pid.store(stat.child_pid, Ordering::SeqCst);
-        apply_foreground_sample(shared, manifest_id, stat.child_pid, stat.foreground_pid);
+        apply_foreground_sample(
+            shared,
+            manifest_id,
+            stat.child_pid,
+            stat.foreground_pid,
+            SampleHost::Local,
+        );
     }
     // A Holder that predates the field omits it: not known to be secret.
     record_secret_input(shared, stat.secret_input == Some(true));
@@ -3626,6 +3810,7 @@ fn handle_remote_message(
                     manifest_id,
                     pid as i32,
                     acknowledgement.foreground_pid,
+                    SampleHost::Remote,
                 );
             }
             if let Some(remote) = shared.remote_grid.lock().expect("remote grid").as_mut() {
@@ -3783,6 +3968,7 @@ fn handle_remote_message(
                 manifest_id,
                 shared.child_pid.load(Ordering::SeqCst),
                 foreground.pid,
+                SampleHost::Remote,
             );
             RemoteConnectionDisposition::Continue
         }
@@ -4178,6 +4364,7 @@ fn pump(
                     &manifest_id,
                     shared.child_pid.load(Ordering::SeqCst),
                     pgid,
+                    SampleHost::Local,
                 );
             }
             // Echo is usually restored just after the newline that ends a
@@ -4432,7 +4619,21 @@ fn evaluate_if_screen_changed(
             shared.bump_state_version();
         }
     }
-    engine.evaluate(&screen.snapshot(), manifest_id)
+    // A shell whose foreground program is a recognised Agent is read with
+    // that Agent's rules; the reducer was lent to it at the same moment.
+    // The name is kept beside the program, not read from the reducer, so a
+    // pump holding the screen never waits on the reducer's lock.
+    let lent = (manifest_id == "shell")
+        .then(|| {
+            shared
+                .foreground
+                .lock()
+                .expect("foreground")
+                .read_as
+                .clone()
+        })
+        .flatten();
+    engine.evaluate(&screen.snapshot(), lent.as_deref().unwrap_or(manifest_id))
 }
 
 /// The held-transport pump: tails the holder-owned output log.
@@ -6681,5 +6882,249 @@ mod returned_to_shell_tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         let _ = pty.terminate(Duration::from_millis(500));
+    }
+}
+
+#[cfg(test)]
+mod foreground_program_tests {
+    use super::*;
+
+    fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// An Agent typed at a shell prompt is recognised by name, borrows the
+    /// shell's status for as long as it holds the foreground, and hands it
+    /// back when it leaves; `cd` is followed while the prompt is idle.
+    #[test]
+    fn a_shell_names_its_foreground_program_and_recognises_an_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let fake_claude = bin.join("claude");
+        // The script itself stays the job's leader, as a real Agent does:
+        // `exec sleep` would rename the job `sleep`, correctly.
+        std::fs::write(&fake_claude, "#!/bin/sh\necho ready\nread -r line\n").unwrap();
+        std::fs::set_permissions(
+            &fake_claude,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let (engine, _) = ManifestEngine::load_dir(&crate::detect::bundled_manifest_dir()).unwrap();
+        let logs = root.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let spec = SessionSpec {
+            id: "foreground-program".into(),
+            pty: PtySpec::new(vec!["/bin/sh".into(), "-i".into()], &root)
+                .env("PATH", &format!("{}:/usr/bin:/bin", bin.display()))
+                .env("PS1", "$ ")
+                .size(80, 24),
+            manifest_id: "shell".into(),
+            authority: Authority::ProcessOnly,
+            logs_dir: logs,
+            holder: None,
+            remote: None,
+            defer_launch: false,
+        };
+        let mut session = Session::spawn(spec, Arc::new(engine)).expect("spawn");
+        let root_text = root.to_string_lossy().into_owned();
+        wait_until("the prompt's directory", || {
+            session.view().terminal_cwd.as_deref() == Some(root_text.as_str())
+        });
+        assert_eq!(session.view().foreground_program, None);
+
+        session.write_input(b"claude\r").unwrap();
+        wait_until("the Agent to be recognised", || {
+            let view = session.view();
+            view.foreground_program.as_deref() == Some("claude")
+                && view.foreground_agent.as_deref() == Some("claude-code")
+        });
+        wait_until("the reducer to be lent", || {
+            session.shared.reducer.lock().unwrap().foreground_agent() == Some("claude-code")
+        });
+
+        session.write_input(b"\x03").unwrap();
+        wait_until("the shell to take its status back", || {
+            let view = session.view();
+            view.foreground_program.is_none()
+                && view.foreground_agent.is_none()
+                && session
+                    .shared
+                    .reducer
+                    .lock()
+                    .unwrap()
+                    .foreground_agent()
+                    .is_none()
+        });
+        assert_eq!(session.status(), SessionStatus::Idle);
+
+        session.write_input(b"cd sub\r").unwrap();
+        let sub = root.join("sub").to_string_lossy().into_owned();
+        wait_until("cd to be followed", || {
+            session.view().terminal_cwd.as_deref() == Some(sub.as_str())
+        });
+        let _ = session.terminate(Duration::from_secs(2));
+    }
+
+    fn session_back(session: &Session) -> bool {
+        let view = session.view();
+        view.foreground_program.is_none()
+            && view.foreground_agent.is_none()
+            && session
+                .shared
+                .reducer
+                .lock()
+                .unwrap()
+                .foreground_agent()
+                .is_none()
+    }
+
+    /// Opt-in: drives the real `claude` CLI typed at a shell prompt and prints
+    /// every status change the lent reducer makes, with the rule behind it.
+    ///
+    /// Needs a signed-in Claude Code on PATH and sends one tiny prompt:
+    /// `DIRI_REAL_CLAUDE=1 cargo test -p diri-engine --lib real_claude -- --ignored --nocapture`.
+    /// It runs in a fresh temp directory (so Claude asks to trust it first),
+    /// and removes that directory afterwards.
+    #[test]
+    #[ignore = "drives the real claude CLI; set DIRI_REAL_CLAUDE=1"]
+    fn real_claude_typed_in_a_shell_reports_its_turn() {
+        if std::env::var_os("DIRI_REAL_CLAUDE").is_none() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let logs = root.join(".logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let home = std::env::var("HOME").unwrap();
+        let (engine, _) = ManifestEngine::load_dir(&crate::detect::bundled_manifest_dir()).unwrap();
+        let spec = SessionSpec {
+            id: "real-claude".into(),
+            pty: PtySpec::new(vec!["/bin/zsh".into(), "-f".into(), "-i".into()], &root)
+                .env("HOME", &home)
+                .env("USER", &std::env::var("USER").unwrap_or_default())
+                .env(
+                    "PATH",
+                    &format!("{home}/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"),
+                )
+                .env("TERM", "xterm-256color")
+                .env("LANG", "en_US.UTF-8")
+                .env("PS1", "$ ")
+                .size(120, 40),
+            manifest_id: "shell".into(),
+            authority: Authority::ProcessOnly,
+            logs_dir: logs,
+            holder: None,
+            remote: None,
+            defer_launch: false,
+        };
+        let mut session = Session::spawn(spec, Arc::new(engine)).expect("spawn");
+        let started = Instant::now();
+        let mut last = String::new();
+        let mut log = |session: &Session| -> SessionStatus {
+            let status = session.status();
+            let view = session.view();
+            let rule = session
+                .shared
+                .reducer
+                .lock()
+                .unwrap()
+                .evidence()
+                .and_then(|evidence| evidence.matched_rule_id.clone());
+            let line = format!(
+                "{status:?} program={:?} agent={:?} rule={rule:?} title={:?}",
+                view.foreground_program, view.foreground_agent, view.terminal_title
+            );
+            if line != last {
+                eprintln!("{:>6.2}s {line}", started.elapsed().as_secs_f32());
+                last = line;
+            }
+            status
+        };
+        let mut run =
+            |session: &Session, secs: u64, mut done: Box<dyn FnMut(&SessionStatus) -> bool>| {
+                let deadline = Instant::now() + Duration::from_secs(secs);
+                while Instant::now() < deadline {
+                    if done(&log(session)) {
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                false
+            };
+
+        std::thread::sleep(Duration::from_millis(500));
+        session.write_input(b"claude\r").unwrap();
+        // Trust dialog for a fresh folder: a blocker, answered with Enter.
+        let asked = run(
+            &session,
+            20,
+            Box::new(|status| matches!(status, SessionStatus::NeedsInput(_))),
+        );
+        eprintln!("--- trust prompt seen: {asked}");
+        if asked {
+            session.write_input(b"\r").unwrap();
+        }
+        let mut idle_since = None;
+        run(
+            &session,
+            30,
+            Box::new(move |status| {
+                if *status == SessionStatus::Idle {
+                    let since = *idle_since.get_or_insert_with(Instant::now);
+                    since.elapsed() > Duration::from_secs(3)
+                } else {
+                    idle_since = None;
+                    false
+                }
+            }),
+        );
+        eprintln!("--- sending prompt");
+        session
+            .write_input(b"Reply with only the word pineapple, no tools.")
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        session.write_input(b"\r").unwrap();
+        let worked = run(
+            &session,
+            30,
+            Box::new(|status| *status == SessionStatus::Working),
+        );
+        eprintln!("--- went working: {worked}");
+        let mut idle_since = None;
+        let settled = run(
+            &session,
+            90,
+            Box::new(move |status| {
+                if *status == SessionStatus::Idle {
+                    let since = *idle_since.get_or_insert_with(Instant::now);
+                    since.elapsed() > Duration::from_secs(3)
+                } else {
+                    idle_since = None;
+                    false
+                }
+            }),
+        );
+        eprintln!("--- settled idle: {settled}");
+        for line in session
+            .screen_lines()
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+        {
+            eprintln!("  | {line}");
+        }
+        session.write_input(b"/exit").unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        session.write_input(b"\r").unwrap();
+        let back = run(&session, 20, Box::new(|_| session_back(&session)));
+        eprintln!("--- back at the shell: {back}");
+        let _ = session.terminate(Duration::from_secs(2));
+        assert!(worked && settled && back);
     }
 }

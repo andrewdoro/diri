@@ -1125,11 +1125,20 @@ impl ControlServer {
         }
 
         let inherited: Vec<(String, String)> = std::env::vars().collect();
-        let mut pty = match descriptor.spawn_spec(&cwd_path, inherited.clone(), &launch_args) {
+        // A terminal may start where another terminal had `cd`'d to, while
+        // `cwd` keeps it in the project it was opened from.
+        let start_directory = p
+            .start_directory
+            .as_deref()
+            .filter(|_| kind == diri_proto::AgentKind::SHELL_ID)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && path.is_dir());
+        let launch_path = start_directory.as_deref().unwrap_or(&cwd_path);
+        let mut pty = match descriptor.spawn_spec(launch_path, inherited.clone(), &launch_args) {
             Some(spec) => spec,
             // No binary in the manifest: the caller has to say what to run.
             None if !argv.is_empty() => {
-                let mut spec = crate::pty::PtySpec::new(argv.clone(), &cwd_path);
+                let mut spec = crate::pty::PtySpec::new(argv.clone(), launch_path);
                 spec.env = inherited;
                 // GUI apps launched by launchd commonly inherit no terminal
                 // environment. A binary-free descriptor is still attached to
@@ -1150,6 +1159,7 @@ impl ControlServer {
             crate::accounts::bind_pty(profile, &mut pty)?;
         }
         let mut record = new_record(&id, &kind, &cwd);
+        record.terminal_cwd = start_directory.map(|path| path.to_string_lossy().into_owned());
         record.account_profile = account_profile;
         record.kind = p.kind.clone();
         record.originating_prompt = p.initial_prompt.clone();
@@ -2930,7 +2940,13 @@ impl ControlServer {
                 .record(&p.session_id.0)
                 .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?
         };
-        let kind = source.effective_kind().clone();
+        // An Agent started by hand in a shell has no conversation Diri
+        // knows, so a shell forks as the shell it is.
+        let kind = if source.kind == diri_proto::AgentKind::SHELL {
+            source.kind.clone()
+        } else {
+            source.effective_kind().clone()
+        };
         let id = next_session_id();
         let mut spec = if source.host.is_some() {
             self.remote_conversation_spec(&source, &id, &kind, ConversationAction::Fork)?
@@ -4098,6 +4114,7 @@ pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::Session
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        terminal_cwd: None,
         scheduled_run: None,
     }
 }
@@ -5074,6 +5091,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
             scheduled_run: None,
         }
     }

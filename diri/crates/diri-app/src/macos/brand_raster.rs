@@ -75,8 +75,7 @@ fn rasterize(kind: BrandMarkKind, size: f32, inset: f32, color: Rgba) -> Option<
     let origin = (pixels as f32 - 24.0 * scale) / 2.0;
 
     let path = NSBezierPath::bezierPath();
-    let map =
-        |x: f32, y: f32| NSPoint::new(f64::from(origin + x * scale), f64::from(origin + y * scale));
+    let map = |x: f32, y: f32| svg_point(x, y, origin, scale);
     let mut current = (0.0_f32, 0.0_f32);
     for command in kind.path_commands() {
         match *command {
@@ -159,8 +158,8 @@ fn rasterize(kind: BrandMarkKind, size: f32, inset: f32, color: Rgba) -> Option<
     NSGraphicsContext::restoreGraphicsState_class();
 
     // Tint from coverage alpha, matching the SF Symbols bridge: output is
-    // unpremultiplied BGRA for GPUI. The row flip cancels AppKit's bottom-up
-    // origin against SVG's top-down coordinates.
+    // unpremultiplied BGRA for GPUI. Rows stay in bitmap order; `svg_point`
+    // already placed SVG Y-down artwork upright in that top-down buffer.
     let red = channel(color.r);
     let green = channel(color.g);
     let blue = channel(color.b);
@@ -197,8 +196,7 @@ pub fn template_ns_image(kind: BrandMarkKind, point_size: f32) -> Option<Retaine
     let origin = (pixels as f32 - 24.0 * scale) / 2.0;
 
     let path = NSBezierPath::bezierPath();
-    let map =
-        |x: f32, y: f32| NSPoint::new(f64::from(origin + x * scale), f64::from(origin + y * scale));
+    let map = |x: f32, y: f32| svg_point(x, y, origin, scale);
     let mut current = (0.0_f32, 0.0_f32);
     for command in kind.path_commands() {
         match *command {
@@ -297,8 +295,7 @@ pub fn template_settings_ns_image(point_size: f32) -> Option<Retained<NSImage>> 
     // Match `Icon` rendering: the 24×24 viewBox fills the point box.
     let scale = (point_size * RASTER_SCALE) / 24.0;
     let origin = (pixels as f32 - 24.0 * scale) / 2.0;
-    let map =
-        |x: f32, y: f32| NSPoint::new(f64::from(origin + x * scale), f64::from(origin + y * scale));
+    let map = |x: f32, y: f32| svg_point(x, y, origin, scale);
 
     // Geometry is a hand-transcription of icons/settings.svg; `settings_svg_matches_the_inlined_geometry`
     // fails the build if the asset and these numbers ever drift apart.
@@ -441,6 +438,18 @@ fn channel(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// Map a 24×24 SVG point into an `NSBitmapImageRep` context.
+///
+/// The context origin is the bottom-left and Y grows upward, while the bitmap
+/// bytes are stored top-down. Flipping Y here keeps the copied image and any
+/// `NSImage` built from the same rep in the SVG's orientation.
+fn svg_point(x: f32, y: f32, origin: f32, scale: f32) -> NSPoint {
+    NSPoint::new(
+        f64::from(origin + x * scale),
+        f64::from(origin + (24.0 - y) * scale),
+    )
+}
+
 pub(crate) const DIRI_LOGO_VB_W: f32 = 59.5;
 pub(crate) const DIRI_LOGO_VB_H: f32 = 42.5;
 pub(crate) const DIRI_LOGO_STROKE: f32 = 8.5;
@@ -505,6 +514,18 @@ mod tests {
             + needle.len();
         let end = start + svg[start..].find('"').expect("unterminated attribute");
         svg[start..end].to_owned()
+    }
+
+    #[test]
+    fn svg_y_maps_to_the_top_of_an_appkit_context() {
+        let origin = 2.0;
+        let scale = 3.0;
+        let top = svg_point(0.0, 0.0, origin, scale);
+        let bottom = svg_point(0.0, 24.0, origin, scale);
+        assert!(top.y > bottom.y);
+        assert_eq!(top.y, f64::from(origin + 24.0 * scale));
+        assert_eq!(bottom.y, f64::from(origin));
+        assert_eq!(top.x, bottom.x);
     }
 
     #[test]

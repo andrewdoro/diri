@@ -583,6 +583,63 @@ fn a_shell_is_idle_at_a_prompt_and_working_only_for_a_foreground_job() {
     assert!(!outcome.turn_completed);
 }
 
+/// `claude` typed at a shell prompt has no hooks, so while it holds the
+/// foreground the shell's status is read from Claude's screen rules. Being
+/// recognised is not a finished turn; a turn it then runs is.
+#[test]
+fn a_shell_lends_its_status_to_an_agent_in_its_foreground() {
+    let mut reducer =
+        StatusReducer::new(Authority::ProcessOnly, t0()).with_manifest("shell", Some("1"));
+    let now = t0() + Duration::from_secs(1);
+    reducer.reduce(StatusSignal::ForegroundJob { running: true }, now);
+    assert_eq!(reducer.status(), &SessionStatus::Working);
+
+    let outcome = reducer.lend_to_agent("claude-code", Some("7"), now);
+    assert_eq!(outcome.status_change, Some(SessionStatus::Idle));
+    assert!(!outcome.turn_completed);
+    assert_eq!(reducer.foreground_agent(), Some("claude-code"));
+    assert_eq!(reducer.authority(), Authority::ScreenPrimary);
+    let evidence = reducer.evidence().expect("evidence");
+    assert_eq!(evidence.manifest_id.as_deref(), Some("claude-code"));
+    // Lending twice to the same Agent changes nothing.
+    assert_eq!(
+        reducer.lend_to_agent("claude-code", Some("7"), now),
+        ReducerOutcome::default()
+    );
+    // Job samples belong to the shell; the Agent's screen decides now.
+    let outcome = reducer.reduce(StatusSignal::ForegroundJob { running: true }, now);
+    assert_eq!(outcome.status_change, None);
+
+    let mut at = now + Duration::from_millis(100);
+    let outcome = reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Working, 1)),
+        at,
+    );
+    assert_eq!(outcome.status_change, Some(SessionStatus::Working));
+    let mut completed = false;
+    for seq in 2..20 {
+        at += Duration::from_millis(200);
+        completed |= reducer
+            .reduce(
+                StatusSignal::Screen(observation(ManifestState::Idle, seq)),
+                at,
+            )
+            .turn_completed;
+        completed |= reducer.reduce(StatusSignal::Tick, at).turn_completed;
+    }
+    assert_eq!(reducer.status(), &SessionStatus::Idle);
+    assert!(completed, "the Agent's own turn completes");
+
+    let outcome = reducer.return_from_agent(false, at);
+    assert_eq!(reducer.foreground_agent(), None);
+    assert_eq!(reducer.authority(), Authority::ProcessOnly);
+    assert_eq!(outcome.status_change, None, "already idle at the prompt");
+    let evidence = reducer.evidence().expect("evidence");
+    assert_eq!(evidence.manifest_id.as_deref(), Some("shell"));
+    let outcome = reducer.reduce(StatusSignal::ForegroundJob { running: true }, at);
+    assert_eq!(outcome.status_change, Some(SessionStatus::Working));
+}
+
 #[test]
 fn foreground_job_running_is_the_child_process_group_test() {
     assert_eq!(super::foreground_job_running(0, Some(12)), None);

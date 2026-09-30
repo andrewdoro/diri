@@ -174,6 +174,10 @@ fn sidebar_lineage_highlights_default() -> bool {
     true
 }
 
+fn terminal_follows_last_directory_default() -> bool {
+    true
+}
+
 const fn window_transparency_default() -> f32 {
     1.0
 }
@@ -222,6 +226,10 @@ pub struct Prefs {
     /// Command- or Control-click.
     pub terminal_open_links_on_click: bool,
     pub terminal_hide_pointer: bool,
+    /// Start a new terminal in the directory the last terminal was in,
+    /// instead of its project's root. Missing files pick this up as on.
+    #[serde(default = "terminal_follows_last_directory_default")]
+    pub terminal_follows_last_directory: bool,
     pub terminal_paste_protection: bool,
     /// Whether the window blurs the desktop behind it. Field-level default so
     /// files written before it existed pick up glass.
@@ -312,6 +320,7 @@ impl Default for Prefs {
             terminal_copy_on_select: false,
             terminal_open_links_on_click: true,
             terminal_hide_pointer: true,
+            terminal_follows_last_directory: true,
             terminal_paste_protection: false,
             window_material: WindowMaterial::Glass,
             window_transparency: window_transparency_default(),
