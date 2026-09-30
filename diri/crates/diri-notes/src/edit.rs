@@ -489,6 +489,66 @@ impl Editor {
         true
     }
 
+    /// Takes in a write made outside the editor (an agent appending, the CLI
+    /// ticking a to-do) while the person has unsaved typing. `merged` comes
+    /// from [`crate::merge::merge3`] with this editor's document as "mine".
+    /// It is one undo step; the person's blocks keep their identity and the
+    /// caret stays with the text it was in. Returns whether anything changed.
+    pub fn absorb(&mut self, merged: crate::merge::Merged, now_ms: u64) -> bool {
+        // Editor block `i + 1` is document block `i`; block 0 is the title.
+        let mut merged_to_mine = vec![None; merged.doc.blocks.len()];
+        for (mine, target) in merged.mine_to_merged.iter().enumerate() {
+            if let Some(target) = target {
+                merged_to_mine[*target] = Some(mine);
+            }
+        }
+        let mut blocks = Vec::with_capacity(merged.doc.blocks.len() + 2);
+        let mut title = self.blocks[0].clone();
+        title.text = merged.doc.title.clone();
+        blocks.push(title);
+        for (index, mut block) in merged.doc.blocks.into_iter().enumerate() {
+            block.id = match merged_to_mine[index] {
+                Some(mine) => self.blocks[mine + 1].id,
+                None => self.fresh_id(),
+            };
+            blocks.push(block);
+        }
+        let map = |pos: Pos| -> Pos {
+            if pos.block == 0 {
+                return pos;
+            }
+            let mine = pos.block - 1;
+            if let Some(Some(target)) = merged.mine_to_merged.get(mine) {
+                return Pos::new(target + 1, pos.offset);
+            }
+            // A block the merge replaced: just after the nearest earlier
+            // block that survived (the typing slot at the end, typically).
+            let before = (0..mine)
+                .rev()
+                .find_map(|m| merged.mine_to_merged[m].map(|t| t + 1))
+                .unwrap_or(0);
+            Pos::new(before + 1, 0)
+        };
+        let selection = Selection {
+            anchor: map(self.selection.anchor),
+            head: map(self.selection.head),
+        };
+        let same = blocks.len() == self.blocks.len()
+            && blocks.iter().zip(&self.blocks).all(|(a, b)| {
+                a.kind == b.kind && a.indent == b.indent && a.text == b.text && a.marks == b.marks
+            });
+        if same {
+            return false;
+        }
+        self.checkpoint(EditKind::Other, now_ms);
+        self.blocks = blocks;
+        self.pending = None;
+        self.last_edit = None;
+        self.changed();
+        self.set_selection(selection);
+        true
+    }
+
     fn after_history(&mut self) {
         self.pending = None;
         self.last_edit = None;
@@ -1826,5 +1886,34 @@ mod tests {
             ]
         );
         assert!(e.is_collapsed(2));
+    }
+
+    #[test]
+    fn absorbing_an_outside_append_keeps_the_caret_and_is_one_undo_step() {
+        let base = crate::markdown::parse("# Plan\n\nIntro\n\n- [ ] venue\n").1;
+        let mut e = Editor::new(&base);
+        // The person is typing at the end of "Intro".
+        e.set_caret(Pos::new(1, 5));
+        e.insert_text(" and more", 1_000);
+        let theirs =
+            crate::markdown::parse("# Plan\n\nIntro\n\n- [x] venue\n\n- agent: booked\n").1;
+        let merged = crate::merge::merge3(&base, &e.document(), &theirs);
+        assert!(e.absorb(merged, 2_000));
+        assert_eq!(e.block(1).text, "Intro and more");
+        assert_eq!(e.block(2).kind, BlockKind::Todo { checked: true });
+        assert!(e.blocks().iter().any(|b| b.text == "agent: booked"));
+        assert_eq!(
+            e.selection,
+            Selection::caret(Pos::new(1, 14)),
+            "caret stays in the typing"
+        );
+        // Typing continues where it was.
+        e.insert_text("!", 3_000);
+        assert_eq!(e.block(1).text, "Intro and more!");
+        // Undo peels the typing, then the outside write, then the earlier typing.
+        e.undo();
+        e.undo();
+        assert_eq!(e.block(1).text, "Intro and more");
+        assert!(!e.blocks().iter().any(|b| b.text == "agent: booked"));
     }
 }

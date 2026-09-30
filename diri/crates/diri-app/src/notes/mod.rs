@@ -375,14 +375,12 @@ impl NotePane {
     }
 
     /// An outside write to the open note (CLI append, an agent, another
-    /// editor) reloads it unless the user has unsaved typing.
+    /// editor). A clean note reloads; with unsaved typing the write is merged
+    /// into the editor as one undo step, so neither side is lost.
     pub(crate) fn reconcile(&mut self, cx: &mut Context<Self>) {
         let PaneState::Open(open) = &self.state else {
             return;
         };
-        if open.dirty {
-            return;
-        }
         let Some(path) = self.store.as_ref().and_then(|s| s.path_for(&open.id).ok()) else {
             return;
         };
@@ -392,14 +390,30 @@ impl NotePane {
         if source == open.saved {
             return;
         }
-        let note = store::parse_note(&source);
-        let editor = Editor::new(&note.doc);
+        self.absorb_outside(source, cx);
+    }
+
+    /// Takes the file's current `source` into the open note: a reload when
+    /// there is no unsaved typing, else a three-way merge against what the
+    /// editor last loaded or saved.
+    fn absorb_outside(&mut self, source: String, cx: &mut Context<Self>) {
         let PaneState::Open(open) = &mut self.state else {
             return;
         };
+        let theirs = store::parse_note(&source);
+        if open.dirty {
+            let base = store::parse_note(&open.saved).doc;
+            open.editor.update(cx, |view, cx| {
+                let merged = diri_notes::merge::merge3(&base, &view.editor.document(), &theirs.doc);
+                view.editor.absorb(merged, diri_notes::history::now_ms());
+                cx.notify();
+            });
+        } else {
+            let editor = Editor::new(&theirs.doc);
+            open.editor.update(cx, |view, cx| view.reload(editor, cx));
+        }
         open.saved = source;
-        open.front = note.front;
-        open.editor.update(cx, |view, cx| view.reload(editor, cx));
+        open.front = theirs.front;
     }
 
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
@@ -416,25 +430,54 @@ impl NotePane {
         let Some(store) = self.store.clone() else {
             return;
         };
-        let PaneState::Open(open) = &mut self.state else {
-            return;
-        };
-        let doc = open.editor.read(cx).editor.document();
-        let note = Note {
-            front: open.front.clone(),
-            doc,
-        };
-        let markdown = note.to_markdown();
-        open.dirty = false;
-        if markdown != open.saved {
-            match store.save(&open.id, &note) {
-                Ok(()) => {
-                    open.saved = markdown;
+        // Save only over the version this editor knows; an outside write in
+        // between is merged in first, then saved over. Bounded: a file that
+        // keeps changing under us is retried on the next save.
+        let mut note = None;
+        for _ in 0..3 {
+            let PaneState::Open(open) = &mut self.state else {
+                return;
+            };
+            let current = Note {
+                front: open.front.clone(),
+                doc: open.editor.read(cx).editor.document(),
+            };
+            let markdown = current.to_markdown();
+            if markdown == open.saved {
+                open.dirty = false;
+                note = Some(current);
+                break;
+            }
+            match store.save_if_unchanged(&open.id, &current, &open.saved) {
+                Ok(store::SaveOutcome::Saved { source }) => {
+                    open.saved = source;
+                    open.dirty = false;
                     self.error = None;
+                    note = Some(current);
+                    break;
                 }
-                Err(err) => self.error = Some(format!("Couldn't save this note: {err}").into()),
+                Ok(store::SaveOutcome::Conflict {
+                    current: Some(outside),
+                }) => {
+                    open.dirty = true;
+                    self.absorb_outside(outside, cx);
+                }
+                Ok(store::SaveOutcome::Conflict { current: None }) => {
+                    self.error = Some(
+                        "This note's file was moved or deleted outside Diri; your text is still here."
+                            .into(),
+                    );
+                    return;
+                }
+                Err(err) => {
+                    self.error = Some(format!("Couldn't save this note: {err}").into());
+                    return;
+                }
             }
         }
+        let Some(note) = note else {
+            return;
+        };
         // The sidebar row is the Session's title; keep it the note's title.
         let PaneState::Open(open) = &mut self.state else {
             return;

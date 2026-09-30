@@ -310,7 +310,9 @@ fn folding_is_view_state_that_survives_outside_writes(cx: &mut gpui::TestAppCont
         "folding never changes the file:\n{text}"
     );
     // An agent appends while the item is folded; the fold survives the reload.
-    store.append(&id, "- [ ] added by an agent").unwrap();
+    store
+        .append(&id, "- [ ] added by an agent", &diri_notes::history::Author::Session("s_agent".into()))
+        .unwrap();
     pane.update(cx, |pane, cx| pane.reconcile(cx));
     editor.read_with(cx, |view, _| {
         assert!(view.editor.is_collapsed(parent));
@@ -321,4 +323,132 @@ fn folding_is_view_state_that_survives_outside_writes(cx: &mut gpui::TestAppCont
                 .any(|b| b.text == "added by an agent")
         );
     });
+}
+
+/// What the `write_note` MCP tool does to the file: an attributed, locked,
+/// additive write through the store.
+fn agent_appends(store: &NoteStore, id: &str, markdown: &str) {
+    store
+        .update(
+            id,
+            &diri_notes::history::Author::Session("s_agent".into()),
+            |note| {
+                diri_notes::store::append_markdown(note, markdown);
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+fn type_text(editor: &Entity<NoteEditorView>, text: &str, cx: &mut gpui::VisualTestContext) {
+    editor.update_in(cx, |view, window, cx| {
+        for ch in text.chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+    });
+}
+
+#[gpui::test]
+fn an_agent_append_while_typing_is_merged_not_lost(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    // The person starts typing at the end of the first paragraph...
+    editor.update(cx, |view, _| {
+        let at = view
+            .editor
+            .blocks()
+            .iter()
+            .position(|b| b.text.starts_with("A rich"))
+            .unwrap();
+        let len = view.editor.block(at).text.len();
+        view.editor.set_caret(diri_notes::edit::Pos::new(at, len));
+    });
+    type_text(&editor, " Also for PMs.", cx);
+    // ...an agent adds its finding before the debounced save lands...
+    agent_appends(&store, &id, "- Finding: the venue holds 300 people");
+    // ...the file watcher reconciles, and the person keeps typing.
+    pane.update(cx, |pane, cx| pane.reconcile(cx));
+    type_text(&editor, " And ops.", cx);
+    pane.update(cx, |pane, cx| pane.save(cx));
+
+    let file = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(file.contains("next to your agents. Everything is plain Markdown on disk — see [the spec](https://diri.sh/notes). Also for PMs. And ops."), "{file}");
+    assert!(
+        file.contains("- Finding: the venue holds 300 people"),
+        "{file}"
+    );
+    // One undo takes back the typing after the merge; the next the agent's line.
+    editor.update(cx, |view, _| {
+        view.editor.undo();
+        assert!(
+            view.editor
+                .blocks()
+                .iter()
+                .any(|b| b.text == "Finding: the venue holds 300 people")
+        );
+        view.editor.undo();
+        assert!(
+            !view
+                .editor
+                .blocks()
+                .iter()
+                .any(|b| b.text == "Finding: the venue holds 300 people")
+        );
+    });
+}
+
+#[gpui::test]
+fn a_save_racing_an_agent_write_merges_before_writing(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update(cx, |view, _| {
+        let at = view
+            .editor
+            .blocks()
+            .iter()
+            .position(|b| b.text == "Quick capture from anywhere")
+            .unwrap();
+        view.editor
+            .set_caret(diri_notes::edit::Pos::new(at, "Quick capture".len()));
+    });
+    type_text(&editor, " (hotkey)", cx);
+    // The agent ticks that very to-do and links itself, then the save runs
+    // before the watcher ever fires.
+    store
+        .update(
+            &id,
+            &diri_notes::history::Author::Session("s_agent".into()),
+            |note| {
+                let index = diri_notes::handoff::find_todo(
+                    note,
+                    &diri_notes::handoff::TodoSelector::Text("Quick capture".into()),
+                )
+                .unwrap();
+                diri_notes::handoff::set_checked(note, index, true);
+                diri_notes::handoff::link_session(note, index, "@Codex: capture", "s_agent");
+                Ok(())
+            },
+        )
+        .unwrap();
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let file = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(
+        file.contains(
+            "- [x] Quick capture (hotkey) from anywhere [@Codex: capture](diri://session/s_agent)"
+        ),
+        "{file}"
+    );
+    // History kept the agent's write as its own version.
+    let versions = store.history().list(&id).unwrap();
+    assert!(
+        versions
+            .iter()
+            .any(|v| v.author == diri_notes::history::Author::Session("s_agent".into()))
+    );
 }

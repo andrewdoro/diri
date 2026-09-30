@@ -858,7 +858,7 @@ mod tests {
         let (fixture, note_id) = from_note();
         fixture
             .store()
-            .update(&note_id, |note| {
+            .update(&note_id, &Author::Cli, |note| {
                 diri_notes::store::append_markdown(
                     note,
                     "- [ ] Draft the launch posts\n  - Tone: plain",

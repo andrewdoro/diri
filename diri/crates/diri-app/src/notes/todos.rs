@@ -186,7 +186,7 @@ impl TodosModel {
         let note_id = note_id.to_owned();
         cx.background_executor()
             .spawn(async move {
-                let _ = store.update(&note_id, |note| {
+                let _ = store.update(&note_id, &diri_notes::history::Author::User, |note| {
                     handoff::set_checked(note, index, true);
                     Ok(())
                 });

@@ -894,7 +894,7 @@ pub(crate) fn link_in_file(link: &crate::store::WorkLink, session: &SessionId) {
     let Ok(store) = diri_notes::store::NoteStore::open(link.notes_dir.clone()) else {
         return;
     };
-    let _ = store.update(&link.note_id, |note| {
+    let _ = store.update(&link.note_id, &diri_notes::history::Author::User, |note| {
         let found = note.doc.blocks.iter().position(|block| {
             matches!(block.kind, BlockKind::Todo { .. }) && work::task_text(block) == link.todo_text
         });

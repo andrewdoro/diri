@@ -259,7 +259,7 @@ fn a_todo_becomes_tracked_work_inside_its_note(cx: &mut gpui::TestAppContext) {
     assert_eq!(state(&editor, cx, posts), WorkState::Working);
     fixture
         .store
-        .update(&fixture.id, |note| {
+        .update(&fixture.id, &diri_notes::history::Author::Cli, |note| {
             diri_notes::handoff::append_update(
                 note,
                 "2026-09-30T14:02:00Z",
