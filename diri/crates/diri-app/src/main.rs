@@ -54,6 +54,7 @@ pub mod quote;
 mod recovery;
 pub mod review_prompt;
 pub mod root;
+mod schedules_page;
 pub mod seam;
 mod secure_input;
 mod session_presentation;

@@ -121,6 +121,8 @@ impl EventName {
     pub const EVENTS_DROPPED: &'static str = "events.dropped";
     pub const SESSION_RESOURCES: &'static str = "session.resources";
     pub const SESSION_REMOVED: &'static str = "session.removed";
+    /// A schedule was created, changed, ran, or was deleted. Carries `id`.
+    pub const SCHEDULE_UPDATED: &'static str = "schedule.updated";
     pub const PROJECT_UPDATED: &'static str = "project.updated";
 }
 

@@ -17,6 +17,7 @@ use crate::tools::{ToolDefinition, tool_definitions_for};
 mod audit_tests;
 mod orchestration;
 mod policy;
+mod schedules;
 mod tasks;
 
 use policy::{McpPolicy, WRITE_POLICY, WriteAction};
@@ -110,6 +111,9 @@ impl Bridge {
             "answer_task" => self.answer_task(arguments),
             "cancel_task" => self.cancel_task(arguments),
             "list_tasks" => self.list_tasks(arguments),
+            "schedule_agent" => self.schedule_agent(arguments),
+            "list_schedules" => self.list_schedules(),
+            "delete_schedule" => self.delete_schedule(arguments),
             "wait_any" => self.wait_any(arguments),
             "get_diff" => self.get_diff(arguments),
             "integrate" => self.integrate(arguments),

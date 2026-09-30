@@ -250,7 +250,7 @@ mod local {
 
     #[cfg(unix)]
     pub fn break_down(secs: i64) -> Option<Tm> {
-        let time: libc::time_t = secs.try_into().ok()?;
+        let time = libc::time_t::try_from(secs).ok()?;
         // SAFETY: `localtime_r` only writes the provided, zeroed `tm`.
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
@@ -320,7 +320,14 @@ mod tests {
         ] {
             Cron::parse(expr).unwrap_or_else(|error| panic!("{expr}: {error}"));
         }
-        for expr in ["", "* * * *", "60 * * * *", "* 24 * * *", "*/0 * * * *", "0 9 * * xyz"] {
+        for expr in [
+            "",
+            "* * * *",
+            "60 * * * *",
+            "* 24 * * *",
+            "*/0 * * * *",
+            "0 9 * * xyz",
+        ] {
             assert!(Cron::parse(expr).is_err(), "{expr} should be rejected");
         }
     }

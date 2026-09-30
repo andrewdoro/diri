@@ -3814,8 +3814,7 @@ impl ControlServer {
                         return;
                     };
                     // An enabled schedule is work the Engine must stay up for.
-                    let live_sessions =
-                        registry.live_count() + server.scheduler.enabled_count();
+                    let live_sessions = registry.live_count() + server.scheduler.enabled_count();
                     if !watch.observe(live_sessions, connections, Instant::now(), grace) {
                         continue;
                     }

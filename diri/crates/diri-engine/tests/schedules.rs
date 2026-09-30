@@ -180,10 +180,14 @@ fn a_due_one_shot_starts_its_session_on_time() {
         marker.exists()
     });
     let mut record = control.schedule(&id);
-    wait_until("the run recorded its session", Duration::from_secs(10), || {
-        record = control.schedule(&id);
-        record["runs"][0]["sessionId"].is_string()
-    });
+    wait_until(
+        "the run recorded its session",
+        Duration::from_secs(10),
+        || {
+            record = control.schedule(&id);
+            record["runs"][0]["sessionId"].is_string()
+        },
+    );
     assert_eq!(record["runs"][0]["outcome"], "onTime");
     assert_eq!(record["enabled"], false, "a one-shot ends after its run");
     assert!(record.get("nextDue").is_none());
@@ -214,16 +218,23 @@ fn an_occurrence_missed_while_not_running_fires_once_late() {
         marker.exists()
     });
     let mut record = control.schedule(&id);
-    wait_until("the run recorded its session", Duration::from_secs(10), || {
-        record = control.schedule(&id);
-        record["runs"][0]["sessionId"].is_string()
-    });
+    wait_until(
+        "the run recorded its session",
+        Duration::from_secs(10),
+        || {
+            record = control.schedule(&id);
+            record["runs"][0]["sessionId"].is_string()
+        },
+    );
     let runs = record["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 1, "caught up exactly once: {runs:?}");
     assert_eq!(runs[0]["outcome"], "late");
     assert_eq!(runs[0]["lateReason"], "notRunning");
     assert_eq!(record["enabled"], true);
-    assert!(record["nextDue"].as_f64().unwrap() > now_ms(), "re-armed ahead");
+    assert!(
+        record["nextDue"].as_f64().unwrap() > now_ms(),
+        "re-armed ahead"
+    );
     kill_run(&mut control, &record);
 }
 
@@ -249,7 +260,9 @@ fn an_occurrence_past_its_window_is_recorded_missed_and_not_run() {
     let mut record = control.schedule(&id);
     wait_until("the miss was recorded", Duration::from_secs(10), || {
         record = control.schedule(&id);
-        record["runs"].as_array().is_some_and(|runs| !runs.is_empty())
+        record["runs"]
+            .as_array()
+            .is_some_and(|runs| !runs.is_empty())
     });
     assert_eq!(record["runs"][0]["outcome"], "missed");
     assert!(record["runs"][0].get("sessionId").is_none());
@@ -280,10 +293,14 @@ fn run_now_starts_a_run_and_keeps_the_next_due_time() {
         marker.exists()
     });
     let mut record = control.schedule(&id);
-    wait_until("the run recorded its session", Duration::from_secs(10), || {
-        record = control.schedule(&id);
-        record["runs"][0]["sessionId"].is_string()
-    });
+    wait_until(
+        "the run recorded its session",
+        Duration::from_secs(10),
+        || {
+            record = control.schedule(&id);
+            record["runs"][0]["sessionId"].is_string()
+        },
+    );
     assert_eq!(record["runs"][0]["outcome"], "manual");
     assert_eq!(record["nextDue"], created["nextDue"]);
     kill_run(&mut control, &record);
@@ -295,7 +312,11 @@ fn run_now_starts_a_run_and_keeps_the_next_due_time() {
             .unwrap()
             .is_empty()
     );
-    assert!(control.try_request("schedule.delete", json!({ "id": id })).is_err());
+    assert!(
+        control
+            .try_request("schedule.delete", json!({ "id": id }))
+            .is_err()
+    );
 }
 
 #[test]
@@ -314,7 +335,11 @@ fn invalid_schedules_are_rejected_before_storage() {
     let error = control
         .try_request(
             "schedule.create",
-            spec(&marker, json!({ "kind": "once", "at": now_ms() - 3_600_000.0 }), 0),
+            spec(
+                &marker,
+                json!({ "kind": "once", "at": now_ms() - 3_600_000.0 }),
+                0,
+            ),
         )
         .unwrap_err();
     assert!(error.contains("past"), "{error}");

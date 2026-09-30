@@ -294,8 +294,11 @@ impl super::ControlServer {
     }
 
     fn publish_schedule(&self, id: &str) {
-        self.events
-            .publish("schedule.updated", json!({ "id": id }), None);
+        self.events.publish(
+            diri_proto::EventName::SCHEDULE_UPDATED,
+            json!({ "id": id }),
+            None,
+        );
     }
 
     pub(super) fn schedule_list(&self) -> Result<Value, ControlError> {

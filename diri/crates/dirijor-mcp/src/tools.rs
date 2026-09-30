@@ -106,6 +106,38 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
+            "schedule_agent",
+            "Schedule an agent run for later or on a repeating cron, owned by Diri rather than by this session: it survives this session closing and Diri restarting. Use this instead of your own cron or loop whenever the user asks to run something at a time or every day/hour. Each run opens a new top-level session with the prompt. If the Mac is asleep or Diri is not running when a run is due, it fires once on wake inside catch_up_hours (default 12) and is recorded as missed beyond that. Give exactly one of cron (five fields, local time, e.g. \"0 9 * * 1-5\"), at_ms (epoch ms), or in_minutes.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": kind_enum},
+                    "cwd": {"type": "string"},
+                    "prompt": {"type": "string", "minLength": 1, "maxLength": 1048576},
+                    "name": {"type": "string", "maxLength": 200},
+                    "cron": {"type": "string"},
+                    "at_ms": {"type": "number"},
+                    "in_minutes": {"type": "number", "minimum": 0},
+                    "worktree": {"type": "boolean", "description": "Start each run in a fresh worktree."},
+                    "branch": {"type": "string"},
+                    "base": {"type": "string", "description": "Starting ref for each run's worktree, e.g. origin/main."},
+                    "catch_up_hours": {"type": "number", "minimum": 0, "maximum": 168, "description": "A run missed by up to this long still fires late; 0 never catches up. Default 12."},
+                    "keep_awake": {"type": "boolean", "description": "Keep an awake Mac from idle-sleeping shortly before each run and while it works. Cannot wake a sleeping Mac."}
+                },
+                "required": ["kind", "cwd", "prompt"]
+            }),
+        ),
+        ToolDefinition::new(
+            "list_schedules",
+            "List every Diri schedule with its next due time and recent runs (onTime, late with lateReason asleep/notRunning, missed, failed, manual) and the session each run opened.",
+            json!({"type":"object","properties":{}}),
+        ),
+        ToolDefinition::new(
+            "delete_schedule",
+            "Delete a Diri schedule. Sessions its earlier runs opened are left alone.",
+            json!({"type":"object","properties":{"schedule_id":{"type":"string","minLength":1}},"required":["schedule_id"]}),
+        ),
+        ToolDefinition::new(
             "spawn_agents",
             "Fan out: open several sessions in one call (at most 8), concurrently. Each entry takes the same fields as spawn_agent (kind, cwd, worktree, branch, base, host, prompt, name, operation_id, task, result_schema) and is deduplicated the same way. Use worktree:true per entry for parallel edits. Returns one result per entry in order, plus the session_ids and task_ids to pass to wait_any.",
             json!({"type":"object","properties":{"agents":{"type":"array","items":spawn_entry_schema()}},"required":["agents"]}),
@@ -400,7 +432,7 @@ pub(crate) fn validate_arguments(tool: &str, arguments: &Value) -> Result<(), St
         .ok_or_else(|| format!("unknown or unavailable tool: {tool}"))?;
     // Kind aliases/custom commands are resolved against the live catalog by
     // spawn; the static validator must not use an empty discovery enum.
-    if tool == "spawn_agent" {
+    if tool == "spawn_agent" || tool == "schedule_agent" {
         definition.input_schema["properties"]["kind"]
             .as_object_mut()
             .unwrap()
