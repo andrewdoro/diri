@@ -349,6 +349,8 @@ pub struct UtilitySurfaces {
     worktrees: WorktreesSheet,
     settings_tab: SettingsTab,
     usage: crate::usage::UsageSnapshot,
+    /// Remote hosts are polled for usage only while this page shows it.
+    remote_usage_viewer: crate::usage::RemoteUsageViewer,
     usage_days: usize,
     usage_host: Option<String>,
     usage_tokens: bool,
@@ -546,6 +548,7 @@ impl UtilitySurfaces {
             worktrees: WorktreesSheet::default(),
             settings_tab,
             usage: crate::usage::UsageSnapshot::default(),
+            remote_usage_viewer: crate::usage::RemoteUsageViewer::default(),
             usage_days: 30,
             usage_host: None,
             usage_tokens: false,
@@ -5590,6 +5593,10 @@ impl Focusable for UtilitySurfaces {
 impl Render for UtilitySurfaces {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.release_retired_share_images(window, cx);
+        // Every surface or tab change notifies, so this render sees it.
+        self.remote_usage_viewer.set_viewing(
+            self.surface == Surface::Settings && self.settings_tab == SettingsTab::Usage,
+        );
         // Worktree delegation starts in the sidebar, so that one surface
         // deliberately leaves the visible sidebar interactive. The shaded
         // workspace and sheet remain modal once the pointer crosses the seam.
@@ -7710,6 +7717,10 @@ mod tests {
             }];
         });
         cx.run_until_parked();
+        // The page on screen is what lets remote hosts be polled.
+        surfaces.read_with(cx, |surfaces, _| {
+            assert!(surfaces.remote_usage_viewer.is_viewing());
+        });
         for selector in ["usage-tokens", "usage-source-forge", "usage-range-1"] {
             let bounds = cx.debug_bounds(selector).expect("visible usage control");
             cx.simulate_click(bounds.center(), Modifiers::default());
@@ -7726,6 +7737,17 @@ mod tests {
         );
         assert!(settings_tab_matches(SettingsTab::Usage, "cache savings"));
         assert!(settings_tab_matches(SettingsTab::Usage, "cost"));
+        surfaces.update(cx, |surfaces, cx| {
+            surfaces.open_settings_tab(SettingsTab::General, cx);
+        });
+        cx.run_until_parked();
+        surfaces.read_with(cx, |surfaces, _| {
+            assert!(!surfaces.remote_usage_viewer.is_viewing());
+        });
+        surfaces.update(cx, |surfaces, cx| {
+            surfaces.open_settings_tab(SettingsTab::Usage, cx);
+        });
+        cx.run_until_parked();
         if !usage_share::SUPPORTED {
             assert!(cx.debug_bounds("usage-share").is_none());
             return;

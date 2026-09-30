@@ -1,5 +1,45 @@
 # diri performance record
 
+## Remote usage polls only while the Usage page is open (2026-09-30)
+
+`rpc.slow method=host.usage` was the author's most frequent slow RPC: 161 in
+3 days (0.8.10, one host), p50 966 ms, p90 1.8 s, p99 4.7 s, max 11.9 s (a
+one-off Helper upload after an app update). It is not a stall: `host.usage`
+already runs on a background request thread, holds no lock across SSH, and
+the client multiplexes requests, so nothing else waited on it. It was waste:
+the App polled every host every five minutes for as long as it ran, while
+remote usage is shown only on Settings > Usage (the sidebar's cost is local
+only). Each poll paid a cold SSH connection, since the 60 s ControlPersist
+expires between five-minute polls.
+
+Measured from the author's Mac against the real host over Tailscale:
+
+| | wall |
+|---|---|
+| cold `ssh true` | 410–630 ms (p50 430) |
+| multiplexed `ssh true` | 130–150 ms |
+| one fused probe + `usage` poll (after #577), cold | 516–564 ms |
+| pre-#577 poll: cached probe, then `usage` (telemetry) | p50 670 + 285 ms |
+
+The fused poll is still above the Engine's 250 ms `rpc.slow` threshold on
+every call, and ~80% of it is the SSH handshake, which only a permanent
+ControlMaster could remove (not permitted: masters are finite-lived).
+
+Change: a view holds a `RemoteUsageViewer` while it renders the Usage tab
+(released on tab change, close or drop). The poller waits for a viewer,
+refreshes at once when the previous refresh is at least five minutes old,
+and repeats every five minutes only while a viewer remains.
+
+| App running, Usage page closed | before | after |
+|---|---|---|
+| SSH commands per host per day | 288 (576 before #577) | 0 |
+| `host.usage` calls / `rpc.slow` per day | 288 | 0 |
+| Data age when the page opens | ≤ 5 min (always polled) | shown from cache; refreshed at once if ≥ 5 min |
+| Refresh cadence while the page is open | 5 min | 5 min |
+
+Verified with paused-time pacer tests (`usage::remote::tests`) and the
+Usage settings UI test (viewer held on the tab, released on leaving it).
+
 ## Agent hooks and remote usage polls (2026-09-30)
 
 Real telemetry (4.7 h of the author's 0.8.10 use, aggregates only): 1,928
