@@ -2499,18 +2499,32 @@ impl TerminalPane {
     }
 
     fn selected_id(&self) -> Option<SessionId> {
+        // A note has no terminal: the pane behaves as if nothing were
+        // selected while RootView shows the note in its place.
         match &self.session_source {
-            SessionSource::FollowSelection => self.window_store.as_ref().map_or_else(
-                || {
-                    self.runtime
-                        .store
-                        .read()
-                        .expect("store")
-                        .selected_session_id()
-                        .cloned()
-                },
-                |store| store.read().expect("store").selected_session_id().cloned(),
-            ),
+            SessionSource::FollowSelection => {
+                let (id, note) = match self.window_store.as_ref() {
+                    Some(store) => {
+                        let store = store.read().expect("store");
+                        let id = store.selected_session_id().cloned();
+                        let note = id
+                            .as_ref()
+                            .and_then(|id| store.sessions().get(id))
+                            .is_some_and(|record| record.is_note());
+                        (id, note)
+                    }
+                    None => {
+                        let store = self.runtime.store.read().expect("store");
+                        let id = store.selected_session_id().cloned();
+                        let note = id
+                            .as_ref()
+                            .and_then(|id| store.sessions().get(id))
+                            .is_some_and(|record| record.is_note());
+                        (id, note)
+                    }
+                };
+                id.filter(|_| !note)
+            }
             SessionSource::Fixed(id) => Some(id.clone()),
         }
     }

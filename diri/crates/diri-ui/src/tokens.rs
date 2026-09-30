@@ -442,7 +442,7 @@ impl Ink {
 
     pub fn working(kind: crate::AgentKind, semantic: SemanticColors) -> Rgba {
         match kind {
-            crate::AgentKind::ClaudeCode => Palette::CLAY,
+            crate::AgentKind::ClaudeCode | crate::AgentKind::Note => Palette::CLAY,
             crate::AgentKind::Codex | crate::AgentKind::Cursor => semantic.primary.alpha(0.96),
             crate::AgentKind::Gemini => Palette::GEMINI_BLUE,
             crate::AgentKind::Shell | crate::AgentKind::Generic => Self::GENERIC_WORKING,
@@ -468,7 +468,9 @@ impl Ink {
 
     pub const fn overprint(kind: crate::AgentKind) -> Rgba {
         match kind {
-            crate::AgentKind::ClaudeCode => rgba_f32(1.0, 0.435, 0.380, 1.0),
+            crate::AgentKind::ClaudeCode | crate::AgentKind::Note => {
+                rgba_f32(1.0, 0.435, 0.380, 1.0)
+            }
             crate::AgentKind::Codex => rgba_f32(0.180, 0.800, 0.741, 1.0),
             crate::AgentKind::Cursor => rgba_f32(0.62, 0.45, 0.95, 1.0),
             crate::AgentKind::Gemini => rgba_f32(0.85, 0.40, 0.55, 1.0),

@@ -83,12 +83,17 @@ impl AgentKind {
     pub const GEMINI_ID: &'static str = "gemini";
     pub const SHELL_ID: &'static str = "shell";
     pub const GENERIC_ID: &'static str = "generic";
+    /// A Diri note: a Session with no process whose content is a Markdown
+    /// file in the notes store (`SessionRecord::note_id`). It lives in the
+    /// sidebar, lineage, and workspaces like any other Session.
+    pub const NOTE_ID: &'static str = "note";
 
     pub const CLAUDE_CODE: Self = Self::builtin(Self::CLAUDE_CODE_ID);
     pub const CODEX: Self = Self::builtin(Self::CODEX_ID);
     pub const CURSOR: Self = Self::builtin(Self::CURSOR_ID);
     pub const GEMINI: Self = Self::builtin(Self::GEMINI_ID);
     pub const SHELL: Self = Self::builtin(Self::SHELL_ID);
+    pub const NOTE: Self = Self::builtin(Self::NOTE_ID);
     /// A kind we could not parse at all. Distinct from a manifest agent the
     /// client simply hasn't heard of, which keeps its real id.
     pub const UNKNOWN: Self = Self::builtin("unknown");
@@ -824,9 +829,18 @@ pub struct SessionRecord {
     /// the launch directory, which owns the Session's project and worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_cwd: Option<String>,
+    /// For a note Session (`kind` = [`AgentKind::NOTE_ID`]): the id of its
+    /// Markdown file in the notes store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_id: Option<String>,
 }
 
 impl SessionRecord {
+    /// A note has no process: nothing to attach, send to, resume, or reap.
+    pub fn is_note(&self) -> bool {
+        self.kind.id() == AgentKind::NOTE_ID
+    }
+
     pub fn effective_kind(&self) -> &AgentKind {
         self.foreground_agent.as_ref().unwrap_or(&self.kind)
     }

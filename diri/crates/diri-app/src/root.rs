@@ -42,7 +42,7 @@ use crate::AppServices;
 use crate::commands::{
     self, APP_CONTEXT, ArchiveSelectedSession, CheckForUpdates, CloseSession, CommandId,
     DelegateSelectedSession, FocusSidebar, MoveSelectedSessionDown, MoveSelectedSessionUp,
-    NewCodexSession, NewDefaultSession, NewTerminal, OpenLauncher, OpenNotes, OpenSettings,
+    NewCodexSession, NewDefaultSession, NewNote, NewTerminal, OpenLauncher, OpenSettings,
     OpenWorktrees, QuoteSelection, QuoteSelectionToSession, RenameSelectedSession, ReopenSession,
     SESSION_NAVIGATION_CONTEXT, SelectLastSession, SelectNextAttentionSession, SelectNextSession,
     SelectPreviousSession, SelectSession1, SelectSession2, SelectSession3, SelectSession4,
@@ -280,6 +280,9 @@ pub struct RootView {
     /// preference change re-applies it exactly once.
     applied_material: Option<WindowMaterial>,
     auxiliary_terminal: Option<Entity<TerminalPane>>,
+    /// Shows the selected note Session where the terminal would be. Created
+    /// the first time a note is selected.
+    note_pane: Option<Entity<crate::notes::NotePane>>,
     auxiliary_id: Option<SessionId>,
     auxiliary_parent: Option<SessionId>,
     auxiliary_spawn_parent: Option<SessionId>,
@@ -674,7 +677,11 @@ impl RootView {
                     this.launcher
                         .update(cx, |launcher, cx| launcher.dismiss(cx));
                 }
-                if let Some(terminal) = &this.terminal {
+                if this.selected_note().is_some() {
+                    this.note_pane(window, cx)
+                        .update(cx, |pane, _| pane.request_focus());
+                    cx.notify();
+                } else if let Some(terminal) = &this.terminal {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                     this.sync_auxiliary_terminal(window, cx);
                 }
@@ -1367,6 +1374,7 @@ impl RootView {
             tabs_seam,
             tabs_target: tabs_seam,
             auxiliary_terminal: None,
+            note_pane: None,
             auxiliary_id: None,
             auxiliary_parent: None,
             auxiliary_spawn_parent: None,
@@ -2236,11 +2244,19 @@ impl RootView {
                     surfaces.update(cx, |surfaces, cx| surfaces.toggle_overview(cx));
                 }
             }
-            CommandId::OpenNotes => {
+            CommandId::NewNote => {
                 if let Some(navigation) = &self.navigation {
                     navigation.update(cx, |navigation, cx| navigation.dismiss(cx));
                 }
-                crate::notes::open(self.services.store.clone(), cx);
+                if self.spawn_note() {
+                    if self.launcher.read(cx).is_open() {
+                        self.launcher
+                            .update(cx, |launcher, cx| launcher.dismiss(cx));
+                    }
+                    self.note_pane(window, cx)
+                        .update(cx, |pane, _| pane.request_focus());
+                    cx.notify();
+                }
             }
             CommandId::OpenWorktrees => {
                 if let Some(navigation) = &self.navigation {
@@ -2445,7 +2461,62 @@ impl RootView {
         true
     }
 
+    /// ⌥⌘N: a note Session in the current project, created like ⌘T creates
+    /// a terminal. The Engine writes the note's file and the spawn reply
+    /// selects it.
+    fn spawn_note(&self) -> bool {
+        if self.preview {
+            return false;
+        }
+        self.window_store
+            .write()
+            .expect("session store lock poisoned")
+            .spawn_kind(AgentKind::NOTE, SpawnOptions::default());
+        true
+    }
+
+    fn note_pane(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::notes::NotePane> {
+        if let Some(pane) = &self.note_pane {
+            return pane.clone();
+        }
+        let runtime = Arc::clone(&self.services.store);
+        let pane = cx.new(|cx| crate::notes::NotePane::new(runtime, cx));
+        // Escape with nothing left to dismiss hands the keyboard to the
+        // sidebar, where ↑/↓ move between notes and sessions alike.
+        cx.subscribe_in(&pane, window, |_, _, event, window, cx| match event {
+            crate::notes::NotePaneEvent::Dismiss => {
+                window.dispatch_action(Box::new(FocusSidebar), cx);
+            }
+        })
+        .detach();
+        self.note_pane = Some(pane.clone());
+        pane
+    }
+
+    /// The selected Session when it is a note: (session, note file id).
+    fn selected_note(&self) -> Option<(SessionId, String)> {
+        let store = self
+            .window_store
+            .read()
+            .expect("session store lock poisoned");
+        let id = store.selected_session_id()?;
+        let record = store.sessions().get(id)?;
+        record
+            .is_note()
+            .then(|| (id.clone(), record.note_id.clone().unwrap_or_default()))
+    }
+
     fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_note().is_some() {
+            let pane = self.note_pane(window, cx);
+            let handle = pane.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            return;
+        }
         if let Some(terminal) = self.active_terminal(cx) {
             terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
             self.sync_auxiliary_terminal(window, cx);
@@ -3693,6 +3764,10 @@ impl RootView {
             }
         } else if self.preview && self.preview_scenario != PreviewScenario::Empty {
             body = body.child(self.preview_workbench(terminal));
+        } else if let Some((session, note_id)) = self.selected_note() {
+            let pane = self.note_pane(window, cx);
+            pane.update(cx, |pane, cx| pane.show(&session, &note_id, window, cx));
+            body = body.child(pane);
         } else if split_open {
             let available_height = (card_height - 1.0).max(0.0);
             self.terminal_available_height = available_height;
@@ -4938,8 +5013,8 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &OpenWorktrees, window, cx| {
                 this.run_command(CommandId::OpenWorktrees, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &OpenNotes, window, cx| {
-                this.run_command(CommandId::OpenNotes, window, cx);
+            .on_action(cx.listener(|this, _: &NewNote, window, cx| {
+                this.run_command(CommandId::NewNote, window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.run_command(CommandId::OpenSettings, window, cx);
@@ -9099,6 +9174,105 @@ mod tests {
                 .unwrap();
             cx.run_until_parked();
         }
+    }
+
+    /// A note Session selected in the real window: the sidebar lists it among
+    /// agents and terminals (one agent is its child), and the main area shows
+    /// the note editor. `DIRI_VISUAL_OUTPUT=<png>`, `DIRI_VISUAL_THEME=<id>`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes the notes-in-window screenshot artifact"]
+    fn render_notes_in_window_screenshot() {
+        use gpui::{AppContext as _, HeadlessAppContext};
+        let output = std::env::var("DIRI_VISUAL_OUTPUT").expect("DIRI_VISUAL_OUTPUT");
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| {
+            crate::fonts::init(cx);
+            cx.set_reduce_motion(true);
+            cx.bind_keys(crate::notes::key_bindings());
+        });
+        let notes_dir = tempfile::tempdir().unwrap();
+        let note_store =
+            Arc::new(diri_notes::store::NoteStore::open(notes_dir.path().join("notes")).unwrap());
+        let (_, doc) = diri_notes::markdown::parse(crate::notes::tests::PLAN);
+        let (note_id, _) = note_store.create(doc, None).unwrap();
+
+        let services = test_services();
+        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::from_env(None));
+        let template = fixture.list.sessions[0].clone();
+        let mut note = template.clone();
+        note.id = SessionId::new("s_note_plan");
+        note.kind = AgentKind::NOTE;
+        note.title = "Notes launch plan".into();
+        note.title_source = diri_proto::TitleSource::DirijorAssigned;
+        note.status = diri_proto::SessionStatus::Idle;
+        note.needs_input = None;
+        note.resumability = diri_proto::Resumability::NotResumable;
+        note.note_id = Some(note_id);
+        note.parent = None;
+        note.pinned = false;
+        note.archived_at = None;
+        note.agent_session_id = None;
+        note.transcript_path = None;
+        note.git_branch = None;
+        note.foreground_agent = None;
+        note.pull_requests = None;
+        note.listening_ports = None;
+        note.artifacts = None;
+        note.worktree_path = None;
+        note.created_at = template.created_at;
+        // One agent in the same project works for the note.
+        if let Some(child) =
+            fixture.list.sessions.iter_mut().find(|s| {
+                s.project_id == note.project_id && s.id != template.id && !s.is_archived()
+            })
+        {
+            child.parent = Some(note.id.clone());
+        }
+        fixture.list.sessions.insert(1, note);
+        {
+            let mut store = services.store.store.write().unwrap();
+            store.hydrate(fixture.list);
+            store.select(SessionId::new("s_note_plan"));
+            store
+                .update_preferences(|prefs| {
+                    prefs.sidebar_visible = true;
+                    prefs.terminal_theme = std::env::var("DIRI_VISUAL_THEME")
+                        .unwrap_or_else(|_| "dirijor-light".into());
+                })
+                .unwrap();
+        }
+        let runtime = Arc::clone(&services.store);
+        let window = cx
+            .open_window(size(px(1240.0), px(780.0)), |window, cx| {
+                cx.new(|cx| {
+                    let mut root =
+                        RootView::new(services, false, PreviewScenario::Empty, window, cx);
+                    root.note_pane = Some(cx.new(|cx| {
+                        crate::notes::NotePane::with_store(runtime, Some(note_store), false, cx)
+                    }));
+                    root
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        for _ in 0..3 {
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+        }
+        cx.capture_screenshot(window.into())
+            .unwrap()
+            .save(&output)
+            .unwrap();
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
     }
 
     /// The first-run and resting pages inside the real window, so they are

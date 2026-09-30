@@ -810,11 +810,18 @@ impl Registry {
     /// Remote (`host`-bound) sessions are none of this pass's business: their
     /// authenticated Holders live on another machine and outlive both this
     /// daemon and this Mac, so their records stay untouched.
+    #[cfg(test)]
+    pub(crate) fn reap_orphans_for_test(&mut self) {
+        self.reap_orphans();
+    }
+
     fn reap_orphans(&mut self) {
         let orphaned: Vec<String> = self
             .records
             .values()
             .filter(|record| record.host.is_none())
+            // A note never had a process, so there is no claim to retract.
+            .filter(|record| !record.is_note())
             .filter(|record| !matches!(record.status, SessionStatus::Exited(_)))
             .filter(|record| !self.sessions.contains_key(&record.id.0))
             .map(|record| record.id.0.clone())
@@ -1440,7 +1447,7 @@ impl Registry {
             // The stack holds the record as it was before the close, so it
             // still claims its last live status. Nothing runs under it now;
             // re-listing it live would leave clients attaching to no PTY.
-            if !matches!(record.status, SessionStatus::Exited(_)) {
+            if !record.is_note() && !matches!(record.status, SessionStatus::Exited(_)) {
                 record.status = SessionStatus::Exited(diri_proto::ExitInfo {
                     reason: diri_proto::ExitReason::Exited,
                     code: None,
@@ -2677,6 +2684,7 @@ fn recovered_record(capsule: diri_proto::recovery::SessionRecoveryCapsule) -> Se
         listening_ports: None,
         foreground_agent: None,
         terminal_cwd: None,
+        note_id: None,
     }
 }
 
@@ -2903,6 +2911,7 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            note_id: None,
         }
     }
 

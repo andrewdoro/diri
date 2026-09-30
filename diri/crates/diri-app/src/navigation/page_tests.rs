@@ -519,7 +519,7 @@ impl Render for ActionHarness {
             MovePaneUp,
             MovePaneDown,
             OpenWorktrees,
-            OpenNotes,
+            NewNote,
             ToggleSidebar,
             HorizontalTabs,
             VerticalTabs,

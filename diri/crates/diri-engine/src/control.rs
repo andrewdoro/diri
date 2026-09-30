@@ -78,6 +78,9 @@ pub struct ControlServer {
     session_operations: Mutex<std::collections::HashSet<String>>,
     agent_scans: Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
     hook_reports: hook_queue::HookQueue,
+    /// Where note Sessions keep their files; `None` resolves the standard
+    /// notes directory (tests pin a temporary one).
+    notes_dir: Option<PathBuf>,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -187,6 +190,7 @@ impl ControlServer {
             session_operations: Mutex::new(std::collections::HashSet::new()),
             agent_scans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             hook_reports: hook_queue::HookQueue::new(),
+            notes_dir: None,
         }
     }
 
@@ -224,6 +228,11 @@ impl ControlServer {
 
     /// Where session output logs are written. Defaults to `logs/` beside the
     /// socket, matching the Swift daemon's layout.
+    pub fn with_notes_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.notes_dir = Some(dir.into());
+        self
+    }
+
     pub fn with_logs_dir(mut self, logs_dir: impl Into<PathBuf>) -> Self {
         self.logs_dir = logs_dir.into();
         let activity_path = self
@@ -1003,6 +1012,10 @@ impl ControlServer {
         // never silently drop arguments or fall back to a login shell.
         let argv = decode_launch_argv(&raw)?;
         let p: diri_proto::SessionSpawnParams = decode(Some(raw))?;
+        // A note runs nothing: no account, argv, or holder applies.
+        if p.kind.id() == diri_proto::AgentKind::NOTE_ID {
+            return self.session_spawn_note(p, reserved_id);
+        }
         let mut account_profile = self.accounts.lock().map_err(poisoned)?.resolve(
             p.account_profile_id.as_deref(),
             p.kind.id(),
@@ -1284,6 +1297,69 @@ impl ControlServer {
         // SessionSpawnResult is the record itself, as the Swift daemon
         // answers — not wrapped.
         serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
+
+    /// A note Session: a record with no process, backed by a Markdown file
+    /// in the notes store. The file is created first so a record can never
+    /// point at a note that does not exist. `initial_prompt` seeds the body
+    /// (Markdown), which is how a PRD or handoff arrives pre-written.
+    fn session_spawn_note(
+        &self,
+        p: diri_proto::SessionSpawnParams,
+        reserved_id: Option<String>,
+    ) -> Result<JsonValue, ControlError> {
+        if p.host.is_some() {
+            return Err(ControlError::bad_request(
+                "notes are stored on this Mac; they cannot be opened on a remote host",
+            ));
+        }
+        if p.new_worktree.unwrap_or(false) {
+            return Err(ControlError::bad_request("a note has no worktree"));
+        }
+        let cwd = p.cwd.trim().to_owned();
+        if cwd.is_empty() || !Path::new(&cwd).is_dir() {
+            return Err(ControlError::bad_request(format!(
+                "cwd {cwd:?} is not a directory"
+            )));
+        }
+        let store = self.note_store()?;
+        let title = p.title.clone().unwrap_or_default();
+        let body = p.initial_prompt.clone().unwrap_or_default();
+        let (_, parsed) = diri_notes::markdown::parse(&format!("\n{body}"));
+        let doc = diri_notes::doc::Document::new(title.trim(), parsed.blocks);
+        let (note_id, _) = store.create(doc, Some(&cwd)).map_err(io_control_error)?;
+
+        let id = reserved_id.unwrap_or_else(next_session_id);
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        let mut record = new_record(&id, diri_proto::AgentKind::NOTE_ID, &cwd);
+        record.kind = diri_proto::AgentKind::NOTE;
+        record.project_id = crate::registry::session_project_id(&cwd, None);
+        self.ensure_published_project(&mut registry, &cwd, None);
+        if !title.trim().is_empty() {
+            record.title = title.trim().to_owned();
+            record.title_source = diri_proto::TitleSource::DirijorAssigned;
+        } else {
+            record.title = "Untitled".into();
+        }
+        record.parent = p.parent.clone();
+        record.git_branch = None;
+        record.status = diri_proto::SessionStatus::Idle;
+        record.resumability = diri_proto::Resumability::NotResumable;
+        record.note_id = Some(note_id);
+        registry.insert_record(record.clone());
+        registry.persist_for_shutdown().map_err(io_control_error)?;
+        self.publish_updated(&registry, &id);
+        drop(registry);
+        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
+
+    fn note_store(&self) -> Result<diri_notes::store::NoteStore, ControlError> {
+        let dir = match &self.notes_dir {
+            Some(dir) => dir.clone(),
+            None => diri_notes::store::NoteStore::resolve_dir()
+                .ok_or_else(|| ControlError::internal("no home directory for notes"))?,
+        };
+        diri_notes::store::NoteStore::open(dir).map_err(io_control_error)
     }
 
     fn session_spawn_remote(
@@ -4106,6 +4182,7 @@ pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::Session
         listening_ports: None,
         foreground_agent: None,
         terminal_cwd: None,
+        note_id: None,
     }
 }
 
@@ -5082,6 +5159,7 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            note_id: None,
         }
     }
 
@@ -5162,6 +5240,50 @@ mod tests {
             .read_line(&mut response)
             .expect("background response");
         serde_json::from_str(&response).expect("a request gets a response")
+    }
+
+    #[test]
+    fn note_sessions_have_a_file_and_survive_the_restart_reaper() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let server = Arc::new(
+            ControlServer::new(Arc::clone(&registry), temp.path().join("daemon.sock"))
+                .with_notes_dir(temp.path().join("notes")),
+        );
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let record = ok_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({
+                "kind": "note",
+                "cwd": project.to_string_lossy(),
+                "title": "Launch plan",
+                "initialPrompt": "- [ ] ship it",
+            })),
+        ));
+        let record: diri_proto::SessionRecord = serde_json::from_value(record).expect("record");
+        assert!(record.is_note());
+        assert_eq!(record.title, "Launch plan");
+        assert!(matches!(record.status, diri_proto::SessionStatus::Idle));
+        let note_id = record.note_id.clone().expect("note id");
+        let store = diri_notes::store::NoteStore::open(temp.path().join("notes")).expect("store");
+        let note = store.load(&note_id).expect("note file");
+        assert_eq!(note.doc.title, "Launch plan");
+        assert_eq!(note.doc.todo_progress(), (0, 1));
+        assert_eq!(note.project(), Some(project.to_string_lossy().as_ref()));
+
+        // A daemon restart finds no holder for the note and must not call it lost.
+        registry.lock().expect("registry").reap_orphans_for_test();
+        let after = registry
+            .lock()
+            .expect("registry")
+            .record(&record.id.0)
+            .expect("still listed");
+        assert!(matches!(after.status, diri_proto::SessionStatus::Idle));
     }
 
     fn ok_of(message: ControlMessage) -> JsonValue {

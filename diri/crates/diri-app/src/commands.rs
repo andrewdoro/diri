@@ -61,7 +61,7 @@ actions!(
         MovePaneUp,
         MovePaneDown,
         OpenWorktrees,
-        OpenNotes,
+        NewNote,
         OpenSettings,
         // Palette destination: open Settings even when it is already visible.
         // OpenSettings retains the Cmd+, toggle behavior.
@@ -163,7 +163,7 @@ pub enum CommandId {
     MovePaneUp,
     MovePaneDown,
     OpenWorktrees,
-    OpenNotes,
+    NewNote,
     OpenSettings,
     ToggleSidebar,
     ToggleTabOrientation,
@@ -631,14 +631,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         "workspace move pane down dock"
     ),
     spec!(
-        OpenNotes,
-        "notes",
-        Some("cmd-shift-m"),
-        Some("⇧⌘M"),
+        NewNote,
+        "new-note",
+        Some("cmd-alt-n"),
+        Some("⌥⌘N"),
         Some(APP_CONTEXT),
-        "Notes",
+        "New Note",
         "doc.text",
-        "notes note markdown todo todos write memo journal"
+        "note notes markdown todo todos write memo prd plan doc"
     ),
     spec!(
         OpenWorktrees,
@@ -1202,7 +1202,7 @@ impl CommandSpec {
             CommandId::MovePaneDown => KeyBinding::new(key, MovePaneDown, context),
 
             CommandId::OpenWorktrees => KeyBinding::new(key, OpenWorktrees, context),
-            CommandId::OpenNotes => KeyBinding::new(key, OpenNotes, context),
+            CommandId::NewNote => KeyBinding::new(key, NewNote, context),
             CommandId::OpenSettings => KeyBinding::new(key, OpenSettings, context),
             CommandId::ToggleSidebar => KeyBinding::new(key, ToggleSidebar, context),
             CommandId::ToggleTabOrientation => KeyBinding::new(key, ToggleTabOrientation, context),
@@ -1623,9 +1623,9 @@ impl CommandId {
                 description: "Preview sessions across projects without changing work",
                 category: Navigation,
             },
-            Self::OpenNotes => ShortcutMetadata {
-                title: "Notes",
-                description: "Open the Notes window",
+            Self::NewNote => ShortcutMetadata {
+                title: "New note",
+                description: "Start a note in the current project, beside its agents",
                 category: Navigation,
             },
             Self::OpenWorktrees => ShortcutMetadata {
@@ -1871,7 +1871,7 @@ impl CommandId {
             Self::MovePaneDown => Box::new(MovePaneDown),
 
             Self::OpenWorktrees => Box::new(OpenWorktrees),
-            Self::OpenNotes => Box::new(OpenNotes),
+            Self::NewNote => Box::new(NewNote),
             Self::OpenSettings => Box::new(OpenSettings),
             Self::ToggleSidebar => Box::new(ToggleSidebar),
             Self::ToggleTabOrientation => Box::new(ToggleTabOrientation),

@@ -312,7 +312,7 @@ fn append_management_actions(
                     | PaletteCommand::SyncPrefs { .. }
                     | PaletteCommand::Action(
                         CommandId::OpenWorktrees
-                            | CommandId::OpenNotes
+                            | CommandId::NewNote
                             | CommandId::ToggleSidebar
                             | CommandId::HorizontalTabs
                             | CommandId::VerticalTabs
@@ -516,7 +516,7 @@ pub fn actions_for_default_host(
 
     result.extend([
         registered_action(CommandId::OpenWorktrees),
-        registered_action(CommandId::OpenNotes),
+        registered_action(CommandId::NewNote),
         registered_action(CommandId::ToggleSidebar),
         registered_action(CommandId::HorizontalTabs),
         registered_action(CommandId::VerticalTabs),
@@ -1103,7 +1103,7 @@ mod tests {
                 "move-pane-down",
                 "new-default-in-/work/diri",
                 "worktrees",
-                "notes",
+                "new-note",
                 "toggle-sidebar",
                 "horizontal-tabs",
                 "vertical-tabs",
@@ -1263,6 +1263,7 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            note_id: None,
         }
     }
 
