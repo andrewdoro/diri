@@ -5048,6 +5048,7 @@ mod tests {
         let unsampled = SessionView {
             remote_connection: None,
             foreground_program: None,
+            foreground_ports: Vec::new(),
             foreground_agent: None,
             terminal_cwd: None,
             attention_state: None,
