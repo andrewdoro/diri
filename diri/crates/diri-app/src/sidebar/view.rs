@@ -6212,6 +6212,22 @@ impl Sidebar {
                 .child(copy_session_id_row(id, colors, cx));
         } else {
             let running = !matches!(session.status, diri_proto::SessionStatus::Exited(_));
+            // A dev server opens where its tab says it is, as the links
+            // menu's Local preview row does, without opening that menu.
+            if running && let Some(port) = crate::switcher::served_port(&session) {
+                let url = format!("http://localhost:{port}");
+                content = content
+                    .child(menu_row(
+                        format!("Open localhost:{port}"),
+                        colors,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.open_url(&url);
+                            this.ui.popover = None;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(menu_divider(colors));
+            }
             if session.kind == ProtoAgentKind::CLAUDE_CODE
                 || (session.kind == ProtoAgentKind::CODEX && session.host.is_none())
             {
@@ -11590,6 +11606,11 @@ mod tests {
             }),
             "session" => Some(Popover::SessionActions {
                 id: SessionId::new("preview-codex"),
+                position: point(px(48.0), px(210.0)),
+            }),
+            // The fixture's dev-server terminal, which offers its address.
+            "server" => Some(Popover::SessionActions {
+                id: SessionId::new("preview-shell"),
                 position: point(px(48.0), px(210.0)),
             }),
             _ => Some(Popover::SidebarLayout),

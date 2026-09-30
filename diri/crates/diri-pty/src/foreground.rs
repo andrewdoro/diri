@@ -6,7 +6,10 @@
 //! passwords and tokens typed on a command line live, so nothing past the
 //! program's own name ever leaves this module.
 
+use std::collections::BTreeMap;
 use std::io;
+
+use diri_proto::PortInfo;
 
 /// The program name of `pid`: `vim`, `claude`, `npm`, never its arguments.
 ///
@@ -22,6 +25,237 @@ pub fn program_name(pid: u32) -> io::Result<String> {
 /// The live working directory of `pid`, as the kernel reports it.
 pub fn working_directory(pid: u32) -> io::Result<String> {
     crate::process_facts::working_directory(pid)
+}
+
+/// The TCP ports the processes of group `pgid` listen on, lowest first, each
+/// with the name of the process holding it (`node`), never its arguments.
+///
+/// A dev server's workers share its job's process group, so `npm run dev` is
+/// answered by the `node` it started. Read natively rather than through
+/// `lsof`: this is asked while a job runs, and a child process per ask would
+/// cost more than the answer.
+pub fn listening_ports(pgid: u32) -> io::Result<Vec<PortInfo>> {
+    let mut ports = BTreeMap::new();
+    for pid in sockets::group_members(pgid)? {
+        let mut name = None;
+        for port in sockets::listening(pid) {
+            let name = name.get_or_insert_with(|| sockets::process_name(pid).unwrap_or_default());
+            ports.entry(port).or_insert_with(|| name.clone());
+        }
+    }
+    Ok(ports
+        .into_iter()
+        .map(|(port, process_name)| PortInfo {
+            port: i64::from(port),
+            process_name,
+        })
+        .collect())
+}
+
+#[cfg(target_os = "macos")]
+mod sockets {
+    use std::io;
+
+    const PROC_PGRP_ONLY: u32 = 2;
+    const PROC_PIDFDSOCKETINFO: libc::c_int = 3;
+    // `struct socket_fdinfo` from <sys/proc_info.h>, which libc does not
+    // bind. Its layout is kernel ABI; `reads_a_port_this_process_listens_on`
+    // fails if these ever stop describing it.
+    const SOCKET_FDINFO_SIZE: usize = 792;
+    const SOI_KIND: usize = 256;
+    const INSI_LPORT: usize = 268;
+    const TCPSI_STATE: usize = 344;
+    const SOCKINFO_TCP: i32 = 2;
+    const TSI_S_LISTEN: i32 = 1;
+
+    pub(super) fn group_members(pgid: u32) -> io::Result<Vec<i32>> {
+        // SAFETY: a null buffer asks only for the size needed.
+        let bytes = unsafe { libc::proc_listpids(PROC_PGRP_ONLY, pgid, std::ptr::null_mut(), 0) };
+        if bytes < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Room for members that join between the two calls.
+        let mut pids = vec![0i32; bytes as usize / size_of::<i32>() + 16];
+        // SAFETY: pids is writable for the byte length passed.
+        let bytes = unsafe {
+            libc::proc_listpids(
+                PROC_PGRP_ONLY,
+                pgid,
+                pids.as_mut_ptr().cast(),
+                (pids.len() * size_of::<i32>()) as libc::c_int,
+            )
+        };
+        if bytes < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        pids.truncate(bytes as usize / size_of::<i32>());
+        pids.retain(|pid| *pid > 0);
+        Ok(pids)
+    }
+
+    pub(super) fn listening(pid: i32) -> Vec<u16> {
+        let entry = size_of::<libc::proc_fdinfo>();
+        // SAFETY: a null buffer asks only for the size needed.
+        let bytes =
+            unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+        if bytes <= 0 {
+            return Vec::new();
+        }
+        let mut fds = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0,
+            };
+            bytes as usize / entry + 16
+        ];
+        // SAFETY: fds is writable for the byte length passed.
+        let bytes = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                fds.as_mut_ptr().cast(),
+                (fds.len() * entry) as libc::c_int,
+            )
+        };
+        if bytes <= 0 {
+            return Vec::new();
+        }
+        fds.truncate(bytes as usize / entry);
+        let mut info = [0u8; SOCKET_FDINFO_SIZE];
+        let field = |info: &[u8; SOCKET_FDINFO_SIZE], at: usize| {
+            i32::from_ne_bytes(info[at..at + 4].try_into().expect("four bytes"))
+        };
+        fds.iter()
+            .filter(|fd| fd.proc_fdtype == libc::PROX_FDTYPE_SOCKET as u32)
+            .filter_map(|fd| {
+                // SAFETY: info is writable for the byte length passed.
+                let read = unsafe {
+                    libc::proc_pidfdinfo(
+                        pid,
+                        fd.proc_fd,
+                        PROC_PIDFDSOCKETINFO,
+                        info.as_mut_ptr().cast(),
+                        SOCKET_FDINFO_SIZE as libc::c_int,
+                    )
+                };
+                (read as usize == SOCKET_FDINFO_SIZE
+                    && field(&info, SOI_KIND) == SOCKINFO_TCP
+                    && field(&info, TCPSI_STATE) == TSI_S_LISTEN)
+                    // The port is stored in network byte order.
+                    .then(|| u16::from_be(field(&info, INSI_LPORT) as u16))
+            })
+            .filter(|port| *port != 0)
+            .collect()
+    }
+
+    pub(super) fn process_name(pid: i32) -> Option<String> {
+        let mut name = [0u8; 256];
+        // SAFETY: name is writable for the byte length passed.
+        let length = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
+        (length > 0).then(|| String::from_utf8_lossy(&name[..length as usize]).into_owned())
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod sockets {
+    use std::collections::HashSet;
+    use std::io;
+
+    pub(super) fn group_members(pgid: u32) -> io::Result<Vec<i32>> {
+        let mut pids = Vec::new();
+        for entry in std::fs::read_dir("/proc")?.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            if std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| super::stat_group(&stat))
+                == Some(pgid)
+            {
+                pids.push(pid);
+            }
+        }
+        Ok(pids)
+    }
+
+    pub(super) fn listening(pid: i32) -> Vec<u16> {
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            return Vec::new();
+        };
+        let sockets: HashSet<u64> = fds
+            .flatten()
+            .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+            .filter_map(|target| {
+                target
+                    .to_str()?
+                    .strip_prefix("socket:[")?
+                    .strip_suffix(']')?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        if sockets.is_empty() {
+            return Vec::new();
+        }
+        ["tcp", "tcp6"]
+            .iter()
+            .filter_map(|table| std::fs::read_to_string(format!("/proc/{pid}/net/{table}")).ok())
+            .flat_map(|table| {
+                super::listening_sockets(&table)
+                    .filter(|(inode, _)| sockets.contains(inode))
+                    .map(|(_, port)| port)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub(super) fn process_name(pid: i32) -> Option<String> {
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|name| name.trim_end().to_owned())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+mod sockets {
+    pub(super) fn group_members(_: u32) -> std::io::Result<Vec<i32>> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    pub(super) fn listening(_: i32) -> Vec<u16> {
+        Vec::new()
+    }
+    pub(super) fn process_name(_: i32) -> Option<String> {
+        None
+    }
+}
+
+/// The process group in a `/proc/<pid>/stat` line. The command name before it
+/// is parenthesised and may itself hold spaces and parentheses.
+#[cfg(any(target_os = "linux", test))]
+fn stat_group(stat: &str) -> Option<u32> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    // state, ppid, pgrp
+    rest.split_whitespace().nth(2)?.parse().ok()
+}
+
+/// `(inode, port)` for each listening socket in a `/proc/net/tcp{,6}` table.
+#[cfg(any(target_os = "linux", test))]
+fn listening_sockets(table: &str) -> impl Iterator<Item = (u64, u16)> + '_ {
+    const TCP_LISTEN: &str = "0A";
+    table.lines().skip(1).filter_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (local, state, inode) = (fields.get(1)?, fields.get(3)?, fields.get(9)?);
+        if *state != TCP_LISTEN {
+            return None;
+        }
+        let port = u16::from_str_radix(local.rsplit(':').next()?, 16).ok()?;
+        Some((inode.parse().ok()?, port))
+    })
 }
 
 /// Interpreters whose first operand names the program a user started.
@@ -176,6 +410,37 @@ mod tests {
         let mut single = 1i32.to_ne_bytes().to_vec();
         single.extend_from_slice(b"/bin/vim\0vim\0HOME=/x\0");
         assert_eq!(parse_procargs2(&single).unwrap(), ("vim".into(), None));
+    }
+
+    #[test]
+    fn reads_a_port_this_process_listens_on() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = i64::from(listener.local_addr().unwrap().port());
+        // SAFETY: getpgrp cannot fail.
+        let group = unsafe { libc::getpgrp() } as u32;
+        let ports = listening_ports(group).unwrap();
+        let found = ports.iter().find(|info| info.port == port);
+        assert!(
+            found.is_some_and(|info| !info.process_name.is_empty()),
+            "{ports:?}"
+        );
+        drop(listener);
+        let ports = listening_ports(group).unwrap();
+        assert!(ports.iter().all(|info| info.port != port), "{ports:?}");
+    }
+
+    #[test]
+    fn proc_tables_yield_listening_ports_and_groups() {
+        let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 00000000:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 41234 1 0000000000000000 100 0 0 10 0\n   1: 0100007F:1F90 0100007F:D2A4 01 00000000:00000000 00:00000000 00000000  1000        0 41235 1 0000000000000000 20 4 30 10 -1\n";
+        assert_eq!(
+            listening_sockets(table).collect::<Vec<_>>(),
+            vec![(41234, 3000)]
+        );
+        assert_eq!(
+            stat_group("812 (node (vite)) S 800 790 790 34817"),
+            Some(790)
+        );
+        assert_eq!(stat_group("garbage"), None);
     }
 
     #[test]

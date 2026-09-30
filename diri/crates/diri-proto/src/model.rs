@@ -824,6 +824,11 @@ pub struct SessionRecord {
     /// the launch directory, which owns the Session's project and worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_cwd: Option<String>,
+    /// The TCP ports a local shell's foreground job listens on, read live: a
+    /// dev server, which names the tab after its address. Also counted in
+    /// `listening_ports`, which it keeps current between governor scans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_ports: Option<Vec<PortInfo>>,
 }
 
 impl SessionRecord {

@@ -65,6 +65,7 @@ pub(super) fn session(value: &str, project: &str, created: f64) -> SessionRecord
         listening_ports: None,
         foreground_agent: None,
         terminal_cwd: None,
+        foreground_ports: None,
     }
 }
 

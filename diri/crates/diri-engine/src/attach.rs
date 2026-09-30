@@ -1261,6 +1261,7 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            foreground_ports: None,
         };
         let child = ProcessIdentity::new(
             4321,
