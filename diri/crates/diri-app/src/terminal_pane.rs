@@ -777,6 +777,7 @@ pub struct TerminalPane {
     /// Hosts the note when this pane's session is a note Session: a note has
     /// no PTY, so the pane shows the editor and never attaches.
     note: Option<Entity<crate::notes::NotePane>>,
+    pending_note_block: Option<usize>,
     qol: QolState,
     /// The open Insert Path picker, bound to the session it was opened on.
     path_picker: Option<path_picker::PathPickerState>,
@@ -1057,6 +1058,7 @@ impl TerminalPane {
             #[cfg(test)]
             render_count: 0,
             note: None,
+            pending_note_block: None,
             window_store,
             runtime,
             _tokio_owner: tokio_owner,
@@ -2576,6 +2578,12 @@ impl TerminalPane {
         .detach();
         self.note = Some(pane.clone());
         pane
+    }
+
+    /// Put the caret on a note block (from the To-dos page) once the note
+    /// is shown.
+    pub(crate) fn reveal_note_block(&mut self, block: usize) {
+        self.pending_note_block = Some(block);
     }
 
     #[cfg(test)]
@@ -4828,7 +4836,13 @@ impl Render for TerminalPane {
         }
         if let Some((session, note_id)) = self.displayed_note() {
             let pane = self.note_pane(window, cx);
-            pane.update(cx, |pane, cx| pane.show(&session, &note_id, window, cx));
+            let reveal = self.pending_note_block.take();
+            pane.update(cx, |pane, cx| {
+                pane.show(&session, &note_id, window, cx);
+                if let Some(block) = reveal {
+                    pane.reveal_block(block, window, cx);
+                }
+            });
             return div()
                 .id("terminal-note")
                 .track_focus(&self.focus)

@@ -211,6 +211,8 @@ pub(crate) enum SidebarEvent {
     /// A plain click (or shortcut) selected a session: hand keyboard focus
     /// to its terminal surface so the user can type immediately.
     SessionActivated,
+    /// The To-dos row: RootView shows every open to-do across notes.
+    OpenTodos,
     ProjectLayoutUnavailable,
     /// Escape left keyboard-navigation mode without changing the active
     /// session. Root owns the terminal entity, so it completes the handoff.
@@ -569,6 +571,10 @@ fn section_shift_deltas(
 }
 
 pub struct Sidebar {
+    /// Open to-dos across notes; set by RootView. The To-dos row appears
+    /// only while some note has one.
+    todos: Option<Entity<crate::notes::todos::TodosModel>>,
+    todos_active: bool,
     workspace_nav: workspaces::WorkspaceNavigation,
     project_picker: project_picker::ProjectPicker,
     strip_menu: tabs::StripMenu,
@@ -797,6 +803,8 @@ impl Sidebar {
         ui.visible = visible;
         let mut sidebar = Self {
             store,
+            todos: None,
+            todos_active: false,
             _preview_effects: preview_effects,
             _store_changes: store_changes,
             ui,
@@ -1837,6 +1845,81 @@ impl Sidebar {
         )
         .absolute()
         .size_full()
+    }
+
+    pub(crate) fn set_todos(
+        &mut self,
+        model: Entity<crate::notes::todos::TodosModel>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.observe(&model, |_, _, cx| cx.notify()).detach();
+        self.todos = Some(model);
+        cx.notify();
+    }
+
+    pub(crate) fn set_todos_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.todos_active != active {
+            self.todos_active = active;
+            cx.notify();
+        }
+    }
+
+    /// "To-dos" under New Agent: every open to-do across notes, shown while
+    /// at least one exists (or while its page is open).
+    fn todos_row(&mut self, colors: SemanticColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let model = self.todos.clone()?;
+        model.update(cx, |model, cx| model.sync(cx));
+        let count = model.read(cx).open_count();
+        if count == 0 && !self.todos_active {
+            return None;
+        }
+        let hovering = self.ui.hovered_control == Some("todos");
+        let active = self.todos_active;
+        Some(
+            div()
+                .id("todos-row")
+                .debug_selector(|| "todos-row".into())
+                .mx(px(Space::INSET))
+                .px(px(Space::ROW_H))
+                .h(px(SIDEBAR_NAV_ROW_HEIGHT))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .rounded(px(SIDEBAR_ROW_RADIUS))
+                .when(active, |row| row.bg(Fill::selected(colors, true)))
+                .when(!active, |row| row.bg(Fill::hover(colors, hovering)))
+                .cursor_pointer()
+                .text_size(px(Typo::ROW.size))
+                .text_color(colors.text(diri_ui::TextTone::Label))
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    this.ui.hovered_control = hovered.then_some("todos");
+                    cx.notify();
+                }))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.commit_rename();
+                    cx.emit(SidebarEvent::OpenTodos);
+                }))
+                .child(
+                    div()
+                        .size(px(18.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(sf_symbol("checklist", 13.0, colors.secondary)),
+                )
+                .child(div().min_w(px(0.0)).flex_1().child("To-dos"))
+                .when(count > 0, |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(Typo::META.size))
+                            .text_color(colors.tertiary)
+                            .child(count.to_string()),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     fn new_agent_row(
@@ -8222,7 +8305,8 @@ impl Sidebar {
                 .min_h(px(0.0))
                 .flex()
                 .flex_col()
-                .child(self.new_agent_row(crate::held_hints::opacity(window, cx), colors, cx));
+                .child(self.new_agent_row(crate::held_hints::opacity(window, cx), colors, cx))
+                .children(self.todos_row(colors, cx));
             if projection.projects.is_empty() && !self.filter_query.text().trim().is_empty() {
                 body = body.child(
                     div()

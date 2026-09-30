@@ -280,6 +280,10 @@ pub struct RootView {
     /// preference change re-applies it exactly once.
     applied_material: Option<WindowMaterial>,
     auxiliary_terminal: Option<Entity<TerminalPane>>,
+    /// The To-dos page covers the workbench while open; selecting any
+    /// session closes it.
+    todos_open: bool,
+    todos_page: Option<Entity<crate::notes::todos::TodosPage>>,
     auxiliary_id: Option<SessionId>,
     auxiliary_parent: Option<SessionId>,
     auxiliary_spawn_parent: Option<SessionId>,
@@ -452,6 +456,10 @@ impl RootView {
             sidebar.set_surface_in_parent();
             sidebar
         });
+        if !preview {
+            let todos = crate::notes::todos::TodosModel::global(&services.store, cx);
+            sidebar.update(cx, |sidebar, cx| sidebar.set_todos(todos, cx));
+        }
         let window_store = if preview {
             crate::store::WindowStore::from_canonical(services.store.store.clone())
         } else {
@@ -659,6 +667,12 @@ impl RootView {
                 cx.defer_in(window, move |_, window, cx| {
                     launcher.update(cx, |launcher, cx| launcher.focus(window, cx));
                 });
+            }
+            if matches!(event, SidebarEvent::OpenTodos) {
+                this.open_todos(window, cx);
+            }
+            if matches!(event, SidebarEvent::SessionActivated) {
+                this.close_todos(cx);
             }
             if matches!(
                 event,
@@ -1370,6 +1384,8 @@ impl RootView {
             tabs_seam,
             tabs_target: tabs_seam,
             auxiliary_terminal: None,
+            todos_open: false,
+            todos_page: None,
             auxiliary_id: None,
             auxiliary_parent: None,
             auxiliary_spawn_parent: None,
@@ -2465,6 +2481,48 @@ impl RootView {
             .expect("session store lock poisoned")
             .spawn_kind(AgentKind::NOTE, SpawnOptions::default());
         true
+    }
+
+    fn open_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.todos_page.is_none() {
+            let runtime = Arc::clone(&self.services.store);
+            let model = crate::notes::todos::TodosModel::global(&runtime, cx);
+            let page = cx.new(|cx| crate::notes::todos::TodosPage::new(runtime, model, cx));
+            cx.subscribe_in(&page, window, |this, _, event, window, cx| {
+                use crate::notes::todos::TodosEvent;
+                let (session, block) = match event {
+                    TodosEvent::OpenNote { session, block } => (session.clone(), Some(*block)),
+                    TodosEvent::OpenSession(session) => (session.clone(), None),
+                };
+                this.close_todos(cx);
+                this.window_store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .select(session);
+                if let (Some(block), Some(terminal)) = (block, &this.terminal) {
+                    terminal.update(cx, |terminal, _| terminal.reveal_note_block(block));
+                }
+                this.focus_active_terminal(window, cx);
+                cx.notify();
+            })
+            .detach();
+            self.todos_page = Some(page);
+        }
+        self.todos_open = true;
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_todos_active(true, cx));
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn close_todos(&mut self, cx: &mut Context<Self>) {
+        if !self.todos_open {
+            return;
+        }
+        self.todos_open = false;
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_todos_active(false, cx));
+        cx.notify();
     }
 
     fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3666,7 +3724,9 @@ impl RootView {
             .h(px(card_height))
             .min_h(px(0.0))
             .bg(terminal.work_surface_nested());
-        if self.active_workspace.is_some() {
+        if let Some(page) = self.todos_page.clone().filter(|_| self.todos_open) {
+            body = body.child(page);
+        } else if self.active_workspace.is_some() {
             let tab = {
                 let store = self.window_store.read().expect("store");
                 store
@@ -9195,6 +9255,17 @@ mod tests {
                 .unwrap();
         }
         let runtime = Arc::clone(&services.store);
+        cx.update(|cx| {
+            let model = cx.new(|cx| {
+                crate::notes::todos::TodosModel::with_store(
+                    Arc::clone(&runtime),
+                    Some(Arc::clone(&note_store)),
+                    false,
+                    cx,
+                )
+            });
+            crate::notes::todos::TodosModel::install(model, cx);
+        });
         let note_pane = std::rc::Rc::new(std::cell::RefCell::new(None));
         let window = cx
             .open_window(size(px(1240.0), px(780.0)), {
@@ -9217,6 +9288,17 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
+        // `DIRI_VISUAL_TODOS=1` opens the To-dos page from the sidebar row.
+        if std::env::var_os("DIRI_VISUAL_TODOS").is_some() {
+            cx.update_window(window.into(), |root, window, cx| {
+                let root = root.downcast::<RootView>().unwrap();
+                root.update(cx, |root, cx| root.open_todos(window, cx));
+            })
+            .unwrap();
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(50));
+            cx.run_until_parked();
+        }
         // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips` types into the note:
         // mention chips beside a to-do, then the `/` or `@` menu open at the
         // caret, to judge the menus beside the rest of diri's chrome.

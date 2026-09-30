@@ -97,7 +97,9 @@ impl Sidebar {
         let (selected, multi, drag_selection, migrating, unread) = {
             let mut store = self.store.write().expect("session store lock poisoned");
             (
-                store.selected_session_id() == Some(id),
+                // While the To-dos page covers the workbench, no row is the
+                // one on screen.
+                store.selected_session_id() == Some(id) && !self.todos_active,
                 store.sidebar_selection().contains(id),
                 (store.sidebar_selection().len() > 1).then(|| store.sidebar_selection_ordered()),
                 store.migrating().contains(id),

@@ -10,6 +10,7 @@
 pub(crate) mod editor_view;
 #[cfg(test)]
 pub(crate) mod tests;
+pub(crate) mod todos;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -170,6 +171,28 @@ impl NotePane {
             let handle = self.focus_handle(cx);
             window.focus(&handle, cx);
         }
+    }
+
+    /// Caret to the end of a note block (index in the file, title excluded)
+    /// and focus the editor, as a jump from the To-dos page.
+    pub(crate) fn reveal_block(
+        &mut self,
+        block: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let PaneState::Open(open) = &self.state else {
+            return;
+        };
+        open.editor.update(cx, |view, cx| {
+            let index = (block + 1).min(view.editor.blocks().len() - 1);
+            let len = view.editor.block(index).text.len();
+            view.editor
+                .set_caret(diri_notes::edit::Pos::new(index, len));
+            cx.notify();
+        });
+        let handle = self.focus_handle(cx);
+        window.focus(&handle, cx);
     }
 
     fn load(
