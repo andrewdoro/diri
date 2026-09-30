@@ -5310,16 +5310,20 @@ impl Sidebar {
                 row.cursor_pointer()
                     .glass_menu_row(colors, false)
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        // Notes live on this Mac: a remote target falls back
+                        // to the local project directory.
+                        let note = spawn_kind == ProtoAgentKind::NOTE;
+                        let remote = note && spawn_host.is_some();
                         this.store
                             .write()
                             .expect("session store lock poisoned")
                             .spawn_kind(
                                 spawn_kind.clone(),
                                 SpawnOptions {
-                                    cwd: Some(target.clone()),
-                                    host: spawn_host.clone(),
+                                    cwd: (!remote).then(|| target.clone()),
+                                    host: if note { None } else { spawn_host.clone() },
                                     account_profile_id: None,
-                                    same_repo_as: same_repo_as.clone(),
+                                    same_repo_as: if note { None } else { same_repo_as.clone() },
                                     ..SpawnOptions::default()
                                 },
                             );
@@ -9088,6 +9092,19 @@ fn agent_picker_options(
             .shortcut_label()
             .unwrap_or_default(),
         binary: "login shell".to_owned(),
+        available: true,
+        setup_url: None,
+        unavailable_detail: None,
+    });
+    // A note sits beside agents and terminals in the sidebar, so it starts
+    // from the same menu.
+    options.push(AgentPickerOption {
+        title: "Note".to_owned(),
+        kind: ProtoAgentKind::NOTE,
+        shortcut: crate::commands::command(CommandId::NewNote)
+            .shortcut_label()
+            .unwrap_or_default(),
+        binary: "note".to_owned(),
         available: true,
         setup_url: None,
         unavailable_detail: None,

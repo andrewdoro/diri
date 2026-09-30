@@ -280,9 +280,6 @@ pub struct RootView {
     /// preference change re-applies it exactly once.
     applied_material: Option<WindowMaterial>,
     auxiliary_terminal: Option<Entity<TerminalPane>>,
-    /// Shows the selected note Session where the terminal would be. Created
-    /// the first time a note is selected.
-    note_pane: Option<Entity<crate::notes::NotePane>>,
     auxiliary_id: Option<SessionId>,
     auxiliary_parent: Option<SessionId>,
     auxiliary_spawn_parent: Option<SessionId>,
@@ -677,11 +674,7 @@ impl RootView {
                     this.launcher
                         .update(cx, |launcher, cx| launcher.dismiss(cx));
                 }
-                if this.selected_note().is_some() {
-                    this.note_pane(window, cx)
-                        .update(cx, |pane, _| pane.request_focus());
-                    cx.notify();
-                } else if let Some(terminal) = &this.terminal {
+                if let Some(terminal) = &this.terminal {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                     this.sync_auxiliary_terminal(window, cx);
                 }
@@ -1374,7 +1367,6 @@ impl RootView {
             tabs_seam,
             tabs_target: tabs_seam,
             auxiliary_terminal: None,
-            note_pane: None,
             auxiliary_id: None,
             auxiliary_parent: None,
             auxiliary_spawn_parent: None,
@@ -2249,13 +2241,7 @@ impl RootView {
                     navigation.update(cx, |navigation, cx| navigation.dismiss(cx));
                 }
                 if self.spawn_note() {
-                    if self.launcher.read(cx).is_open() {
-                        self.launcher
-                            .update(cx, |launcher, cx| launcher.dismiss(cx));
-                    }
-                    self.note_pane(window, cx)
-                        .update(cx, |pane, _| pane.request_focus());
-                    cx.notify();
+                    self.focus_spawned_session(window, cx);
                 }
             }
             CommandId::OpenWorktrees => {
@@ -2475,48 +2461,7 @@ impl RootView {
         true
     }
 
-    fn note_pane(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<crate::notes::NotePane> {
-        if let Some(pane) = &self.note_pane {
-            return pane.clone();
-        }
-        let runtime = Arc::clone(&self.services.store);
-        let pane = cx.new(|cx| crate::notes::NotePane::new(runtime, cx));
-        // Escape with nothing left to dismiss hands the keyboard to the
-        // sidebar, where ↑/↓ move between notes and sessions alike.
-        cx.subscribe_in(&pane, window, |_, _, event, window, cx| match event {
-            crate::notes::NotePaneEvent::Dismiss => {
-                window.dispatch_action(Box::new(FocusSidebar), cx);
-            }
-        })
-        .detach();
-        self.note_pane = Some(pane.clone());
-        pane
-    }
-
-    /// The selected Session when it is a note: (session, note file id).
-    fn selected_note(&self) -> Option<(SessionId, String)> {
-        let store = self
-            .window_store
-            .read()
-            .expect("session store lock poisoned");
-        let id = store.selected_session_id()?;
-        let record = store.sessions().get(id)?;
-        record
-            .is_note()
-            .then(|| (id.clone(), record.note_id.clone().unwrap_or_default()))
-    }
-
     fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_note().is_some() {
-            let pane = self.note_pane(window, cx);
-            let handle = pane.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
-            return;
-        }
         if let Some(terminal) = self.active_terminal(cx) {
             terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
             self.sync_auxiliary_terminal(window, cx);
@@ -3764,10 +3709,6 @@ impl RootView {
             }
         } else if self.preview && self.preview_scenario != PreviewScenario::Empty {
             body = body.child(self.preview_workbench(terminal));
-        } else if let Some((session, note_id)) = self.selected_note() {
-            let pane = self.note_pane(window, cx);
-            pane.update(cx, |pane, cx| pane.show(&session, &note_id, window, cx));
-            body = body.child(pane);
         } else if split_open {
             let available_height = (card_height - 1.0).max(0.0);
             self.terminal_available_height = available_height;
@@ -9251,11 +9192,13 @@ mod tests {
         let window = cx
             .open_window(size(px(1240.0), px(780.0)), |window, cx| {
                 cx.new(|cx| {
-                    let mut root =
-                        RootView::new(services, false, PreviewScenario::Empty, window, cx);
-                    root.note_pane = Some(cx.new(|cx| {
+                    let root = RootView::new(services, false, PreviewScenario::Empty, window, cx);
+                    let pane = cx.new(|cx| {
                         crate::notes::NotePane::with_store(runtime, Some(note_store), false, cx)
-                    }));
+                    });
+                    if let Some(terminal) = &root.terminal {
+                        terminal.update(cx, |terminal, _| terminal.set_note_pane_for_test(pane));
+                    }
                     root
                 })
             })
