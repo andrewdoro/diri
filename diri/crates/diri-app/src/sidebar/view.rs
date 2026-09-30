@@ -3697,16 +3697,11 @@ impl Sidebar {
             .pl(px(Space::ROW_H - 1.0))
             .pr(px(Space::ROW_H))
             .h(px(SIDEBAR_NAV_ROW_HEIGHT))
-            .relative()
             .flex()
             .items_center()
             .gap(px(8.0))
             .rounded(px(SIDEBAR_ROW_RADIUS))
             .bg(fill_color)
-            // Bar and fill progress sit under everything the row draws.
-            .children(progress.and_then(|face| {
-                crate::progress_mark::progress_underlay(face, colors, SIDEBAR_ROW_RADIUS)
-            }))
             .border_1()
             .border_color(if marked {
                 Palette::CLAY.alpha(0.78)

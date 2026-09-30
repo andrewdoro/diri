@@ -30,11 +30,8 @@ pub(super) fn session_tab_face(
     title: impl IntoElement,
     active: bool,
     colors: SemanticColors,
-    under: Option<AnyElement>,
 ) -> gpui::Div {
     div()
-        // Progress drawn under the tab's content (see `progress_mark`).
-        .children(under)
         .px(px(10.0))
         .rounded(px(SIDEBAR_ROW_RADIUS))
         .flex()
@@ -530,15 +527,15 @@ impl Sidebar {
         let id = id.clone();
         let title = title.clone();
         let entity = cx.entity();
-        // Progress takes the mark while the session has nothing more urgent
-        // to say: a ring around the logo, or a pie in its place.
+        // Progress rings the logo while the session has nothing more urgent
+        // to say.
         let progress = props.progress.filter(|_| {
             !matches!(
                 state,
                 StatusState::NeedsInput { .. } | StatusState::Hibernated
             )
         });
-        let progress_mark = progress.and_then(|face| {
+        let progress_mark = progress.map(|face| {
             let logo = Self::agent_tab_icon_sized(kind, colors, 10.0);
             crate::progress_mark::progress_mark(face, colors, Some(logo))
         });
@@ -592,10 +589,7 @@ impl Sidebar {
             None => title_fade(title.clone()).into_any_element(),
         };
         let location = props.location.clone();
-        let under = progress.and_then(|face| {
-            crate::progress_mark::progress_underlay(face, colors, SIDEBAR_ROW_RADIUS)
-        });
-        let tab = session_tab_face(mark, face, active, colors, under)
+        let tab = session_tab_face(mark, face, active, colors)
             .id(SharedString::from(format!("horizontal-tab-{}", id.0)))
             .when_some(location, |tab, place| {
                 tab.warm_tooltip(move |_, cx| {

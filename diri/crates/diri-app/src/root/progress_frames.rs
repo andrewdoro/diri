@@ -1,9 +1,8 @@
-//! Renders terminal progress (`OSC 9;4`) in the sidebar and the tab strip,
-//! for every treatment in `progress_mark`, because an agent session cannot
-//! record the screen.
+//! Renders the terminal progress ring (`OSC 9;4`) in the sidebar and the tab
+//! strip, because an agent session cannot record the screen.
 //!
 //! ```sh
-//! DIRI_VISUAL_PROGRESS=ring DIRI_VISUAL_OUTPUT=/tmp/progress \
+//! DIRI_VISUAL_OUTPUT=/tmp/progress \
 //!   cargo test -p diri-app --bin diri -- --ignored render_progress_frames
 //! ```
 //!
