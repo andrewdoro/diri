@@ -38,18 +38,22 @@ fn website_mcp_reference_matches_the_tool_catalog() {
         .iter()
         .map(|tool| tool.wire_value())
         .collect();
+    let catalog = json!({
+        "server": "dirijor",
+        "skills": diri_proto::skills::ALL.iter().map(|skill| json!({
+            "name": skill.name,
+            "description": skill.description,
+            "markdown": skill.markdown,
+        })).collect::<Vec<_>>(),
+        "tools": tools,
+    });
+    // Object key order depends on whether serde_json's `preserve_order` is
+    // unified into this build (a whole-workspace build turns it on, a
+    // `-p dirijor-mcp` build does not). Compare contents, and always write
+    // keys sorted, so the check passes however the crate was built.
     let expected = format!(
         "{}\n",
-        serde_json::to_string_pretty(&json!({
-            "server": "dirijor",
-            "skills": diri_proto::skills::ALL.iter().map(|skill| json!({
-                "name": skill.name,
-                "description": skill.description,
-                "markdown": skill.markdown,
-            })).collect::<Vec<_>>(),
-            "tools": tools,
-        }))
-        .expect("serialize")
+        serde_json::to_string_pretty(&sorted(&catalog)).expect("serialize")
     );
 
     if std::env::var_os("DIRI_UPDATE_DOCS").is_some() {
@@ -57,8 +61,42 @@ fn website_mcp_reference_matches_the_tool_catalog() {
         return;
     }
     let actual = std::fs::read_to_string(&reference).unwrap_or_default();
-    assert!(
-        actual == expected,
-        "website/docs-src/mcp-tools.json is stale. Run: DIRI_UPDATE_DOCS=1 cargo test -p dirijor-mcp --test docs_catalog"
-    );
+    let parsed: Value = serde_json::from_str(&actual).unwrap_or(Value::Null);
+    if sorted(&parsed) != sorted(&catalog) {
+        let have = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&sorted(&parsed)).expect("serialize")
+        );
+        if let Some((line, (want, have))) = expected
+            .lines()
+            .zip(have.lines())
+            .enumerate()
+            .find(|(_, (want, have))| want != have)
+        {
+            eprintln!(
+                "first difference at line {}:\n  catalog: {want}\n  file:    {have}",
+                line + 1
+            );
+        }
+        panic!(
+            "website/docs-src/mcp-tools.json is stale. Run: DIRI_UPDATE_DOCS=1 cargo test -p dirijor-mcp --test docs_catalog"
+        );
+    }
+}
+
+/// The same value with every object's keys in sorted order.
+fn sorted(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|key| (key.clone(), sorted(&map[key])))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+        other => other.clone(),
+    }
 }

@@ -814,6 +814,10 @@ mod login {
 
     #[cfg(not(target_os = "macos"))]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[allow(
+        dead_code,
+        reason = "mirrors the macOS login-item states; only Unavailable occurs elsewhere"
+    )]
     pub(super) enum Status {
         Enabled,
         Disabled,
