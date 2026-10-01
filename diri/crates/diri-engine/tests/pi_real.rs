@@ -1,7 +1,7 @@
 //! Opt-in: the real Pi coding agent driven through a private Engine.
 //!
 //! Nothing here needs a model account. Pi talks to
-//! `fixtures/fake_openai_api.py` (spawned on a free 127.0.0.1 port and
+//! `fixtures/fake_pi_api.py` (spawned on a free 127.0.0.1 port and
 //! registered as a custom provider in the temp HOME's `~/.pi/agent/models.json`),
 //! which scripts slow streams and a `bash` tool call from keywords in the
 //! prompt. HOME, the project and the Engine socket all live in a temp dir
@@ -170,7 +170,7 @@ fn fixture(fake_api: bool) -> Option<Fixture> {
             .unwrap()
             .port();
         let child = Command::new("python3")
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_openai_api.py"))
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_pi_api.py"))
             .arg(port.to_string())
             .arg(temp.path().join("api.log"))
             .spawn()
