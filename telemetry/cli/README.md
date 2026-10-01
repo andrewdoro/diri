@@ -37,7 +37,8 @@ or in `~/.config/diri-debug/config.json` (keep it `chmod 600`):
 | `sessions <who>` | sessions with their agent and every conversation they ran |
 | `find <session id \| conversation uuid>` | which install owns it, and when it was seen |
 | `raw <batch key>` | one uploaded batch, decompressed, header first |
-| `local [timeline\|incidents\|top\|health\|sessions\|find]` | the same views over a local spool (`timeline` is the default) |
+| `funnel [--since 7d] [--version v] [--preexisting]` | the activation funnel of installs first launched in the window: per step, installs, share of the cohort, share of the previous step, median time from first launch, and how the first agent got there. `--preexisting` shows installs that used Diri before activation tracking instead of new ones |
+| `local [timeline\|incidents\|top\|health\|sessions\|find\|activation]` | the same views over a local spool (`timeline` is the default); `activation` shows this Mac's milestone markers and the events that recorded them |
 
 `<who>` can be a name (`alex`), a Support ID (`D-7K3MQ9XA`) or an install UUID or prefix. When a name matches several installs, the command lists them and asks for a Support ID.
 

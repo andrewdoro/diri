@@ -30,6 +30,10 @@ static WINDOWS_OPENED: AtomicU64 = AtomicU64::new(0);
 /// Set when the app is frontmost; the stall watchdog paces itself on it.
 static APP_ACTIVE: AtomicBool = AtomicBool::new(true);
 static LAUNCH_RECORDED: AtomicBool = AtomicBool::new(false);
+/// This process is the install's first launch (`activation.first_launch`).
+static FIRST_LAUNCH: AtomicBool = AtomicBool::new(false);
+/// A local agent catalog arrived in this process before.
+static LOCAL_CATALOG_SEEN: AtomicBool = AtomicBool::new(false);
 
 /// A frame longer than this records `ui.slow_frame`.
 const SLOW_FRAME: Duration = Duration::from_millis(50);
@@ -60,6 +64,14 @@ pub(crate) fn start(preview: bool) {
         return;
     }
     diri_telemetry::install_panic_hook();
+    // Before the first-run privacy notice or anything else writes settings:
+    // existing settings mean this Mac used Diri before activation tracking.
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    diri_telemetry::activation::init_origin(home.as_deref());
+    FIRST_LAUNCH.store(
+        diri_telemetry::activation::app_launched(),
+        Ordering::Relaxed,
+    );
     diri_telemetry::register_gauge("windows_main", || gauge(&MAIN_WINDOWS));
     diri_telemetry::register_gauge("windows_floating", || gauge(&FLOATING_WINDOWS));
     diri_telemetry::register_gauge("windows_opened", || gauge(&WINDOWS_OPENED));
@@ -95,6 +107,77 @@ pub(crate) fn install(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// `activation.agent_ready`, once per install: the first local agent
+/// catalog with a launchable agent. `installing` is the agent the welcome's
+/// one-click install is waiting for.
+pub(crate) fn agent_catalog_seen(
+    installing: Option<&diri_proto::AgentKind>,
+    catalog: &diri_proto::AgentReadinessResult,
+) {
+    let first_catalog = !LOCAL_CATALOG_SEEN.swap(true, Ordering::Relaxed);
+    use diri_telemetry::activation::{self, Milestone};
+    if activation::is_reached(Milestone::AgentReady) {
+        return;
+    }
+    let Some(ready) = agent_ready(
+        installing,
+        catalog,
+        first_catalog && FIRST_LAUNCH.load(Ordering::Relaxed),
+    ) else {
+        return;
+    };
+    activation::reach(
+        Milestone::AgentReady,
+        vec![
+            ("agent", Value::from(id(ready.agent.id()))),
+            ("source", Value::from(ready.source)),
+            ("agents", Value::from(ready.agents)),
+        ],
+    );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AgentReady {
+    agent: diri_proto::AgentKind,
+    /// `onboarding_install`: the agent Diri's one-click install was waiting
+    /// for. `preexisting`: already launchable in the first catalog of the
+    /// install's first launch. `manual`: became launchable later, installed
+    /// outside Diri.
+    source: &'static str,
+    /// Launchable agents in the catalog.
+    agents: usize,
+}
+
+fn agent_ready(
+    installing: Option<&diri_proto::AgentKind>,
+    catalog: &diri_proto::AgentReadinessResult,
+    first_catalog_of_first_launch: bool,
+) -> Option<AgentReady> {
+    let ready: Vec<_> = crate::agent_catalog::agent_options(catalog)
+        .into_iter()
+        .filter(|option| option.available && option.kind.id() != diri_proto::AgentKind::NOTE_ID)
+        .map(|option| option.kind)
+        .collect();
+    let agents = ready.len();
+    if let Some(kind) = installing.filter(|kind| ready.contains(kind)) {
+        return Some(AgentReady {
+            agent: kind.clone(),
+            source: "onboarding_install",
+            agents,
+        });
+    }
+    let agent = ready.into_iter().next()?;
+    Some(AgentReady {
+        agent,
+        source: if first_catalog_of_first_launch {
+            "preexisting"
+        } else {
+            "manual"
+        },
+        agents,
+    })
 }
 
 /// A named action run from somewhere other than a key binding.
@@ -444,7 +527,10 @@ impl FrameBreakdown {
             ("faults", Value::from(self.faults)),
             ("idle_ms", Value::from(self.idle)),
             ("active", Value::from(self.window_active)),
-            ("app_active", Value::from(APP_ACTIVE.load(Ordering::Relaxed))),
+            (
+                "app_active",
+                Value::from(APP_ACTIVE.load(Ordering::Relaxed)),
+            ),
             ("window", Value::from(window)),
             ("surface", Value::from(context.surface)),
             ("workspace", Value::from(context.workspace)),
@@ -463,6 +549,7 @@ impl FrameBreakdown {
             ("a11y", Value::from(self.gpui.a11y_active)),
         ]
     }
+}
 
 /// A zero-size element painted last in a main window: the time from the
 /// start of the root view's render to here is the frame's CPU cost (render,
@@ -1271,6 +1358,35 @@ mod tests {
             upload_now_blocking().is_err(),
             "tests never reach the real Engine"
         );
+    }
+
+    #[test]
+    fn agent_ready_names_where_the_first_agent_came_from() {
+        use diri_proto::AgentKind;
+        let none = crate::agent_setup::bundled_catalog(&[]);
+        assert_eq!(agent_ready(None, &none, true), None);
+        assert_eq!(
+            agent_ready(Some(&AgentKind::CLAUDE_CODE), &none, false),
+            None
+        );
+
+        let claude = crate::agent_setup::bundled_catalog(&["claude-code"]);
+        let ready = |installing: Option<&AgentKind>, first| {
+            agent_ready(installing, &claude, first).unwrap()
+        };
+        let (claude_code, codex) = (AgentKind::CLAUDE_CODE, AgentKind::CODEX);
+        let installed = ready(Some(&claude_code), false);
+        assert_eq!(installed.source, "onboarding_install");
+        assert_eq!(installed.agent, AgentKind::CLAUDE_CODE);
+        assert_eq!(installed.agents, 1);
+        assert_eq!(ready(None, true).source, "preexisting");
+        assert_eq!(ready(None, false).source, "manual");
+        // Waiting for Codex while Claude Code turns up is not the install.
+        assert_eq!(ready(Some(&codex), false).source, "manual");
+
+        let two = crate::agent_setup::bundled_catalog(&["codex", "claude-code"]);
+        let both = agent_ready(Some(&AgentKind::CODEX), &two, false).unwrap();
+        assert_eq!((both.agent, both.agents), (AgentKind::CODEX, 2));
     }
 
     #[test]

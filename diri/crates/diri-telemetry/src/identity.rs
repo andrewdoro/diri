@@ -187,7 +187,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Writes `bytes` to a private temp file and hard-links it to `path`,
 /// failing with `AlreadyExists` instead of replacing an existing file.
-fn publish_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn publish_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let temp = path.with_extension(format!("{}.new", unique_suffix()));
     write_private(&temp, bytes)?;
     let linked = std::fs::hard_link(&temp, path);

@@ -16,7 +16,10 @@ flight recorder: a local log of what it did, in
 frames; hangs and slow frames; memory, CPU and open-file counts; how long
 sessions take to start, attach and first draw; errors and their codes;
 whether copy, paste, file drops and updates worked (with size classes such as
-"under 1 KB", never contents); which commands ran (by name); and identifiers
+"under 1 KB", never contents); which commands ran (by name); once-only setup
+milestones (first launch, first agent ready and whether it was installed from
+the welcome, first and second agent session, first agent started by another
+agent, a launch on a later day) with the time since first launch; and identifiers
 that let a report be followed: session ids, agent names, and agent
 conversation ids. Folders are recorded only as a one-way hash. Errors are
 recorded as codes and classes. Free-form error messages,

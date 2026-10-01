@@ -39,6 +39,8 @@ Under the platform state dir (`~/Library/Application Support/Dirijor`):
 | `telemetry/spool/*.jsonl` | each process | rolled at 2 MiB |
 | `telemetry/spool/offsets.json` | uploader | bytes acknowledged per file |
 | `telemetry/spool/urgent` | recorder | touched on an incident |
+| `telemetry/activation/origin.json` | app or Engine, first to start | `{created_ms, preexisting}`: the activation baseline |
+| `telemetry/activation/<step>.json` | whichever process reached it | `{t}`: the milestone was recorded (see Activation) |
 
 The spool is capped at 64 MiB; oldest sealed files go first.
 
@@ -351,6 +353,43 @@ note ids.
 | `notes.search.opened` | info | | Search notes page opened (⇧⌘F, ⌘K, To-dos header) |
 | `notes.search.result_opened` | info | `kind` (`live`\|`archived`\|`orphan`) | which notes people go back to, and whether archived and Session-less files matter |
 
+## Activation
+
+The new-user funnel: six milestones, each recorded **once per install** by
+`diri_telemetry::activation`. A milestone is claimed by publishing its marker
+file under `telemetry/activation/` with an exclusive hard link, so when the app
+and the Engine race, exactly one records it, and a restart, an upgrade or a
+repeat of the trigger never records it again. With `DIRI_TELEMETRY=off`
+nothing is recorded and no marker is written.
+
+**Existing users.** The first process of a build with activation tracking
+writes `origin.json` before it writes anything else. `preexisting` is true when
+Diri was already used on this Mac: `telemetry/config.json` (written on the
+first run of any recording build), the Engine's `state.json` or the app's
+`prefs.json` exists. An upgrade therefore still records `first_launch` (on the
+first launch of the new build) and the later steps as they happen, but every
+milestone event carries `preexisting: true`, and the funnel keeps those
+installs out of the new-user cohort. The baseline is decided once; files
+written after it never change it.
+
+Every milestone event also carries `preexisting` and `since_first_launch_s`
+(seconds from the `first_launch` marker, or from the baseline when the app has
+not launched yet, e.g. an Engine started by the CLI).
+
+| kind | process | sev | fields | when |
+|---|---|---|---|---|
+| `activation.first_launch` | app | info | | the app's first launch on this install (from `telemetry::start`) |
+| `activation.agent_ready` | app | info | `agent, source: onboarding_install\|preexisting\|manual, agents` | the first local agent catalog with a launchable agent (terminals and notes excluded). `onboarding_install`: the agent the welcome's one-click install was waiting for; `preexisting`: launchable in the first catalog of the first launch; `manual`: became launchable later, installed outside Diri. `agents` is how many are launchable |
+| `activation.first_session` | engine | info | `agent, mode: fresh\|history, helper` | the first agent session started (`session.spawn`; terminals and notes do not count). `helper`: started by another agent |
+| `activation.second_session` | engine | info | `agent, mode, helper, concurrent` | the second agent session started; `concurrent`: another agent session was live at the time |
+| `activation.first_helper` | engine | info | `agent` | the first agent session with a parent session: an agent started it through MCP `spawn_agent`/`spawn_agents` |
+| `activation.returned` | app | info | `days` | the first app launch on a later local calendar day than `first_launch` (`days` apart) |
+
+The Worker indexes these into D1 `milestones` (one row per install and step,
+`INSERT OR IGNORE`), and `GET /v1/admin/funnel` / `diri-debug funnel` count
+them per cohort of installs first launched in a window. `diri-debug local
+activation` shows this Mac's markers next to the events in its spool.
+
 ## Upload
 
 The Engine's uploader wakes once a minute. If `spool/urgent` exists, or an
@@ -386,7 +425,8 @@ Cloudflare Worker + R2 + D1.
   R2 at `v1/<install>/<yyyy-mm-dd>/<sent_at>-<rand>.ndjson.gz`, and indexes it
   in D1: the install (upsert), the batch (time range, processes, R2 key),
   incidents and errors (`s` of `error` or `incident`, with a grouping
-  signature), and sessions seen (`session`, `agent`, `conv`, first/last seen).
+  signature), sessions seen (`session`, `agent`, `conv`, first/last seen) and
+  activation milestones (`activation.*`, first copy per install and step).
 - **Admin** endpoints under `/v1/admin/*` require
   `Authorization: Bearer <ADMIN_TOKEN>` (a Worker secret): find installs by
   name, support id or UUID prefix; list incidents (filter by install, kind,
@@ -406,6 +446,7 @@ Cloudflare Worker + R2 + D1.
   | `GET /v1/admin/batch?key=<r2 key>` | the stored gzip body, streamed as `application/gzip` (the caller gunzips) |
   | `GET /v1/admin/sessions?install=` | `(session, conv)` spans with agent, newest first |
   | `GET /v1/admin/find?id=<session id or conversation uuid>` | matching spans joined with the owning install's name and Support ID |
+  | `GET /v1/admin/funnel?since=&until=&version=` | the activation funnel of installs whose `first_launch` is in the window (default: the last 7 days), optionally of one first-launch version: `new` and `preexisting` cohorts, each `{installs, steps[{step, installs, of_cohort, of_previous, median_s, sources?}]}` |
 - **Admission**: a required Workers Rate Limiting binding throttles each
   edge-provided source to 30 attempts/minute/location, before D1/body processing.
   An atomic D1 reservation limits all sources together to 3,600 attempts per UTC
@@ -430,7 +471,9 @@ diri-debug timeline alex --around "2026-09-27 23:40" --window 20m [--session s_�
 diri-debug health alex --since 24h         # memory / fds / cpu / frame-time trends per process
 diri-debug sessions alex                   # sessions, agents, conversations
 diri-debug find <session id | conversation uuid>
+diri-debug funnel --since 14d [--version 0.9.0] [--preexisting]   # activation funnel per cohort
 diri-debug local [--since 1h] [...]         # same views over ~/Library/Application Support/Dirijor/telemetry/spool
+diri-debug local activation                # this Mac's activation markers and their events
 ```
 
 Configuration: `DIRI_TELEMETRY_URL` and `DIRI_TELEMETRY_ADMIN_TOKEN`, or

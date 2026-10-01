@@ -7,12 +7,13 @@
 // and skipped, never a reason to lose the other 49,999.
 //
 // Accepted requests make two D1 admission/budget reservations, one per-install
-// count, one R2 PUT, and one D1 index batch of at most four statements. Records
+// count, one R2 PUT, and one D1 index batch of at most five statements. Records
 // are scanned with an anchored regex over the recorder's fixed key order;
 // only error/incident lines and noncanonical records need JSON.parse.
 
 import { reserveIngest, reserveWrite } from "./budget";
 import { type Env, error, json, rateLimitPerHour } from "./env";
+import { type MilestoneRow, milestoneOf } from "./funnel";
 
 export const MAX_COMPRESSED_BYTES = 5 * 1024 * 1024;
 export const MAX_RAW_BYTES = 64 * 1024 * 1024;
@@ -155,6 +156,8 @@ export class BatchScan {
   incidentsDropped = 0;
   sessions = new Map<string, SessionSpan>();
   sessionsDropped = 0;
+  /** `activation.*` records by step, earliest kept. At most six. */
+  milestones = new Map<string, MilestoneRow>();
 
   record(line: string): void {
     if (line.length === 0) return;
@@ -214,6 +217,20 @@ export class BatchScan {
     const conv = session && line.includes('"conv":"') ? (CONV_FIELD.exec(line)?.[1] ?? null) : null;
     const agent = session && line.includes('"agent":"') ? (AGENT_FIELD.exec(line)?.[1] ?? null) : null;
     if (session) this.session(session, conv ?? "", agent, t);
+
+    // Once per install per step, so parsing these is rare.
+    if (kind.startsWith("activation.")) {
+      if (!parsed) {
+        try {
+          parsed = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          parsed = {};
+        }
+      }
+      const milestone = milestoneOf(kind, t, isObject(parsed.f) ? parsed.f : {});
+      const seen = milestone && this.milestones.get(milestone.step);
+      if (milestone && (!seen || milestone.t < seen.t)) this.milestones.set(milestone.step, milestone);
+    }
 
     if (sev === "error" || sev === "incident") {
       if (this.incidents.length >= MAX_INCIDENTS_PER_BATCH) {
@@ -538,6 +555,22 @@ export async function handleIngest(request: Request, env: Env, now = Date.now())
       ).bind(header.install, JSON.stringify(sessions), now),
     );
   }
+  const milestones = [...scan.milestones.values()];
+  if (milestones.length > 0) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO milestones (install, step, t, preexisting, since_s, source, agent, app_version, received_at)
+         SELECT ?1, j.value ->> '$.step', j.value ->> '$.t', j.value ->> '$.preexisting',
+                j.value ->> '$.since_s', j.value ->> '$.source', j.value ->> '$.agent', ?2, ?3
+         FROM json_each(?4) AS j`,
+      ).bind(
+        header.install,
+        header.app_version,
+        now,
+        JSON.stringify(milestones.map((m) => ({ ...m, preexisting: m.preexisting ? 1 : 0 }))),
+      ),
+    );
+  }
   await env.DB.batch(statements);
 
   return json(
@@ -547,6 +580,7 @@ export async function handleIngest(request: Request, env: Env, now = Date.now())
       incidents: incidents.length,
       incidents_unindexed: scan.incidentsDropped,
       sessions: sessions.length,
+      milestones: milestones.length,
       key,
     },
     202,

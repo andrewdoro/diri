@@ -5,11 +5,11 @@ Receives the batches Diri's Engine uploads (`diri/crates/diri-telemetry/src/uplo
 It is a Cloudflare Worker with two storage bindings:
 
 - **R2** (`BATCHES`) holds every batch exactly as uploaded (gzip NDJSON) at `v1/<install>/<yyyy-mm-dd>/<sent_at>-<rand>.ndjson.gz`. This is the only complete copy of the records.
-- **D1** (`DB`) is the index: `installs`, `batches` (time range, processes, R2 key), `incidents` (every `error`/`incident` record with a grouping signature and up to 2 KiB of its fields) and `sessions` (session id, agent, conversation, first/last seen). Schema: `migrations/0001_init.sql`.
+- **D1** (`DB`) is the index: `installs`, `batches` (time range, processes, R2 key), `incidents` (every `error`/`incident` record with a grouping signature and up to 2 KiB of its fields), `sessions` (session id, agent, conversation, first/last seen) and `milestones` (the activation funnel: one row per install and `activation.*` step). Schema: `migrations/`.
 
 ```
 Engine uploader ──POST /v1/ingest (gzip NDJSON)──▶ Worker ──PUT original bytes──▶ R2
-                                                     └──one D1 batch (≤4 statements)──▶ D1
+                                                     └──one D1 batch (≤5 statements)──▶ D1
 diri-debug ──GET /v1/admin/* (Bearer ADMIN_TOKEN)──▶ Worker ──▶ D1 index, R2 bodies
 cron 03:17 UTC ──▶ delete D1 rows + their R2 objects older than 30 days
 ```
@@ -28,7 +28,7 @@ cron 03:17 UTC ──▶ delete D1 rows + their R2 objects older than 30 days
 
 400/413/422 are permanent: the client drops the batch. 429 and 5xx are retried next cycle. A record line that is not a JSON object is counted in `bad_lines` and skipped; it never rejects the batch. Only the header line can do that.
 
-Accepted requests reserve global admission and R2 budget in D1, check the per-install limit, then make one R2 PUT and one D1 index `batch()` of at most four statements. Incidents and sessions go in as one `INSERT … SELECT FROM json_each(?)` each, however many rows, so a batch never approaches D1's per-invocation query limit. At most 200 incident rows and 200 session spans are indexed per batch; anything past that is still in R2 and is counted in the response.
+Accepted requests reserve global admission and R2 budget in D1, check the per-install limit, then make one R2 PUT and one D1 index `batch()` of at most five statements. Incidents, sessions and milestones go in as one `INSERT … SELECT FROM json_each(?)` each, however many rows, so a batch never approaches D1's per-invocation query limit. At most 200 incident rows and 200 session spans are indexed per batch; anything past that is still in R2 and is counted in the response. Milestones (`activation.*` records, once per install and step on the client) add at most six rows per install over its lifetime, with `INSERT OR IGNORE` so a re-sent batch never moves a step's time.
 
 Records are scanned with an anchored regex over the recorder's fixed key order (`t, seq, p, pid, k, s, f`). Only `error`/`incident` lines and lines in another key order are `JSON.parse`d.
 
@@ -64,6 +64,7 @@ Every route needs `Authorization: Bearer <ADMIN_TOKEN>`, compared in constant ti
 | `GET /v1/admin/batch?key=<r2 key>` | the stored gzip body, streamed as `application/gzip` (the caller gunzips) |
 | `GET /v1/admin/sessions?install=` | `(session, conv)` spans with agent, newest first |
 | `GET /v1/admin/find?id=<session id or conversation uuid>` | matching spans joined with the owning install's name and Support ID |
+| `GET /v1/admin/funnel?since=&until=&version=` | the activation funnel (`src/funnel.ts`): installs whose `first_launch` record time is in the window (default the last 7 days; `version` filters by the version that first launched) form the cohort, split into `new` and `preexisting` (used Diri before activation tracking). Each has `installs` and per step `installs, of_cohort, of_previous, median_s` (seconds from first launch) and, for `agent_ready`, `sources`. Reads at most 60,000 milestone rows (`truncated` says so) |
 
 Incident signatures: a `panic` groups by `panic:<f.signature>` (first non-runtime frame), a `crash.report` by `crash.report:<f.signature | f.crashed_frame | f.frame | f.frames[0]>`, and everything else by `<kind>:<f.code>`, or by `<kind>` alone when there is no code.
 
@@ -74,9 +75,15 @@ receipt times, so deletion occurs at the next sweep after expiry. R2 lifecycle
 expiration is an independent backstop.
 
 1. **R2 lifecycle rule (primary).** Objects under `v1/` expire 30 days after upload. Lifecycle deletions are free and also catch objects whose D1 row was never written, for example when the Worker died between the PUT and the D1 batch.
-2. **Daily cron (`17 3 * * *`).** Walks `batches` for rows older than the window, deletes their R2 objects in chunks of 1,000 (R2 deletes are free; listing the bucket is not), then deletes old `batches`, `incidents`, `sessions` and silent `installs` rows. Each run handles at most 50,000 batches; anything left is picked up the next day.
+2. **Daily cron (`17 3 * * *`).** Walks `batches` for rows older than the window, deletes their R2 objects in chunks of 1,000 (R2 deletes are free; listing the bucket is not), then deletes old `batches`, `incidents`, `sessions`, `milestones` and silent `installs` rows. Milestones expire like everything else, so a funnel can only look back 30 days: the cohort's `first_launch` rows are gone after that. Each run handles at most 50,000 batches; anything left is picked up the next day.
 
 ## Deploy
+
+Apply migration `0004_activation.sql` (the `milestones` table) before deploying
+the revision that indexes activation records: `pnpm run migrate`, then
+`pnpm exec wrangler deploy`. Batches ingested before it carry no indexed
+milestones (they stay in R2 only), so the funnel starts with the first upload
+after the deploy.
 
 Apply migration `0003_server_retention.sql` before deploying this revision.
 It intentionally expires the existing incident/session index at the next sweep

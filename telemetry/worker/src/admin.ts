@@ -6,6 +6,7 @@
 
 import { reserveRead, usage } from "./budget";
 import { DAY_MS, type Env, error, json } from "./env";
+import { type CohortRow, splitFunnel } from "./funnel";
 
 const encoder = new TextEncoder();
 
@@ -253,6 +254,28 @@ async function find(url: URL, env: Env): Promise<Response> {
   return json({ matches: results });
 }
 
+/** Cohort rows a funnel query reads at most (about 10k installs). */
+const FUNNEL_MAX_ROWS = 60_000;
+
+async function funnel(url: URL, env: Env, now = Date.now()): Promise<Response> {
+  const since = int(url.searchParams.get("since"), now - 7 * DAY_MS)!;
+  const until = int(url.searchParams.get("until"), now)!;
+  const version = url.searchParams.get("version") || null;
+  // The cohort is every install whose first launch is in the window; its
+  // later milestones count whenever they happened (until retention).
+  const { results } = await env.DB.prepare(
+    `SELECT m.install, m.step, f.preexisting, m.since_s, m.source
+     FROM milestones f JOIN milestones m ON m.install = f.install
+     WHERE f.step = 'first_launch' AND f.t >= ?1 AND f.t <= ?2
+       AND (?3 IS NULL OR f.app_version = ?3)
+     LIMIT ?4`,
+  )
+    .bind(since, until, version, FUNNEL_MAX_ROWS + 1)
+    .all<CohortRow>();
+  const truncated = results.length > FUNNEL_MAX_ROWS;
+  return json({ since, until, version, truncated, ...splitFunnel(results.slice(0, FUNNEL_MAX_ROWS)) });
+}
+
 export async function handleAdmin(request: Request, env: Env, url: URL): Promise<Response> {
   if (!(await authorized(request, env))) return error(401, "unauthorized");
   if (request.method !== "GET") return error(405, "method_not_allowed");
@@ -272,6 +295,8 @@ export async function handleAdmin(request: Request, env: Env, url: URL): Promise
       return sessions(url, env);
     case "/v1/admin/find":
       return find(url, env);
+    case "/v1/admin/funnel":
+      return funnel(url, env);
     case "/v1/admin/budget":
       return json(await usage(env));
   }

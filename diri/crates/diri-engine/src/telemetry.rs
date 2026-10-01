@@ -282,11 +282,15 @@ pub fn is_lifecycle_method(method: &str) -> bool {
 }
 
 /// A new session record went live: what was launched, where, and how.
+/// `concurrent` says another agent session was live at the time (see
+/// [`counts_for_activation`]); it feeds the activation milestones.
 pub fn record_session_spawn(
     record: &diri_proto::SessionRecord,
     mode: &'static str,
     elapsed: Duration,
+    concurrent: bool,
 ) {
+    record_activation(record, mode, concurrent);
     diri_telemetry::event!(
         "session.spawn",
         session = diri_telemetry::id(&record.id.0),
@@ -307,6 +311,42 @@ pub fn record_session_spawn(
             .is_some_and(|prompt| !prompt.is_empty()),
         ms = elapsed,
     );
+}
+
+/// Agent sessions count toward the activation funnel; terminals (`shell`,
+/// `generic`) and notes do not.
+#[must_use]
+pub fn counts_for_activation(kind: &diri_proto::AgentKind) -> bool {
+    !kind.is_terminal() && kind.id() != diri_proto::AgentKind::NOTE_ID
+}
+
+/// `activation.first_session`, then `activation.second_session`, and
+/// `activation.first_helper` for the first session another agent started.
+/// Each fires once per install (see `diri_telemetry::activation`).
+fn record_activation(record: &diri_proto::SessionRecord, mode: &'static str, concurrent: bool) {
+    use diri_telemetry::activation::{self, Milestone};
+    if !counts_for_activation(&record.kind) {
+        return;
+    }
+    let helper = record.parent.is_some();
+    let agent = diri_telemetry::id(record.kind.id());
+    activation::reach_next(
+        &[Milestone::FirstSession, Milestone::SecondSession],
+        |milestone| {
+            let mut fields = vec![
+                ("agent", Value::from(agent.clone())),
+                ("mode", Value::from(mode)),
+                ("helper", Value::from(helper)),
+            ];
+            if milestone == Milestone::SecondSession {
+                fields.push(("concurrent", Value::from(concurrent)));
+            }
+            fields
+        },
+    );
+    if helper {
+        activation::reach(Milestone::FirstHelper, vec![("agent", Value::from(agent))]);
+    }
 }
 
 /// What `session.resume` decided to launch for `record`, and which

@@ -8,7 +8,7 @@ import { analyze, leakHint, sparkline } from "../lib/health.mjs";
 import { globMatcher, mergeSort, severityMatcher } from "../lib/records.mjs";
 import { supportIdOf } from "../lib/sources.mjs";
 import { parseDuration, parseTime, resolveWindow } from "../lib/time.mjs";
-import { buildRecords, CONV, INSTALL, NOW, SESSION, startStub, SUPPORT_ID, T0, TOKEN, writeSpool } from "./fixtures.mjs";
+import { buildRecords, CONV, INSTALL, NOW, SESSION, startStub, SUPPORT_ID, T0, TOKEN, writeActivationSpool, writeSpool } from "./fixtures.mjs";
 
 let stub;
 let spool;
@@ -197,6 +197,43 @@ describe("remote commands", () => {
     assert.match(bad.stderr, /HTTP 401/);
     const unknown = await run(["timeline", "nobody"]);
     assert.match(unknown.stderr, /no install matches "nobody"/);
+  });
+});
+
+describe("activation funnel", () => {
+  it("asks the Worker for a cohort window and prints conversion per step", async () => {
+    const { code, stdout } = await run(["funnel", "--since", "7d", "--version", "0.9.0"]);
+    assert.equal(code, 0);
+    const asked = stub.requests.filter((r) => r.startsWith("/v1/admin/funnel")).at(-1);
+    assert.match(asked, new RegExp(`since=${NOW - 7 * 86_400_000}&until=${NOW}&version=0\\.9\\.0`));
+    assert.match(stdout, /new installs first launched .* v0\.9\.0: 10/);
+    assert.match(stdout, /agent_ready\s+8\s+80\.0%\s+80\.0%\s+45\.0s\s+onboarding_install 5, preexisting 3/);
+    assert.match(stdout, /first_helper\s+1\s+10\.0%\s+33\.3%\s+2h/);
+    assert.match(stdout, /returned\s+4\s+40\.0%\s+-/);
+    assert.match(stdout, /25 preexisting installs in the window are left out/);
+    const json = JSON.parse((await run(["funnel", "--json"])).stdout);
+    assert.equal(json.new.installs, 10);
+    assert.match((await run(["funnel", "--preexisting"])).stdout, /preexisting \(upgraded\) installs .*: 25/);
+  });
+
+  it("shows this Mac's milestones with the events that recorded them", async () => {
+    const dir = writeActivationSpool();
+    const { code, stdout } = await run(["local", "activation", "--dir", dir]);
+    assert.equal(code, 0);
+    assert.match(stdout, /baseline 2026-09-27 23:40\s+new install/);
+    assert.match(stdout, /✓ first_launch\s+2026-09-27 23:40/);
+    assert.match(stdout, /✓ agent_ready\s+2026-09-27 23:41\s+\+2m\s+app\s+agent=claude-code source=onboarding_install agents=1/);
+    assert.match(stdout, /✓ first_session .* engine\s+agent=claude-code mode=fresh helper=false/);
+    assert.match(stdout, /\s{2}second_session\s+not yet/);
+    const json = JSON.parse((await run(["local", "funnel", "--dir", dir, "--json"])).stdout);
+    assert.equal(json.origin.preexisting, false);
+    assert.deepEqual(
+      json.steps.filter((s) => s.reached_t !== null).map((s) => s.step),
+      ["first_launch", "agent_ready", "first_session"],
+    );
+    // A Mac that never ran a tracking build says so instead of failing.
+    assert.match((await run(["local", "activation", "--dir", spool])).stdout, /no activation baseline/);
+    assert.match((await run(["funnel", "--dir", dir], { DIRI_TELEMETRY_URL: "" })).stderr, /DIRI_TELEMETRY_URL/);
   });
 });
 

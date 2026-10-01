@@ -106,6 +106,52 @@ function buildBatches() {
   return batches;
 }
 
+/** What the Worker's /v1/admin/funnel answers (its aggregation is tested in telemetry/worker). */
+const FUNNEL = (since, until, version) => ({
+  since,
+  until,
+  version,
+  truncated: false,
+  new: {
+    installs: 10,
+    steps: [
+      { step: "first_launch", installs: 10, of_cohort: 1, of_previous: null, median_s: null },
+      { step: "agent_ready", installs: 8, of_cohort: 0.8, of_previous: 0.8, median_s: 45, sources: { onboarding_install: 5, preexisting: 3 } },
+      { step: "first_session", installs: 6, of_cohort: 0.6, of_previous: 0.75, median_s: 120 },
+      { step: "second_session", installs: 3, of_cohort: 0.3, of_previous: 0.5, median_s: 1800 },
+      { step: "first_helper", installs: 1, of_cohort: 0.1, of_previous: 0.333, median_s: 7200 },
+      { step: "returned", installs: 4, of_cohort: 0.4, of_previous: null, median_s: 90000 },
+    ],
+  },
+  preexisting: { installs: 25, steps: [] },
+});
+
+/**
+ * A state dir with this Mac's activation markers and a spool holding the
+ * matching events: a new install that installed Claude Code from the
+ * welcome and started one session.
+ */
+export function writeActivationSpool() {
+  const state = mkdtempSync(join(tmpdir(), "diri-activation-"));
+  const telemetry = join(state, "telemetry");
+  const dir = join(telemetry, "spool");
+  const markers = join(telemetry, "activation");
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(markers, { recursive: true });
+  writeFileSync(join(telemetry, "install.json"), JSON.stringify({ install_id: INSTALL, created_ms: T0 }));
+  writeFileSync(join(markers, "origin.json"), JSON.stringify({ created_ms: T0, preexisting: false }));
+  writeFileSync(join(markers, "first_launch.json"), JSON.stringify({ t: T0 }));
+  writeFileSync(join(markers, "agent_ready.json"), JSON.stringify({ t: T0 + 95_000 }));
+  writeFileSync(join(markers, "first_session.json"), JSON.stringify({ t: T0 + 4 * MIN }));
+  const records = [
+    { t: T0, seq: 1, p: "app", pid: 900, k: "activation.first_launch", s: "info", f: { preexisting: false, since_first_launch_s: 0 } },
+    { t: T0 + 95_000, seq: 2, p: "app", pid: 900, k: "activation.agent_ready", s: "info", f: { agent: "claude-code", source: "onboarding_install", agents: 1, preexisting: false, since_first_launch_s: 95 } },
+    { t: T0 + 4 * MIN, seq: 1, p: "engine", pid: 812, k: "activation.first_session", s: "info", f: { agent: "claude-code", mode: "fresh", helper: false, preexisting: false, since_first_launch_s: 240 } },
+  ];
+  writeFileSync(join(dir, `app-900-${T0}-0000.open`), `${records.map(line).join("\n")}\n`);
+  return dir;
+}
+
 const INSTALL_ROW = {
   install: INSTALL,
   support_id: SUPPORT_ID,
@@ -208,6 +254,8 @@ export async function startStub() {
       }
       case "/v1/admin/sessions":
         return send(200, { sessions });
+      case "/v1/admin/funnel":
+        return send(200, FUNNEL(num("since", 0), num("until", 0), q.get("version")));
       case "/v1/admin/budget":
         return send(200, {
           month: "2026-09",

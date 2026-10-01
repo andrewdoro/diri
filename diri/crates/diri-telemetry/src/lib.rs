@@ -14,6 +14,7 @@
 //! Recording never blocks the caller and is a no-op until [`init`] ran, so
 //! libraries can record unconditionally and tests record nothing.
 
+pub mod activation;
 mod health;
 mod identity;
 mod metrics;
@@ -86,6 +87,13 @@ pub(crate) struct Recorder {
 }
 
 pub(crate) static RECORDER: OnceLock<Recorder> = OnceLock::new();
+static STATE_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// The state directory this process records under, once [`init`] succeeded.
+pub(crate) fn recording_state_dir() -> Option<&'static Path> {
+    RECORDER.get()?;
+    STATE_DIR.get().map(std::path::PathBuf::as_path)
+}
 
 /// Starts recording for this process into `<state_dir>/telemetry/spool`.
 /// Idempotent; returns whether recording is active. `DIRI_TELEMETRY=off`
@@ -105,6 +113,7 @@ pub fn init(process: Process, state_dir: &Path) -> bool {
         seq: AtomicU64::new(0),
         dropped: AtomicU64::new(0),
     };
+    let _ = STATE_DIR.set(state_dir.to_path_buf());
     if RECORDER.set(recorder).is_err() {
         return true;
     }
@@ -280,7 +289,7 @@ mod tests {
             .map(|e| e.unwrap().path())
             .find(|p| p.extension().is_some_and(|e| e == "open"))
             .unwrap();
-        let text = std::fs::read_to_string(file).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
         let lines: Vec<serde_json::Value> = text
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
@@ -294,5 +303,44 @@ mod tests {
         assert_eq!(lines[2]["s"], "incident");
         assert_eq!(lines[2]["f"]["exit"], 127);
         assert!(dir.join(spool::URGENT_MARKER).exists());
+
+        // Activation milestones through the global recorder: each one is
+        // recorded once, however often the trigger repeats.
+        use activation::Milestone;
+        let origin = activation::init_origin(None).unwrap();
+        assert!(!origin.preexisting, "a fresh state dir is a new install");
+        assert!(activation::app_launched());
+        assert!(!activation::app_launched());
+        let order = [Milestone::FirstSession, Milestone::SecondSession];
+        let session = |_| vec![("agent", Value::from(id("claude-code")))];
+        assert_eq!(
+            activation::reach_next(&order, session),
+            Some(Milestone::FirstSession)
+        );
+        assert_eq!(
+            activation::reach_next(&order, session),
+            Some(Milestone::SecondSession)
+        );
+        assert_eq!(activation::reach_next(&order, session), None);
+        flush(Duration::from_secs(2));
+        let text = std::fs::read_to_string(file).unwrap();
+        let kinds: Vec<String> = text
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|line| line["k"].as_str().unwrap().starts_with("activation."))
+            .map(|line| {
+                assert_eq!(line["f"]["preexisting"], false);
+                assert!(line["f"]["since_first_launch_s"].is_u64());
+                line["k"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "activation.first_launch",
+                "activation.first_session",
+                "activation.second_session"
+            ]
+        );
     }
 }

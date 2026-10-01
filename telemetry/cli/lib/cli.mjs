@@ -1,6 +1,7 @@
 // diri-debug: "what happened to this person", from the telemetry Worker's
 // admin API or a local spool. See ../README.md and diri/TELEMETRY.md.
 
+import { activationSteps, readActivation, renderActivation, renderFunnel } from "./funnel.mjs";
 import { analyze, renderHealth, summarizeHealth } from "./health.mjs";
 import { filterRecords, formatRecord, globMatcher, isIncident, isPeriodic, LEGEND, severityMatcher } from "./records.mjs";
 import { defaultSpoolDir, loadConfig, LocalSource, RemoteSource } from "./sources.mjs";
@@ -19,7 +20,9 @@ usage:
   diri-debug find <session id | conversation uuid>
   diri-debug raw <batch key>
   diri-debug budget                  R2 usage against the spend caps (free tier)
-  diri-debug local [timeline|incidents|top|health|sessions|find] [--dir spool] [same flags]
+  diri-debug funnel [--since 7d] [--until T] [--version v] [--preexisting]
+                                     activation funnel of installs first launched in the window
+  diri-debug local [timeline|incidents|top|health|sessions|find|activation] [--dir spool] [same flags]
 
 flags:
   --json          machine-readable output (every command)
@@ -34,7 +37,7 @@ times: "2026-09-27 23:40", "23:40" (the latest one), "2h" (ago), ISO 8601, epoch
 config: DIRI_TELEMETRY_URL + DIRI_TELEMETRY_ADMIN_TOKEN, or ~/.config/diri-debug/config.json {"url","token"}.
 `;
 
-const BOOLEAN_FLAGS = new Set(["json", "utc", "full", "all", "help", "no-color", "color"]);
+const BOOLEAN_FLAGS = new Set(["json", "utc", "full", "all", "help", "no-color", "color", "preexisting"]);
 
 /**
  * @param {string[]} argv
@@ -107,7 +110,7 @@ export async function main(argv, io) {
       const source = new LocalSource(dir);
       const [view = "timeline", ...args] = rest;
       const run = LOCAL_VIEWS[view];
-      if (!run) throw new Error(`unknown local view "${view}" (timeline, incidents, top, health, sessions, find)`);
+      if (!run) throw new Error(`unknown local view "${view}" (timeline, incidents, top, health, sessions, find, activation)`);
       await run(ctx, source, args, true);
       return 0;
     }
@@ -306,7 +309,41 @@ async function budgetCmd(ctx, source) {
   ctx.out(`  stored   ${gb(u.bytes)} / ${gb(u.caps.bytes)}  ${pct(u.bytes, u.caps.bytes)}`);
 }
 
+/** The activation funnel of installs whose first launch is in the window. */
+async function funnelCmd(ctx, source) {
+  if (!(source instanceof RemoteSource)) throw new Error("funnel needs the Worker; `diri-debug local activation` shows this Mac");
+  const window = resolveWindow(ctx.flags, ctx.now, "7d");
+  const body = await source.get("/v1/admin/funnel", {
+    since: Math.floor(window.since),
+    until: Math.ceil(window.until),
+    version: ctx.flags.version,
+  });
+  if (ctx.flags.json) return ctx.json(body);
+  const cohort = ctx.flags.preexisting ? "preexisting" : "new";
+  const funnel = body[cohort];
+  const version = body.version ? ` v${body.version}` : "";
+  ctx.out(
+    `${cohort === "new" ? "new" : "preexisting (upgraded)"} installs first launched ${formatStamp(body.since, opts(ctx))} → ${formatStamp(body.until, opts(ctx))}${version}: ${funnel.installs}`,
+  );
+  if (funnel.installs === 0) ctx.out("(no installs in this cohort)");
+  else for (const line of renderFunnel(funnel)) ctx.out(line);
+  if (cohort === "new") {
+    ctx.out(`\n${body.preexisting.installs} preexisting installs in the window are left out (--preexisting shows them).`);
+  }
+  if (body.truncated) ctx.out("warning: the cohort was truncated; narrow the window.");
+  ctx.out("median: time from first launch. returned: launched again on a later day (retention, not a next step).");
+}
+
+/** This Mac's activation markers and the matching spool events. */
+async function activationCmd(ctx, source) {
+  const state = readActivation(source.dir);
+  const steps = activationSteps(state, source.allRecords().records);
+  if (ctx.flags.json) return ctx.json({ ...state, steps });
+  for (const line of renderActivation(state, steps, opts(ctx))) ctx.out(line);
+}
+
 const COMMANDS = {
+  funnel: funnelCmd,
   budget: budgetCmd,
   who: whoCmd,
   incidents: incidentsCmd,
@@ -325,5 +362,7 @@ const LOCAL_VIEWS = {
   health: healthCmd,
   sessions: sessionsCmd,
   find: findCmd,
+  activation: activationCmd,
+  funnel: activationCmd,
 };
 

@@ -17,11 +17,12 @@ export interface SweepReport {
   batches: number;
   incidents: number;
   sessions: number;
+  milestones: number;
 }
 
 export async function sweep(env: Env, now = Date.now()): Promise<SweepReport> {
   const cutoff = now - retentionDays(env) * DAY_MS;
-  const report: SweepReport = { objects: 0, batches: 0, incidents: 0, sessions: 0 };
+  const report: SweepReport = { objects: 0, batches: 0, incidents: 0, sessions: 0, milestones: 0 };
   for (let i = 0; i < MAX_CHUNKS; i++) {
     const { results } = await env.DB.prepare(
       "SELECT id, r2_key FROM batches WHERE received_at < ?1 ORDER BY id LIMIT ?2",
@@ -38,10 +39,12 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepReport> {
     report.batches += deleted.meta.changes;
     if (results.length < CHUNK) break;
   }
-  const [incidents, sessions] = await env.DB.batch([
+  const [incidents, sessions, milestones] = await env.DB.batch([
     env.DB.prepare("DELETE FROM incidents WHERE received_at < ?1").bind(cutoff),
     env.DB.prepare("DELETE FROM sessions WHERE received_at < ?1").bind(cutoff),
+    env.DB.prepare("DELETE FROM milestones WHERE received_at < ?1").bind(cutoff),
   ]);
+  report.milestones = milestones.meta.changes;
   report.incidents = incidents.meta.changes;
   report.sessions = sessions.meta.changes;
   // Installs stay while they have any data; an install silent for the whole

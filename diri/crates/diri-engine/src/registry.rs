@@ -2055,6 +2055,18 @@ impl Registry {
         &self.projects
     }
 
+    /// Whether an agent session other than `except` is live (terminals and
+    /// notes excluded), for the `activation.second_session` milestone.
+    pub fn other_live_agent(&self, except: &str) -> bool {
+        self.sessions.keys().any(|id| {
+            id != except
+                && self
+                    .records
+                    .get(id)
+                    .is_some_and(|record| crate::telemetry::counts_for_activation(&record.kind))
+        })
+    }
+
     pub fn live_count(&self) -> usize {
         self.sessions.len()
     }

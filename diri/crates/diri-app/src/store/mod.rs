@@ -808,6 +808,9 @@ impl SessionStore {
     /// Installs the agent catalog fetched on connect.
     pub fn set_agent_catalog(&mut self, agents: AgentReadinessResult) {
         let local = agents.host.is_none();
+        if local {
+            crate::telemetry::agent_catalog_seen(self.agent_install.as_ref(), &agents);
+        }
         let key = agent_target_key(agents.host.as_deref());
         self.agent_catalog_errors.remove(&key);
         self.agents.insert(key, agents);

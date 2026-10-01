@@ -394,6 +394,9 @@ fn start_telemetry(home: &Path, state_dir: &Path, exe_dir: &Path) {
         return;
     }
     diri_telemetry::install_panic_hook();
+    // Before the Engine loads or writes its session table, which is part of
+    // the evidence that this install predates activation tracking.
+    diri_telemetry::activation::init_origin(Some(home));
     diri_telemetry::start_health_sampler(std::time::Duration::from_secs(60));
     diri_engine::telemetry::set_holder_state_dir(state_dir);
     if let Some(endpoint) = diri_telemetry::upload::endpoint() {
