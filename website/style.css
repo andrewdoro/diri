@@ -984,3 +984,86 @@ html { overflow-x: clip; }
 .sidebar-rows { flex: 1 1 0; min-height: 0; overflow: hidden; -webkit-mask-image: linear-gradient(#000 calc(100% - 36px), transparent); mask-image: linear-gradient(#000 calc(100% - 36px), transparent); }
 .sidebar-rows > * { flex-shrink: 0; }
 .app-sidebar .sidebar-bottom { position: static; flex: none; background: none; }
+
+/* Hero as one paragraph: the claim in full white, the detail in grey at the same size. Medium weight, normal tracking. */
+.intro-heading h1, .intro-heading > p { max-width: 780px !important; margin-inline: auto; font-size: 30px !important; line-height: 1.32 !important; letter-spacing: -.018em !important; font-weight: 500 !important; text-wrap: balance; }
+.intro-heading h1 { color: #f4f0fa; }
+.intro-heading > p { margin-top: 2px !important; color: #a9a2bc !important; }
+.intro-heading .inline-agent { color: #d9d3e6; gap: .28em; }
+.intro-heading .inline-agent .agent-logo { width: .8em; height: .8em; color: #d9d3e6; }
+.release-pill { margin-bottom: 30px; padding: 4px 12px 4px 5px; font-size: 13px; color: #b6afc9; background: #ffffff06; border-color: #ffffff12; }
+.release-pill-tag { color: #f4f0fa; background: #ffffff14; font-weight: 500; }
+.intro-actions { gap: 22px !important; margin-top: 34px !important; }
+.intro-actions .button.primary { color: #17151f; background: #f4f0fa; border-color: #f4f0fa; box-shadow: 0 1px 0 #ffffff inset, 0 10px 30px -12px #00000080; }
+.intro-actions .button.primary .button-mark { filter: brightness(0); }
+.intro-actions .button.secondary.text-link { height: auto; padding: 0; gap: 6px; background: none; border: 0; color: #cfc8de; font-weight: 450; }
+.intro-actions .button.secondary.text-link .icon { width: 12px; height: 12px; opacity: .7; }
+@media (hover: hover) and (pointer: fine) {
+  .intro-actions .button.primary:hover { background: #ffffff; border-color: #ffffff; }
+  .intro-actions .button.secondary.text-link:hover { color: #fff; background: none; }
+}
+@media (min-width: 851px) { .intro { padding-bottom: 72px !important; } }
+@media (max-width: 600px) {
+  .intro-heading h1, .intro-heading > p { font-size: 22px !important; }
+}
+
+/* Hero: agent names stay in the grey sentence so the white claim leads. */
+.intro-heading .inline-agent, .intro-heading .inline-agent .agent-logo { color: #c9c2d8; }
+
+/* Features as a bento: five cards that show a slice of the app, then a grid of short facts. */
+.bento, .bento-small { display: grid; gap: 14px; margin: 8px 0 0; }
+.bento { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.bento-small { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 14px; }
+.bento-card { position: relative; display: flex; flex-direction: column; grid-column: span 2; padding: 26px 26px 28px; border-radius: 20px; background: #ffffff06; border: 1px solid #ffffff0d; }
+.bento-card.wide { grid-column: span 3; }
+.bento-card dt { margin-top: auto; font-size: 16.5px; font-weight: 500; letter-spacing: -.01em; color: #f4f0fa; }
+.bento-card dd { margin: 6px 0 0; font-size: 14px; line-height: 1.55; color: #a9a2bc; text-wrap: pretty; }
+.bento-visual { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 230px; margin-bottom: 26px; }
+.bento-card.small { grid-column: auto; padding: 22px 22px 24px; border-radius: 16px; }
+.bento-card.small > .icon { width: 18px; height: 18px; margin-bottom: 18px; color: #c9c2d8; }
+.bento-card.small dt { margin-top: 0; font-size: 15px; }
+.bento-card.small dd { font-size: 13.5px; }
+
+.mini { width: min(330px, 100%); padding: 10px; border-radius: 13px; background: #211e2e; border: 1px solid #ffffff14; box-shadow: 0 1px 0 #ffffff0d inset, 0 18px 40px -18px #000c; font-size: 13px; color: #e9e4f2; text-align: left; }
+.mini .icon, .mini .agent-logo { width: 14px; height: 14px; color: #c9c2d8; }
+.mini-title { display: flex; align-items: center; gap: 7px; padding: 4px 8px 8px; font-size: 12.5px; color: #a9a2bc; }
+.mini-title .icon { width: 13px; height: 13px; }
+.mini-row { display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 9px; border-radius: 8px; white-space: nowrap; }
+.mini-row span { overflow: hidden; text-overflow: ellipsis; }
+.mini-row small { margin-left: auto; padding-left: 10px; color: #8f87a3; font-size: 12px; }
+.mini-row.selected { background: #ffffff0f; }
+.mini-row > .icon[data-icon="check"], .mini-row.done .icon { color: #8fd3a3; }
+.mini-row.note .icon { color: #f6c177; }
+.mini-row.working .icon { animation: spin 1.2s linear infinite; }
+.mini-row > .agent-logo:last-child { margin-left: auto; }
+.mini-tree { margin-left: 15px; padding-left: 10px; border-left: 1px solid #ffffff14; }
+.mini-skeleton i { width: 14px; height: 14px; border-radius: 4px; background: #ffffff10; }
+.mini-skeleton b { width: 46%; height: 8px; border-radius: 4px; background: #ffffff10; }
+.mini-skeleton em { width: 18%; height: 8px; margin-left: auto; border-radius: 4px; background: #ffffff0b; }
+.mini-table { width: min(420px, 100%); padding: 0; overflow: hidden; }
+.mini-tr { display: grid; grid-template-columns: 1.6fr .6fr .8fr; align-items: center; height: 42px; padding: 0 14px; border-top: 1px solid #ffffff0d; }
+.mini-tr.head { height: 36px; border-top: 0; font-size: 12px; color: #8f87a3; background: #ffffff05; }
+.mini-tr span:first-child { display: flex; align-items: center; gap: 8px; font-family: Menlo, monospace; font-size: 12px; }
+.mini-tr b { font-weight: 500; color: #8fd3a3; } .mini-tr s { text-decoration: none; color: #e59ab0; }
+.mini-diff { width: min(420px, 100%); padding: 0 0 8px; overflow: hidden; font: 12px/26px Menlo, monospace; }
+.mini-file { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; margin-bottom: 6px; border-bottom: 1px solid #ffffff0d; font-size: 12px; }
+.mini-file small { margin-left: auto; color: #8f87a3; }
+.mini-diff code { display: block; padding: 0 12px; font: inherit; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.mini-diff .del { background: #eb6f9214; color: #e3a9bb; } .mini-diff .add { background: #8fd3a314; color: #cfe9d6; }
+.mini-pr { width: min(420px, 100%); display: flex; align-items: center; gap: 9px; padding: 11px 14px; }
+.mini-pr small { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: #8fd3a3; font-size: 12px; }
+.mini-pr small .icon { width: 12px; height: 12px; color: #8fd3a3; }
+@media (max-width: 1050px) { .bento { grid-template-columns: repeat(2, minmax(0, 1fr)); } .bento-card, .bento-card.wide { grid-column: span 1; } .bento-card.wide:last-child { grid-column: span 2; } .bento-small { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .bento, .bento-small { grid-template-columns: minmax(0, 1fr); } .bento-card, .bento-card.wide, .bento-card.wide:last-child { grid-column: auto; } .bento-visual { min-height: 0; } }
+@media (prefers-reduced-motion: reduce) { .mini-row.working .icon { animation: none; } }
+.bento-visual { height: 250px; min-height: 0; }
+.bento-card dt { margin-top: 0; }
+.mini-row.working { color: inherit; }
+@media (max-width: 600px) { .bento-visual { height: auto; } }
+.intro-heading > p, .intro-heading .inline-agent, .intro-heading .inline-agent .agent-logo { color: #9d96b1 !important; }
+.mini-tr span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 600px) {
+  .intro-heading h1, .intro-heading > p { font-size: 21px !important; line-height: 1.35 !important; }
+  .intro-heading .inline-agent .agent-logo { display: none; }
+  .intro-heading .inline-agent { gap: 0; }
+}

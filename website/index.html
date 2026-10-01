@@ -180,13 +180,13 @@
       <section class="intro" aria-labelledby="page-title">
         <div class="intro-heading">
           <a class="release-pill" href="/whats-new/0.9.0/"><span class="release-pill-tag">New in 0.9</span><span class="release-pill-text">Notes, and to-dos that start agents</span><span class="icon" data-icon="chevron-right" aria-hidden="true"></span></a>
-          <h1 id="page-title">The best way to work with coding agents</h1>
-          <p>Run <span class="inline-agent"><i class="agent-logo claude" data-agent="claude"></i>Claude Code,</span> <span class="inline-agent"><i class="agent-logo" data-agent="codex"></i>Codex,</span> <span class="inline-agent"><i class="agent-logo" data-agent="cursor"></i>Cursor,</span> <span class="inline-agent"><i class="agent-logo gemini" data-agent="gemini"></i>Gemini</span> and 18&nbsp;more in parallel. <span class="intro-line">Step in only when one needs you.</span></p>
+          <h1 id="page-title">The best way to work with coding agents.</h1>
+          <p>Run <span class="inline-agent"><i class="agent-logo claude" data-agent="claude"></i>Claude Code,</span> <span class="inline-agent"><i class="agent-logo" data-agent="codex"></i>Codex,</span> <span class="inline-agent"><i class="agent-logo" data-agent="cursor"></i>Cursor,</span> <span class="inline-agent"><i class="agent-logo gemini" data-agent="gemini"></i>Gemini</span> and 18&nbsp;more in parallel, and step in only when one needs you.</p>
         </div>
         <div class="intro-actions">
           <a id="download-primary" class="button primary" href="https://github.com/cristicretu/diri/releases/latest"><img class="button-mark" src="/assets/brand/apple.svg" width="15" height="15" alt=""><span class="button-label">Download for macOS</span></a>
           <details class="download-options">
-            <summary class="button secondary"><span class="os-marks" aria-hidden="true"><img src="/assets/brand/linux.svg" width="14" height="15" alt=""><img class="upcoming" src="/assets/brand/windows.svg" width="12" height="12" alt=""></span>Other platforms</summary>
+            <summary class="button secondary text-link">Other platforms<span class="icon" data-icon="chevron-down" aria-hidden="true"></span></summary>
             <div class="download-menu">
               <div class="download-menu-head"><span id="download-version">macOS 15+ · Linux beta</span><a id="download-notes" href="https://github.com/cristicretu/diri/releases/latest">Release notes</a></div>
               <div id="download-assets"></div>
@@ -196,7 +196,6 @@
             </div>
           </details>
         </div>
-        <p class="intro-proof"><span>Free &amp; open source</span><span>Native, no Electron</span><span>Your accounts, your machines</span></p>
       </section>
 
       <section class="product" aria-label="Interactive Diri preview" data-nosnippet>
@@ -287,60 +286,27 @@
 
       <section class="features" id="features" aria-labelledby="features-title">
         <div class="features-heading"><h2 id="features-title">Features</h2><a href="/docs/">Read the docs <span class="icon" data-icon="chevron-right" aria-hidden="true"></span></a></div>
-        <section class="feature-group" aria-labelledby="feature-group-0">
-          <h3 id="feature-group-0"><span class="icon" data-icon="terminal" aria-hidden="true"></span>Agents &amp; sessions</h3>
-          <dl class="feature-list">
-            <div><dt>22 supported agents</dt><dd>Run Claude Code, Codex, Cursor, Gemini, and more with your existing CLI logins. Add custom agent definitions.</dd></div>
-            <div><dt>Projects, kept in order</dt><dd>Group chats by project. Pin, rename, reorder, and archive sessions without losing track of your work.</dd></div>
-            <div><dt>A real terminal</dt><dd>Use each agent’s own interface. Search output, quote selections, paste images, and open a shell beside your session.</dd></div>
-            <div><dt>Conversation history</dt><dd>Find and resume past Claude and Codex chats by title, project, or agent, including conversations started outside Diri.</dd></div>
-          </dl>
-        </section>
-        <section class="feature-group" aria-labelledby="feature-group-1">
-          <h3 id="feature-group-1"><span class="icon" data-icon="branch" aria-hidden="true"></span>Parallel work</h3>
-          <dl class="feature-list">
-            <div><dt>Separate workspaces</dt><dd>Give each agent its own Git worktree so parallel tasks can change files on separate branches.</dd></div>
-            <div><dt>Handoffs &amp; forks</dt><dd>Pass a task and its context to another agent. Fork conversations when the agent supports it.</dd></div>
-            <div><dt>Agents that run agents</dt><dd>One prompt starts a swarm. Through Diri’s MCP tools, agents spawn other agents, hand out tasks, follow progress, and answer each other’s questions.</dd></div>
-            <div><dt>Remote machines</dt><dd>Start sessions on your own SSH hosts from the same workspace. Diri handles setup, with no hosted relay.</dd></div>
-          </dl>
-        </section>
-        <section class="feature-group" aria-labelledby="feature-group-2">
-          <h3 id="feature-group-2"><span class="icon" data-icon="check-circle" aria-hidden="true"></span>Review &amp; follow-up</h3>
-          <dl class="feature-list">
-            <div><dt>Status &amp; notifications</dt><dd>Read one sidebar, not thirty terminals. See who’s working, waiting, or done, and jump straight to the session that needs you.</dd></div>
-            <div><dt>Changes &amp; commits</dt><dd>Inspect diffs, stage or discard changes, and commit from the workspace where the work happened.</dd></div>
-            <div><dt>Pull requests &amp; links</dt><dd>Keep outputs and links beside their session, with pull request checks and discussion attached to the right PR.</dd></div>
-            <div><dt>Files &amp; source code</dt><dd>Open file references from terminal output. Search local files and symbols, and inspect code without switching apps.</dd></div>
-          </dl>
-        </section>
-        <section class="feature-group" aria-labelledby="feature-group-3">
-          <h3 id="feature-group-3"><span class="icon" data-icon="local-agents" aria-hidden="true"></span>Usage &amp; accounts</h3>
-          <dl class="feature-list">
-            <div><dt>Cost &amp; token usage</dt><dd>See estimated spend today and this month, token usage, and cache savings for Claude and Codex.</dd></div>
-            <div><dt>Context window</dt><dd>Check how much of the selected session’s context is used before deciding what to work on next.</dd></div>
-            <div><dt>Plan limits</dt><dd>Check Claude and Codex usage limits and reset times alongside your sessions.</dd></div>
-            <div><dt>Work &amp; personal accounts</dt><dd>Choose a Claude or Codex account for each new session. Keep provider profiles and logins separate.</dd></div>
-          </dl>
-        </section>
-        <section class="feature-group" aria-labelledby="feature-group-4">
-          <h3 id="feature-group-4"><span class="icon" data-icon="settings" aria-hidden="true"></span>Your workspace</h3>
-          <dl class="feature-list">
-            <div><dt>Commands &amp; shortcuts</dt><dd>Find chats, open projects, and change settings from one command menu. Customize keyboard shortcuts to suit you.</dd></div>
-            <div><dt>Themes &amp; type</dt><dd>Choose from built-in themes, preview your appearance, pick a terminal font, and adjust text size.</dd></div>
-            <div><dt>Skill library</dt><dd>Search personal, project, and plugin skills. Read their instructions, copy them, or open the source file.</dd></div>
-            <div><dt>Resource controls</dt><dd>Choose when to hibernate idle sessions and set a memory threshold for freezing idle agents.</dd></div>
-          </dl>
-        </section>
-        <section class="feature-group" aria-labelledby="feature-group-5">
-          <h3 id="feature-group-5"><span class="icon" data-icon="monitor" aria-hidden="true"></span>On your devices</h3>
-          <dl class="feature-list">
-            <div><dt>Sessions that stay open</dt><dd>Close and reopen Diri while local agents keep working. Return to the same session and terminal history.</dd></div>
-            <div><dt>iPhone companion <span class="feature-badge">Beta</span></dt><dd>Start sessions, send prompts, answer questions, and review changes over Tailscale while Diri is open on your Mac.</dd></div>
-            <div><dt>Native desktop app</dt><dd>Rust and GPUI, no Electron. Native on macOS, Linux in beta, Windows in progress.</dd></div>
-            <div><dt>Free &amp; open source</dt><dd>No Diri account or subscription. Use your own agent accounts, on your computer or a host you control.</dd></div>
-          </dl>
-        </section>
+        <dl class="bento">
+          <div class="bento-card "><div class="bento-visual" aria-hidden="true"><div class="mini"><div class="mini-title">New Agent</div><div class="mini-row selected"><i class="agent-logo claude" data-agent="claude"></i><span>Claude Code</span><small>Opus</small></div><div class="mini-row"><i class="agent-logo" data-agent="codex"></i><span>Codex</span><small>gpt-6</small></div><div class="mini-row"><i class="agent-logo" data-agent="cursor"></i><span>Cursor</span><small>Auto</small></div><div class="mini-row mini-skeleton"><i></i><b></b><em></em></div></div></div><dt>Every agent you already use</dt><dd>Claude Code, Codex, Cursor, Gemini and 18 more, in their own real terminals, with your existing logins.</dd></div>
+          <div class="bento-card "><div class="bento-visual" aria-hidden="true"><div class="mini"><div class="mini-row"><span class="icon" data-icon="check" aria-hidden="true"></span><span>Ship the 0.9 release</span><i class="agent-logo claude" data-agent="claude"></i></div><div class="mini-tree"><div class="mini-row"><span class="icon" data-icon="check" aria-hidden="true"></span><span>Write the release notes</span><small>2m</small></div><div class="mini-row"><span class="icon" data-icon="check" aria-hidden="true"></span><span>Verify the Linux build</span><small>7m</small></div><div class="mini-row working"><span class="icon" data-icon="working-0" aria-hidden="true"></span><span>Test the updater</span><small>9m</small></div></div></div></div><dt>Agents that run agents</dt><dd>One prompt starts a team. Agents hand out tasks, follow progress and bring back one result.</dd></div>
+          <div class="bento-card "><div class="bento-visual" aria-hidden="true"><div class="mini"><div class="mini-title"><span class="icon" data-icon="bell" aria-hidden="true"></span>Notifications</div><div class="mini-row note"><span class="icon" data-icon="warning" aria-hidden="true"></span><span>Weekly plan</span><small>Claude has a question</small></div><div class="mini-row done"><span class="icon" data-icon="check-circle" aria-hidden="true"></span><span>Diri website</span><small>Codex finished</small></div><div class="mini-row mini-skeleton"><i></i><b></b><em></em></div></div></div><dt>Know who needs you</dt><dd>One sidebar, not thirty terminals. Jump straight to the session that is waiting.</dd></div>
+          <div class="bento-card wide"><div class="bento-visual" aria-hidden="true"><div class="mini mini-table"><div class="mini-tr head"><span>Branch</span><span>Agent</span><span>Changes</span></div><div class="mini-tr"><span><span class="icon" data-icon="branch" aria-hidden="true"></span>fix/reconnect-test</span><span><i class="agent-logo" data-agent="codex"></i></span><span><b>+42</b> <s>−7</s></span></div><div class="mini-tr"><span><span class="icon" data-icon="branch" aria-hidden="true"></span>feat/passkeys</span><span><i class="agent-logo claude" data-agent="claude"></i></span><span><b>+318</b> <s>−40</s></span></div><div class="mini-tr"><span><span class="icon" data-icon="branch" aria-hidden="true"></span>perf/search-p95</span><span><i class="agent-logo" data-agent="cursor"></i></span><span><b>+27</b> <s>−12</s></span></div></div></div><dt>A workspace per agent</dt><dd>Each agent gets its own Git worktree and branch, so parallel work never collides.</dd></div>
+          <div class="bento-card wide"><div class="bento-visual" aria-hidden="true"><div class="mini mini-diff"><div class="mini-file"><span class="icon" data-icon="code" aria-hidden="true"></span>src/updater/linux.rs<small>+18 −6</small></div><code class="del">−    fs::rename(new, &amp;current)?;</code><code class="add">+    fs::rename(new, &amp;staged)?;</code><code class="add">+    verify_bundle(&amp;staged)?;</code></div><div class="mini mini-pr"><span class="icon" data-icon="pull-request" aria-hidden="true"></span><span>Swap the bundle atomically</span><small><span class="icon" data-icon="check" aria-hidden="true"></span>Checks passed</small></div></div><dt>Review and ship</dt><dd>Inspect diffs, commit, and follow the pull request from the session that did the work.</dd></div>
+        </dl>
+        <dl class="bento-small">
+          <div class="bento-card small"><span class="icon" data-icon="moon" aria-hidden="true"></span><dt>Sessions that stay open</dt><dd>Close diri and agents keep working. Idle ones hibernate.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="server" aria-hidden="true"></span><dt>Remote machines</dt><dd>Run sessions on your own SSH hosts, with no hosted relay.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="monitor" aria-hidden="true"></span><dt>iPhone companion</dt><dd>Answer questions and review changes from your phone. Beta.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="clock" aria-hidden="true"></span><dt>Conversation history</dt><dd>Find and resume past Claude and Codex chats, even ones started elsewhere.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="refresh" aria-hidden="true"></span><dt>Handoffs &amp; forks</dt><dd>Pass a task and its context to another agent, or fork the conversation.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="local-agents" aria-hidden="true"></span><dt>Usage &amp; limits</dt><dd>Spend, tokens, context and plan limits beside your sessions.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="user" aria-hidden="true"></span><dt>Work &amp; personal accounts</dt><dd>Choose a Claude or Codex account for each session.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="note" aria-hidden="true"></span><dt>Notes &amp; to-dos</dt><dd>Plans next to your agents. Any to-do can start one.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><dt>Command menu</dt><dd>Chats, projects and settings one ⌘K away. Rebind any shortcut.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="code" aria-hidden="true"></span><dt>Files &amp; source</dt><dd>Open file references from output and search symbols in place.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="file" aria-hidden="true"></span><dt>Skill library</dt><dd>Search, read and copy personal, project and plugin skills.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="shield" aria-hidden="true"></span><dt>Free &amp; open source</dt><dd>Apache 2.0, native Rust, no Electron, no account.</dd></div>
+        </dl>
         <section class="feature-group" aria-labelledby="feature-group-guides">
           <h3 id="feature-group-guides"><span class="icon" data-icon="file" aria-hidden="true"></span>Guides</h3>
           <dl class="feature-list">
