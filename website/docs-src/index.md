@@ -31,7 +31,7 @@ Agents you start inside diri can reach the Engine too, through the built-in [MCP
 - [Sessions](/docs/sessions/): status, notifications, the sidebar, history, and what survives a restart.
 - [Worktrees and review](/docs/worktrees/): give each task its own checkout, then review and bring the changes back.
 - [Notes](/docs/notes/): plans and to-do lists you can hand to agents.
-- [Recipes](/docs/scheduled-tasks/): save a task and rerun it in one click.
+- [Recipes and schedules](/docs/scheduled-tasks/): start an agent at a set time, or save a task and rerun it in one click.
 - [Accounts and usage](/docs/accounts/): switch accounts and see what you spend.
 
 ## Automate

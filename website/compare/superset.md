@@ -18,7 +18,7 @@ Superset is a desktop workspace for running many coding agents in parallel, each
 | Agents controlling agents | Local MCP server bundled with the app: spawn agents in worktrees, tracked tasks, wait_any, get_diff, integrate | Hosted MCP server with OAuth: create workspaces, launch agent sessions, tasks, automations |
 | Session persistence | Per-session holder processes; agents survive app quit and Engine updates | Sessions survive app restarts with output and scrollback |
 | Notes and planning | Notes with to-dos that start agents and receive reports | Tasks through its MCP and CLI; Linear integration on Pro |
-| Scheduling | Recipes rerun by hand; no timer yet | Automations on Pro |
+| Scheduling | Local schedules in Settings or from an agent; catch up after sleep and can wake the Mac | Automations on Pro |
 
 ## Where diri is different
 
@@ -40,7 +40,7 @@ A diri note is a Markdown plan whose to-dos each start an agent with the note as
 ## Where Superset is a better fit
 - **More around the terminal.** An in-app browser with automatic port detection, setup and teardown scripts per workspace, a built-in chat pane, and a TypeScript SDK. diri has a browser tool for agents, but not a browser pane with port detection.
 - **Worktree per task by default.** Every Superset workspace is its own worktree, and you can push and open a PR from the diff viewer. In diri worktrees are opt-in and merging a PR opens GitHub.
-- **Scheduled automations and team features.** Pro adds automations, Linear and Slack integrations, and unlimited users, with SSO and audit logs on Enterprise. diri cannot run anything on a timer yet and has no team features.
+- **Automations and team features.** Pro adds automations, Linear and Slack integrations, and unlimited users, with SSO and audit logs on Enterprise. diri's [schedules](/docs/scheduled-tasks/) start an agent with a prompt at a set time on your own Mac while diri is running; diri has no Linear or Slack triggers and no team features.
 - **Reach your workspaces from anywhere.** The relay lets you open a workspace on another machine without setting up SSH or a VPN. diri's phone companion uses Tailscale instead.
 
 ## Switching

@@ -17,7 +17,7 @@ Each page is available as Markdown at the URL below. The docs are concatenated i
 - [Sessions](https://diri.sh/docs/sessions.md): How diri sessions work: status colors, notifications, the sidebar, searching and resuming past chats, persistence across quits, hibernation and terminal features.
 - [Worktrees and review](https://diri.sh/docs/worktrees.md): Give each diri agent its own git worktree and branch, review its diff in the Review panel, commit, follow pull request checks, and clean up afterwards.
 - [Notes](https://diri.sh/docs/notes.md): Write plans and to-dos in diri Notes, hand any to-do to an agent with the note as context, follow its progress live, and let agents write back.
-- [Recipes and scheduled tasks](https://diri.sh/docs/scheduled-tasks.md): Save a prompt, agent, project and worktree choice as a recipe and rerun it in one click. Timed schedules are not available in diri yet.
+- [Recipes and schedules](https://diri.sh/docs/scheduled-tasks.md): Start an agent at a set time with a schedule that catches up after sleep and can wake the Mac, or save a launch as a recipe and rerun it in one click.
 - [Accounts and usage](https://diri.sh/docs/accounts.md): Save Claude Code and Codex logins as profiles, switch every open tab to another account in one click, and see estimated cost, tokens and plan limits.
 
 ## Automation

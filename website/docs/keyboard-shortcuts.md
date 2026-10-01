@@ -118,7 +118,7 @@ Choose **Settings → Color theme** in the palette, or search for **Color theme*
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>A</kbd> | Choose the account (Claude Code and Codex) |
 | <kbd>Esc</kbd> | Close the launcher |
 
-When the agent or project picker is open it takes the arrows first: ↑ ↓ move the highlight, ↵ commits it, and Esc closes the picker without closing the launcher. Recipes are covered in [Recipes and scheduled tasks](/docs/scheduled-tasks/).
+When the agent or project picker is open it takes the arrows first: ↑ ↓ move the highlight, ↵ commits it, and Esc closes the picker without closing the launcher. Recipes are covered in [Recipes and schedules](/docs/scheduled-tasks/).
 
 A handoff opens in the same surface with the generated context editable. Nothing is sent until you activate **Send handoff** or press Return. Esc cancels without sending.
 

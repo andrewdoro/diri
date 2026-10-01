@@ -18,6 +18,7 @@ Conductor is a Mac app for running Claude Code, Codex, Cursor and OpenCode in pa
 | Agents controlling agents | Built-in local MCP server: spawn agents in worktrees, tracked tasks, wait_any, get_diff, integrate | Conductor API and hosted MCP server (beta) that manage cloud workspaces |
 | Session persistence | Per-session holder processes; agents keep running when the app quits or the Engine updates | Archived workspaces restore with chat history; behavior on app quit not documented |
 | Notes and planning | Notes with to-dos that start agents and receive reports | A per-workspace `.context` folder for notes and handoffs; plan mode |
+| Scheduling | Schedules that start an agent with a prompt at a set time, catch up after sleep and can wake the Mac | Routines, listed in its changelog |
 | Account | No diri account; bring your own CLIs and logins | Bring your own subscriptions and keys; its hosted MCP server uses a Conductor sign-in |
 
 ## Where diri is different
@@ -41,7 +42,6 @@ A diri note is a Markdown plan whose to-dos can each start an agent with the not
 - **A guided, opinionated workflow.** Every workspace gets a worktree and branch by default, and the path from issue to pull request to merge is built in: create a workspace from a branch, PR, GitHub issue or Linear issue, review in the diff viewer, open the PR, and watch CI and review threads in the Checks tab. In diri, worktrees are opt-in and merging a PR opens GitHub.
 - **A chat-first interface.** If you prefer a composer with a model picker, plan and fast modes, and attachments over a raw terminal, Conductor is built around that.
 - **Cloud workspaces and collaboration.** Pro adds Conductor Cloud workspaces, multiplayer with live collaboration, an API and a mobile app. diri has no hosted compute and no multi-user features.
-- **Scheduled work.** Conductor lists routines in its changelog. diri saves recipes you rerun by hand but cannot run them on a timer yet.
 
 ## Switching
 diri runs the same agent CLIs with the same logins you already use, so there is nothing to migrate for the agents themselves.
