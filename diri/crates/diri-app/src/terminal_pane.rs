@@ -6942,6 +6942,15 @@ mod tests {
                         prefs.terminal_theme = theme;
                     }
                     prefs.terminal_file_editor = crate::store::FileEditor::Cursor;
+                    if let Ok(family) = std::env::var("DIRI_QOL_FONT") {
+                        prefs.terminal_font_family = family;
+                    }
+                    if let Some(scale) = std::env::var("DIRI_QOL_LINE_HEIGHT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                    {
+                        prefs.terminal_line_height = scale;
+                    }
                 })
                 .unwrap();
             store.upsert_session(session);
@@ -7011,6 +7020,32 @@ mod tests {
                         }
                         grid.cursor_row = 11;
                         grid.cursor_col = 2;
+                    }
+                    if scene == "typography" {
+                        // An agent transcript with box drawing, shades and
+                        // colour: what a font or line-height change touches.
+                        let mut screen = diri_engine::HeadlessScreen::new(80, 18);
+                        screen.feed(concat!(
+                            "\x1b[38;5;173m╭────────────────────────────────────────────╮\x1b[0m\r\n",
+                            "\x1b[38;5;173m│\x1b[0m \x1b[38;5;173m✻\x1b[0m Welcome to \x1b[1mClaude Code\x1b[0m                   \x1b[38;5;173m│\x1b[0m\r\n",
+                            "\x1b[38;5;173m│\x1b[0m   \x1b[2mcwd: ~/work/diri\x1b[0m                         \x1b[38;5;173m│\x1b[0m\r\n",
+                            "\x1b[38;5;173m╰────────────────────────────────────────────╯\x1b[0m\r\n",
+                            "\r\n",
+                            "\x1b[2m>\x1b[0m Let me pick the terminal font in Settings\r\n",
+                            "\r\n",
+                            "\x1b[32m●\x1b[0m \x1b[1mRead\x1b[0m(crates/diri-app/src/fonts.rs)\r\n",
+                            "  ⎿  Read 196 lines\r\n",
+                            "\x1b[32m●\x1b[0m \x1b[1mUpdate\x1b[0m(crates/diri-term/src/metrics.rs)\r\n",
+                            "  ⎿  \x1b[32m+ pub fn with_line_height_scale(self, scale: f32)\x1b[0m\r\n",
+                            "     \x1b[31m- line_height: px(raw_height.round())\x1b[0m\r\n",
+                            "\r\n",
+                            "┌──────┬──────────┬────────┐  \x1b[36m█▓▒░\x1b[0m 0O 1lI {}[]() => != ->\r\n",
+                            "│ size │ 13 pt    │ \x1b[33mok\x1b[0m     │  \x1b[7m inverse \x1b[0m \x1b[4munderline\x1b[0m \x1b[3mitalic\x1b[0m\r\n",
+                            "└──────┴──────────┴────────┘\r\n",
+                            "\x1b[32m$\x1b[0m cargo test -p diri-term\r\n",
+                            "test result: \x1b[32mok\x1b[0m. 278 passed; 0 failed",
+                        ).as_bytes());
+                        grid = screen.full_snapshot();
                     }
                     let find_fixture = if scene == "find-unicode" {
                         let mut screen = diri_engine::HeadlessScreen::new(80, 28);
