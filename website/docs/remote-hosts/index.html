@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Remote hosts · Diri docs</title>
+  <meta name="description" content="Run agents on your own servers over SSH. diri reuses your OpenSSH setup and needs no tmux, sudo or remote service. Learn what survives a dropped connection.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/remote-hosts/">
+  <link rel="alternate" type="text/markdown" href="/docs/remote-hosts.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Remote hosts">
+  <meta property="og:description" content="Run agents on your own servers over SSH. diri reuses your OpenSSH setup and needs no tmux, sudo or remote service. Learn what survives a dropped connection.">
+  <meta property="og:url" content="https://diri.sh/docs/remote-hosts/">
+  <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Remote hosts","description":"Run agents on your own servers over SSH. diri reuses your OpenSSH setup and needs no tmux, sudo or remote service. Learn what survives a dropped connection.","url":"https://diri.sh/docs/remote-hosts/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Remote<span class="docs-menu-sep">/</span><strong>Remote hosts</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Recipes</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/" aria-current="page"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/remote-hosts.md">
+        <header class="docs-heading"><span class="eyebrow">Remote</span><h1>Remote hosts</h1><p>Run agents on your own servers over SSH. diri reuses your OpenSSH setup and needs no tmux, sudo or remote service. Learn what survives a dropped connection.</p></header>
+        <article class="docs-content">
+<p>diri can run an agent on any machine you reach with <code>ssh</code>. The agent runs on the server, its row in the sidebar works like a local one, and on most hosts it keeps running when your connection drops. For a walkthrough with screenshots, see <a href="/guides/remote-sessions/">Run agents on your own server</a>.</p>
+<h2 id="what-you-need"><a class="anchor" href="#what-you-need" aria-hidden="true" tabindex="-1">#</a>What you need</h2>
+<ul><li>A server you can already reach with <code>ssh</code>, including aliases from <code>~/.ssh/config</code>.</li><li>A project folder on that server.</li><li>The agent CLI installed and signed in on the server. diri never copies your local agent logins to it.</li></ul>
+<p>Nothing else. The server does not need <code>tmux</code>, <code>screen</code>, Node.js, Python, <code>curl</code>, a preinstalled diri service, or administrator rights. diri never runs <code>sudo</code> and never changes host-wide configuration.</p>
+<h3 id="supported-servers"><a class="anchor" href="#supported-servers" aria-hidden="true" tabindex="-1">#</a>Supported servers</h3>
+<div class="table-wrap"><table><thead><tr><th>Platform</th><th>Supported</th></tr></thead><tbody><tr><td>Linux x86_64</td><td>Yes</td></tr><tr><td>Linux aarch64 (arm64)</td><td>Yes</td></tr><tr><td>macOS on Apple silicon</td><td>Yes</td></tr><tr><td>macOS on Intel</td><td>No. The host reports <code>unsupported-platform</code>.</td></tr></tbody></table></div>
+<h2 id="add-a-host"><a class="anchor" href="#add-a-host" aria-hidden="true" tabindex="-1">#</a>Add a host</h2>
+<ol><li>Open <strong>Settings → Remote</strong> and click <strong>Add Host</strong>.</li><li>Fill in the form:</li></ol>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>What to enter</th></tr></thead><tbody><tr><td>Name</td><td>A label for the host, such as <code>Forge</code>.</td></tr><tr><td>SSH destination</td><td>What you would type after <code>ssh</code>, for example <code>you@forge</code> or an alias from <code>~/.ssh/config</code>.</td></tr><tr><td>Default folder</td><td>Where the folder picker starts. Without one, it starts in the remote home folder.</td></tr></tbody></table></div>
+<ol start="3"><li>Click <strong>Add Host</strong>.</li></ol>
+<p>diri then connects, checks the platform, uploads and verifies its helper, loads the remote login environment, and tests whether sessions survive a disconnect. When it finishes, the card shows the folder, helper build, protocol version and persistence result, with <strong>Use by default</strong> to make it the default host.</p>
+<p>Host settings are saved in <code>hosts.json</code>, in <code>~/Library/Application Support/Dirijor</code> on macOS and <code>~/.config/diri</code> on Linux.</p>
+<p>To start a session on the host, open <strong>New Agent</strong>, click the folder row and pick the host under <strong>Machine</strong>. Then browse to a folder on it. The same path on two hosts counts as two different projects.</p>
+<h2 id="how-it-works"><a class="anchor" href="#how-it-works" aria-hidden="true" tabindex="-1">#</a>How it works</h2>
+<p>SSH is only the authenticated, encrypted pipe. diri does not use the SSH terminal for the agent.</p>
+<ol><li>On first use, diri uploads a small helper program, <code>diri-remote</code>, built for that exact platform and shipped inside the app. It never downloads a binary from a URL the server chooses.</li><li>The upload lands in a temporary file first. diri checks its length, SHA-256, build ID and protocol before moving it into place.</li><li>Each session gets its own <strong>Holder</strong>: one helper process that owns the agent's terminal, the agent's processes and the current screen.</li><li>diri sends the agent launch as a structured argument list, folder and environment. It does not build shell command strings.</li></ol>
+<p>Helpers live in a private cache under your remote account:</p>
+<div class="table-wrap"><table><thead><tr><th>Path</th><th>Contents</th></tr></thead><tbody><tr><td><code>~/.cache/diri/bin/protocol-&lt;major&gt;/&lt;build-id&gt;/diri-remote</code></td><td>Helper binaries, one per version</td></tr><tr><td><code>~/.local/state/diri/sessions/&lt;session-id&gt;/</code></td><td>Per-session state, socket and output log</td></tr></tbody></table></div>
+<p>The state path follows <code>XDG_STATE_HOME</code> when it is set. Directories are <code>0700</code>, files and sockets are <code>0600</code>, and the helper binary is <code>0700</code>. Several helper versions can sit side by side. An update never replaces a helper that a running session still uses.</p>
+<aside class="callout note"><strong>Note</strong><p>After you update diri, the first remote action installs the matching helper if needed. To force a fresh install, open the host in <strong>Settings → Remote</strong> and click <strong>Reinstall Environment</strong>. Running sessions are not interrupted.</p></aside>
+<h3 id="environment-on-the-server"><a class="anchor" href="#environment-on-the-server" aria-hidden="true" tabindex="-1">#</a>Environment on the server</h3>
+<p>diri reads your login shell from the server's user database and captures the login environment there, so tools installed with Homebrew, <code>nvm</code>, <code>mise</code> or in user folders are found. Your local environment is not copied over. Local <code>DIRI_</code> and <code>SSH_</code> variables, local sockets and credentials stay on your machine.</p>
+<p>Each host has its own agent list. Open <strong>Settings → Agents</strong>, choose the host under <strong>Execution target</strong>, and click <strong>Refresh</strong> to rescan it. You can point an agent at a specific executable on that host with <strong>Add…</strong> or <strong>Change</strong>. The one-click <strong>Install</strong> button is offered only for your own machine; remote hosts keep the guide link.</p>
+<h2 id="persistence-what-survives-a-disconnect"><a class="anchor" href="#persistence-what-survives-a-disconnect" aria-hidden="true" tabindex="-1">#</a>Persistence: what survives a disconnect</h2>
+<p>Some servers kill every process from a login session when you log out. diri tests this instead of assuming. It starts a temporary Holder, closes the SSH connection, reconnects on a new connection, and checks whether the same process is still there.</p>
+<div class="table-wrap"><table><thead><tr><th>Result</th><th>What it means for you</th></tr></thead><tbody><tr><td>native detach</td><td>Sessions keep running on their own after you disconnect.</td></tr><tr><td>user supervisor</td><td>The server would stop detached processes, so diri runs sessions under a supervisor your account already has, without configuring anything. They keep running after you disconnect.</td></tr><tr><td>non-persistent</td><td>The server may stop the session when the connection closes. diri still lets you start sessions, but the row shows a <strong>No detach</strong> warning. Stay connected, or use another server.</td></tr></tbody></table></div>
+<p>diri never installs a service or a persistent user unit, never enables lingering, and never falls back to <code>tmux</code> to get around a non-persistent result.</p>
+<aside class="callout warning"><strong>Warning</strong><p>No result survives the server itself rebooting.</p></aside>
+<h3 id="after-a-dropped-connection"><a class="anchor" href="#after-a-dropped-connection" aria-hidden="true" tabindex="-1">#</a>After a dropped connection</h3>
+<p>On a host that keeps sessions alive, the agent keeps working while you are offline. The Holder keeps the agent's processes, the current screen and up to 4 MiB of scrollback.</p>
+<ul><li>The terminal shows <strong>Connection lost · Last received screen</strong> until diri gets back in.</li><li>diri reconnects to the same session and redraws the current screen. Click <strong>Reconnect</strong> in the terminal to retry by hand, or run <code>dirijor session reconnect &lt;id&gt;</code>.</li><li>Input whose delivery is uncertain is not replayed. Check the screen before retyping.</li><li>Do not start a duplicate agent because the connection blinked.</li></ul>
+<p>Only one diri window controls a session at a time. A new attach takes over and the old one is disconnected.</p>
+<h2 id="passwords-and-host-keys"><a class="anchor" href="#passwords-and-host-keys" aria-hidden="true" tabindex="-1">#</a>Passwords and host keys</h2>
+<p>diri runs your normal OpenSSH client, so keys, agents, <code>ProxyJump</code> and the rest of <code>~/.ssh/config</code> work as usual. diri may keep a short-lived ControlMaster connection open to make repeat connections faster. Sessions never depend on it.</p>
+<p>When OpenSSH needs to ask you something, diri shows a native prompt instead of reading the answer itself:</p>
+<div class="table-wrap"><table><thead><tr><th>Prompt</th><th>Dialog</th></tr></thead><tbody><tr><td>New host key</td><td><strong>Verify SSH host</strong>, with <strong>Allow</strong> and <strong>Cancel</strong></td></tr><tr><td>Password or key passphrase</td><td><strong>SSH authentication</strong>, with a secure field and <strong>Connect</strong></td></tr></tbody></table></div>
+<p>The prompt helper has no logging and no connection to the Engine, so what you type never reaches session state or diagnostics. On Linux it needs <code>zenity</code> or <code>kdialog</code>. Without either, use key-based authentication or load your key into <code>ssh-agent</code> first.</p>
+<h2 id="troubleshooting"><a class="anchor" href="#troubleshooting" aria-hidden="true" tabindex="-1">#</a>Troubleshooting</h2>
+<div class="table-wrap"><table><thead><tr><th>Problem</th><th>What to do</th></tr></thead><tbody><tr><td><code>remote_transport_unavailable</code></td><td>This build has no valid remote helper catalog. Install an official release instead of a local development build. diri fails closed rather than falling back to another transport.</td></tr><tr><td><code>unsupported remote platform</code></td><td>The server is not Linux x86_64, Linux aarch64 or Apple silicon macOS.</td></tr><tr><td>Artifact length, SHA-256 or protocol mismatch</td><td>The bundled helper is damaged or does not match the app. Reinstall diri.</td></tr><tr><td>Agent missing on the host</td><td>Install it on the server so it is on your login shell's <code>PATH</code>, then <strong>Refresh</strong> under <strong>Settings → Agents</strong> with that host selected.</td></tr><tr><td><strong>No detach</strong> warning</td><td>The host is non-persistent. Keep the connection open or use another server.</td></tr><tr><td><code>remote_reconnect_failed</code> or <code>remote_owner_unavailable</code></td><td>The host is unreachable or the session has no live binding. Try again when the host is back.</td></tr><tr><td>Remote usage shows &quot;Usage unavailable&quot;</td><td>diri retries every 5 minutes. Check that the host still connects in <strong>Settings → Remote</strong>.</td></tr></tbody></table></div>
+<p>Run <code>ssh &lt;destination&gt;</code> in a terminal first. If that fails, diri cannot connect either. See <a href="/docs/troubleshooting/">Troubleshooting</a> for logs and bug reports.</p>
+<h2 id="advanced-diri-node"><a class="anchor" href="#advanced-diri-node" aria-hidden="true" tabindex="-1">#</a>Advanced: diri-node</h2>
+<p><code>diri-node</code> is an optional per-user service for a VPS that you run on purpose. It adds per-machine account logins, fleet usage totals and moving Claude or Codex conversations between machines. It is not needed for ordinary remote sessions, and SSH stays configured as the install and recovery path.</p>
+<ul><li>Run it as an ordinary user, never as root, under a systemd user service.</li><li>Bind it only to loopback or a Tailscale address. Public TCP is unsupported.</li><li>Enrollment gives you a token. Store it in an owner-only file on your Mac.</li></ul>
+<p>In <strong>Settings → Remote</strong>, edit the host and fill in the <strong>First-party node (optional)</strong> fields: <strong>Node endpoint</strong> (for example <code>tcp://100.64.0.2:7337</code>), <strong>Local token file</strong> and <strong>Pinned node ID</strong>. The token stays in that file. Setup steps are in <a href="https://github.com/cristicretu/diri/blob/main/diri/NODE.md" rel="noopener">diri/NODE.md</a>.</p>
+<h2 id="learn-more"><a class="anchor" href="#learn-more" aria-hidden="true" tabindex="-1">#</a>Learn more</h2>
+<ul><li><a href="/guides/remote-sessions/">Run agents on your own server</a></li><li><a href="/docs/security/">Security model</a></li><li><a href="https://github.com/cristicretu/diri/blob/main/diri/REMOTE_PORT.md" rel="noopener">Remote architecture</a></li></ul>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><a class="prev" href="/docs/agents/"><span>Previous</span>Supported agents</a><a class="next" href="/docs/security/"><span>Next</span>Security model</a></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#what-you-need">What you need</a><a href="#add-a-host">Add a host</a><a href="#how-it-works">How it works</a><a href="#persistence-what-survives-a-disconnect">Persistence: what survives a disconnect</a><a href="#passwords-and-host-keys">Passwords and host keys</a><a href="#troubleshooting">Troubleshooting</a><a href="#advanced-diri-node">Advanced: diri-node</a><a href="#learn-more">Learn more</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/remote-hosts.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Fremote-hosts.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/remote-hosts.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>

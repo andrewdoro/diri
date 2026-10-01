@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Recipes and scheduled tasks · Diri docs</title>
+  <meta name="description" content="Save a prompt, agent, project and worktree choice as a recipe and rerun it in one click. Timed schedules are not available in diri yet.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/scheduled-tasks/">
+  <link rel="alternate" type="text/markdown" href="/docs/scheduled-tasks.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Recipes and scheduled tasks">
+  <meta property="og:description" content="Save a prompt, agent, project and worktree choice as a recipe and rerun it in one click. Timed schedules are not available in diri yet.">
+  <meta property="og:url" content="https://diri.sh/docs/scheduled-tasks/">
+  <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Recipes and scheduled tasks","description":"Save a prompt, agent, project and worktree choice as a recipe and rerun it in one click. Timed schedules are not available in diri yet.","url":"https://diri.sh/docs/scheduled-tasks/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Working with agents<span class="docs-menu-sep">/</span><strong>Recipes</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/" aria-current="page"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Recipes</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/scheduled-tasks.md">
+        <header class="docs-heading"><span class="eyebrow">Working with agents</span><h1>Recipes and scheduled tasks</h1><p>Save a prompt, agent, project and worktree choice as a recipe and rerun it in one click. Timed schedules are not available in diri yet.</p></header>
+        <article class="docs-content">
+<p>A recipe is a saved task you can run again: the agent, the project or host, the prompt, an optional session title, and whether to use a fresh worktree. Each run starts a brand new session. diri does not run recipes on a timer yet; see <a href="#scheduling">Scheduling</a> below.</p>
+<h2 id="save-a-recipe"><a class="anchor" href="#save-a-recipe" aria-hidden="true" tabindex="-1">#</a>Save a recipe</h2>
+<ol><li>Press <kbd>⌘</kbd><kbd>N</kbd> to open the launcher.</li><li>Choose the agent and project, and type the prompt.</li><li>Click <strong>Save recipe</strong> or press <kbd>⌘</kbd><kbd>S</kbd>.</li></ol>
+<p>diri confirms with &quot;it is now a one-click recipe&quot;. Saving works even while agent detection is still running or a remote host is offline; diri checks the destination and agent when you run it.</p>
+<p>If you started from a recipe and changed some fields, the button reads <strong>Update recipe</strong> instead. Changes you make without updating apply to that one run only, and the saved recipe stays as it was.</p>
+<h2 id="run-a-recipe"><a class="anchor" href="#run-a-recipe" aria-hidden="true" tabindex="-1">#</a>Run a recipe</h2>
+<p>With an empty prompt, the launcher shows your first three recipes under <strong>Saved tasks · a fresh session each run</strong>, each with a <strong>Run</strong> button.</p>
+<div class="table-wrap"><table><thead><tr><th>Action</th><th>How</th></tr></thead><tbody><tr><td>Run one of the first three</td><td><kbd>⌘</kbd><kbd>1</kbd>, <kbd>⌘</kbd><kbd>2</kbd> or <kbd>⌘</kbd><kbd>3</kbd> in an empty launcher</td></tr><tr><td>Open the full list</td><td><kbd>⌘</kbd><kbd>R</kbd> in the launcher</td></tr><tr><td>Preview and change it for one run</td><td><kbd>Space</kbd> on a highlighted recipe</td></tr><tr><td>Edit name, session title or branch prefix</td><td><kbd>E</kbd> on a highlighted recipe</td></tr><tr><td>Duplicate</td><td><kbd>⌘</kbd><kbd>D</kbd></td></tr><tr><td>Reorder</td><td><kbd>⌘</kbd><kbd>↑</kbd> / <kbd>⌘</kbd><kbd>↓</kbd></td></tr><tr><td>Delete</td><td><kbd>⌫</kbd>, then press it again to confirm</td></tr></tbody></table></div>
+<p>The order of the list decides which recipes get ⌘1, ⌘2 and ⌘3.</p>
+<h2 id="what-a-run-does"><a class="anchor" href="#what-a-run-does" aria-hidden="true" tabindex="-1">#</a>What a run does</h2>
+<ul><li><strong>Starts a new session</strong> with the saved prompt, agent, project or host, title and worktree choice. It never resumes or depends on the session from an earlier run.</li><li><strong>Creates a fresh branch each time</strong> when the recipe uses a new worktree. The branch prefix is a naming pattern; diri adds a unique suffix per run. Fresh worktrees are local only, so a recipe that targets a remote host cannot use one.</li><li><strong>Follows moved projects.</strong> A recipe points at the tracked project, so it uses the project's current folder.</li><li><strong>Refuses to guess.</strong> If the folder, host or agent is missing, the recipe asks you to repair it rather than launching somewhere else.</li></ul>
+<p>Prompts keep their exact whitespace. A prompt over 32,768 characters is rejected with an error, never cut short. You can keep up to 64 recipes.</p>
+<aside class="callout note"><strong>Note</strong><p>Recipes store launch settings only. They do not store credentials, the agent's conversation, or a copy of the agent's own configuration, so your current agent settings apply to every run.</p></aside>
+<h2 id="scheduling"><a class="anchor" href="#scheduling" aria-hidden="true" tabindex="-1">#</a>Scheduling</h2>
+<p>diri cannot run a recipe at a set time yet. Nothing in the app installs cron jobs, LaunchAgents or any other background scheduler, and an agent does not need to stay open to act as one.</p>
+<p>The design for Engine-owned schedules, including missed runs while the Mac sleeps and overlap rules, is in <a href="https://github.com/cristicretu/diri/blob/main/diri/SCHEDULED_TASKS.md" rel="noopener">SCHEDULED_TASKS.md</a>. Until it ships, run a recipe by hand with <kbd>⌘</kbd><kbd>N</kbd> then <kbd>⌘</kbd><kbd>1</kbd>.</p>
+<h2 id="related"><a class="anchor" href="#related" aria-hidden="true" tabindex="-1">#</a>Related</h2>
+<ul><li><a href="/docs/sessions/">Sessions</a> covers what happens to a session after it starts.</li><li><a href="/docs/worktrees/">Worktrees and review</a> explains fresh worktrees and how to bring their work back.</li><li><a href="/docs/keyboard-shortcuts/">Keyboard shortcuts</a> lists every launcher key.</li></ul>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><a class="prev" href="/docs/notes/"><span>Previous</span>Notes</a><a class="next" href="/docs/accounts/"><span>Next</span>Accounts and usage</a></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#save-a-recipe">Save a recipe</a><a href="#run-a-recipe">Run a recipe</a><a href="#what-a-run-does">What a run does</a><a href="#scheduling">Scheduling</a><a href="#related">Related</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/scheduled-tasks.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Fscheduled-tasks.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/scheduled-tasks.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>
