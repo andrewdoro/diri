@@ -36,7 +36,7 @@ use crate::switcher::{
 };
 
 pub use prefs::{
-    InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
+    FileEditor, InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
     WindowMaterial, WindowMode, WindowPlacement,
 };
 pub use projection::{SidebarProject, SidebarProjection, SidebarRow};
@@ -386,6 +386,9 @@ pub struct SessionStore {
     /// append-only, which makes this the one order here that never reshuffles.
     project_seniority: Vec<ProjectId>,
     selected_session_id: Option<SessionId>,
+    /// The local terminal most recently focused, whose directory a new
+    /// terminal can start in.
+    last_terminal: Option<SessionId>,
     sidebar_selection: HashSet<SessionId>,
     pending_close: Option<PendingClose>,
     /// Sessions with a `session.remove` in flight. The daemon terminates the
@@ -508,6 +511,7 @@ impl SessionStore {
                 projects: HashMap::new(),
                 project_seniority: Vec::new(),
                 selected_session_id: selected_session_id.clone(),
+                last_terminal: None,
                 sidebar_selection: HashSet::new(),
                 pending_close: None,
                 closing: HashSet::new(),
@@ -2682,6 +2686,7 @@ impl SessionStore {
                 host: session.host.clone(),
                 account_profile_id: None,
                 same_repo_as: None,
+                start_directory: None,
             },
         });
         true
@@ -2707,7 +2712,7 @@ impl SessionStore {
         kind: AgentKind,
         options: SpawnOptions,
     ) -> SessionSpawnParams {
-        let local_context = options
+        let source = options
             .workspace_target
             .as_ref()
             .and_then(|target| self.workspace_spawn_source(target))
@@ -2718,14 +2723,22 @@ impl SessionStore {
                     .and_then(|target| target.selected_session.as_ref())
                     .and_then(|id| self.sessions.get(id))
                     .map(Arc::as_ref)
-            })
-            .map(|session| {
-                if session.host.is_none() {
-                    session.cwd.clone()
-                } else {
-                    self.local_fallback_directory_for(Some(session))
-                }
             });
+        let followed = (kind == AgentKind::SHELL
+            && options.host.is_none()
+            && options.cwd.is_none()
+            && options.worktree.is_none()
+            && self.prefs.terminal_follows_last_directory)
+            .then(|| self.terminal_to_follow(source.or_else(|| self.selected_session())))
+            .flatten();
+        let start_directory = followed.and_then(|terminal| terminal.terminal_cwd.clone());
+        let local_context = followed.or(source).map(|session| {
+            if session.host.is_none() {
+                session.cwd.clone()
+            } else {
+                self.local_fallback_directory_for(Some(session))
+            }
+        });
         let host = options.host;
         let cwd = if let Some(host_id) = &host {
             // Remote spawn: local directories are meaningless — use the
@@ -2764,7 +2777,27 @@ impl SessionStore {
             host,
             account_profile_id: options.account_profile_id,
             same_repo_as: options.same_repo_as,
+            start_directory,
         }
+    }
+
+    /// The terminal a new terminal starts beside: the focused one, else the
+    /// last one used in the same project, else, with nothing focused, the
+    /// last one used at all. It opens in that terminal's project and in the
+    /// directory it had `cd`'d to.
+    fn terminal_to_follow<'a>(
+        &'a self,
+        source: Option<&'a SessionRecord>,
+    ) -> Option<&'a SessionRecord> {
+        if let Some(source) = source.filter(|session| is_local_terminal(session)) {
+            return Some(source);
+        }
+        self.last_terminal
+            .as_ref()
+            .and_then(|id| self.sessions.get(id))
+            .map(Arc::as_ref)
+            .filter(|terminal| is_local_terminal(terminal) && !terminal.is_archived())
+            .filter(|terminal| source.is_none_or(|source| source.project_id == terminal.project_id))
     }
 
     pub fn reparent_worktree(&self, params: diri_proto::SessionReparentWorktreeParams) {
@@ -2867,6 +2900,13 @@ impl SessionStore {
     fn focus_session(&mut self, id: SessionId) {
         let selection_changed = self.selected_session_id.as_ref() != Some(&id);
         self.selected_session_id = Some(id.clone());
+        if self
+            .sessions
+            .get(&id)
+            .is_some_and(|session| is_local_terminal(session))
+        {
+            self.last_terminal = Some(id.clone());
+        }
         self.unread_holds.remove(&id);
         if self.window_navigation_enabled {
             self.invalidate_projection();
@@ -4039,3 +4079,8 @@ pub fn prefs_path_in_home(home: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests;
+
+/// A shell on this machine, whose live directory the Engine can read.
+fn is_local_terminal(session: &SessionRecord) -> bool {
+    session.kind == AgentKind::SHELL && session.host.is_none()
+}

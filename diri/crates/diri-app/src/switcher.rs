@@ -530,12 +530,47 @@ pub fn display_title_str(session: &SessionRecord) -> &str {
     if session.title_source == TitleSource::Placeholder {
         if matches!(session.status, SessionStatus::Exited(_)) {
             "Ended"
+        } else if session.kind == diri_proto::AgentKind::SHELL {
+            // Until the Engine names it after its program or folder, and for
+            // a remote shell, which reports neither.
+            "Terminal"
         } else {
             "Untitled"
         }
     } else {
         &session.title
     }
+}
+
+/// The port a session's local preview is on: what its terminal's foreground
+/// job serves, else the lowest the session listens on. Ports the kernel hands
+/// out (a debugger's, a worker's) are not a page anyone opens.
+pub fn served_port(session: &SessionRecord) -> Option<i64> {
+    const EPHEMERAL_PORTS: i64 = 32768;
+    if session.host.is_some() {
+        return None;
+    }
+    let first = |ports: Option<&[diri_proto::PortInfo]>| {
+        ports?
+            .iter()
+            .map(|info| info.port)
+            .find(|port| (1..EPHEMERAL_PORTS).contains(port))
+    };
+    first(session.foreground_ports.as_deref()).or_else(|| first(session.listening_ports.as_deref()))
+}
+
+/// Where a terminal is, for the hover on its row and tab: the directory its
+/// prompt is in (`~/fun/diri/web`), or where a remote one was opened
+/// (`forge: ~/code`). `None` for Agents, whose title already says enough.
+pub fn terminal_location(session: &SessionRecord) -> Option<String> {
+    if session.kind != diri_proto::AgentKind::SHELL {
+        return None;
+    }
+    let path = session.terminal_cwd.as_deref().unwrap_or(&session.cwd);
+    Some(match &session.host {
+        Some(host) => format!("{host}: {path}"),
+        None => crate::quick_open::home_relative(std::path::Path::new(path)),
+    })
 }
 
 fn fuzzy_matches(query: &str, candidate: &str) -> bool {
@@ -597,7 +632,34 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: None,
+            terminal_progress: None,
         }
+    }
+
+    #[test]
+    fn a_served_port_is_the_foreground_jobs_before_the_trees() {
+        let port = |port: i64| diri_proto::PortInfo {
+            port,
+            process_name: "node".into(),
+        };
+        let mut session = session("web", SessionStatus::Idle);
+        assert_eq!(served_port(&session), None);
+        session.listening_ports = Some(vec![port(6006), port(9229)]);
+        assert_eq!(served_port(&session), Some(6006));
+        session.foreground_ports = Some(vec![port(50123), port(8080)]);
+        assert_eq!(
+            served_port(&session),
+            Some(8080),
+            "ephemeral ports are skipped"
+        );
+        session.host = Some("forge".into());
+        assert_eq!(
+            served_port(&session),
+            None,
+            "localhost is not the remote host"
+        );
     }
 
     #[test]

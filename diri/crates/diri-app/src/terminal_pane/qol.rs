@@ -29,6 +29,8 @@ pub(super) struct QolState {
     autoscroll_generation: u64,
     export_files: Vec<tempfile::NamedTempFile>,
     busy: bool,
+    /// Which file references under the pointer name a real local file.
+    files: crate::file_links::ExistenceCache,
 }
 
 impl QolState {
@@ -76,12 +78,16 @@ pub(super) struct TerminalMenu {
     target: Option<ReferenceHit>,
     selected: usize,
     actions: Vec<MenuAction>,
+    /// The editor file links open in, named by the Open item.
+    editor: Option<crate::file_links::Editor>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuAction {
     Open,
     CopyLink,
+    OpenFile,
+    CopyPath,
     Copy,
     Paste,
     Find,
@@ -92,10 +98,22 @@ enum MenuAction {
 }
 
 impl MenuAction {
-    fn label(self) -> &'static str {
+    fn label(self, editor: Option<crate::file_links::Editor>) -> SharedString {
+        match self {
+            Self::OpenFile => match editor {
+                Some(editor) => format!("Open in {}", editor.name()).into(),
+                None => "Open file".into(),
+            },
+            other => other.static_label().into(),
+        }
+    }
+
+    fn static_label(self) -> &'static str {
         match self {
             Self::Open => "Open link",
             Self::CopyLink => "Copy link",
+            Self::OpenFile => "Open file",
+            Self::CopyPath => "Copy path",
             Self::Copy => "Copy selection",
             Self::Paste => "Paste",
             Self::Find => "Find selection",
@@ -142,8 +160,44 @@ impl TerminalPane {
         let key = (col, row, generation, offset, sequence);
         if self.qol.hover_key != Some(key) {
             self.qol.hover_key = Some(key);
-            self.qol.hit = resident.element.reference_hit_at(col, row);
+            let hit = resident.element.reference_hit_at(col, row);
+            self.qol.hit = self.linkable(hit);
         }
+    }
+
+    /// Keeps a reference only if clicking it would open something: every web
+    /// URL, but a file reference only when it names a file on this Mac.
+    /// Hover, press, release and the context menu all ask here, so what is
+    /// underlined is exactly what opens.
+    pub(super) fn linkable(&mut self, hit: Option<ReferenceHit>) -> Option<ReferenceHit> {
+        let hit = hit?;
+        match &hit.reference {
+            TerminalReference::Url(_) => Some(hit),
+            TerminalReference::File(reference) => {
+                self.local_file(reference).is_some().then_some(hit)
+            }
+        }
+    }
+
+    /// Where a file reference in the selected session points, if it exists.
+    /// A remote session's paths name the remote host, so none resolve here.
+    fn local_file(&mut self, reference: &str) -> Option<crate::file_links::LocalFile> {
+        let session = self.selected_session()?;
+        let bases = file_reference_bases(&session)?;
+        let bases: Vec<&std::path::Path> = bases.iter().map(std::path::PathBuf::as_path).collect();
+        self.qol.files.resolve(&bases, reference, Instant::now())
+    }
+
+    /// The editor a file link opens in under the current preference.
+    pub(super) fn file_editor(&self) -> Option<crate::file_links::Editor> {
+        let choice = self
+            .runtime
+            .store
+            .read()
+            .expect("store")
+            .preferences()
+            .terminal_file_editor;
+        crate::file_links::editor_for(choice)
     }
 
     pub(super) fn open_reference(
@@ -155,26 +209,12 @@ impl TerminalPane {
         match reference {
             TerminalReference::Url(url) => cx.open_url(&url),
             TerminalReference::File(reference) => {
-                if let Some(session) = self.selected_session() {
-                    if session.host.is_none() {
-                        match crate::code_intelligence::local_reference_url(
-                            std::path::Path::new(&session.cwd),
-                            &reference,
-                        ) {
-                            Some(url) => cx.open_url(url.as_str()),
-                            None => self.show_terminal_feedback(
-                                "Could not open this local file link",
-                                window,
-                                cx,
-                            ),
-                        }
-                    } else {
-                        cx.emit(TerminalPaneEvent::OpenFileReference {
-                            reference,
-                            cwd: session.cwd.clone(),
-                            session_id: session.id.clone(),
-                        });
-                    }
+                let opened = self
+                    .local_file(&reference)
+                    .and_then(|file| crate::file_links::open_url(&file, self.file_editor()));
+                match opened {
+                    Some(url) => cx.open_url(&url),
+                    None => self.show_terminal_feedback("That file is not on this Mac", window, cx),
                 }
             }
         }
@@ -225,11 +265,19 @@ impl TerminalPane {
             return;
         };
         let target = resident.element.reference_hit_at(col, row);
+        let has_selection = !resident.element.selected_text().is_empty();
+        let target = self.linkable(target);
         let mut actions = Vec::new();
-        if target.is_some() {
-            actions.extend([MenuAction::Open, MenuAction::CopyLink]);
+        match target.as_ref().map(|hit| &hit.reference) {
+            Some(TerminalReference::Url(_)) => {
+                actions.extend([MenuAction::Open, MenuAction::CopyLink]);
+            }
+            Some(TerminalReference::File(_)) => {
+                actions.extend([MenuAction::OpenFile, MenuAction::CopyPath]);
+            }
+            None => {}
         }
-        if !resident.element.selected_text().is_empty() {
+        if has_selection {
             actions.extend([MenuAction::Copy, MenuAction::Find]);
         }
         actions.extend([
@@ -239,11 +287,13 @@ impl TerminalPane {
             MenuAction::PreviousPrompt,
             MenuAction::NextPrompt,
         ]);
+        let editor = self.file_editor();
         self.qol.menu = Some(TerminalMenu {
             position,
             target,
             selected: 0,
             actions,
+            editor,
         });
         self.qol.pressed = None;
         self.qol.drag = None;
@@ -262,9 +312,19 @@ impl TerminalPane {
     ) {
         self.qol.menu = None;
         match action {
-            MenuAction::Open => {
+            MenuAction::Open | MenuAction::OpenFile => {
                 if let Some(hit) = target {
                     self.open_reference(hit.reference, window, cx);
+                }
+            }
+            MenuAction::CopyPath => {
+                let file = target.and_then(|hit| match hit.reference {
+                    TerminalReference::File(reference) => self.local_file(&reference),
+                    TerminalReference::Url(_) => None,
+                });
+                if let Some(file) = file {
+                    cx.write_to_clipboard(ClipboardItem::new_string(file.display()));
+                    self.show_terminal_feedback("Path copied", window, cx);
                 }
             }
             MenuAction::CopyLink => {
@@ -939,7 +999,7 @@ impl TerminalPane {
                         })
                         .cursor_pointer()
                         .hover(move |style| style.bg(colors.primary.alpha(0.08)))
-                        .child(action.label())
+                        .child(action.label(menu.editor))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.run_menu_action(action, target.clone(), window, cx)
                         })),
@@ -1213,6 +1273,21 @@ fn append_export_row(text: &mut String, row: &[GridCell], metadata: Option<&RowM
         text.push_str(line.trim_end_matches(' '));
         text.push('\n');
     }
+}
+
+/// The directories a relative file reference is read from, most specific
+/// first: a shell's live directory, then the launch directory, which is an
+/// Agent's worktree. `None` for remote sessions.
+fn file_reference_bases(session: &SessionRecord) -> Option<Vec<std::path::PathBuf>> {
+    if session.host.is_some() {
+        return None;
+    }
+    let mut bases = Vec::with_capacity(2);
+    if let Some(live) = session.terminal_cwd.as_deref() {
+        bases.push(std::path::PathBuf::from(live));
+    }
+    bases.push(std::path::PathBuf::from(&session.cwd));
+    Some(bases)
 }
 
 #[cfg(test)]

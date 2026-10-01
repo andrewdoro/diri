@@ -15,6 +15,7 @@ mod workspaces;
 pub(crate) use titles::testing as title_clock_for_test;
 
 use std::cell::{Cell, RefCell};
+
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
@@ -38,6 +39,8 @@ use gpui::{
     linear_color_stop, linear_gradient, point, prelude::*, px,
 };
 use tokio::sync::mpsc;
+
+use crate::tooltip_warmth::WarmTooltip;
 
 use crate::commands::{CommandId, OpenSettings, ToggleHistory};
 use crate::delegation::{HandoffProposal, handoff_proposal, sibling_proposal, validate_handoff};
@@ -3526,6 +3529,7 @@ impl Sidebar {
             migrating,
             activity_state,
             activity_frame,
+            progress,
             marked,
             hovered,
             focused,
@@ -3632,7 +3636,12 @@ impl Sidebar {
                     }
                 }))
                 .children(indent_rails(row, colors))
-                .child(activity_mark(activity_state, activity_frame, colors))
+                .child(crate::progress_mark::leading_mark(
+                    activity_state,
+                    activity_frame,
+                    progress,
+                    colors,
+                ))
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -3677,6 +3686,12 @@ impl Sidebar {
             .debug_selector({
                 let id = id.clone();
                 move || format!("SESSION_{}", id.0)
+            })
+            .when_some(crate::switcher::terminal_location(session), |row, place| {
+                row.warm_tooltip(move |_, cx| {
+                    cx.new(|_| crate::palette_chrome::PaletteTooltip(place.clone(), colors))
+                        .into()
+                })
             })
             // Account for the selection border when aligning with project icons.
             .pl(px(Space::ROW_H - 1.0))
@@ -3827,7 +3842,12 @@ impl Sidebar {
             // Activity shares the project's icon column. Leaf rows reserve
             // no empty disclosure column; only parents get a trailing fold.
             // Hover keeps activity visible and swaps identity for the close action.
-            .child(activity_mark(activity_state, activity_frame, colors))
+            .child(crate::progress_mark::leading_mark(
+                activity_state,
+                activity_frame,
+                progress,
+                colors,
+            ))
             .child(
                 if let Some(range) = super::filter::label_match(&title, filter) {
                     div()
@@ -6203,6 +6223,22 @@ impl Sidebar {
                 .child(copy_session_id_row(id, colors, cx));
         } else {
             let running = !matches!(session.status, diri_proto::SessionStatus::Exited(_));
+            // A dev server opens where its tab says it is, as the links
+            // menu's Local preview row does, without opening that menu.
+            if running && let Some(port) = crate::switcher::served_port(&session) {
+                let url = format!("http://localhost:{port}");
+                content = content
+                    .child(menu_row(
+                        format!("Open localhost:{port}"),
+                        colors,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.open_url(&url);
+                            this.ui.popover = None;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(menu_divider(colors));
+            }
             if session.kind == ProtoAgentKind::CLAUDE_CODE
                 || (session.kind == ProtoAgentKind::CODEX && session.host.is_none())
             {
@@ -6224,8 +6260,14 @@ impl Sidebar {
                 ));
             }
             if !running && session.can_resume() {
+                // A local terminal comes back as a fresh shell where it was.
+                let label = if session.kind == ProtoAgentKind::SHELL && session.host.is_none() {
+                    "Restart"
+                } else {
+                    "Resume"
+                };
                 content = content.child(menu_row(
-                    "Resume",
+                    label,
                     colors,
                     cx.listener({
                         let id = id.clone();
@@ -11583,6 +11625,11 @@ mod tests {
                 id: SessionId::new("preview-codex"),
                 position: point(px(48.0), px(210.0)),
             }),
+            // The fixture's dev-server terminal, which offers its address.
+            "server" => Some(Popover::SessionActions {
+                id: SessionId::new("preview-shell"),
+                position: point(px(48.0), px(210.0)),
+            }),
             _ => Some(Popover::SidebarLayout),
         };
         // First row of a right-click menu, for `DIRI_VISUAL_MENU_HOVER`.
@@ -11665,6 +11712,76 @@ mod tests {
                                 }));
                         }
                         store.upsert_session(session);
+                    }
+                    // `DIRI_VISUAL_TERMINALS=1` adds terminals the Engine has
+                    // named: one at a prompt, one running a program, and one
+                    // running Claude Code typed at its prompt.
+                    if std::env::var_os("DIRI_VISUAL_TERMINALS").is_some() {
+                        let base = store
+                            .sessions()
+                            .get(&SessionId::new("preview-shell"))
+                            .map(|session| (**session).clone())
+                            .expect("fixture shell");
+                        let root = base.cwd.clone();
+                        for (id, title, folder, status, agent) in [
+                            (
+                                "preview-term-web",
+                                "web",
+                                "web",
+                                diri_proto::SessionStatus::Idle,
+                                None,
+                            ),
+                            (
+                                "preview-term-vim",
+                                "vim",
+                                "crates/diri-app",
+                                diri_proto::SessionStatus::Working,
+                                None,
+                            ),
+                            (
+                                "preview-term-claude",
+                                "Fix login redirect",
+                                "web",
+                                diri_proto::SessionStatus::Working,
+                                Some(ProtoAgentKind::CLAUDE_CODE),
+                            ),
+                        ] {
+                            let mut terminal = base.clone();
+                            terminal.id = SessionId::new(id);
+                            terminal.title = title.into();
+                            terminal.title_source = diri_proto::TitleSource::TerminalTitle;
+                            terminal.terminal_cwd = Some(format!("{root}/{folder}"));
+                            terminal.status = status;
+                            terminal.foreground_agent = agent;
+                            terminal.listening_ports = None;
+                            terminal.updated_at = diri_proto::DateMillis(now);
+                            store.upsert_session(terminal);
+                        }
+                        // And one whose script stopped at a question, which
+                        // the Engine flags as it flags an Agent's prompt.
+                        let mut asking = base.clone();
+                        asking.id = SessionId::new("preview-term-deploy");
+                        asking.title = "deploy".into();
+                        asking.title_source = diri_proto::TitleSource::TerminalTitle;
+                        asking.terminal_cwd = Some(format!("{root}/infra"));
+                        asking.status = diri_proto::SessionStatus::NeedsInput(
+                            diri_proto::NeedsInputKind::Question,
+                        );
+                        asking.needs_input = Some(diri_proto::NeedsInputDetail {
+                            kind: diri_proto::NeedsInputKind::Question,
+                            source: diri_proto::NeedsInputSource::TerminalLine,
+                            tool_name: None,
+                            summary: "Deploy to production? [y/N]".into(),
+                            prompt_excerpt: Some("Deploy to production? [y/N]".into()),
+                            options: None,
+                            risk_hint: diri_proto::RiskHint::Neutral,
+                            occurred_at: diri_proto::DateMillis(now),
+                            secret: false,
+                        });
+                        asking.foreground_agent = None;
+                        asking.listening_ports = None;
+                        asking.updated_at = diri_proto::DateMillis(now);
+                        store.upsert_session(asking);
                     }
                     store
                         .update_preferences(|prefs| {
@@ -11803,6 +11920,27 @@ mod tests {
             })
             .expect("hover menu row");
             cx.run_until_parked();
+        }
+        // `DIRI_VISUAL_POINTER=x,y` rests the pointer there long enough for
+        // a tooltip to open.
+        if let Some((x, y)) = std::env::var("DIRI_VISUAL_POINTER").ok().and_then(|value| {
+            let (x, y) = value.split_once(',')?;
+            Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+        }) {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.simulate_mouse_move(point(px(x), px(y)), cx);
+            })
+            .expect("rest the pointer");
+            // Tooltip timers run on the test dispatcher's clock; wall time
+            // is only for anything that reads `Instant::now`.
+            for _ in 0..8 {
+                std::thread::sleep(Duration::from_millis(20));
+                cx.advance_clock(Duration::from_millis(120));
+                cx.run_until_parked();
+                cx.update_window(window.into(), |_, window, _| window.refresh())
+                    .expect("refresh sidebar window");
+                cx.run_until_parked();
+            }
         }
         if std::env::var_os("DIRI_VISUAL_BENCH").is_some() {
             // Force exactly the same work in before/after runs; warm all eight

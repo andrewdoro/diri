@@ -368,6 +368,33 @@ struct ElementSharedState {
     /// it without holding the rest of the view's state.
     cursor: Arc<Mutex<CursorDriver>>,
     scroll_glide: Mutex<GlideState>,
+    /// Frames GPUI painted this view in, including ones with nothing to draw
+    /// yet (no grid, suspended). Unlike `stats` it is never reset, so a host
+    /// can tell whether the view was on screen at all since a point it
+    /// remembered.
+    paints: AtomicU64,
+    /// Called once, from the first paint that puts non-blank content on
+    /// screen after it was armed; see [`TerminalElement::on_first_content_paint`].
+    content_paint: Mutex<Option<ArmedContentPaint>>,
+}
+
+/// When a view first painted content after the host armed the callback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentPaint {
+    /// The first frame of any kind (blank included) drawn since arming: when
+    /// the view came on screen. A view armed while nothing draws it (a
+    /// covered or background pane) is shown only later.
+    pub shown_at: Instant,
+    /// The frame that put content on screen.
+    pub at: Instant,
+}
+
+/// Told when a view first painted content.
+pub type ContentPaintCallback = Box<dyn FnOnce(ContentPaint) + Send>;
+
+struct ArmedContentPaint {
+    callback: ContentPaintCallback,
+    shown_at: Option<Instant>,
 }
 
 /// The glide to a find match, if one is running, and the clock it reads.
@@ -707,6 +734,8 @@ impl TerminalElement {
                 metrics: Mutex::new(None),
                 cursor: Arc::new(Mutex::new(CursorDriver::default())),
                 scroll_glide: Mutex::new(GlideState::default()),
+                paints: AtomicU64::new(0),
+                content_paint: Mutex::new(None),
             }),
             theme: TermTheme::default(),
             background_opacity: 1.0,
@@ -897,6 +926,25 @@ impl TerminalElement {
             buffer: self.buffer.clone(),
             shared: self.shared.clone(),
         }
+    }
+
+    /// Frames GPUI painted this view (or a clone) in since it was built,
+    /// empty ones included. A view outside every drawn window, or in a window
+    /// the system stopped drawing, stays where it was.
+    #[must_use]
+    pub fn paint_count(&self) -> u64 {
+        self.shared.paints.load(Ordering::Relaxed)
+    }
+
+    /// Arms `callback` for the next paint that puts non-blank content on
+    /// screen, replacing whatever was armed before. It runs inside that
+    /// paint, so the instant it gets is when the content was drawn, not when
+    /// the host next looked.
+    pub fn on_first_content_paint(&self, callback: ContentPaintCallback) {
+        *mutex_lock(&self.shared.content_paint) = Some(ArmedContentPaint {
+            callback,
+            shown_at: None,
+        });
     }
 
     #[must_use]
@@ -1245,14 +1293,25 @@ impl TerminalElement {
                 .map(|byte| candidate[..byte].chars().count())
                 .unwrap_or(0);
             let target_start = start + prefix;
-            ReferenceHit {
-                spans: vec![(
-                    absolute_row,
-                    target_start,
-                    (target_start + target.chars().count()).min(end),
-                )],
-                reference,
-            }
+            let spans = vec![(
+                absolute_row,
+                target_start,
+                (target_start + target.chars().count()).min(end),
+            )];
+            // Python names its line in prose after the quoted path.
+            let reference = match reference {
+                TerminalReference::File(path)
+                    if candidate.starts_with('"') && candidate.ends_with("\",") =>
+                {
+                    let rest: String = chars[end..].iter().take(32).collect();
+                    match python_traceback_line(&rest) {
+                        Some(line) => TerminalReference::File(format!("{path}:{line}")),
+                        None => TerminalReference::File(path),
+                    }
+                }
+                other => other,
+            };
+            ReferenceHit { spans, reference }
         })
     }
 
@@ -2439,6 +2498,10 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         let paint_started = Instant::now();
+        self.shared.paints.fetch_add(1, Ordering::Relaxed);
+        if let Some(armed) = mutex_lock(&self.shared.content_paint).as_mut() {
+            armed.shown_at.get_or_insert(paint_started);
+        }
         if let (Some(focus_handle), Some(text_input)) = (&self.focus_handle, &self.text_input) {
             let (cursor_bounds, cell_width) = match (prepaint.metrics, prepaint.cursor.as_ref()) {
                 (Some(metrics), Some(cursor)) => (
@@ -2684,6 +2747,8 @@ impl Element for TerminalElement {
             }
         });
 
+        self.report_first_content_paint();
+
         if let Some(started_at) = prepaint.started_at {
             let elapsed = started_at.elapsed();
             let mut stats = mutex_lock(&self.shared.stats);
@@ -2736,6 +2801,26 @@ impl PaintTotals {
             paints: self.paints.saturating_sub(earlier.paints),
             shape_misses: self.shape_misses.saturating_sub(earlier.shape_misses),
             micros: self.micros.saturating_sub(earlier.micros),
+        }
+    }
+}
+
+impl TerminalElement {
+    /// Hands the armed first-content callback the paint that just drew
+    /// content. The grid is only scanned while a callback is armed.
+    fn report_first_content_paint(&self) {
+        let mut armed = mutex_lock(&self.shared.content_paint);
+        if armed.is_none() || read_lock(&self.buffer).is_blank() {
+            return;
+        }
+        let taken = armed.take();
+        drop(armed);
+        if let Some(ArmedContentPaint { callback, shown_at }) = taken {
+            let at = Instant::now();
+            callback(ContentPaint {
+                shown_at: shown_at.unwrap_or(at),
+                at,
+            });
         }
     }
 }
@@ -3249,12 +3334,13 @@ fn file_reference_from_run(run: &str) -> Option<String> {
     if candidate.is_empty() {
         return None;
     }
-    let path_candidate = if let Some(path) = candidate.strip_prefix("file://") {
-        path
+    let (candidate, path_candidate) = if let Some(path) = candidate.strip_prefix("file://") {
+        (candidate, path)
     } else if candidate.contains("://") {
         return None;
     } else {
-        candidate
+        let candidate = cut_after_location(candidate);
+        (candidate, candidate)
     };
 
     // Ignore up to the conventional `:line:column` suffix while deciding
@@ -3279,6 +3365,8 @@ fn file_reference_from_run(run: &str) -> Option<String> {
     let has_extension = file_name.rsplit_once('.').is_some_and(|(stem, extension)| {
         (!stem.is_empty() || file_name.starts_with('.'))
             && !extension.is_empty()
+            // A letter keeps versions and addresses (`1.2.3`, `10.0.0.1`) out.
+            && extension.bytes().any(|byte| byte.is_ascii_alphabetic())
             && extension
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
@@ -3300,7 +3388,46 @@ fn trim_file_reference_run(run: &str) -> &str {
         candidate = candidate[..candidate.len() - 1]
             .trim_end_matches(['.', ',', ';', ':', ']', '}', '\'', '"', '>', '!', '?']);
     }
+    // Agent tool calls print `Update(src/app.rs)`: the path is the argument.
+    if parenthesized_location_path(candidate).is_none()
+        && let Some(open) = candidate.rfind('(')
+        && !candidate[open..].contains(')')
+    {
+        candidate = &candidate[open + 1..];
+    }
     candidate
+}
+
+/// The line number in the remainder of a Python traceback frame,
+/// `  File "app.py", line 12, in <module>`, read after the quoted path.
+fn python_traceback_line(rest: &str) -> Option<usize> {
+    let digits = rest.strip_prefix(" line ")?;
+    let end = digits
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(digits.len());
+    digits[..end].parse().ok().filter(|line| *line > 0)
+}
+
+/// Cuts grep-style output after its location: `src/lib.rs:120:fn main()`
+/// arrives as the run `src/lib.rs:120:fn`, of which only `src/lib.rs:120`
+/// names a place. A run without a numeric position is returned unchanged.
+fn cut_after_location(candidate: &str) -> &str {
+    let mut segments = candidate.split(':');
+    let Some(path) = segments.next().filter(|path| !path.is_empty()) else {
+        return candidate;
+    };
+    let mut kept = path.len();
+    for segment in segments.take(2) {
+        if segment.is_empty() || !segment.bytes().all(|byte| byte.is_ascii_digit()) {
+            break;
+        }
+        kept += 1 + segment.len();
+    }
+    if kept == path.len() {
+        candidate
+    } else {
+        &candidate[..kept]
+    }
 }
 
 fn parenthesized_location_path(candidate: &str) -> Option<&str> {
@@ -4106,6 +4233,77 @@ mod link_tests {
         assert_eq!(
             file_reference_from_run("(src/main.rs(42))."),
             Some("src/main.rs(42)".to_owned())
+        );
+    }
+
+    /// The cases a `file:line` link has to get right, as the run under the
+    /// pointer. `None` means the matcher never offers it; everything else is
+    /// still subject to the host's existence check before it is underlined.
+    #[test]
+    fn file_locations_from_compilers_tests_and_tools() {
+        let file = |text: &str| Some(TerminalReference::File(text.to_owned()));
+        for (run, expected) in [
+            // rustc `--> src/app.rs:42:9`
+            ("src/app.rs:42:9", file("src/app.rs:42:9")),
+            // gcc/clang/go vet `main.c:3:5: error:`
+            ("main.c:3:5:", file("main.c:3:5")),
+            // go test `main_test.go:33: want 1`
+            ("main_test.go:33:", file("main_test.go:33")),
+            // rg/grep `src/lib.rs:120:fn main()` and `src/lib.rs:120:5:let x`
+            ("src/lib.rs:120:fn", file("src/lib.rs:120")),
+            ("src/lib.rs:120:5:let", file("src/lib.rs:120:5")),
+            // node `at run (/abs/app.js:10:5)`
+            ("(/abs/app.js:10:5)", file("/abs/app.js:10:5")),
+            // tsc `src/app.ts(12,5): error`
+            ("src/app.ts(12,5):", file("src/app.ts(12,5)")),
+            // Claude Code tool calls `⏺ Update(src/app.rs)`
+            ("Update(src/app.rs)", file("src/app.rs")),
+            ("Read(diri/AGENTS.md)", file("diri/AGENTS.md")),
+            ("~/notes/todo.md:4", file("~/notes/todo.md:4")),
+            ("./Cargo.toml", file("./Cargo.toml")),
+            ("Cargo.toml", file("Cargo.toml")),
+            // Not files: versions, times, addresses, URLs, IPv6.
+            ("1.2.3", None),
+            ("v0.8.2", None),
+            ("10.0.0.1:8080", None),
+            ("12:30", None),
+            ("12:30:45", None),
+            ("localhost:3000", None),
+            ("::1", None),
+            ("fe80::1", None),
+            ("[::1]:8080", None),
+            ("2001:db8::ff00:42:8329", None),
+            ("ftp://example.com/a.txt", None),
+            ("Finished", None),
+        ] {
+            assert_eq!(reference_from_run(run), expected, "{run}");
+        }
+        // URLs keep winning over the file reading of their path.
+        assert_eq!(
+            reference_from_run("https://example.com/src/app.rs:42"),
+            Some(TerminalReference::Url(
+                "https://example.com/src/app.rs:42".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn python_traceback_frames_carry_their_line() {
+        let terminal = terminal_with_rows(&[
+            "Traceback (most recent call last):",
+            "  File \"/srv/app/main.py\", line 12, in <module>",
+            "  File \"tools.py\", lines 3",
+        ]);
+        let hit = terminal.reference_hit_at(12, 1).unwrap();
+        assert_eq!(
+            hit.reference,
+            TerminalReference::File("/srv/app/main.py:12".to_owned())
+        );
+        // The underline covers the path, not its quotes or the line words.
+        assert_eq!(hit.spans, vec![(1, 8, 24)]);
+        assert_eq!(
+            terminal.reference_at(10, 2),
+            Some(TerminalReference::File("tools.py".to_owned()))
         );
     }
 

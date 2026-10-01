@@ -879,6 +879,7 @@ mod tests {
                 host: None,
                 account_profile_id: None,
                 same_repo_as: None,
+                start_directory: None,
             })
         );
     }

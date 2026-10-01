@@ -2,7 +2,7 @@
   "_notice": "Screen-detection predicates adapted from the herdr project (https://github.com/herdrdev/herdr, src/detect/manifests/*.toml), licensed Apache-2.0. Translated from herdr's TOML rule schema into Dirijor's JSON predicate schema and re-prioritised for this engine; the agent capability block is Dirijor's own.",
   "schemaVersion": 2,
   "id": "opencode",
-  "version": "2026.07.31.1",
+  "version": "2026.10.01.1",
   "statusModel": "full",
   "agent": {
     "id": "opencode",
@@ -108,6 +108,9 @@
             "contains": "esc to interrupt"
           },
           {
+            "contains": "esc interrupt"
+          },
+          {
             "contains": "ctrl+c to interrupt"
           },
           {
@@ -123,6 +126,16 @@
       "region": "whole_recent",
       "when": {
         "lineRegex": "(\u25a0|\u2b1d){4,}"
+      }
+    },
+    {
+      "id": "idle-footer",
+      "state": "idle",
+      "priority": 50,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 3,
+      "when": {
+        "contains": "ctrl+p commands"
       }
     }
   ]

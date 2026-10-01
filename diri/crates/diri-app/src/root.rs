@@ -6,6 +6,8 @@ mod held_hint_tests;
 #[path = "root/peek_profile.rs"]
 mod peek_profile;
 #[cfg(all(test, target_os = "macos"))]
+mod progress_frames;
+#[cfg(all(test, target_os = "macos"))]
 mod project_agent_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod row_motion_frames;
@@ -238,7 +240,8 @@ pub struct RootView {
     launch_cursor: Option<u64>,
     launch_scroll: gpui::ScrollHandle,
     active_workspace: Option<diri_proto::workspace::WorkspaceId>,
-    workspace_error: Option<String>,
+    /// The last workspace failure shown, and the layout revision it failed at.
+    workspace_error: Option<(u64, String)>,
     workspace_workbench: Option<Entity<crate::workspace_workbench::WorkspaceWorkbench>>,
     sidebar: Entity<Sidebar>,
     terminal: Option<Entity<TerminalPane>>,
@@ -534,15 +537,6 @@ impl RootView {
                     if let Some(surfaces) = &this.utility_surfaces {
                         surfaces.update(cx, |surfaces, cx| {
                             surfaces.open_account_continuation(id.clone(), window, cx)
-                        });
-                    }
-                }
-                TerminalPaneEvent::OpenFileReference { reference, cwd, .. } => {
-                    let inspector = this.inspector.clone();
-                    this.reveal_inspector(cx);
-                    if let Some(inspector) = inspector {
-                        inspector.update(cx, |inspector, cx| {
-                            inspector.open_file_reference(cwd.clone(), reference.clone(), cx);
                         });
                     }
                 }
@@ -1191,22 +1185,25 @@ impl RootView {
                             this.sync_workspace_spawn_context(cx);
                             this.sync_inspector_context(cx);
                             this.sync_auxiliary_terminal(window, cx);
-                            let error = this
-                                .window_store
-                                .read()
-                                .expect("store")
-                                .workspace_catalog()
-                                .error
-                                .clone();
-                            if error != this.workspace_error {
-                                this.workspace_error = error.clone();
-                                if let Some(error) = error {
-                                    this.show_quote_feedback(
-                                        "Workspace change was not saved",
-                                        error,
-                                        cx,
-                                    );
-                                }
+                            let error = {
+                                let store = this.window_store.read().expect("store");
+                                let catalog = store.workspace_catalog();
+                                catalog.error.clone().map(|error| {
+                                    (catalog.snapshot().map_or(0, |s| s.revision), error)
+                                })
+                            };
+                            // Each edit clears the error, so one rejection
+                            // repeated per click would toast per click. Say it
+                            // once until the layout moves on.
+                            if let Some(error) = error
+                                && this.workspace_error.as_ref() != Some(&error)
+                            {
+                                this.workspace_error = Some(error.clone());
+                                this.show_quote_feedback(
+                                    "Workspace change was not saved",
+                                    error.1,
+                                    cx,
+                                );
                             }
                             cx.notify();
                         })
@@ -1530,20 +1527,6 @@ impl RootView {
                                 cx,
                             )
                         }),
-                        crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
-                            TerminalPaneEvent::OpenFileReference { reference, cwd, .. },
-                        ) => {
-                            this.reveal_inspector(cx);
-                            if let Some(inspector) = &this.inspector {
-                                inspector.update(cx, |inspector, cx| {
-                                    inspector.open_file_reference(
-                                        cwd.clone(),
-                                        reference.clone(),
-                                        cx,
-                                    )
-                                });
-                            }
-                        }
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
                             TerminalPaneEvent::Feedback { message },
                         ) => this.show_quote_feedback("Terminal", message.clone(), cx),
@@ -4525,7 +4508,7 @@ impl RootView {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let frame_started = crate::telemetry::FrameStart::now();
+        let frame_started = crate::telemetry::frame_start();
         self.main_viewport = window.viewport_size();
         if self.pending_notification_open.is_some()
             && self

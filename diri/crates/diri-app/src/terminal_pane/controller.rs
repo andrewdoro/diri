@@ -126,6 +126,18 @@ impl AttachmentControl {
         }
     }
 
+    /// A press or wheel is the user pointing at this view. With no view in
+    /// control (the owner closed, or its window gave the lease up on
+    /// deactivation) nothing contends for the session, so the view the user
+    /// is touching takes it instead of dropping the gesture. A lease another
+    /// view holds is never taken this way: only focus moves a held lease.
+    fn claim_if_vacant(&self) {
+        let vacant = self.state.lock().unwrap().owner == 0;
+        if vacant {
+            self.claim();
+        }
+    }
+
     pub(super) fn release(&self) {
         let mut state = self.state.lock().unwrap();
         if state.owner == self.view {
@@ -290,6 +302,7 @@ impl AttachmentControl {
 
     pub(super) fn mouse(&self, bytes: Vec<u8>) {
         if !bytes.is_empty() {
+            self.claim_if_vacant();
             self.report("mouse", self.submit(AttachmentCommand::Mouse(bytes)));
         }
     }
@@ -299,18 +312,21 @@ impl AttachmentControl {
     /// layout changes the pane under the pointer may already have lost its
     /// lease; an any-motion terminal such as Codex would then raise the
     /// "active in another view" notice on every pointer move. A passive view
-    /// drops motion silently; delivery failures are still reported.
+    /// drops motion silently, and so does a view whose transport is
+    /// reconnecting: the pane already shows that state, and a notice per
+    /// pointer move says nothing more. A full queue is still reported.
     pub(super) fn mouse_motion(&self, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
         }
         match self.submit(AttachmentCommand::Mouse(bytes)) {
-            Err(InputRejection::PassiveView) => {}
+            Err(InputRejection::PassiveView | InputRejection::Disconnected) => {}
             result => self.report("mouse_motion", result),
         }
     }
 
     pub(super) fn scroll(&self, direction: u8, lines: u16, col: u16, row: u16) {
+        self.claim_if_vacant();
         self.report(
             "scroll",
             self.submit(AttachmentCommand::Scroll {
@@ -1015,7 +1031,19 @@ mod tests {
             .build()
             .unwrap();
         let engine = FakeEngine::start(&runtime);
+        let (owner_events, _owner_rx) = pane_event_channel();
         let (events, rx) = pane_event_channel();
+        let (_owner_lease, owner, _) = cx.update(|cx| {
+            ControllerLease::mount(
+                engine.path.clone(),
+                SessionId("shared-session".into()),
+                runtime.handle(),
+                owner_events,
+                1,
+                None,
+                cx,
+            )
+        });
         let (_lease, control, _) = cx.update(|cx| {
             ControllerLease::mount(
                 engine.path.clone(),
@@ -1031,7 +1059,8 @@ mod tests {
             control.state.lock().unwrap().writer.is_some()
                 && engine.connects.load(Ordering::SeqCst) == 1
         });
-        assert!(!control.is_controller(), "first mount starts passive");
+        owner.claim();
+        assert!(!control.is_controller(), "another view holds the lease");
         let feedback = || {
             rx.state
                 .lock()
@@ -1047,9 +1076,123 @@ mod tests {
         assert_eq!(feedback(), 0, "passive motion raises no notice");
         control.mouse(b"\x1b[<0;1;1M".to_vec());
         assert_eq!(feedback(), 1, "a passive click still explains itself");
+        assert!(owner.is_controller(), "a click does not take a held lease");
         control.claim();
         control.mouse_motion(b"\x1b[<35;2;2M".to_vec());
         assert_eq!(feedback(), 1, "owned motion is delivered, not reported");
+    }
+
+    #[gpui::test]
+    fn a_press_or_wheel_takes_a_vacant_lease(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let engine = FakeEngine::start(&runtime);
+        let (owner_events, _owner_rx) = pane_event_channel();
+        let (events, rx) = pane_event_channel();
+        let (owner_lease, owner, _) = cx.update(|cx| {
+            ControllerLease::mount(
+                engine.path.clone(),
+                SessionId("shared-session".into()),
+                runtime.handle(),
+                owner_events,
+                1,
+                None,
+                cx,
+            )
+        });
+        let (_lease, control, _) = cx.update(|cx| {
+            ControllerLease::mount(
+                engine.path.clone(),
+                SessionId("shared-session".into()),
+                runtime.handle(),
+                events,
+                1,
+                None,
+                cx,
+            )
+        });
+        wait_for(cx, &runtime, || {
+            control.state.lock().unwrap().writer.is_some()
+                && engine.connects.load(Ordering::SeqCst) == 1
+        });
+        let feedback = || {
+            rx.state
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| matches!(event, PaneEvent::InputFeedback(..)))
+                .count()
+        };
+        owner.claim();
+        control.scroll(0, 3, 1, 1);
+        assert_eq!(feedback(), 1, "a wheel over a passive view is refused");
+        assert!(owner.is_controller());
+
+        // The owner's window gave the lease up (a workbench does on
+        // deactivation) or its view closed: nobody holds it now.
+        drop(owner_lease);
+        drop(owner);
+        assert!(!control.is_controller());
+        control.scroll(0, 3, 1, 1);
+        assert!(control.is_controller(), "a wheel takes a vacant lease");
+        assert_eq!(feedback(), 1, "and is delivered, not refused");
+
+        control.release();
+        control.mouse(b"\x1b[<0;1;1M".to_vec());
+        assert!(control.is_controller(), "so does a press");
+        assert_eq!(feedback(), 1);
+
+        control.release();
+        control.mouse_motion(b"\x1b[<35;1;1M".to_vec());
+        assert!(
+            !control.is_controller(),
+            "motion alone never claims: a stale frame routes it to panes \
+             that are already gone"
+        );
+    }
+
+    #[gpui::test]
+    fn pointer_motion_while_reconnecting_raises_no_notice(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let engine = FakeEngine::start(&runtime);
+        let (events, rx) = pane_event_channel();
+        let (_lease, control, _) = cx.update(|cx| {
+            ControllerLease::mount(
+                engine.path.clone(),
+                SessionId("shared-session".into()),
+                runtime.handle(),
+                events,
+                1,
+                None,
+                cx,
+            )
+        });
+        control.claim();
+        // The transport has not connected yet: there is no writer.
+        assert!(control.state.lock().unwrap().writer.is_none());
+        let feedback = || {
+            rx.state
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| matches!(event, PaneEvent::InputFeedback(..)))
+                .count()
+        };
+        control.mouse_motion(b"\x1b[<35;1;1M".to_vec());
+        assert_eq!(feedback(), 0, "motion during a reconnect is not news");
+        control.mouse(b"\x1b[<0;1;1M".to_vec());
+        assert_eq!(
+            feedback(),
+            1,
+            "a click during a reconnect still explains itself"
+        );
     }
 
     #[gpui::test]

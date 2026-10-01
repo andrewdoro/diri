@@ -1,24 +1,38 @@
 # Roadmap
 
-Diri's priorities are session reliability, useful agent integrations, and a
-compact workspace. This is direction, not a release calendar. Specific work
-is tracked in [Issues](https://github.com/cristicretu/diri/issues).
+diri should be the best way to work with coding agents. Agents are good enough
+now that the bottleneck is you: how many you can keep track of and how much
+context you can hold. Everything below is about removing that bottleneck.
 
-## Focus
+This is direction, not a release calendar. Specific work is tracked in
+[Issues](https://github.com/cristicretu/diri/issues).
 
-- **Session continuity.** Reliable persistence, Engine upgrades, and recovery;
-  deeper tests for updates and reconnects.
-- **Agent integration.** More launch and resume support, with accurate status
-  detection and real terminal fixtures.
-- **Platform coverage.** Harden the Rust Engine across supported platforms and
-  improve remote setup and diagnostics.
-- **Release quality.** Keep CI green, strengthen provenance and supply-chain
-  checks, and maintain signed, notarized macOS builds and the Homebrew tap.
+## Next
+
+- **Notes.** Write a PRD in a note, break it into to-dos, and send any to-do to
+  an agent. Agents write notes back. You stay at the level of the plan while
+  the agents do the work.
+- **Windows.** A native Windows build is in progress, alongside macOS and the
+  Linux beta.
+- **Bigger swarms.** Today you can run dozens of agents in parallel. The goal is
+  hundreds, with status, review, and coordination that still fit in one head.
+
+## Always
+
+- **Sessions never die.** Persistence, Engine upgrades, and recovery that hold
+  up under updates, reconnects, crashes, and memory pressure.
+- **Every agent, done properly.** Launch, resume, and status detection for each
+  agent, tested against real terminal fixtures.
+- **Your machines.** Local or any SSH host you control, with no tmux, no sudo,
+  and no hosted relay.
+- **Releases you can trust.** Green CI, provenance and supply-chain checks,
+  signed and notarized builds, and the Homebrew tap.
 
 ## Boundaries
 
-A hosted Diri account or telemetry service is not planned. Agent processes run
-with your user permissions; Diri does not sandbox them.
+No Diri account and no hosted relay for your sessions. Diagnostics are covered
+by the [privacy notice](PRIVACY.md) and can be turned off. Agent processes run
+with your user permissions; diri does not sandbox them.
 
 For proposals, describe the workflow and the smallest useful improvement in
 [Discussions](https://github.com/cristicretu/diri/discussions) or a

@@ -85,6 +85,7 @@ pub fn parse_claude_hook(
                     prompt_excerpt: summary.clone(),
                     options: None,
                     risk_hint: classify_risk(summary.as_deref().unwrap_or_default()),
+                    secret: false,
                     occurred_at: now.into(),
                 });
             }
@@ -108,6 +109,7 @@ pub fn parse_claude_hook(
                     prompt_excerpt: None,
                     options: None,
                     risk_hint: classify_risk(&text),
+                    secret: false,
                     occurred_at: now.into(),
                 });
             }

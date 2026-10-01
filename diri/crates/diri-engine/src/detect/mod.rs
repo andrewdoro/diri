@@ -18,7 +18,7 @@ mod regions;
 
 pub use manifest::{Manifest, ManifestState, RegionKind, StatusModel};
 pub use redact::redact;
-pub(crate) use regions::prompt_box_body;
+pub(crate) use regions::{bottom_non_empty, prompt_box_body};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -160,12 +160,18 @@ impl ManifestEngine {
                     reliable_completion: false,
                 },
                 |agent| {
-                    agent.session_capabilities(
+                    let mut capabilities = agent.session_capabilities(
                         record.resumability,
                         &record.status,
                         record.is_archived(),
                         record.agent_session_id.as_deref(),
-                    )
+                    );
+                    // An Agent started by hand in a shell has no conversation
+                    // Diri knows: forking it would pick whichever was latest.
+                    if record.kind == diri_proto::AgentKind::SHELL {
+                        capabilities.fork = false;
+                    }
+                    capabilities
                 },
             )
     }
@@ -391,17 +397,16 @@ mod tests {
 
         // Every id but the two command-less ones detects state from the
         // screen, and the rules are the substance of that. Counting them is
-        // what catches a manifest that survives as a stub: `pi` alone ships
-        // zero rules, deliberately, because it is process-only.
+        // what catches a manifest that survives as a stub.
         let rules: usize = engine
             .ids()
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 106, "the shipped ruleset lost rules");
+        assert_eq!(rules, 112, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
-            let expected_empty = matches!(id, "shell" | "generic" | "pi");
+            let expected_empty = matches!(id, "shell" | "generic");
             assert_eq!(
                 engine.manifest(id).expect("manifest").rules.is_empty(),
                 expected_empty,
@@ -557,6 +562,313 @@ mod tests {
                 .expect("Maki screen should match");
             assert_eq!(observation.state, state);
             assert_eq!(observation.matched_rule_id, rule);
+        }
+    }
+
+    /// Screens captured from Gemini CLI 0.62 running inside the Engine. Its
+    /// footer (edit-mode hint, composer bars, workspace row) is seven lines
+    /// tall, so the spinner sits eighth from the bottom: a six-line window
+    /// read every streamed turn as idle.
+    #[test]
+    fn gemini_rules_match_the_screens_gemini_cli_draws() {
+        let footer = [
+            " ────────────────────────────────────────────────────────",
+            "  Shift+Tab to accept edits",
+            " ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
+            "  >   Type your message or @path/to/file",
+            " ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "  workspace (/directory)        sandbox          /model",
+            "  ~/project                     no sandbox       gemini-2.5-flash",
+        ];
+        let with_footer = |lines: &[&'static str]| {
+            lines
+                .iter()
+                .chain(footer.iter())
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        let trust_dialog = vec![
+            " ╭──────────────────────────────────────────────────────╮",
+            " │ Do you trust the files in this folder?               │",
+            " │                                                      │",
+            " │ Trusting a folder allows Gemini CLI to load its      │",
+            " │ local configurations, including custom commands.     │",
+            " │                                                      │",
+            " │ ● 1. Trust folder (project)                          │",
+            " │   2. Trust parent folder (work)                      │",
+            " │   3. Don't trust                                     │",
+            " │                                                      │",
+            " ╰──────────────────────────────────────────────────────╯",
+        ];
+        let cases = [
+            (
+                with_footer(&[
+                    " > SLOW stream something",
+                    " ✦ slow part 0 slow part 1",
+                    "  ⠼ Thinking... (esc to cancel, 1s)        ? for shortcuts",
+                ]),
+                ManifestState::Working,
+                "working-cancel-timer",
+            ),
+            (
+                trust_dialog.clone(),
+                ManifestState::BlockedQuestion,
+                "folder-trust-dialog",
+            ),
+            (
+                // Accepting trust restarts Gemini below the old dialog, which
+                // stays on screen; the fresh composer must win.
+                trust_dialog
+                    .iter()
+                    .copied()
+                    .chain([
+                        "  Gemini CLI is restarting to apply the trust changes...",
+                        "  Gemini CLI v0.62.0",
+                        " Tips for getting started:",
+                        " 1. Create GEMINI.md files to customize your interactions",
+                    ])
+                    .chain(footer)
+                    .collect(),
+                ManifestState::Idle,
+                "idle-placeholder",
+            ),
+            (
+                vec![
+                    " > RUNCMD for me",
+                    "╭──────────────────────────────────────────────────────╮",
+                    "│ ? Shell  touch diri-e2e-file                         │",
+                    "│ Allow execution of [Shell]?                          │",
+                    "│                                                      │",
+                    "│ ● 1. Allow once                                      │",
+                    "│   2. Allow for this session                          │",
+                    "│   3. No, suggest changes (esc)                       │",
+                    "╰──────────────────────────────────────────────────────╯",
+                ],
+                ManifestState::BlockedPermission,
+                "confirm-dialog",
+            ),
+            (
+                with_footer(&[" > Reply with PINEAPPLE", " ✦ PINEAPPLE"]),
+                ManifestState::Idle,
+                "idle-placeholder",
+            ),
+        ];
+
+        let engine = engine();
+        for (lines, state, rule) in cases {
+            let observation = engine
+                .evaluate(&ScreenSnapshot::from_lines(lines), "gemini")
+                .expect("Gemini screen should match");
+            assert_eq!(
+                (observation.state, observation.matched_rule_id.as_str()),
+                (state, rule)
+            );
+        }
+    }
+
+    /// Screens captured from Pi 0.99.2 (and 0.73.1, whose loader sits above
+    /// the composer instead of in its border) driven by tests/pi_real.rs.
+    #[test]
+    fn pi_rules_match_the_screens_pi_draws() {
+        let rule = "─".repeat(100);
+        let rule = rule.as_str();
+        let footer = [
+            "/private/var/folders/T/.tmpELAZcH/project",
+            "↑10 ↓5 0.0%/128k (auto)                                       fake-model",
+        ];
+        let header = [
+            " ▀▀█  v0.99.2",
+            " █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more",
+            " Warning: fd not found. Offline mode enabled, skipping download.",
+        ];
+        let screen = |body: &[&str]| {
+            header
+                .iter()
+                .chain(body)
+                .chain(footer.iter())
+                .map(|line| (*line).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let border_working = format!("── ⠙ Working {}", "─".repeat(86));
+        let border_retry = format!(
+            "── ⠼ Retrying (1/3) in 2s... (escape to cancel) {}",
+            "─".repeat(40)
+        );
+        let cases = [
+            (
+                screen(&[
+                    " Reply with the word PINEAPPLE please.",
+                    &border_working,
+                    rule,
+                ]),
+                ManifestState::Working,
+                "working-spinner",
+            ),
+            (
+                screen(&[" SLOW stream something", &border_retry, rule]),
+                ManifestState::Working,
+                "working-spinner",
+            ),
+            (
+                // 0.73: the loader is its own line above the composer.
+                screen(&[" Reply with PINEAPPLE", " ⠙ Working...", rule, rule]),
+                ManifestState::Working,
+                "working-spinner",
+            ),
+            (
+                screen(&[" Reply with PINEAPPLE", " PINEAPPLE", rule, rule]),
+                ManifestState::Idle,
+                "idle-composer",
+            ),
+            (
+                // A draft in the composer is still idle.
+                screen(&[" PINEAPPLE", rule, "half a thought", rule]),
+                ManifestState::Idle,
+                "idle-composer",
+            ),
+            (
+                vec![
+                    rule.to_owned(),
+                    " Trust project folder?".into(),
+                    " /private/var/folders/T/.tmpfi3BJz/project".into(),
+                    " This allows pi to load .pi settings and resources, install missing project packages, and execute".into(),
+                    " project extensions.".into(),
+                    " → Trust".into(),
+                    "   Trust parent folder (/private/var/folders/T/.tmpfi3BJz)".into(),
+                    "   Trust (this session only)".into(),
+                    "   Do not trust".into(),
+                    "   Do not trust (this session only)".into(),
+                    " ↑↓ navigate  enter select  escape/ctrl+c cancel".into(),
+                    rule.to_owned(),
+                ],
+                ManifestState::BlockedQuestion,
+                "question-dialog",
+            ),
+            (
+                // An extension's ctx.ui.select, e.g. a permission gate, with
+                // the footer still below it.
+                screen(&[
+                    rule,
+                    " ⚠️ Dangerous command:",
+                    "   rm -rf build",
+                    " Allow?",
+                    " → Yes",
+                    "   No",
+                    " ↑↓ navigate  enter select  escape/ctrl+c cancel",
+                    rule,
+                ]),
+                ManifestState::BlockedQuestion,
+                "question-dialog",
+            ),
+            (
+                screen(&[
+                    rule,
+                    " Name this session",
+                    " > ",
+                    " enter submit  escape/ctrl+c cancel",
+                    rule,
+                ]),
+                ManifestState::BlockedQuestion,
+                "question-dialog",
+            ),
+        ];
+
+        let engine = engine();
+        for (lines, state, rule_id) in cases {
+            let observation = engine
+                .evaluate(&ScreenSnapshot::from_lines(lines.clone()), "pi")
+                .unwrap_or_else(|| panic!("Pi screen should match: {lines:#?}"));
+            assert_eq!(
+                (observation.state, observation.matched_rule_id.as_str()),
+                (state, rule_id),
+                "{lines:#?}"
+            );
+        }
+    }
+
+    /// Screens captured from OpenCode 1.18 driven through the Engine
+    /// (`tests/opencode_real.rs`). OpenCode draws no idle marker beyond its
+    /// footer, so without the footer rule no screen read as idle and every
+    /// session sat Starting, then Working, forever.
+    #[test]
+    fn opencode_rules_match_the_screens_opencode_draws() {
+        let composer = [
+            "   ┃",
+            "   ┃  Build · Fake Model Fake",
+            "   ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        ];
+        let with_composer = |lines: &[&'static str], footer: &'static str| {
+            lines
+                .iter()
+                .chain(composer.iter())
+                .copied()
+                .chain([footer])
+                .collect::<Vec<_>>()
+        };
+        let cases = [
+            (
+                // First run, no provider configured: the home screen.
+                vec![
+                    "                                ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▄ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀",
+                    "              ┃",
+                    "              ┃  Ask anything... \"Fix a TODO in the codebase\"",
+                    "              ┃",
+                    "              ┃  Build · Big Pickle OpenCode Zen",
+                    "              ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+                    "                                                    tab agents  ctrl+p commands",
+                    "                       ● Tip Run /connect to add an AI provider and start coding",
+                    "   ~/project                                                               1.17.9",
+                ],
+                ManifestState::Idle,
+                "idle-footer",
+            ),
+            (
+                with_composer(
+                    &["   ┃  SLOW stream something", "      ▣  Build · Fake Model"],
+                    "    ■⬝⬝⬝⬝⬝⬝⬝  esc interrupt                         tab agents  ctrl+p commands",
+                ),
+                ManifestState::Working,
+                "working-interrupt",
+            ),
+            (
+                // After a turn the token count replaces "tab agents".
+                with_composer(
+                    &[
+                        "      part 7 slow part 8 slow part 9 SLOWDONE",
+                        "      ▣  Build · Fake Model · 6.7s",
+                    ],
+                    "                                                         15  ctrl+p commands",
+                ),
+                ManifestState::Idle,
+                "idle-footer",
+            ),
+            (
+                vec![
+                    "   ┃  RUNCMD for me",
+                    "      $ touch diri-e2e-file",
+                    "      ▣  Build · Fake Model",
+                    "   ┃",
+                    "   ┃  △ Permission required",
+                    "   ┃    # Create the e2e marker file",
+                    "   ┃",
+                    "   ┃  $ touch diri-e2e-file",
+                    "   ┃",
+                    "   ┃   Allow once   Allow always   Reject     ctrl+f fullscreen  ⇆ select  enter confirm",
+                ],
+                ManifestState::BlockedPermission,
+                "blocked-permission",
+            ),
+        ];
+
+        let engine = engine();
+        for (lines, state, rule) in cases {
+            let observation = engine
+                .evaluate(&ScreenSnapshot::from_lines(lines), "opencode")
+                .expect("OpenCode screen should match");
+            assert_eq!(
+                (observation.state, observation.matched_rule_id.as_str()),
+                (state, rule)
+            );
         }
     }
 
@@ -740,6 +1052,44 @@ mod tests {
             now + Duration::from_secs(8),
         );
         assert_eq!(reducer.status(), &SessionStatus::Working);
+    }
+
+    /// Codex's startup update chooser, as `update_prompt.rs` draws it. Its
+    /// selected row starts with `›`, the same mark as the composer, so it read
+    /// as an idle input box; Enter there updates Codex and exits it.
+    #[test]
+    fn codex_update_chooser_is_a_question_not_an_idle_composer() {
+        let engine = engine();
+        let chooser = [
+            "  ✨ Update available! 0.158.0 -> 0.159.0",
+            "",
+            "  Release notes: https://github.com/openai/codex/releases/latest",
+            "",
+            "› 1. Update now (runs `npm install -g @openai/codex`)",
+            "  2. Skip",
+            "  3. Skip until next version",
+            "",
+            "  Press enter to continue",
+        ];
+        let observation = engine
+            .evaluate(&cursor_snapshot(&chooser, None), "codex")
+            .expect("chooser rule");
+        assert_eq!(observation.state, ManifestState::BlockedQuestion);
+
+        // Once the chat is up, the in-history update banner is not a blocker.
+        let chat = [
+            "✨ Update available! 0.158.0 -> 0.159.0",
+            "Run npm install -g @openai/codex to update.",
+            "",
+            "› Ask Codex to do anything",
+        ];
+        assert_eq!(
+            engine
+                .evaluate(&cursor_snapshot(&chat, None), "codex")
+                .unwrap()
+                .state,
+            ManifestState::Idle
+        );
     }
 
     #[test]

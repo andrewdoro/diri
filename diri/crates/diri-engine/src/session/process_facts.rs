@@ -189,6 +189,7 @@ mod tests {
             rows: Some(24),
             epoch_offset: Some(epoch),
             secret_input: None,
+            awaiting_line: None,
         };
         capture_holder(&shared, &stat);
         (

@@ -26,8 +26,10 @@ use sha2::{Digest, Sha256};
 use crate::registry::Registry;
 mod account_handoff;
 mod account_switch;
+mod agent_relaunch;
 mod claude_accounts;
 mod codex_accounts;
+mod hook_queue;
 mod message_delivery;
 mod operations;
 mod orchestration;
@@ -53,6 +55,27 @@ const fn default_shell() -> &'static str {
     "/bin/sh"
 }
 
+/// A terminal's shell: the user's own, as a login shell.
+fn login_shell_argv() -> Vec<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell().into());
+    vec![shell, "-l".into()]
+}
+
+/// Where a fresh shell for an existing local terminal starts: the directory it
+/// had `cd`'d to, while that is still an absolute directory on this host.
+/// `None` sends it to the launch `cwd`, as before. Remote shells and Agents
+/// always start in `cwd`.
+fn restored_terminal_directory(record: &diri_proto::SessionRecord) -> Option<PathBuf> {
+    if record.kind != diri_proto::AgentKind::SHELL || record.host.is_some() {
+        return None;
+    }
+    record
+        .terminal_cwd
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_dir())
+}
+
 pub struct ControlServer {
     engine_instance_id: String,
     registry: Arc<Mutex<Registry>>,
@@ -76,6 +99,7 @@ pub struct ControlServer {
     account_operations: std::sync::RwLock<()>,
     session_operations: Mutex<std::collections::HashSet<String>>,
     agent_scans: Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
+    hook_reports: hook_queue::HookQueue,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -184,6 +208,7 @@ impl ControlServer {
             account_operations: std::sync::RwLock::new(()),
             session_operations: Mutex::new(std::collections::HashSet::new()),
             agent_scans: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            hook_reports: hook_queue::HookQueue::new(),
         }
     }
 
@@ -1029,10 +1054,7 @@ impl ControlServer {
                     let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell().into());
                     vec![shell, "-lc".into(), command.to_string()]
                 }
-                _ if kind == diri_proto::AgentKind::SHELL_ID => {
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell().into());
-                    vec![shell, "-l".into()]
-                }
+                _ if kind == diri_proto::AgentKind::SHELL_ID => login_shell_argv(),
                 _ => Vec::new(),
             }
         } else {
@@ -1114,11 +1136,20 @@ impl ControlServer {
         }
 
         let inherited: Vec<(String, String)> = std::env::vars().collect();
-        let mut pty = match descriptor.spawn_spec(&cwd_path, inherited.clone(), &launch_args) {
+        // A terminal may start where another terminal had `cd`'d to, while
+        // `cwd` keeps it in the project it was opened from.
+        let start_directory = p
+            .start_directory
+            .as_deref()
+            .filter(|_| kind == diri_proto::AgentKind::SHELL_ID)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && path.is_dir());
+        let launch_path = start_directory.as_deref().unwrap_or(&cwd_path);
+        let mut pty = match descriptor.spawn_spec(launch_path, inherited.clone(), &launch_args) {
             Some(spec) => spec,
             // No binary in the manifest: the caller has to say what to run.
             None if !argv.is_empty() => {
-                let mut spec = crate::pty::PtySpec::new(argv.clone(), &cwd_path);
+                let mut spec = crate::pty::PtySpec::new(argv.clone(), launch_path);
                 spec.env = inherited;
                 // GUI apps launched by launchd commonly inherit no terminal
                 // environment. A binary-free descriptor is still attached to
@@ -1139,6 +1170,7 @@ impl ControlServer {
             crate::accounts::bind_pty(profile, &mut pty)?;
         }
         let mut record = new_record(&id, &kind, &cwd);
+        record.terminal_cwd = start_directory.map(|path| path.to_string_lossy().into_owned());
         record.account_profile = account_profile;
         record.kind = p.kind.clone();
         record.originating_prompt = p.initial_prompt.clone();
@@ -2635,15 +2667,19 @@ impl ControlServer {
             return Ok(json!({}));
         };
         let session_end = p.kind == "claude-hook" && p.event.as_deref() == Some("SessionEnd");
-        let mut registry = self.registry.lock().map_err(poisoned)?;
-        if session_end && let Some(session) = registry.get(&session_id.0) {
-            session.note_agent_ended();
-        }
-        let changed = registry.apply_hook_report(&session_id.0, signal, &meta);
-        if changed {
-            let _ = registry.persist();
-        }
-        self.publish_updated(&registry, &session_id.0);
+        // Never wait on the Registry here: the Agent is blocked on this reply.
+        self.hook_reports
+            .submit(
+                &self.registry,
+                &self.events,
+                hook_queue::HookReport {
+                    session_id: session_id.0,
+                    signal,
+                    meta,
+                    session_end,
+                },
+            )
+            .map_err(poisoned)?;
         Ok(json!({}))
     }
 
@@ -2793,9 +2829,15 @@ impl ControlServer {
             }
             record
         };
+        // A local terminal has no conversation to re-enter: it restarts as a
+        // fresh login shell, back in the directory it had `cd`'d to.
+        let restored_directory = restored_terminal_directory(&record);
         let mut spec = if record.host.is_some() {
             crate::telemetry::record_resume(&record, "remote", record.agent_session_id.as_deref());
             self.remote_resume_spec(&record)?
+        } else if record.kind == diri_proto::AgentKind::SHELL {
+            crate::telemetry::record_resume(&record, "shell", None);
+            self.shell_restart_spec(&record, restored_directory.as_deref())?
         } else {
             let registry = self.registry.lock().map_err(poisoned)?;
             match claude_resume_target(&record) {
@@ -2877,9 +2919,20 @@ impl ControlServer {
             // silently handing back the dead record it was asked to revive.
             let _ = registry.terminate(&p.session_id.0, std::time::Duration::from_millis(500));
         }
+        let local_shell = record.kind == diri_proto::AgentKind::SHELL && record.host.is_none();
         registry
             .respawn(spec)
             .map_err(|error| ControlError::internal(error.to_string()))?;
+        if local_shell {
+            // Report where the new shell actually starts before its first
+            // sample: the restored directory, or none when that directory is
+            // gone and the shell fell back to `cwd`.
+            registry.update_record(&p.session_id.0, |record| {
+                record.terminal_cwd = restored_directory
+                    .as_deref()
+                    .map(|path| path.to_string_lossy().into_owned());
+            });
+        }
         if let Some(persistence) = remote_persistence {
             registry.update_record(&p.session_id.0, |record| {
                 record.remote_persistence = Some(persistence);
@@ -2915,7 +2968,13 @@ impl ControlServer {
                 .record(&p.session_id.0)
                 .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?
         };
-        let kind = source.effective_kind().clone();
+        // An Agent started by hand in a shell has no conversation Diri
+        // knows, so a shell forks as the shell it is.
+        let kind = if source.kind == diri_proto::AgentKind::SHELL {
+            source.kind.clone()
+        } else {
+            source.effective_kind().clone()
+        };
         let id = next_session_id();
         let mut spec = if source.host.is_some() {
             self.remote_conversation_spec(&source, &id, &kind, ConversationAction::Fork)?
@@ -3136,6 +3195,32 @@ impl ControlServer {
                 binding_store,
             }),
             defer_launch: false,
+        })
+    }
+
+    /// A fresh login shell under an existing local terminal's id, started in
+    /// `directory` when there is one and in the terminal's `cwd` otherwise.
+    /// It is launched exactly as `session.spawn` launches a new terminal.
+    fn shell_restart_spec(
+        &self,
+        record: &diri_proto::SessionRecord,
+        directory: Option<&Path>,
+    ) -> Result<crate::session::SessionSpec, ControlError> {
+        let registry = self.registry.lock().map_err(poisoned)?;
+        let kind = diri_proto::AgentKind::SHELL_ID;
+        let launch_path = directory.unwrap_or_else(|| Path::new(&record.cwd));
+        let mut pty = crate::pty::PtySpec::new(login_shell_argv(), launch_path);
+        pty.env = std::env::vars().collect();
+        crate::agent::assert_color_environment(&mut pty.env);
+        Ok(crate::session::SessionSpec {
+            id: record.id.0.clone(),
+            pty,
+            manifest_id: kind.to_owned(),
+            authority: crate::session::authority_for(kind, &registry.engine()),
+            logs_dir: self.logs_dir.clone(),
+            holder: self.holder.clone(),
+            remote: None,
+            defer_launch: true,
         })
     }
 
@@ -4082,6 +4167,9 @@ pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::Session
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        terminal_cwd: None,
+        foreground_ports: None,
+        terminal_progress: None,
     }
 }
 
@@ -4403,6 +4491,20 @@ fn prepare_agent_input(
         accept_claude_workspace_trust(registry, session_id);
     }
     if let Some(prompt) = prompt {
+        let gemini = with_session(registry, session_id, |session| {
+            session.manifest_id() == diri_proto::AgentKind::GEMINI_ID
+        })
+        .unwrap_or(false);
+        if gemini {
+            accept_gemini_folder_trust(registry, session_id);
+        }
+        let pi = with_session(registry, session_id, |session| {
+            session.manifest_id() == "pi"
+        })
+        .unwrap_or(false);
+        if pi {
+            accept_pi_project_trust(registry, session_id);
+        }
         inject_initial_prompt(registry, session_id, prompt)?;
     }
     Ok(())
@@ -4443,13 +4545,25 @@ fn initial_prompt_control_error(session_id: &str, failure: InitialPromptFailure)
 /// directory the session was pointed at. That is defensible when the user
 /// picked the directory in the UI, and weaker when they did not — an
 /// orchestrator spawning into a freshly cloned repository gets trust without
-/// anyone affirming it. The window is bounded (20s, and it stops at the first
-/// non-matching screen), but a session whose own output contains the matched
-/// phrases inside that window would also receive the keystroke.
+/// anyone affirming it. The window is bounded (20s), but a session whose own
+/// output contains the matched phrases inside that window would also receive
+/// the keystroke.
+///
+/// The watch ends as soon as a Claude hook reports: Claude runs no hooks
+/// until the workspace is trusted, so a hook proves the picker is not coming.
+/// Without that exit an already-trusted folder — the common case — held a
+/// spawn's initial prompt, and the spawn RPC with it, for the full 20s.
 fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
     for _ in 0..200 {
-        let Some((exited, screen)) = with_session(registry, session_id, |session| {
-            (session.view().exited, session.screen_lines().join("\n"))
+        let Some((exited, screen, hooked)) = with_session(registry, session_id, |session| {
+            let view = session.view();
+            (
+                view.exited,
+                session.screen_lines().join("\n"),
+                view.status_evidence.is_some_and(|evidence| {
+                    evidence.source == diri_proto::StatusEvidenceSource::Hook
+                }),
+            )
         }) else {
             return;
         };
@@ -4476,6 +4590,9 @@ fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &s
             }
             return;
         }
+        if hooked {
+            return;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -4484,6 +4601,175 @@ fn is_claude_workspace_trust_screen(screen: &str) -> bool {
     let normalized = screen.to_ascii_lowercase();
     normalized.contains("yes, i trust this folder")
         && (normalized.contains("1.") || normalized.contains("1 "))
+}
+
+/// Answers Gemini CLI's "Do you trust the files in this folder?" dialog when
+/// a spawn carries an initial prompt, then waits out the restart Gemini does
+/// to apply trust.
+///
+/// Before this the injector's paste-then-Enter answered the dialog by
+/// accident: Enter picks the preselected "Trust folder", Gemini restarts, and
+/// the prompt died with the old process while the spawn reported success. The
+/// trade is the one [`accept_claude_workspace_trust`] documents, and it is no
+/// wider than the accidental Enter was. Without a prompt the dialog is left to
+/// the user, where the manifest reports it as a question.
+///
+/// A trusted folder costs about a second: the composer has to stand alone
+/// long enough to rule out the dialog Gemini opens just after it. Capped at
+/// 20s either way.
+fn accept_gemini_folder_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted_at: Option<Instant> = None;
+    let mut composer_since: Option<Instant> = None;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_gemini_folder_trust_screen(&screen) {
+            composer_since = None;
+            if accepted_at.is_none() {
+                diri_telemetry::event!(
+                    "prompt.workspace_trust_accepted",
+                    session = diri_telemetry::id(session_id),
+                );
+                // Enter on the preselected "1. Trust folder": a digit would
+                // only move Gemini's selection.
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted_at = Some(Instant::now());
+            }
+        } else if is_gemini_composer_screen(&screen) {
+            // The outgoing process can repaint its composer before it
+            // restarts, and a prompt typed into it dies with it. After an
+            // accept, only a composer drawn below the restart notice is the
+            // new process's; the time bound covers a Gemini that applies
+            // trust without restarting.
+            //
+            // Before any accept, Gemini paints the composer first and opens
+            // the dialog ~100 ms later, so the composer only proves a
+            // trusted folder once it has stood alone for a moment.
+            let since = *composer_since.get_or_insert_with(Instant::now);
+            let ready = match accepted_at {
+                None => since.elapsed() >= GEMINI_TRUST_QUIET,
+                Some(accepted) => {
+                    gemini_restarted_below_notice(&screen)
+                        || accepted.elapsed() > Duration::from_secs(5)
+                }
+            };
+            if ready {
+                return;
+            }
+        } else {
+            composer_since = None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// How long Gemini's composer must stand with no trust dialog before a
+/// folder counts as already trusted.
+const GEMINI_TRUST_QUIET: Duration = Duration::from_secs(1);
+
+/// True when Gemini's composer appears after its "restarting to apply the
+/// trust changes" notice, i.e. the relaunched process has drawn its UI.
+fn gemini_restarted_below_notice(lines: &[String]) -> bool {
+    let notice = lines
+        .iter()
+        .rposition(|line| line.contains("restarting to apply the trust changes"));
+    let composer = lines.iter().rposition(|line| {
+        line.to_lowercase()
+            .contains("type your message or @path/to/file")
+    });
+    matches!((notice, composer), (Some(notice), Some(composer)) if composer > notice)
+}
+
+/// Gemini's trust dialog, anchored to its option lines at the bottom of the
+/// screen: the question itself stays in view above the restarted UI.
+fn is_gemini_folder_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 8)
+        .join("\n")
+        .to_lowercase();
+    bottom.contains("1. trust folder") && bottom.contains("don't trust")
+}
+
+fn is_gemini_composer_screen(lines: &[String]) -> bool {
+    crate::detect::bottom_non_empty(lines, 8)
+        .join("\n")
+        .to_lowercase()
+        .contains("type your message or @path/to/file")
+}
+
+/// Answers Pi's startup "Trust project folder?" selector when a spawn carries
+/// an initial prompt, then waits for the composer Pi draws once startup goes
+/// on.
+///
+/// Pi asks before its interactive UI exists, whenever the folder holds
+/// project resources (`.pi/settings.json`, `.pi/extensions`, ...). The
+/// injector's paste went into the selector, which drops it, and its blind
+/// Enter picked the preselected "Trust" and saved it: the folder ended up
+/// trusted anyway and the prompt was gone. The trade is the one
+/// [`accept_claude_workspace_trust`] documents, and it is no wider than the
+/// accidental Enter was. Without a prompt the selector is left to the user,
+/// where the manifest reports it as a question.
+///
+/// The composer only ever follows the selector, so it ends the wait as soon
+/// as it shows. Capped at 20s.
+fn accept_pi_project_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted = false;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_pi_project_trust_screen(&screen) {
+            if !accepted {
+                diri_telemetry::event!(
+                    "prompt.workspace_trust_accepted",
+                    session = diri_telemetry::id(session_id),
+                );
+                // Enter on the preselected "→ Trust".
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted = true;
+            }
+        } else if is_pi_composer_screen(&screen) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Pi's trust selector, anchored to its key hint at the bottom of the screen.
+fn is_pi_project_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 16);
+    let hint = bottom
+        .iter()
+        .rev()
+        .take(3)
+        .any(|line| line.contains("↑↓ navigate"));
+    hint && bottom
+        .iter()
+        .any(|line| line.to_lowercase().contains("trust project folder?"))
+}
+
+/// Pi's composer: two bare full-width rules (above and below the input)
+/// directly over its two-line footer.
+fn is_pi_composer_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 6);
+    let rules = bottom
+        .iter()
+        .filter(|line| {
+            let line = line.trim();
+            line.chars().count() >= 10 && line.chars().all(|c| c == '─')
+        })
+        .count();
+    rules >= 2 && !bottom.iter().any(|line| line.contains("↑↓ navigate"))
 }
 
 /// Types and submits an initial prompt at most once. Screen observations can
@@ -4773,12 +5059,14 @@ fn wait_until_ready(registry: &Arc<Mutex<Registry>>, session_id: &str) -> bool {
         if exited {
             return false;
         }
-        if paste {
+        if paste && !text.trim().is_empty() {
             // Paste mode says the input line exists; it does NOT say the TUI
             // has stopped repainting over it. Claude Code turns paste mode on
             // while its banner and tips panel are still landing, and anything
             // typed into that window is discarded. Wait for the screen to
-            // hold still before treating the composer as real.
+            // hold still before treating the composer as real. OpenCode
+            // turns paste mode on before its first paint: a blank screen is
+            // not a composer, however still it holds.
             return screen_settled(registry, session_id);
         }
         if !text.trim().is_empty() && text == last_text {
@@ -4857,6 +5145,7 @@ const MAX_PROBE_CHARS: usize = 20;
 mod tests {
     use super::*;
 
+    mod agent_relaunch_tests;
     mod find_capture_tests;
     mod reconnect_tests;
     mod send_key_tests;
@@ -5042,6 +5331,9 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: None,
+            terminal_progress: None,
         }
     }
 
@@ -5079,6 +5371,8 @@ mod tests {
 
     fn ended_resumable_record(id: &str, repo: &Path) -> diri_proto::SessionRecord {
         let mut record = test_record(id);
+        // An Agent's conversation: a terminal typed `exit` is closed for good.
+        record.kind = diri_proto::AgentKind::CLAUDE_CODE;
         record.cwd = repo.to_string_lossy().into_owned();
         record.project_id = crate::registry::session_project_id(&record.cwd, None);
         record.status = diri_proto::SessionStatus::Exited(diri_proto::ExitInfo {
@@ -5851,6 +6145,175 @@ mod tests {
         );
     }
 
+    /// A local terminal whose shell died under it (a crash, a reboot that
+    /// took its Holder) with `cwd` the project and `terminal_cwd` wherever it
+    /// had `cd`'d to. `/usr/bin/false` stands in for the shell that went away;
+    /// its non-zero exit is not the user closing the tab.
+    fn dead_terminal(
+        temp: &Path,
+        terminal_cwd: Option<&Path>,
+    ) -> (Arc<Mutex<Registry>>, Arc<ControlServer>, PathBuf) {
+        let project = temp.join("project").canonicalize().expect("project");
+        let registry = Arc::new(Mutex::new(Registry::new(engine(), temp.join("state.json"))));
+        {
+            let mut guard = registry.lock().expect("registry");
+            let mut record = test_record("s_term");
+            record.cwd = project.to_string_lossy().into_owned();
+            record.terminal_cwd = terminal_cwd.map(|path| path.to_string_lossy().into_owned());
+            guard
+                .spawn(
+                    crate::session::SessionSpec {
+                        id: "s_term".into(),
+                        pty: crate::pty::PtySpec::new(vec!["/usr/bin/false".into()], &project),
+                        manifest_id: diri_proto::AgentKind::SHELL_ID.into(),
+                        authority: crate::status::Authority::ProcessOnly,
+                        logs_dir: temp.join("logs"),
+                        holder: None,
+                        remote: None,
+                        defer_launch: false,
+                    },
+                    record,
+                )
+                .expect("spawn");
+        }
+        let exited = (0..200).any(|_| {
+            let exited = registry
+                .lock()
+                .expect("registry")
+                .record("s_term")
+                .is_some_and(|record| {
+                    matches!(record.status, diri_proto::SessionStatus::Exited(_))
+                });
+            if !exited {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            exited
+        });
+        assert!(exited, "the stand-in shell never exited");
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.join("daemon.sock"),
+        ));
+        (registry, server, project)
+    }
+
+    /// Where the resumed shell's own process sits, as the Engine samples it.
+    fn wait_for_live_directory(registry: &Arc<Mutex<Registry>>, expected: &Path) {
+        let expected = expected.to_string_lossy().into_owned();
+        let mut last = None;
+        for _ in 0..500 {
+            last = registry
+                .lock()
+                .expect("registry")
+                .get("s_term")
+                .and_then(|session| session.view().terminal_cwd);
+            if last.as_deref() == Some(expected.as_str()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the resumed shell runs in {last:?}, not {expected}");
+    }
+
+    fn stop_terminal(registry: &Arc<Mutex<Registry>>) {
+        let _ = registry
+            .lock()
+            .expect("registry")
+            .terminate("s_term", Duration::from_secs(2));
+    }
+
+    /// A terminal that comes back after its shell died starts in the directory
+    /// it had `cd`'d to, keeps its project, and says so before the new shell
+    /// has been sampled.
+    #[test]
+    fn a_resumed_terminal_starts_in_its_last_directory() {
+        let temp = tempfile::tempdir().expect("temp");
+        let sub = temp.path().join("project/crates/engine");
+        std::fs::create_dir_all(&sub).expect("sub");
+        let sub = sub.canonicalize().expect("sub");
+        let (registry, server, project) = dead_terminal(temp.path(), Some(&sub));
+        let record = registry
+            .lock()
+            .expect("registry")
+            .record("s_term")
+            .expect("record");
+        assert_eq!(
+            record.resumability,
+            diri_proto::Resumability::Resumable,
+            "a terminal whose shell died must offer to come back"
+        );
+
+        let result = ok_of(call(
+            &server,
+            "session.resume",
+            Some(json!({ "sessionID": "s_term" })),
+        ));
+        assert!(
+            result["status"].get("exited").is_none(),
+            "resume handed back the dead terminal: {}",
+            result["status"]
+        );
+        assert_eq!(result["terminalCwd"], sub.to_string_lossy().as_ref());
+        assert_eq!(result["cwd"], project.to_string_lossy().as_ref());
+        wait_for_live_directory(&registry, &sub);
+        stop_terminal(&registry);
+    }
+
+    /// A directory deleted while the terminal was down is not an error: the
+    /// shell starts in the project, as it always did, and stops claiming the
+    /// vanished directory.
+    #[test]
+    fn a_resumed_terminal_whose_directory_vanished_starts_in_its_project() {
+        let temp = tempfile::tempdir().expect("temp");
+        std::fs::create_dir_all(temp.path().join("project")).expect("project");
+        let gone = temp.path().join("project/gone");
+        let (registry, server, project) = dead_terminal(temp.path(), Some(&gone));
+
+        let result = ok_of(call(
+            &server,
+            "session.resume",
+            Some(json!({ "sessionID": "s_term" })),
+        ));
+        assert!(result.get("terminalCwd").is_none(), "{result}");
+        assert_eq!(result["cwd"], project.to_string_lossy().as_ref());
+        wait_for_live_directory(&registry, &project);
+        stop_terminal(&registry);
+    }
+
+    /// Only a local shell restarts in its last directory. Agents re-enter
+    /// their conversation in `cwd`, remote shells are left to the Helper, and
+    /// nothing but an existing absolute directory is trusted.
+    #[test]
+    fn only_a_local_terminal_restores_an_existing_absolute_directory() {
+        let temp = tempfile::tempdir().expect("temp");
+        let sub = temp.path().canonicalize().expect("temp").join("sub");
+        std::fs::create_dir_all(&sub).expect("sub");
+        let mut shell = test_record("shell");
+        shell.terminal_cwd = Some(sub.to_string_lossy().into_owned());
+        assert_eq!(restored_terminal_directory(&shell), Some(sub.clone()));
+
+        let mut agent = shell.clone();
+        agent.kind = diri_proto::AgentKind::CLAUDE_CODE;
+        assert_eq!(restored_terminal_directory(&agent), None);
+
+        let mut remote = shell.clone();
+        remote.host = Some("forge".into());
+        assert_eq!(restored_terminal_directory(&remote), None);
+
+        let mut relative = shell.clone();
+        relative.terminal_cwd = Some("sub".into());
+        assert_eq!(restored_terminal_directory(&relative), None);
+
+        let mut file = shell.clone();
+        let path = sub.join("notes.txt");
+        std::fs::write(&path, "").expect("file");
+        file.terminal_cwd = Some(path.to_string_lossy().into_owned());
+        assert_eq!(restored_terminal_directory(&file), None);
+
+        shell.terminal_cwd = None;
+        assert_eq!(restored_terminal_directory(&shell), None);
+    }
+
     fn check_resume_relaunches(archived: bool) {
         let temp = tempfile::tempdir().expect("temp");
         // A manifest that resumes by flag, onto a binary that outlives the
@@ -6285,6 +6748,79 @@ mod tests {
         }
     }
 
+    /// `session.remove` holds the Registry through the Holder's TERM→KILL
+    /// escalation while a closing Claude waits on its own SessionEnd hook.
+    /// The hook must be answered at once and still land, in order.
+    #[test]
+    fn a_hook_report_never_waits_for_a_busy_registry_and_keeps_order() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        registry
+            .lock()
+            .expect("registry")
+            .insert_record(test_record("s_hook"));
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.path().join("daemon.sock"),
+        ));
+        fn prompt(uuid: &str, prompt: &str) -> Option<JsonValue> {
+            Some(json!({
+                "kind": "claude-hook", "dirijorSessionID": "s_hook", "event": "UserPromptSubmit",
+                "payload": {"session_id": uuid, "hook_event_name": "UserPromptSubmit", "prompt": prompt},
+            }))
+        }
+        let busy = registry.lock().expect("registry");
+        let (answered, replies) = std::sync::mpsc::channel();
+        let agent = {
+            let server = Arc::clone(&server);
+            std::thread::spawn(move || {
+                for (uuid, text) in [("uuid-1", "first prompt"), ("uuid-2", "second prompt")] {
+                    ok_of(call(&server, "hook.report", prompt(uuid, text)));
+                }
+                answered.send(()).unwrap();
+            })
+        };
+        assert!(
+            replies.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "hook.report waited for the busy Registry"
+        );
+        drop(busy);
+        agent.join().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let record = loop {
+            let record = registry.lock().unwrap().record("s_hook").unwrap();
+            if record.agent_session_id.as_deref() == Some("uuid-2")
+                || std::time::Instant::now() > deadline
+            {
+                break record;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        // Applied in callback order: the first prompt titled the placeholder,
+        // the second report's identity is the latest.
+        assert_eq!(record.agent_session_id.as_deref(), Some("uuid-2"));
+        assert_eq!(record.title, "first prompt");
+        // Drained: the next report applies inline, before its reply.
+        ok_of(call(
+            &server,
+            "hook.report",
+            prompt("uuid-3", "third prompt"),
+        ));
+        assert_eq!(
+            registry
+                .lock()
+                .unwrap()
+                .record("s_hook")
+                .unwrap()
+                .agent_session_id
+                .as_deref(),
+            Some("uuid-3")
+        );
+    }
+
     #[test]
     fn a_hook_report_folds_identity_but_rejects_an_untrusted_transcript_path() {
         let temp = tempfile::tempdir().expect("temp");
@@ -6409,7 +6945,11 @@ mod tests {
         registry
             .lock()
             .expect("registry")
-            .insert_record(test_record("s_gone"));
+            .insert_record(diri_proto::SessionRecord {
+                // An Agent with no resume grammar; a terminal restarts instead.
+                kind: diri_proto::AgentKind::new("amp"),
+                ..test_record("s_gone")
+            });
         let server = Arc::new(ControlServer::new(
             registry,
             temp.path().join("daemon.sock"),
@@ -6425,7 +6965,7 @@ mod tests {
 
         let reopened = ok_of(call(&server, "session.reopen_last", None));
         assert_eq!(reopened["id"], "s_gone");
-        // A shell cannot resume; it must come back exited, never still
+        // This Agent cannot resume; it must come back exited, never still
         // claiming the live status it had when closed.
         assert!(
             reopened["status"].get("exited").is_some(),
@@ -7041,6 +7581,56 @@ mod tests {
             &path,
         );
         let _listener = server.bind().expect("a stale socket should be replaced");
+    }
+
+    #[test]
+    fn pi_trust_and_composer_screens_are_told_apart() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let rule = "─".repeat(60);
+        // Captured from Pi 0.99.2 in a folder holding `.pi/settings.json`.
+        let dialog = format!(
+            "{rule}\n Trust project folder?\n /tmp/project\n\n\
+             This allows pi to load .pi settings and resources, install missing project packages, and execute\n\
+             project extensions.\n\n → Trust\n   Trust parent folder (/tmp)\n   Trust (this session only)\n\
+             \x20  Do not trust\n   Do not trust (this session only)\n\n\
+             \x20↑↓ navigate  enter select  escape/ctrl+c cancel\n\n{rule}"
+        );
+        assert!(is_pi_project_trust_screen(&lines(&dialog)));
+        assert!(!is_pi_composer_screen(&lines(&dialog)));
+
+        let composer = format!(
+            " ▀▀█  v0.99.2\n Warning: fd not found. Offline mode enabled, skipping download.\n\
+             {rule}\n\n{rule}\n/tmp/project\n0.0%/128k (auto)                fake-model"
+        );
+        assert!(!is_pi_project_trust_screen(&lines(&composer)));
+        assert!(is_pi_composer_screen(&lines(&composer)));
+    }
+
+    #[test]
+    fn gemini_trust_is_read_from_the_dialog_at_the_bottom_only() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let dialog = "│ Do you trust the files in this folder? │\n\
+                      │ ● 1. Trust folder (project)          │\n\
+                      │   2. Trust parent folder (work)      │\n\
+                      │   3. Don't trust                     │";
+        assert!(is_gemini_folder_trust_screen(&lines(dialog)));
+        assert!(!is_gemini_composer_screen(&lines(dialog)));
+
+        // After accepting, Gemini restarts beneath the old dialog.
+        let restarted = format!(
+            "{dialog}\n Gemini CLI is restarting to apply the trust changes...\n\
+             Gemini CLI v0.62.0\n Tips for getting started:\n\
+             1. Create GEMINI.md files\n ▄▄▄▄▄▄\n\
+             >   Type your message or @path/to/file\n ▀▀▀▀▀▀\n\
+             workspace (/directory)\n ~/project"
+        );
+        assert!(!is_gemini_folder_trust_screen(&lines(&restarted)));
+        assert!(is_gemini_composer_screen(&lines(&restarted)));
+        assert!(gemini_restarted_below_notice(&lines(&restarted)));
+        // The outgoing process's composer, drawn before the notice.
+        let outgoing = " ▄▄▄▄▄▄\n >   Type your message or @path/to/file\n ▀▀▀▀▀▀\n\
+                        Gemini CLI is restarting to apply the trust changes...";
+        assert!(!gemini_restarted_below_notice(&lines(outgoing)));
     }
 
     #[test]

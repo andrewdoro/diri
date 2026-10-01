@@ -18,6 +18,17 @@ const agentPreviews = (() => {
   const changes = (file, lines) => `<div class="diff-file"><span class="icon" data-icon="code"></span>${file}</div><div class="diff-lines">${lines.map((line, i) => `<div class="${line.startsWith('+') ? 'added' : ''}"><span>${line.startsWith('+') ? '+' : i + 1}</span><code>${esc(line.replace(/^\+/, ''))}</code></div>`).join('')}</div>`;
   const command = (symbol, placeholder) => `<span class="composer-prefix">${symbol}</span><span>${placeholder}</span><span class="terminal-cursor" aria-hidden="true"></span>`;
   return {
+    swarm: {
+      render(chat) {
+        const child = (state, title, agent) => `<div class="swarm-child"><span class="swarm-state ${state}">${state === 'done' ? '✓' : '◌'}</span><span>${title}</span>${mark(agent)}</div>`;
+        return {
+          html: `<div class="claude-welcome"><pre class="claude-mascot" aria-hidden="true"> ▐▛███▜▌\n▝▜█████▛▘\n  ▘▘ ▝▝</pre><div><strong>Claude Code</strong><span>Opus</span><small>~/fun/diri</small></div></div><div class="claude-user">❯ ${chat.prompt}</div><div class="claude-answer"><span class="claude-bullet">●</span><div><p>Three independent pieces. I’ll give each its own agent and worktree.</p></div></div><div class="claude-tool"><span class="claude-bullet">●</span><div><strong>diri</strong><span> - spawn_agents (3 agents)</span><div class="swarm-list">${child('done', 'Write the release notes', 'codex')}${child('run', 'Verify the Linux build', 'claude')}${child('run', 'Test the updater', 'gemini')}</div></div></div><div class="claude-answer"><span class="claude-bullet">●</span><div><p>Release notes are in. Reviewing the diff while the other two finish.</p></div></div>`,
+          composer: command('❯', 'Waiting for 2 agents'),
+          footer: '<span>2 agents running</span><span>Opus</span>',
+          changes: changes('RELEASE_NOTES.md', ['+## 0.9', '+', '+- Agents can start other agents', '+- Faster session restore', '+- Linux: Wayland fixes'])
+        };
+      }
+    },
     codex: {
       render(chat) {
         return {

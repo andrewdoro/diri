@@ -28,7 +28,7 @@ fn pid(value: &str) -> ProjectId {
     ProjectId::new(value)
 }
 
-fn session(value: &str, project: &str, created: f64) -> SessionRecord {
+pub(super) fn session(value: &str, project: &str, created: f64) -> SessionRecord {
     SessionRecord {
         attention_state: None,
         id: id(value),
@@ -64,6 +64,9 @@ fn session(value: &str, project: &str, created: f64) -> SessionRecord {
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        terminal_cwd: None,
+        foreground_ports: None,
+        terminal_progress: None,
     }
 }
 
@@ -3421,5 +3424,91 @@ async fn herdr_import_runner_remembers_only_what_opened_and_reports_failures() {
         banner.body.contains("no manifest for agent opencode"),
         "{}",
         banner.body
+    );
+}
+
+#[test]
+fn a_new_terminal_starts_where_the_last_terminal_in_its_project_was() {
+    let terminal = |value: &str, project: &str, cwd: &str| SessionRecord {
+        kind: AgentKind::SHELL,
+        terminal_cwd: Some(cwd.to_owned()),
+        terminal_progress: None,
+        ..session(value, project, 2.0)
+    };
+    let (mut store, mut effects) = hydrated(
+        vec![
+            session("agent", "p", 1.0),
+            terminal("term", "p", "/work/p/web"),
+            session("elsewhere", "q", 3.0),
+        ],
+        vec![project("p", "P"), project("q", "Q")],
+        Prefs::default(),
+    );
+    let mut spawn = |store: &mut super::SessionStore, kind: AgentKind| {
+        drain(&mut effects);
+        store.spawn_kind(kind, super::SpawnOptions::default());
+        match drain(&mut effects).into_iter().next() {
+            Some(StoreEffect::Spawn(params)) => (params.cwd, params.start_directory),
+            other => panic!("expected spawn effect, got {other:?}"),
+        }
+    };
+
+    // From the terminal itself: its project, and the folder it `cd`'d to.
+    store.select(id("term"));
+    assert_eq!(
+        spawn(&mut store, AgentKind::SHELL),
+        ("/work/p".into(), Some("/work/p/web".into()))
+    );
+    // From an Agent in the same project, the last terminal still leads.
+    store.select(id("agent"));
+    assert_eq!(
+        spawn(&mut store, AgentKind::SHELL),
+        ("/work/p".into(), Some("/work/p/web".into()))
+    );
+    // Agents never follow a terminal.
+    assert_eq!(
+        spawn(&mut store, AgentKind::CLAUDE_CODE),
+        ("/work/p".into(), None)
+    );
+    // A terminal in another project is not followed across projects.
+    store.select(id("elsewhere"));
+    assert_eq!(
+        spawn(&mut store, AgentKind::SHELL),
+        ("/work/q".into(), None)
+    );
+
+    store.select(id("term"));
+    store.prefs.terminal_follows_last_directory = false;
+    assert_eq!(
+        spawn(&mut store, AgentKind::SHELL),
+        ("/work/p".into(), None)
+    );
+}
+
+#[test]
+fn only_terminals_carry_a_location_for_their_hover() {
+    let mut terminal = SessionRecord {
+        kind: AgentKind::SHELL,
+        terminal_cwd: Some("/work/p/web".into()),
+        terminal_progress: None,
+        ..session("term", "p", 1.0)
+    };
+    assert_eq!(
+        crate::switcher::terminal_location(&terminal).as_deref(),
+        Some("/work/p/web")
+    );
+    terminal.terminal_cwd = None;
+    assert_eq!(
+        crate::switcher::terminal_location(&terminal).as_deref(),
+        Some("/work/p")
+    );
+    terminal.host = Some("forge".into());
+    assert_eq!(
+        crate::switcher::terminal_location(&terminal).as_deref(),
+        Some("forge: /work/p")
+    );
+    assert_eq!(
+        crate::switcher::terminal_location(&session("agent", "p", 1.0)),
+        None
     );
 }

@@ -1027,6 +1027,9 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: None,
+            terminal_progress: None,
         }
     }
 

@@ -25,8 +25,9 @@
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="site-wrap">
     <header class="site-header">
-      <a class="wordmark" href="/" aria-label="Diri home"><span class="brand-mark" aria-hidden="true"></span>diri</a>
-      <nav class="guide-nav" aria-label="Main"><a href="/guides/" aria-current="location">Guides</a><a href="https://github.com/cristicretu/diri">GitHub ↗</a></nav>
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/" aria-current="page">Guides</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
     </header>
     <main id="main">
       <div class="guide-heading"><a class="eyebrow" href="/guides/">Guides / Workflow</a><h1>Keep coding-agent sessions running over SSH</h1><p>Use the machine you need. Keep the session in the same workspace.</p></div>
@@ -34,7 +35,19 @@
         <article class="guide-content"><section id="before-you-start"><h2>Before you start</h2><p>You need an SSH host you can already access, a project directory on that host, and an installed, authenticated agent CLI there. Diri reuses your OpenSSH configuration.</p><p>Remote hosts can run <strong>Linux on x86_64 or arm64</strong>, or <strong>macOS on Apple silicon</strong>. Intel Macs are not supported as remote hosts, even though the Diri desktop app supports them.</p><p>First check that your usual SSH connection works:</p><pre><code>ssh devbox</code></pre><p>Use your own host alias in place of <code>devbox</code>. Confirm the project path and agent setup on that machine. Diri does not copy your local agent credentials to it.</p></section><section id="connect-the-host"><h2>1. Connect the host</h2><p>Open <strong>Settings → Remote → Add Host</strong> and choose SSH. Enter your host’s connection details and connect.</p><p>Diri checks the platform, uploads and verifies its small remote helper, reads the remote login environment, and tests session persistence. It does not require a preinstalled Diri service or tmux.</p><p>If setup fails, read the host’s error before retrying. Check ordinary SSH access and the supported platform list first.</p></section><section id="start-a-session"><h2>2. Start a remote session</h2><p>Open <strong>New Agent</strong>, choose the connected host, and select an existing project directory on that host. Choose an agent installed there and give it a task.</p><p>The agent runs on the remote machine. Diri’s local engine manages the session, while a small process on the host owns its terminal. Review the working directory before sending commands; local and remote paths are different.</p></section><section id="check-persistence"><h2>3. Check persistence before disconnecting</h2><p>A working SSH connection does not guarantee that the host will keep processes alive after logout. Diri reports the result of its persistence check:</p><dl class="persistence-list"><div><dt><code>native detach</code></dt><dd>The host supports detached sessions without a user supervisor.</dd></div><div><dt><code>user supervisor</code></dt><dd>Diri uses a transient supervisor already available to your user.</dd></div><div><dt><code>non-persistent</code></dt><dd>The host may end the session when the connection closes. Keep it connected or use a host with persistence support.</dd></div></dl><p class="guide-note">No mode preserves a running process across a host reboot. Persistence is about surviving a disconnect, not checkpointing the agent.</p></section><section id="reconnect"><h2>4. Return to the same session</h2><p>On a host with persistence support, disconnect and reconnect to the existing session. Diri reattaches to the remote terminal and restores its current screen. Avoid launching a duplicate agent just because the connection dropped.</p><p>Try this with a disposable task before relying on it for long work. If the host reports <code>non-persistent</code>, or if the agent has exited, reconnecting cannot make that process continue.</p><p>For connection troubleshooting and supported behavior, see <a href="https://github.com/cristicretu/diri/blob/main/docs/GETTING_STARTED.md#remote-hosts">remote sessions</a>.</p></section><aside class="guide-next"><span class="eyebrow">Next guide</span><a href="/guides/parallel-agents/">Run Claude Code and Codex in parallel <span aria-hidden="true">→</span></a></aside></article>
       </div>
     </main>
-    <footer class="site-footer guide-footer"><a href="/">diri</a><nav aria-label="Resources"><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a></nav></footer>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
   </div>
 </body>
 </html>
