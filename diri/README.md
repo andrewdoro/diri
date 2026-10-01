@@ -67,8 +67,9 @@ Either way you get the same universal build, signed and notarized, so it opens
 without a Gatekeeper prompt.
 
 The cask lives in [cristicretu/homebrew-diri](https://github.com/cristicretu/homebrew-diri)
-rather than `homebrew-cask`, which requires a notability threshold the project
-does not meet yet. It declares `auto_updates true`, so Homebrew installs diri
+for now. A submission to the official `homebrew/cask` repository is prepared in
+[packaging/homebrew](packaging/homebrew/README.md). The cask declares
+`auto_updates true`, so Homebrew installs diri
 once and then leaves it alone — diri updates itself after that, and
 `brew upgrade` will not clobber a build the app moved itself to. See
 [UPDATING.md](UPDATING.md) for how that works.

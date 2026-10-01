@@ -1,0 +1,42 @@
+name: Homebrew cask
+
+# Audits the candidate homebrew/cask submission (diri/packaging/homebrew) the
+# way Homebrew's own CI will: `brew style` and `brew audit --new --online`
+# against the latest GitHub release. Not a required check; it runs only when
+# the candidate or its submit script changes, or by hand.
+
+on:
+  pull_request:
+    paths:
+      - diri/packaging/homebrew/**
+      - .github/workflows/homebrew-cask.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Homebrew cask audit
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Render the candidate for the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          brew tap-new --no-git local/diri-candidate
+          tap="$(brew --repository local/diri-candidate)"
+          mkdir -p "${tap}/Casks"
+          diri/packaging/homebrew/submit-to-homebrew-cask.sh --render-only >"${tap}/Casks/diri.rb"
+          cat "${tap}/Casks/diri.rb"
+      - name: brew style
+        run: brew style --cask local/diri-candidate/diri
+      - name: brew audit --new --online
+        run: brew audit --new --cask --online local/diri-candidate/diri
+      - name: brew livecheck
+        run: brew livecheck --cask local/diri-candidate/diri
