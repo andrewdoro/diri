@@ -1021,6 +1021,39 @@ mod tests {
     }
 
     #[test]
+    fn tables_round_trip_through_write_and_read_note() {
+        let fixture = Fixture::new(sessions());
+        // An agent's table, written loosely the way agents write them.
+        let id = fixture.note(
+            "Gaps",
+            None,
+            "| What's missing | Type | Requirement for 5/5 |\n|---|---|---|\n| Onboarding email sequence | Content | 3 emails, tested |\n",
+        );
+        fixture
+            .bridge("root")
+            .call(
+                "write_note",
+                &json!({"note": id, "append": "| Channel | Spend |\n|:--|--:|\n| Search | $1,200 |"}),
+            )
+            .unwrap();
+        let note = fixture
+            .bridge("root")
+            .call("read_note", &json!({"note": id}))
+            .unwrap();
+        let markdown = note["markdown"].as_str().unwrap();
+        assert!(
+            markdown.contains(
+                "| What's missing            | Type    | Requirement for 5/5 |\n| ------------------------- | ------- | ------------------- |"
+            ),
+            "{markdown}"
+        );
+        assert!(markdown.contains("| :------ | -----: |"), "{markdown}");
+        let (_, doc) = diri_notes::markdown::parse(markdown);
+        let tables = doc.blocks.iter().filter(|b| b.kind.starts_table()).count();
+        assert_eq!(tables, 2, "{markdown}");
+    }
+
+    #[test]
     fn write_note_checks_links_and_appends() {
         let fixture = Fixture::new(sessions());
         let id = fixture.note("Plan", None, "- [ ] Fix flicker\n- [ ] Fix tests");

@@ -16,6 +16,9 @@ use crate::doc::{Block, BlockKind, Document, MAX_INDENT, Mark, Style, floor_boun
 use crate::markdown;
 use crate::mention::{self, MentionTarget};
 
+mod table;
+pub use table::{RowsSource, TablePos, parse_rows};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos {
     pub block: usize,
@@ -575,6 +578,8 @@ impl Editor {
         let end = self.selection.end();
         if start.block == end.block {
             self.blocks[start.block].replace(start.offset..end.offset, "", &[]);
+        } else if (start.block..=end.block).any(|i| self.blocks[i].kind.is_cell()) {
+            self.delete_across_tables(start, end);
         } else {
             let tail = {
                 let last = &mut self.blocks[end.block];
@@ -593,6 +598,44 @@ impl Editor {
         }
         self.selection = Selection::caret(start);
         true
+    }
+
+    /// Deletes a selection that touches a table without merging blocks:
+    /// tables wholly inside it go, cells it partly covers are emptied
+    /// (rows stay whole), other blocks inside it go, and the two ends lose
+    /// the selected part of their text.
+    fn delete_across_tables(&mut self, start: Pos, end: Pos) {
+        let mut remove = vec![false; self.blocks.len()];
+        let mut index = start.block + 1;
+        while index < end.block {
+            if let Some(range) = crate::doc::table_range(&self.blocks, index) {
+                let inside = range.start > start.block && range.end <= end.block;
+                let span = range.start.max(index)..range.end.min(end.block);
+                if inside {
+                    remove[span].fill(true);
+                } else {
+                    for block in &mut self.blocks[span] {
+                        let len = block.text.len();
+                        block.replace(0..len, "", &[]);
+                    }
+                }
+                index = range.end.min(end.block).max(index + 1);
+            } else {
+                remove[index] = true;
+                index += 1;
+            }
+        }
+        let last = &mut self.blocks[end.block];
+        last.replace(0..end.offset, "", &[]);
+        let first = &mut self.blocks[start.block];
+        let len = first.text.len();
+        first.replace(start.offset..len, "", &[]);
+        let mut i = 0;
+        self.blocks.retain(|_| {
+            let keep = !remove[i];
+            i += 1;
+            keep
+        });
     }
 
     pub fn delete_selection(&mut self, now_ms: u64) {
@@ -802,6 +845,30 @@ impl Editor {
         if pos.block == 0 {
             return;
         }
+        // At a cell's start Backspace steps back a cell; it never merges.
+        if self.blocks[pos.block].kind.is_cell() {
+            let previous = pos.block - 1;
+            if self.blocks[previous].kind.is_cell() && !self.blocks[pos.block].kind.starts_table() {
+                self.set_caret(self.end_of(previous));
+            }
+            return;
+        }
+        // Right after a table, an empty line goes and the caret lands in the
+        // last cell; a line with text keeps it.
+        if self.blocks[pos.block - 1].kind.is_cell() {
+            let previous = pos.block - 1;
+            if self.blocks[pos.block].text.is_empty()
+                && self.blocks[pos.block].kind == BlockKind::Paragraph
+            {
+                self.checkpoint(EditKind::Other, now_ms);
+                self.blocks.remove(pos.block);
+                self.selection = Selection::caret(self.end_of(previous));
+                self.changed();
+            } else {
+                self.set_caret(self.end_of(previous));
+            }
+            return;
+        }
         self.checkpoint(EditKind::Other, now_ms);
         let kind = self.blocks[pos.block].kind;
         // Formatting unwinds before blocks merge: outdent, then plain text.
@@ -864,6 +931,10 @@ impl Editor {
             return;
         }
         if pos.block + 1 >= self.blocks.len() {
+            return;
+        }
+        // Delete never merges into, out of or across a table.
+        if self.blocks[pos.block].kind.is_cell() || self.blocks[pos.block + 1].kind.is_cell() {
             return;
         }
         self.checkpoint(EditKind::Other, now_ms);
@@ -936,6 +1007,16 @@ impl Editor {
     pub fn insert_image(&mut self, src: &str, alt: &str, now_ms: u64) {
         self.checkpoint(EditKind::Other, now_ms);
         self.delete_selection_inner();
+        if let Some(table) = self.caret_table() {
+            // Pictures do not go in cells: below the table instead.
+            self.selection = Selection::caret(Pos::new(table.range.end - 1, 0));
+            let id = self.fresh_id();
+            self.blocks
+                .insert(table.range.end, Block::image(id, src, alt));
+            self.leave_atomic_from(table.range.end);
+            self.changed();
+            return;
+        }
         let head = self.selection.head.block;
         let id = self.fresh_id();
         let image = Block::image(id, src, alt);
@@ -992,6 +1073,12 @@ impl Editor {
     pub fn enter(&mut self, now_ms: u64) {
         self.checkpoint(EditKind::Other, now_ms);
         self.delete_selection_inner();
+        // Return in a cell adds a row below, caret in the same column.
+        if let Some(table) = self.caret_table() {
+            self.add_row_inner(&table, true);
+            self.changed();
+            return;
+        }
         if self.blocks[self.selection.head.block].kind.is_atomic() {
             // Return on a selected image or divider opens a line below it.
             let at = self.selection.head.block;
@@ -1083,6 +1170,10 @@ impl Editor {
     /// Shift-Return: a line break inside the block.
     pub fn soft_break(&mut self, now_ms: u64) {
         let head = self.selection.head;
+        // Cells are single-line, as GFM tables are.
+        if self.blocks[head.block].kind.is_cell() {
+            return;
+        }
         if self.blocks[head.block].kind == BlockKind::Title {
             self.enter(now_ms);
             return;
@@ -1159,7 +1250,13 @@ impl Editor {
         let Some(block) = self.blocks.get(index) else {
             return;
         };
-        if block.kind == kind || block.kind.is_atomic() || kind.is_atomic() || index == 0 {
+        if block.kind == kind
+            || block.kind.is_atomic()
+            || kind.is_atomic()
+            || block.kind.is_cell()
+            || kind.is_cell()
+            || index == 0
+        {
             return;
         }
         self.checkpoint(EditKind::Other, now_ms);
@@ -1169,6 +1266,9 @@ impl Editor {
 
     /// Converts every selected block (slash menu, ⌘⌥ shortcuts).
     pub fn turn_into(&mut self, turn: Turn, now_ms: u64) {
+        if self.blocks[self.selection.head.block].kind.is_cell() {
+            return;
+        }
         self.checkpoint(EditKind::Other, now_ms);
         let range = self.selected_blocks();
         match turn {
@@ -1188,8 +1288,9 @@ impl Editor {
             Turn::Kind(kind) => {
                 for index in range {
                     let block = &mut self.blocks[index];
-                    // An image has no text to carry into another kind.
-                    if block.kind == BlockKind::Image {
+                    // An image has no text to carry into another kind, and a
+                    // cell belongs to its table.
+                    if block.kind == BlockKind::Image || block.kind.is_cell() {
                         continue;
                     }
                     let text = block.text.clone();
@@ -1221,7 +1322,10 @@ impl Editor {
                 block.kind = BlockKind::Todo {
                     checked: !all_checked,
                 };
-            } else if !block.kind.is_atomic() && block.kind != BlockKind::Title {
+            } else if !block.kind.is_atomic()
+                && !block.kind.is_cell()
+                && block.kind != BlockKind::Title
+            {
                 let indent = block.indent;
                 block.set_kind(BlockKind::Todo { checked: false });
                 block.indent = indent;
@@ -1430,25 +1534,46 @@ impl Editor {
 
     /// Moves the selected blocks up or down (⌥⇧↑/↓).
     pub fn move_blocks(&mut self, up: bool, now_ms: u64) {
-        let range = self.selected_blocks();
+        let mut range = self.selected_blocks();
         if range.is_empty() {
             return;
         }
+        // A selection in a table moves the table; a table next to what moves
+        // is stepped over whole.
+        if let Some(table) = self.table_pos(range.start) {
+            range.start = table.range.start;
+        }
+        if let Some(table) = self.table_pos(range.end - 1) {
+            range.end = range.end.max(table.range.end);
+        }
+        let span = |index: usize| {
+            self.table_pos(index)
+                .map_or(index..index + 1, |table| table.range)
+        };
         let last_body = self.blocks.len() - 1;
         if (up && range.start <= 1) || (!up && range.end > last_body) {
             return;
         }
-        self.checkpoint(EditKind::Other, now_ms);
-        if up {
-            self.blocks[range.start - 1..range.end].rotate_left(1);
+        let neighbor = if up {
+            span(range.start - 1)
         } else {
-            self.blocks[range.start..range.end + 1].rotate_right(1);
+            span(range.end)
+        };
+        if up && neighbor.start < 1 {
+            return;
+        }
+        self.checkpoint(EditKind::Other, now_ms);
+        let by = neighbor.len();
+        if up {
+            self.blocks[neighbor.start..range.end].rotate_left(by);
+        } else {
+            self.blocks[range.start..neighbor.end].rotate_right(by);
         }
         let shift = |pos: Pos| {
             if up {
-                Pos::new(pos.block - 1, pos.offset)
+                Pos::new(pos.block - by, pos.offset)
             } else {
-                Pos::new(pos.block + 1, pos.offset)
+                Pos::new(pos.block + by, pos.offset)
             }
         };
         self.selection = Selection {
@@ -1480,7 +1605,17 @@ impl Editor {
             return markdown::write_inline(&piece, false);
         }
         let mut blocks = Vec::new();
+        let mut copied_to = 0;
         for (index, range) in ranges {
+            // A table the selection touches is copied whole: a table cut to
+            // some of its cells has no Markdown form.
+            if let Some(table) = self.table_pos(index) {
+                if index >= copied_to {
+                    blocks.extend(self.blocks[table.range.clone()].iter().cloned());
+                    copied_to = table.range.end;
+                }
+                continue;
+            }
             let mut piece = self.blocks[index].clone();
             piece.split_off(range.end, 0, piece.kind);
             let mut piece = piece.split_off(range.start, 0, piece.kind);
@@ -1496,8 +1631,75 @@ impl Editor {
     }
 
     /// Pastes text, reading Markdown structure when it spans lines.
+    /// Pastes text that is a table: spreadsheet rows (TSV or CSV) or a
+    /// Markdown table, into the table at the caret or as a new table.
+    /// Returns where the rows came from, or `None` (nothing changed) when
+    /// the text is not a table. A single spreadsheet row only counts in a
+    /// table or on an empty line, where a stray tab is not meant as text.
+    pub fn paste_table(&mut self, text: &str, now_ms: u64) -> Option<&'static str> {
+        let text = text.replace("\r\n", "\n");
+        let head = &self.blocks[self.selection.head.block];
+        let lone_row_ok = head.kind.is_cell() || head.text.is_empty();
+        if let Some((source, rows)) = parse_rows(&text)
+            && (rows.len() >= 2 || lone_row_ok)
+        {
+            self.paste_rows(&rows, now_ms);
+            return Some(source.name());
+        }
+        let (_, parsed) = markdown::parse(&format!("\n{text}"));
+        let only_table = !parsed.blocks.is_empty()
+            && parsed.blocks.iter().all(|b| b.kind.is_cell())
+            && parsed
+                .blocks
+                .iter()
+                .filter(|b| b.kind.starts_table())
+                .count()
+                == 1;
+        if !only_table {
+            return None;
+        }
+        let cols = usize::from(parsed.blocks[0].kind.cell()?.cols.max(1));
+        let rows: Vec<Vec<String>> = parsed
+            .blocks
+            .chunks(cols)
+            .map(|row| row.iter().map(|b| b.text.clone()).collect())
+            .collect();
+        if self.caret_table().is_some() {
+            self.paste_rows(&rows, now_ms);
+        } else {
+            // A new table keeps the pasted marks and alignments.
+            self.checkpoint(EditKind::Other, now_ms);
+            self.delete_selection_inner();
+            let mut cells = parsed.blocks;
+            for cell in &mut cells {
+                cell.id = self.fresh_id();
+            }
+            let at = self.block_slot_after_caret_for_paste();
+            let len = cells.len();
+            self.blocks.splice(at..at, cells);
+            if self.blocks.get(at + len).is_none_or(|b| b.kind.is_cell()) {
+                let id = self.fresh_id();
+                self.blocks
+                    .insert(at + len, Block::new(id, BlockKind::Paragraph, ""));
+            }
+            self.selection = Selection::caret(self.end_of(at + len - 1));
+            self.changed();
+        }
+        Some("markdown")
+    }
+
     pub fn paste(&mut self, text: &str, now_ms: u64) {
         let text = text.replace("\r\n", "\n");
+        // A cell holds one line: pasted lines join with spaces.
+        if self.blocks[self.selection.start().block].kind.is_cell() && text.contains('\n') {
+            let joined: Vec<&str> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            self.paste(&joined.join(" "), now_ms);
+            return;
+        }
         let head_kind = self.blocks[self.selection.start().block].kind;
         if !text.contains('\n') || head_kind == BlockKind::Code {
             self.checkpoint(EditKind::Other, now_ms);
@@ -1524,6 +1726,24 @@ impl Editor {
         let (_, parsed) = markdown::parse(&format!("\n{text}"));
         let mut pasted: Vec<Block> = parsed.blocks;
         if pasted.is_empty() {
+            self.changed();
+            return;
+        }
+        // Pasted tables go in whole, as blocks of their own: no cell merges
+        // into the caret's line.
+        if pasted.iter().any(|b| b.kind.is_cell()) {
+            for block in &mut pasted {
+                block.id = self.fresh_id();
+            }
+            let at = self.block_slot_after_caret_for_paste();
+            let len = pasted.len();
+            self.blocks.splice(at..at, pasted);
+            if self.blocks.get(at + len).is_none_or(|b| b.kind.is_cell()) {
+                let id = self.fresh_id();
+                self.blocks
+                    .insert(at + len, Block::new(id, BlockKind::Paragraph, ""));
+            }
+            self.selection = Selection::caret(self.end_of(at + len - 1));
             self.changed();
             return;
         }
@@ -2158,5 +2378,222 @@ mod tests {
             markdown::write(&markdown::FrontMatter::default(), &e.document()),
             "# T\n\n> [!WARNING]\n> heads up\n> second line\n\nafter\n"
         );
+    }
+
+    fn cell_texts(e: &Editor) -> Vec<String> {
+        e.blocks()
+            .iter()
+            .filter(|b| b.kind.is_cell())
+            .map(|b| b.text.clone())
+            .collect()
+    }
+
+    fn md(e: &Editor) -> String {
+        markdown::write(&markdown::FrontMatter::default(), &e.document())
+    }
+
+    #[test]
+    fn slash_table_inserts_a_three_by_three_table_on_the_empty_line() {
+        let mut e = editor("# T\n\nabove\n\n&nbsp;\n\nbelow\n");
+        e.set_caret(Pos::new(2, 0));
+        e.insert_empty_table(3, 3, 0);
+        assert_eq!(cell_texts(&e).len(), 9);
+        let table = e.caret_table().unwrap();
+        assert_eq!((table.row, table.col, table.rows, table.cols), (0, 0, 3, 3));
+        assert_eq!(e.block(1).text, "above");
+        assert_eq!(e.block(table.range.end).text, "below");
+        assert!(e.undo());
+        assert!(cell_texts(&e).is_empty());
+    }
+
+    #[test]
+    fn tab_moves_through_cells_and_adds_a_row_at_the_end() {
+        let mut e = editor("# T\n\n");
+        e.set_caret(Pos::new(1, 0));
+        e.insert_empty_table(2, 2, 0);
+        for word in ["Metric", "Owner", "CTR", "Ana"] {
+            type_str(&mut e, word);
+            assert!(e.table_tab(true, 0));
+        }
+        // Tab in the last cell added a row, caret in its first cell.
+        let table = e.caret_table().unwrap();
+        assert_eq!((table.rows, table.row, table.col), (3, 2, 0));
+        assert!(e.table_tab(false, 0));
+        assert_eq!(e.caret_table().unwrap().row, 1);
+        assert_eq!(e.selection.head.offset, 3, "caret at the end of the cell");
+        assert_eq!(
+            md(&e),
+            "# T\n\n| Metric | Owner |\n| ------ | ----- |\n| CTR    | Ana   |\n|        |       |\n"
+        );
+    }
+
+    #[test]
+    fn return_adds_a_row_and_shift_return_does_nothing_in_a_cell() {
+        let mut e = editor("# T\n\n| a | b |\n| - | - |\n| 1 | 2 |\n");
+        e.set_caret(Pos::new(4, 1));
+        e.soft_break(0);
+        assert_eq!(e.block(4).text, "2");
+        e.enter(0);
+        let table = e.caret_table().unwrap();
+        assert_eq!((table.rows, table.row, table.col), (3, 2, 1));
+        assert!(e.undo());
+        assert_eq!(e.caret_table().unwrap().rows, 2);
+    }
+
+    #[test]
+    fn rows_columns_alignment_and_deletion_are_single_undo_steps() {
+        use crate::doc::Align;
+        let mut e = editor("# T\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\nafter\n");
+        e.set_caret(Pos::new(1, 1)); // header "a"
+        assert!(e.table_add_col(true, 0));
+        type_str(&mut e, "new");
+        assert!(e.table_set_align(Align::Right, 0));
+        assert_eq!(
+            md(&e),
+            "# T\n\n| a   | new | b   |\n| --- | --: | --- |\n| 1   |     | 2   |\n\nafter\n"
+        );
+        assert!(e.table_add_row(false, 0));
+        assert_eq!(e.caret_table().unwrap().rows, 3);
+        // The new top row is the header now.
+        assert!(e.block(2).kind.cell().unwrap().header);
+        assert!(e.table_delete_row(0));
+        assert!(e.table_delete_col(0));
+        assert_eq!(e.caret_table().unwrap().cols, 2);
+        assert!(e.table_delete(0));
+        assert!(cell_texts(&e).is_empty());
+        assert_eq!(e.block(e.selection.head.block).text, "after");
+        // Undo walks back through each step.
+        for _ in 0..5 {
+            assert!(e.undo());
+        }
+        assert_eq!(cell_texts(&e), ["a", "new", "b", "1", "", "2"]);
+    }
+
+    #[test]
+    fn backspace_and_delete_never_merge_cells() {
+        let mut e = editor("# T\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n&nbsp;\n\nafter\n");
+        // Cells: a=1, b=2, 1=3, 2=4; the empty line is 5, "after" 6.
+        e.set_caret(Pos::new(3, 0));
+        e.backspace(Granularity::Grapheme, 0);
+        assert_eq!(cell_texts(&e), ["a", "b", "1", "2"]);
+        assert_eq!(
+            e.selection.head,
+            Pos::new(2, 1),
+            "stepped back to the end of b"
+        );
+        e.set_caret(Pos::new(4, 1));
+        e.delete_forward(Granularity::Grapheme, 0);
+        assert_eq!(cell_texts(&e), ["a", "b", "1", "2"]);
+        // An empty line after the table goes, the caret lands in the table.
+        e.set_caret(Pos::new(5, 0));
+        e.backspace(Granularity::Grapheme, 0);
+        assert_eq!(e.block(5).text, "after");
+        assert_eq!(e.selection.head, Pos::new(4, 1));
+    }
+
+    #[test]
+    fn deleting_a_selection_keeps_tables_whole_or_removes_them_whole() {
+        let mut e = editor("# T\n\nbefore\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\nafter\n");
+        // From inside a paragraph into the table: cells empty, rows stay.
+        e.set_selection(Selection {
+            anchor: Pos::new(1, 3),
+            head: Pos::new(4, 0),
+        });
+        e.delete_selection(0);
+        assert_eq!(e.block(1).text, "bef");
+        assert_eq!(cell_texts(&e), ["", "", "1", "2"]);
+        assert!(e.undo());
+        // Around the whole table: it goes.
+        e.set_selection(Selection {
+            anchor: Pos::new(1, 0),
+            head: Pos::new(6, 2),
+        });
+        e.delete_selection(0);
+        assert!(cell_texts(&e).is_empty());
+        assert_eq!(e.block(1).text, "");
+        assert_eq!(e.block(2).text, "ter");
+    }
+
+    #[test]
+    fn spreadsheet_rows_paste_as_a_table_or_into_one() {
+        let mut e = editor("# T\n\n");
+        e.set_caret(Pos::new(1, 0));
+        let sheet =
+            "Channel\tSpend\tCPA\nSearch\t$1,200\t$14\n\"Social, paid\"\t$800\t\"$2\"\"1\"\n";
+        assert_eq!(e.paste_table(sheet, 0), Some("tsv"));
+        assert_eq!(
+            cell_texts(&e),
+            [
+                "Channel",
+                "Spend",
+                "CPA",
+                "Search",
+                "$1,200",
+                "$14",
+                "Social, paid",
+                "$800",
+                "$2\"1"
+            ]
+        );
+        // Into the table at a cell: fills right and down, growing it.
+        let first_body = e.caret_table().unwrap().range.start + 3;
+        e.set_caret(Pos::new(first_body + 1, 0));
+        assert_eq!(e.paste_table("a\tb\tc\nd\te\tf\ng\th\ti", 0), Some("tsv"));
+        let table = e.caret_table().unwrap();
+        assert_eq!((table.rows, table.cols), (4, 4));
+        assert_eq!(e.block(table.index(1, 1)).text, "a");
+        assert_eq!(e.block(table.index(3, 3)).text, "i");
+        assert!(e.undo());
+        assert_eq!(e.caret_table().unwrap().cols, 3);
+        // CSV needs two or more consistent lines; prose with commas is text.
+        let mut f = editor("# T\n\n");
+        f.set_caret(Pos::new(1, 0));
+        assert_eq!(f.paste_table("Yes, we shipped it, finally.", 0), None);
+        assert_eq!(f.paste_table("a,b\n1,2\n", 0), Some("csv"));
+        // A Markdown table pastes with its marks.
+        let mut g = editor("# T\n\n");
+        g.set_caret(Pos::new(1, 0));
+        assert_eq!(
+            g.paste_table("| **Goal** | Due |\n|---|--:|\n| Launch | Fri |", 0),
+            Some("markdown")
+        );
+        assert_eq!(g.block(1).marks[0].style, Style::Bold);
+        assert_eq!(cell_texts(&g), ["Goal", "Due", "Launch", "Fri"]);
+    }
+
+    #[test]
+    fn copying_inside_a_table_gives_tsv_and_outside_gives_markdown() {
+        let mut e = editor(
+            "# T\n\nintro\n\n| a | b | c |\n| - | - | - |\n| 1 | 2 | 3 |\n| 4 | 5\t | 6 |\n",
+        );
+        e.set_selection(Selection {
+            anchor: Pos::new(6, 0), // "2"
+            head: Pos::new(10, 1),  // "6"
+        });
+        assert_eq!(e.selection_tsv().as_deref(), Some("2\t3\n5\t6"));
+        e.set_selection(Selection {
+            anchor: Pos::new(1, 0),
+            head: Pos::new(6, 1),
+        });
+        assert_eq!(e.selection_tsv(), None);
+        let copied = e.selected_markdown();
+        assert!(copied.starts_with("intro\n\n| a "), "{copied}");
+        assert!(
+            copied.contains("| 4 "),
+            "the table is copied whole:\n{copied}"
+        );
+    }
+
+    #[test]
+    fn moving_blocks_steps_over_a_table_and_moves_it_whole() {
+        let mut e = editor("# T\n\none\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\ntwo\n");
+        e.set_caret(Pos::new(1, 0));
+        e.move_blocks(false, 0);
+        let texts: Vec<&str> = e.blocks().iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["T", "a", "b", "1", "2", "one", "two"]);
+        e.set_caret(Pos::new(3, 0));
+        e.move_blocks(false, 0);
+        let texts: Vec<&str> = e.blocks().iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["T", "one", "a", "b", "1", "2", "two"]);
     }
 }

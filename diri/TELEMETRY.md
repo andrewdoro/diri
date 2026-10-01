@@ -310,6 +310,10 @@ note ids.
 | `notes.image.added` | info | `kind` (`paste`\|`drop`\|`picker`) | how pictures get into notes |
 | `notes.image.failed` | info | `kind` (as above) | pictures refused (format, size, write) |
 | `notes.callout.added` | info | | callout use |
+| `notes.table.inserted` | info | `kind` (`slash`) | tables made from `/table` |
+| `notes.table.pasted` | info | `kind` (`markdown`\|`tsv`\|`csv`) | tables pasted, and from where (Sheets/Excel/Numbers arrive as TSV) |
+| `notes.table.row_added` | info | | rows added (menu, ⌃⇧↑/↓, Tab in the last cell, Return in a cell) |
+| `notes.table.col_added` | info | | columns added (menu, ⌃⇧←/→, a wider paste) |
 
 ## Upload
 

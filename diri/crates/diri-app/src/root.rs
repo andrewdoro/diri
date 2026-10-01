@@ -9531,7 +9531,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
             cx.run_until_parked();
         }
-        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold|links|link-editor|media|big|select|empty` types
+        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold|links|link-editor|media|big|select|empty|table|table-wide|table-menu` types
         // into the note:
         // mention chips beside a to-do, then the `/` or `@` menu open at the
         // caret, to judge the menus beside the rest of diri's chrome.
@@ -9609,6 +9609,32 @@ mod tests {
                             );
                             view.editor.set_caret(Pos::new(1, 0));
                             window.focus(&view.focus_handle(cx), cx);
+                        }
+                        "table" | "table-wide" | "table-menu" => {
+                            // The user's screenshot: an agent's gap analysis,
+                            // once raw pipes, now a table.
+                            let source = match scene.as_str() {
+                                "table-wide" => crate::notes::tests::WIDE_TABLE,
+                                _ => crate::notes::tests::AGENT_GAPS,
+                            };
+                            let (_, doc) = diri_notes::markdown::parse(source);
+                            view.reload(diri_notes::edit::Editor::new(&doc), cx);
+                            let first = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.kind.is_cell())
+                                .expect("a table");
+                            if scene == "table-menu" {
+                                // Editing: caret in a body cell, menu open.
+                                let cell = first + 3 * 2 + 1;
+                                let len = view.editor.block(cell).text.len();
+                                view.editor.set_caret(Pos::new(cell, len));
+                                window.focus(&view.focus_handle(cx), cx);
+                                view.open_table_menu(cx);
+                            } else {
+                                view.editor.set_caret(Pos::new(0, 0));
+                            }
                         }
                         "big" => {
                             // A long note, scrolled deep: only nearby blocks

@@ -34,6 +34,10 @@ use gpui::{
 
 use crate::floating;
 
+#[path = "table_view.rs"]
+mod table_view;
+use table_view::{TABLE_MENU, TableMenu};
+
 pub(crate) const EDITOR_CONTEXT: &str = "DiriNoteEditor";
 /// The editor's context while the ⌘K link panel owns the keyboard: none of
 /// the editor's bindings match, so keys reach the panel's field.
@@ -84,6 +88,11 @@ actions!(
         Link,
         ToggleTodo,
         ToggleFold,
+        TableRowAbove,
+        TableRowBelow,
+        TableColLeft,
+        TableColRight,
+        TableMenuAction,
         TurnParagraph,
         TurnHeading1,
         TurnHeading2,
@@ -101,6 +110,12 @@ actions!(
     ]
 );
 
+// Table shortcuts, shared by the keymap and the table menu that prints them.
+// ⌃⇧ arrows are free app-wide; outside a table they fall through.
+const KEY_TABLE_ROW_ABOVE: &str = "ctrl-shift-up";
+const KEY_TABLE_ROW_BELOW: &str = "ctrl-shift-down";
+const KEY_TABLE_COL_LEFT: &str = "ctrl-shift-left";
+const KEY_TABLE_COL_RIGHT: &str = "ctrl-shift-right";
 // Turn-into shortcuts, shared by the keymap and the `/` menu that prints them.
 const KEY_TURN_PARAGRAPH: &str = "cmd-alt-0";
 const KEY_TURN_H1: &str = "cmd-alt-1";
@@ -169,6 +184,11 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-k", Link, c),
         KeyBinding::new("cmd-enter", ToggleTodo, c),
         KeyBinding::new("cmd-alt-enter", ToggleFold, c),
+        KeyBinding::new(KEY_TABLE_ROW_ABOVE, TableRowAbove, c),
+        KeyBinding::new(KEY_TABLE_ROW_BELOW, TableRowBelow, c),
+        KeyBinding::new(KEY_TABLE_COL_LEFT, TableColLeft, c),
+        KeyBinding::new(KEY_TABLE_COL_RIGHT, TableColRight, c),
+        KeyBinding::new("ctrl-enter", TableMenuAction, c),
         KeyBinding::new(KEY_TURN_PARAGRAPH, TurnParagraph, c),
         KeyBinding::new(KEY_TURN_H1, TurnHeading1, c),
         KeyBinding::new(KEY_TURN_H2, TurnHeading2, c),
@@ -299,6 +319,8 @@ enum SlashAction {
     Turn(Turn),
     /// Pick picture files and insert them.
     Image,
+    /// A 3 × 3 table.
+    Table,
 }
 
 #[derive(Clone, Copy)]
@@ -403,6 +425,14 @@ const SLASH_ITEMS: &[SlashItem] = &[
         keywords: "divider rule line separator",
     },
     SlashItem {
+        label: "Table",
+        icon: "tablecells",
+        keys: None,
+        action: SlashAction::Table,
+        group: 3,
+        keywords: "table grid rows columns spreadsheet sheet",
+    },
+    SlashItem {
         label: "Image",
         icon: "photo",
         keys: None,
@@ -445,6 +475,9 @@ pub(crate) struct NoteEditorView {
     slash: Option<SlashMenu>,
     mention: Option<MentionMenu>,
     link_editor: Option<LinkEditor>,
+    table_menu: Option<TableMenu>,
+    /// Each table's sideways scroll, by its first cell's id.
+    table_scrolls: std::cell::RefCell<std::collections::HashMap<u64, ScrollHandle>>,
     mentions: Rc<MentionDirectory>,
     assets: Option<AssetHome>,
     /// Each image's on-screen bounds from the last paint, for clicks.
@@ -500,6 +533,8 @@ impl NoteEditorView {
             slash: None,
             mention: None,
             link_editor: None,
+            table_menu: None,
+            table_scrolls: Default::default(),
             mentions: Rc::default(),
             assets: None,
             image_rects: Rc::default(),
@@ -747,6 +782,11 @@ impl NoteEditorView {
             previous = Some(index);
         }
         let index = chosen?;
+        let index = if self.editor.block(index).kind.is_cell() {
+            self.cell_at_x(index, point_at.x)
+        } else {
+            index
+        };
         let block = self.editor.block(index);
         if block.text.is_empty() {
             return Some(Pos::new(index, 0));
@@ -782,6 +822,11 @@ impl NoteEditorView {
         };
         if y >= bounds.top() && y < bounds.bottom() {
             return self.hit(point(x, y));
+        }
+        // In a table ↑/↓ move by row in the same column and leave the table
+        // at its first and last rows.
+        if let Some(target) = self.table_vertical(down, x) {
+            return target;
         }
         let count = self.editor.blocks().len();
         let mut index = head.block;
@@ -881,7 +926,10 @@ impl NoteEditorView {
     fn maybe_open_slash(&mut self) {
         let head = self.editor.selection.head;
         let block = self.editor.block(head.block);
-        if matches!(block.kind, BlockKind::Title | BlockKind::Code) || head.offset == 0 {
+        if matches!(block.kind, BlockKind::Title | BlockKind::Code)
+            || block.kind.is_cell()
+            || head.offset == 0
+        {
             return;
         }
         let slash = head.offset - 1;
@@ -923,6 +971,10 @@ impl NoteEditorView {
                 self.editor.turn_into(turn, now);
             }
             SlashAction::Image => self.pick_images(cx),
+            SlashAction::Table => {
+                self.editor.insert_empty_table(3, 3, now);
+                crate::telemetry::notes_event("notes.table.inserted", "slash");
+            }
         }
         self.edited(cx);
     }
@@ -1187,6 +1239,11 @@ impl NoteEditorView {
     }
 
     pub(crate) fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.table_menu {
+            let selected = menu.selected;
+            self.apply_table_row(selected, cx);
+            return;
+        }
         if self.work_panel_key(super::work_item::PanelKey::Enter, cx) {
             return;
         }
@@ -1218,12 +1275,18 @@ impl NoteEditorView {
             self.apply_slash(selected, cx);
             return;
         }
+        if self.table_tab(true, cx) {
+            return;
+        }
         self.run(cx, |e, now| {
             e.indent(false, now);
         });
     }
 
-    fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.table_tab(false, cx) {
+            return;
+        }
         self.run(cx, |e, now| {
             e.indent(true, now);
         });
@@ -1310,6 +1373,17 @@ impl NoteEditorView {
         if !extend && self.work_panel_key(key, cx) {
             return;
         }
+        let table_rows = self.table_menu_len();
+        if !extend && let Some(menu) = &mut self.table_menu {
+            let count = table_rows;
+            menu.selected = if down {
+                (menu.selected + 1) % count
+            } else {
+                (menu.selected + count - 1) % count
+            };
+            cx.notify();
+            return;
+        }
         if !extend && self.mention.is_some() {
             let count = self.mention_matches().len().max(1);
             if let Some(menu) = &mut self.mention {
@@ -1370,15 +1444,23 @@ impl NoteEditorView {
         self.moved(cx);
     }
 
-    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        let text = self.editor.selected_markdown();
+    /// What ⌘C puts on the pasteboard: cells inside one table as TSV, so a
+    /// spreadsheet takes them, else the selection as Markdown.
+    fn copied_text(&self) -> String {
+        self.editor
+            .selection_tsv()
+            .unwrap_or_else(|| self.editor.selected_markdown())
+    }
+
+    pub(super) fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        let text = self.copied_text();
         if !text.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        let text = self.editor.selected_markdown();
+        let text = self.copied_text();
         if text.is_empty() {
             return;
         }
@@ -1414,6 +1496,22 @@ impl NoteEditorView {
         let Some(text) = item.text() else {
             return;
         };
+        // Spreadsheet rows (Sheets, Excel, Numbers) and Markdown tables
+        // become a table, or fill the one the caret is in.
+        if text.contains(['\t', '\n', ',', '|']) {
+            let before = self.editor.caret_table();
+            let revision = self.editor.revision;
+            if let Some(source) = self.editor.paste_table(&text, now_ms()) {
+                crate::telemetry::notes_event("notes.table.pasted", source);
+                if let Some(before) = before {
+                    self.count_table_growth(&before);
+                }
+                if self.editor.revision != revision {
+                    self.edited(cx);
+                }
+                return;
+            }
+        }
         // Pasting a URL over a selection links it, as Notion and Bear do.
         let trimmed = text.trim();
         if !self.editor.selection.is_collapsed() && is_url(trimmed) {
@@ -1721,6 +1819,7 @@ impl NoteEditorView {
         if self.slash.take().is_some()
             || self.mention.take().is_some()
             || self.link_editor.take().is_some()
+            || self.table_menu.take().is_some()
         {
             cx.notify();
             return;
@@ -2348,7 +2447,31 @@ impl Render for NoteEditorView {
         let rendered = self.visible_blocks(&hidden);
         let heights = Rc::clone(&self.row_heights);
         let mut spacer = 0.0f32;
+        let mut table_end = 0;
+        let autoscroll_now = self.autoscroll;
         for (index, block) in self.editor.blocks().iter().enumerate() {
+            if index < table_end {
+                continue;
+            }
+            // A table is drawn whole, as one grid of its cells.
+            if block.kind.is_cell() {
+                let frame =
+                    self.render_table(index, &rendered, focused, colors, autoscroll_now, cx);
+                table_end = index + frame.layouts.len();
+                layouts.extend(frame.layouts);
+                shown_all.extend(frame.shown);
+                match frame.element {
+                    Some(element) => {
+                        if spacer > 0.0 {
+                            column = column.child(div().flex_none().h(px(spacer)));
+                            spacer = 0.0;
+                        }
+                        column = column.child(element);
+                    }
+                    None => spacer += frame.offscreen,
+                }
+                continue;
+            }
             if !rendered[index] {
                 layouts.push(None);
                 shown_all.push(Shown::default());
@@ -2794,6 +2917,13 @@ impl Render for NoteEditorView {
         } else {
             None
         };
+        let table_menu = if self.table_menu.is_some() && self.editor.caret_table().is_some() {
+            let height = self.table_menu_height();
+            self.host_menu(TABLE_MENU, Self::table_menu_rows, 248.0, height, window, cx)
+        } else {
+            self.table_menu = None;
+            None
+        };
         let link_menu = if self.link_editor.is_some() {
             let height = self.link_menu_height();
             self.host_menu(
@@ -2875,6 +3005,11 @@ impl Render for NoteEditorView {
             .on_action(cx.listener(Self::link))
             .on_action(cx.listener(Self::toggle_todo))
             .on_action(cx.listener(Self::toggle_fold))
+            .on_action(cx.listener(Self::table_row_above))
+            .on_action(cx.listener(Self::table_row_below))
+            .on_action(cx.listener(Self::table_col_left))
+            .on_action(cx.listener(Self::table_col_right))
+            .on_action(cx.listener(Self::table_menu_key))
             .on_action(cx.listener(Self::turn_paragraph))
             .on_action(cx.listener(Self::turn_h1))
             .on_action(cx.listener(Self::turn_h2))
@@ -2930,6 +3065,7 @@ impl Render for NoteEditorView {
             .children(mention_menu)
             .children(work_menu)
             .children(link_menu)
+            .children(table_menu)
     }
 }
 
@@ -3083,16 +3219,31 @@ impl NoteEditorView {
         let selection = self.editor.selection;
         let mut y = 0.0;
         let mut rendered = vec![false; blocks.len()];
-        for (index, block) in blocks.iter().enumerate() {
+        let mut index = 0;
+        while index < blocks.len() {
             if hidden[index] {
+                index += 1;
                 continue;
             }
-            let height = self.row_height(block);
-            rendered[index] = (y + height >= lo && y <= hi)
-                || index == 0
-                || index == selection.head.block
-                || index == selection.anchor.block;
+            // A table row is one unit: its cells sit side by side.
+            let unit = match blocks[index].kind.cell() {
+                Some(cell) => index..(index + usize::from(cell.cols.max(1))).min(blocks.len()),
+                None => index..index + 1,
+            };
+            let height = if blocks[index].kind.is_cell() {
+                self.table_row_height(index)
+            } else {
+                self.row_height(&blocks[index])
+            };
+            let holds_selection =
+                |i: usize| i == selection.head.block || i == selection.anchor.block;
+            let show =
+                (y + height >= lo && y <= hi) || index == 0 || unit.clone().any(holds_selection);
+            for i in unit.clone() {
+                rendered[i] = show;
+            }
             y += height;
+            index = unit.end;
         }
         rendered
     }
@@ -3427,6 +3578,8 @@ impl NoteEditorView {
         let selected = if let Some(menu) = &mut self.slash {
             &mut menu.selected
         } else if let Some(menu) = &mut self.mention {
+            &mut menu.selected
+        } else if let Some(menu) = &mut self.table_menu {
             &mut menu.selected
         } else {
             return;

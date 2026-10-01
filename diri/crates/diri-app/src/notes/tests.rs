@@ -784,7 +784,25 @@ fn big_note_render_cost() {
     cx.update(|cx| crate::fonts::init(cx));
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(NoteStore::open(dir.path().join("notes")).unwrap());
-    let (_, doc) = markdown::parse(&big_note_markdown(blocks));
+    // `DIRI_BENCH_KIND=table`: one table of `DIRI_BENCH_ROWS` rows (200).
+    let source = if std::env::var("DIRI_BENCH_KIND").as_deref() == Ok("table") {
+        let rows: usize = std::env::var("DIRI_BENCH_ROWS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        let mut table =
+            String::from("# Funnel\n\n| Week | Channel | Signups | Notes |\n|--:|:--|--:|:--|\n");
+        for row in 0..rows {
+            table.push_str(&format!(
+                "| {row} | Paid **search** | {} | Holding steady; see [sheet](https://docs.google.com/spreadsheets/d/1AbC) |\n",
+                400 + row * 3
+            ));
+        }
+        table
+    } else {
+        big_note_markdown(blocks)
+    };
+    let (_, doc) = markdown::parse(&source);
     let actual = doc.blocks.len();
     let (id, _) = store.create(doc, None).unwrap();
     let runtime = Arc::new(StoreRuntime::inert());
@@ -975,4 +993,144 @@ fn a_background_autosave_merges_an_outside_write_it_races(cx: &mut gpui::TestApp
     let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
     assert!(text.contains("added by an agent"), "{text}");
     assert!(text.contains("mine"), "{text}");
+}
+
+#[gpui::test]
+fn tables_take_tab_navigation_and_paste_from_a_spreadsheet(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    fn type_str(
+        view: &mut NoteEditorView,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<NoteEditorView>,
+    ) {
+        for ch in text.chars() {
+            view.replace_text_in_range(None, &ch.to_string(), window, cx);
+        }
+    }
+    editor.update_in(cx, |view, window, cx| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+        // `/table` inserts a 3 × 3 table, caret in its first cell.
+        type_str(view, "/table", window, cx);
+        view.newline(&editor_view::Newline, window, cx);
+        let table = view.editor.caret_table().expect("caret in the new table");
+        assert_eq!((table.rows, table.cols, table.row, table.col), (3, 3, 0, 0));
+        // Tab walks the cells; Tab in the last cell adds a row.
+        for (i, word) in [
+            "Channel", "Spend", "CPA", "Search", "$1.2k", "$14", "Social", "$800", "$21",
+        ]
+        .iter()
+        .enumerate()
+        {
+            type_str(view, word, window, cx);
+            view.indent(&editor_view::Indent, window, cx);
+            let table = view.editor.caret_table().unwrap();
+            if i < 8 {
+                assert_eq!(table.rows, 3);
+            } else {
+                assert_eq!((table.rows, table.row, table.col), (4, 3, 0));
+            }
+        }
+        view.outdent(&editor_view::Outdent, window, cx);
+        assert_eq!(view.editor.caret_table().unwrap().row, 2);
+    });
+    // Rows copied from Google Sheets paste into a new table below.
+    editor.update_in(cx, |view, _, _| {
+        let last = view.editor.blocks().len() - 1;
+        view.editor.set_caret(diri_notes::edit::Pos::new(last, 0));
+    });
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+        "Week\tSignups\tActivation\n1\t420\t31%\n2\t515\t\"34%, rising\"\n".into(),
+    ));
+    editor.update_in(cx, |view, window, cx| {
+        view.paste(&editor_view::Paste, window, cx);
+        let table = view.editor.caret_table().expect("pasted as a table");
+        assert_eq!((table.rows, table.cols), (3, 3));
+        // Copying cells inside the table puts TSV on the pasteboard.
+        let start = table.index(1, 1);
+        let end = table.index(2, 2);
+        view.editor.set_selection(diri_notes::edit::Selection {
+            anchor: diri_notes::edit::Pos::new(start, 0),
+            head: diri_notes::edit::Pos::new(end, view.editor.block(end).text.len()),
+        });
+        view.copy(&editor_view::Copy, window, cx);
+    });
+    assert_eq!(
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .as_deref(),
+        Some("420\t31%\n515\t34%, rising")
+    );
+    pane.update(cx, |pane, cx| pane.save(cx));
+    let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+    assert!(text.contains("| Channel | Spend | CPA |"), "{text}");
+    assert!(text.contains("| Week | Signups | Activation  |"), "{text}");
+    assert!(text.contains("| 2    | 515     | 34%, rising |"), "{text}");
+}
+
+/// The table from the user's screenshot, written the way an agent writes
+/// one: loose pipes, no padding, marks and chips in cells.
+pub(crate) const AGENT_GAPS: &str = "# Launch readiness
+
+Where the Q4 launch stands against the 5/5 bar.
+
+| What's missing | Type | Requirement for 5/5 |
+|---|---|---|
+| Onboarding email sequence | Content | 3 emails, **A/B tested** on subject lines |
+| Pricing page experiment | Experiment | Significant at 95%, see [Q4 brief](https://www.notion.so/acme/Q4-brief-1f2e3d4c5b6a79881f2e3d4c5b6a7988) |
+| Attribution dashboard | Analytics | Weekly [funnel sheet](https://docs.google.com/spreadsheets/d/1AbC/edit) owned by growth |
+| Sales handoff | Process | [HubSpot deal](https://app.hubspot.com/contacts/1/record/0-3/2) stages mapped |
+| Launch QA | Engineering | [@Codex: fix resize flicker](diri://session/s_codex) merged |
+
+Next: review with the team on Friday.
+";
+
+/// A table wider than the note's column: it scrolls sideways in its block.
+pub(crate) const WIDE_TABLE: &str = "# Channel plan
+
+| Channel | Owner | Budget | Target CPA | Q1 | Q2 | Q3 | Q4 | Notes |
+|:--|:--|--:|--:|--:|--:|--:|--:|:--|
+| Paid search | Ana | $48,000 | $14 | 11,200 | 12,400 | 13,100 | 15,800 | Brand terms capped at 20% |
+| Paid social | Ravi | $36,000 | $21 | 7,900 | 8,300 | 9,800 | 12,100 | Creative refresh every 3 weeks |
+| Lifecycle email | Mei | $6,000 | $3 | 4,100 | 4,600 | 5,200 | 6,900 | Win-back flow launches in Q2 |
+| Partnerships | Tom | $12,000 | $9 | 1,200 | 2,600 | 3,100 | 4,400 | Two co-marketing launches |
+";
+
+#[gpui::test]
+fn arrows_move_by_row_and_leave_the_table_at_its_edges(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store);
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update_in(cx, |view, _, cx| {
+        let (_, doc) = markdown::parse(
+            "# T\n\nabove\n\n| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n\nbelow\n",
+        );
+        view.reload(diri_notes::edit::Editor::new(&doc), cx);
+        // "b", the header's second cell.
+        view.editor.set_caret(diri_notes::edit::Pos::new(3, 1));
+    });
+    cx.run_until_parked();
+    let step = |cx: &mut gpui::VisualTestContext, down: bool| {
+        editor.update_in(cx, |view, _, cx| view.vertical(down, false, cx));
+        cx.run_until_parked();
+        editor.read_with(cx, |view, _| view.editor.selection.head.block)
+    };
+    // Same column, one row at a time; past the last row, out below.
+    assert_eq!(step(cx, true), 5, "2");
+    assert_eq!(step(cx, true), 7, "4");
+    assert_eq!(step(cx, true), 8, "below");
+    // And back up into the last row, then out above the header.
+    assert!(matches!(step(cx, false), 6 | 7));
+    editor.update_in(cx, |view, _, _| {
+        view.editor.set_caret(diri_notes::edit::Pos::new(2, 0))
+    });
+    cx.run_until_parked();
+    assert_eq!(step(cx, false), 1, "above");
 }

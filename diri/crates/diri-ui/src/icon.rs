@@ -133,10 +133,16 @@ pub enum IconName {
     GitHub,
     Image,
     Info,
+    Table,
+    ArrowLeft,
+    ArrowRight,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
 }
 
 impl IconName {
-    pub const ALL: [Self; 87] = [
+    pub const ALL: [Self; 93] = [
         Self::Account,
         Self::Activity,
         Self::Archive,
@@ -224,6 +230,12 @@ impl IconName {
         Self::GitHub,
         Self::Image,
         Self::Info,
+        Self::Table,
+        Self::ArrowLeft,
+        Self::ArrowRight,
+        Self::AlignLeft,
+        Self::AlignCenter,
+        Self::AlignRight,
     ];
 
     pub const fn asset_path(self) -> &'static str {
@@ -315,6 +327,12 @@ impl IconName {
             Self::GitHub => "icons/github.svg",
             Self::Image => "icons/image.svg",
             Self::Info => "icons/info.svg",
+            Self::Table => "icons/table.svg",
+            Self::ArrowLeft => "icons/arrow-left.svg",
+            Self::ArrowRight => "icons/arrow-right.svg",
+            Self::AlignLeft => "icons/align-left.svg",
+            Self::AlignCenter => "icons/align-center.svg",
+            Self::AlignRight => "icons/align-right.svg",
         }
     }
 
@@ -412,6 +430,12 @@ impl IconName {
             "github" => Self::GitHub,
             "photo" => Self::Image,
             "info.circle" => Self::Info,
+            "tablecells" => Self::Table,
+            "arrow.left.solid" => Self::ArrowLeft,
+            "arrow.right" => Self::ArrowRight,
+            "text.alignleft" => Self::AlignLeft,
+            "text.aligncenter" => Self::AlignCenter,
+            "text.alignright" => Self::AlignRight,
             _ => return None,
         })
     }
@@ -499,6 +523,12 @@ fn embedded_svg(path: &str) -> Option<&'static [u8]> {
         "icons/github.svg" => include_bytes!("../assets/icons/github.svg"),
         "icons/image.svg" => include_bytes!("../assets/icons/image.svg"),
         "icons/info.svg" => include_bytes!("../assets/icons/info.svg"),
+        "icons/table.svg" => include_bytes!("../assets/icons/table.svg"),
+        "icons/arrow-left.svg" => include_bytes!("../assets/icons/arrow-left.svg"),
+        "icons/arrow-right.svg" => include_bytes!("../assets/icons/arrow-right.svg"),
+        "icons/align-left.svg" => include_bytes!("../assets/icons/align-left.svg"),
+        "icons/align-center.svg" => include_bytes!("../assets/icons/align-center.svg"),
+        "icons/align-right.svg" => include_bytes!("../assets/icons/align-right.svg"),
         "icons/account.svg" => include_bytes!("../assets/icons/account.svg"),
         "icons/activity.svg" => include_bytes!("../assets/icons/activity.svg"),
         "icons/archive.svg" => include_bytes!("../assets/icons/archive.svg"),

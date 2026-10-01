@@ -31,7 +31,34 @@ pub enum BlockKind {
     Image,
     /// A highlighted aside, stored as a GitHub-style alert (`> [!NOTE]`).
     Callout(Tone),
+    /// One cell of a table. A table is a run of cells, row by row; its
+    /// first cell is column 0 of the header row, which is how two adjacent
+    /// tables stay apart. Every cell carries its table's column count and
+    /// its column's alignment, kept consistent by the editor.
+    Cell(Cell),
 }
+
+/// A table cell's place and look. Cells are single-line, as in GFM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Cell {
+    pub col: u16,
+    pub cols: u16,
+    pub align: Align,
+    pub header: bool,
+}
+
+/// A table column's alignment: the colons of the delimiter row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Align {
+    #[default]
+    None,
+    Left,
+    Center,
+    Right,
+}
+
+/// The most columns a table keeps; wider Markdown is cut to this.
+pub const MAX_TABLE_COLS: usize = 64;
 
 /// A callout's kind, GitHub's alert set: each has a glyph and a tint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -99,6 +126,49 @@ impl BlockKind {
     pub fn is_atomic(self) -> bool {
         matches!(self, Self::Divider | Self::Image)
     }
+
+    pub fn is_cell(self) -> bool {
+        matches!(self, Self::Cell(_))
+    }
+
+    pub fn cell(self) -> Option<Cell> {
+        match self {
+            Self::Cell(cell) => Some(cell),
+            _ => None,
+        }
+    }
+
+    /// The first cell of a table: column 0 of its header row.
+    pub fn starts_table(self) -> bool {
+        matches!(
+            self,
+            Self::Cell(Cell {
+                col: 0,
+                header: true,
+                ..
+            })
+        )
+    }
+}
+
+/// The table containing `index`, as a range of block indices.
+pub fn table_range(blocks: &[Block], index: usize) -> Option<std::ops::Range<usize>> {
+    blocks.get(index)?.kind.cell()?;
+    let mut start = index;
+    while !blocks[start].kind.starts_table() {
+        if start == 0 || !blocks[start - 1].kind.is_cell() {
+            break;
+        }
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while blocks
+        .get(end)
+        .is_some_and(|b| b.kind.is_cell() && !b.kind.starts_table())
+    {
+        end += 1;
+    }
+    Some(start..end)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -155,6 +225,11 @@ impl Block {
             marks: Vec::new(),
             src: String::new(),
         }
+    }
+
+    /// A table cell holding `text`.
+    pub fn cell(id: BlockId, cell: Cell, text: impl Into<String>) -> Self {
+        Self::new(id, BlockKind::Cell(cell), text)
     }
 
     /// An image block: `src` is a path relative to the notes folder or a URL.

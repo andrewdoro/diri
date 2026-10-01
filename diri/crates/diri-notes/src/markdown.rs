@@ -126,6 +126,11 @@ fn parse_blocks(lines: &[&str]) -> Vec<Block> {
             i += 1;
             continue;
         }
+        if let Some((cells, next)) = table_at(lines, i) {
+            blocks.extend(cells);
+            i = next;
+            continue;
+        }
         if let Some((alt, src)) = image_line(trimmed) {
             blocks.push(Block::image(0, src, alt));
             i += 1;
@@ -164,6 +169,7 @@ fn parse_blocks(lines: &[&str]) -> Vec<Block> {
                 || list_item(next).is_some()
                 || quote_line(next).is_some()
                 || image_line(next).is_some()
+                || table_at(lines, i).is_some()
             {
                 break;
             }
@@ -698,13 +704,23 @@ pub fn write(front: &FrontMatter, doc: &Document) -> String {
         .rposition(|b| !(b.kind == BlockKind::Paragraph && b.text.is_empty()))
         .map_or(0, |i| i + 1);
     let mut previous: Option<&Block> = None;
-    for (index, block) in doc.blocks[..end].iter().enumerate() {
+    let mut index = 0;
+    while index < end {
+        let block = &doc.blocks[index];
         if let Some(previous) = previous {
             let tight = previous.kind.is_list() && block.kind.is_list();
             out.push_str(if tight { "\n" } else { "\n\n" });
         }
+        if block.kind.is_cell() {
+            let range = crate::doc::table_range(&doc.blocks, index).unwrap_or(index..index + 1);
+            write_table(&mut out, &doc.blocks[range.clone()]);
+            previous = doc.blocks.get(range.end - 1);
+            index = range.end;
+            continue;
+        }
         write_block(&mut out, doc, index, block);
         previous = Some(block);
+        index += 1;
     }
     if !out.ends_with('\n') {
         out.push('\n');
@@ -715,6 +731,8 @@ pub fn write(front: &FrontMatter, doc: &Document) -> String {
 fn write_block(out: &mut String, doc: &Document, index: usize, block: &Block) {
     let pad = "  ".repeat(usize::from(block.indent));
     match block.kind {
+        // Tables are written whole by `write_table`; a stray cell reads as text.
+        BlockKind::Cell(_) => out.push_str(&write_inline(block, true)),
         // The editor lifts the title into `Document::title` before writing;
         // a stray one reads as ordinary text.
         BlockKind::Title | BlockKind::Paragraph => {
@@ -987,11 +1005,14 @@ fn escape_text(text: &str, line_start: bool) -> String {
 
 fn escape_block_start(line: &mut String) {
     let trimmed = line.trim_start();
+    // A text line shaped like a table's delimiter row would turn the line
+    // above it into a table header.
     let starts_block = heading(trimmed).is_some()
         || list_item(trimmed).is_some()
         || quote_line(trimmed).is_some()
         || fence_of(trimmed).is_some()
-        || is_divider(trimmed);
+        || is_divider(trimmed)
+        || delimiter_row(trimmed).is_some();
     if starts_block && !trimmed.starts_with('\\') {
         let lead = line.len() - trimmed.len();
         let first = trimmed.chars().next().expect("block start is non-empty");
@@ -1001,6 +1022,203 @@ fn escape_block_start(line: &mut String) {
             line.insert(lead + digits, '\\');
         } else {
             line.insert(lead, '\\');
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tables (GFM)
+
+/// Splits a table row into raw cells on unescaped pipes, dropping one
+/// optional leading and trailing pipe. `None` when the line has no
+/// unescaped pipe at all. As in cmark-gfm, a pipe right after a backslash
+/// is escaped whatever precedes that backslash (even inside a code span),
+/// and unescaping drops just that one backslash.
+fn split_row(line: &str) -> Option<Vec<&str>> {
+    let line = line.trim();
+    let bytes = line.as_bytes();
+    let cuts: Vec<usize> = bytes
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| **b == b'|' && (*i == 0 || bytes[i - 1] != b'\\'))
+        .map(|(i, _)| i)
+        .collect();
+    if cuts.is_empty() {
+        return None;
+    }
+    let mut cells = Vec::new();
+    let mut start = 0;
+    for &cut in &cuts {
+        cells.push(&line[start..cut]);
+        start = cut + 1;
+    }
+    cells.push(&line[start..]);
+    if cuts.first() == Some(&0) {
+        cells.remove(0);
+    }
+    if cuts.last() == Some(&(line.len() - 1)) {
+        cells.pop();
+    }
+    Some(cells)
+}
+
+/// The alignments of a delimiter row such as `| :-- | :-: | --: |`.
+fn delimiter_row(line: &str) -> Option<Vec<crate::doc::Align>> {
+    use crate::doc::Align;
+    if !line.contains('|') || !line.contains('-') {
+        return None;
+    }
+    let cells = split_row(line)?;
+    let mut aligns = Vec::with_capacity(cells.len());
+    for cell in cells {
+        let cell = cell.trim();
+        let left = cell.starts_with(':');
+        let right = cell.ends_with(':') && cell.len() > 1;
+        let dashes = cell.trim_start_matches(':').trim_end_matches(':');
+        if dashes.is_empty() || !dashes.bytes().all(|b| b == b'-') {
+            return None;
+        }
+        aligns.push(match (left, right) {
+            (true, true) => Align::Center,
+            (true, false) => Align::Left,
+            (false, true) => Align::Right,
+            (false, false) => Align::None,
+        });
+    }
+    (!aligns.is_empty()).then_some(aligns)
+}
+
+fn starts_other_block(line: &str) -> bool {
+    heading(line).is_some()
+        || list_item(line).is_some()
+        || quote_line(line).is_some()
+        || fence_of(line).is_some()
+        || is_divider(line)
+        || image_line(line).is_some()
+}
+
+/// A GFM table starting at `lines[i]`: a header row, a delimiter row with
+/// as many cells, then body rows until a blank line, a line without a pipe,
+/// or another block. Short rows are padded and long ones cut, as GFM does.
+/// Returns the cells and the index of the first line after the table.
+fn table_at(lines: &[&str], i: usize) -> Option<(Vec<Block>, usize)> {
+    use crate::doc::{Cell, MAX_TABLE_COLS};
+    let header_line = lines.get(i)?.trim();
+    if starts_other_block(header_line) {
+        return None;
+    }
+    let header = split_row(header_line)?;
+    let aligns = delimiter_row(lines.get(i + 1)?.trim())?;
+    if header.len() != aligns.len() {
+        return None;
+    }
+    let cols = aligns.len().min(MAX_TABLE_COLS);
+    let mut rows = vec![header];
+    let mut next = i + 2;
+    while let Some(line) = lines.get(next) {
+        let line = line.trim();
+        if line.is_empty() || starts_other_block(line) {
+            break;
+        }
+        let Some(cells) = split_row(line) else {
+            break;
+        };
+        rows.push(cells);
+        next += 1;
+    }
+    let mut blocks = Vec::with_capacity(rows.len() * cols);
+    for (r, row) in rows.iter().enumerate() {
+        for (col, &align) in aligns.iter().enumerate().take(cols) {
+            let raw = row
+                .get(col)
+                .copied()
+                .unwrap_or_default()
+                .trim()
+                .replace("\\|", "|");
+            let (text, marks) = parse_inline(&raw);
+            let mut block = Block::cell(
+                0,
+                Cell {
+                    col: col as u16,
+                    cols: cols as u16,
+                    align,
+                    header: r == 0,
+                },
+                text,
+            );
+            block.marks = marks;
+            blocks.push(block);
+        }
+    }
+    Some((blocks, next))
+}
+
+/// Writes a table with its columns padded to line up, so the file reads as
+/// a table in any text editor and renders as one everywhere.
+fn write_table(out: &mut String, cells: &[Block]) {
+    use crate::doc::Align;
+    let cols = cells
+        .first()
+        .and_then(|b| b.kind.cell())
+        .map_or(1, |c| usize::from(c.cols.max(1)));
+    let aligns: Vec<Align> = (0..cols)
+        .map(|col| {
+            cells
+                .get(col)
+                .and_then(|b| b.kind.cell())
+                .map_or(Align::None, |c| c.align)
+        })
+        .collect();
+    let written: Vec<String> = cells
+        .iter()
+        .map(|cell| {
+            let mut flat = cell.clone();
+            flat.text = flat.text.replace('\n', " ");
+            write_inline(&flat, false).replace('|', "\\|")
+        })
+        .collect();
+    let width = |s: &str| s.chars().count();
+    let mut widths = vec![3usize; cols];
+    for (i, text) in written.iter().enumerate() {
+        widths[i % cols] = widths[i % cols].max(width(text));
+    }
+    let pad = |text: &str, col: usize| {
+        let gap = widths[col].saturating_sub(width(text));
+        match aligns[col] {
+            Align::Right => format!("{}{text}", " ".repeat(gap)),
+            Align::Center => format!("{}{text}{}", " ".repeat(gap / 2), " ".repeat(gap - gap / 2)),
+            _ => format!("{text}{}", " ".repeat(gap)),
+        }
+    };
+    let row = |out: &mut String, cells: &[String]| {
+        out.push('|');
+        for (col, text) in cells.iter().enumerate() {
+            out.push(' ');
+            out.push_str(&pad(text, col));
+            out.push_str(" |");
+        }
+    };
+    for (r, chunk) in written.chunks(cols).enumerate() {
+        if r > 0 {
+            out.push('\n');
+        }
+        let mut chunk = chunk.to_vec();
+        chunk.resize(cols, String::new());
+        row(out, &chunk);
+        if r == 0 {
+            out.push_str("\n|");
+            for (col, align) in aligns.iter().enumerate() {
+                let dashes = widths[col];
+                let rule = match align {
+                    Align::Left => format!(":{}", "-".repeat(dashes - 1)),
+                    Align::Center => format!(":{}:", "-".repeat(dashes - 2)),
+                    Align::Right => format!("{}:", "-".repeat(dashes - 1)),
+                    Align::None => "-".repeat(dashes),
+                };
+                out.push(' ');
+                out.push_str(&rule);
+                out.push_str(" |");
+            }
         }
     }
 }
@@ -1214,6 +1432,119 @@ mod tests {
         assert_eq!(doc.blocks[2].text, "Irreversible");
     }
 
+    fn cells(doc: &Document) -> Vec<(u16, u16, bool, String)> {
+        doc.blocks
+            .iter()
+            .filter_map(|b| {
+                b.kind
+                    .cell()
+                    .map(|c| (c.col, c.cols, c.header, b.text.clone()))
+            })
+            .collect()
+    }
+
+    /// The table from the user's screenshot, as an agent wrote it.
+    const AGENT_TABLE: &str = "# Gaps\n\n| What's missing | Type | Requirement for 5/5 |\n|---|---|---|\n| Onboarding email sequence | Content | 3 emails, tested |\n| Pricing page **A/B test** | Experiment | Significant at 95% |\n| [Q4 brief](https://www.notion.so/acme/Q4-brief-1f2e3d4c5b6a79881f2e3d4c5b6a7988) | Doc | Signed off |\n";
+
+    #[test]
+    fn reads_the_agent_table_and_writes_it_aligned() {
+        let (_, doc) = parse(AGENT_TABLE);
+        let cells = cells(&doc);
+        assert_eq!(cells.len(), 12);
+        assert_eq!(cells[0], (0, 3, true, "What's missing".into()));
+        assert_eq!(cells[5], (2, 3, false, "3 emails, tested".into()));
+        // Inline marks and links survive inside cells.
+        assert!(doc.blocks[3].marks.is_empty());
+        assert_eq!(doc.blocks[6].text, "Pricing page A/B test");
+        assert_eq!(doc.blocks[6].marks[0].style, Style::Bold);
+        assert!(matches!(doc.blocks[9].marks[0].style, Style::Link(_)));
+        let text = write(&FrontMatter::default(), &doc);
+        let table: Vec<&str> = text.lines().filter(|l| l.starts_with('|')).collect();
+        assert_eq!(table.len(), 5);
+        let widths: Vec<usize> = table.iter().map(|l| l.chars().count()).collect();
+        assert!(
+            widths.iter().all(|w| *w == widths[0]),
+            "columns line up:\n{text}"
+        );
+        assert!(table[1].starts_with("| ---"), "{text}");
+        round_trip(&doc);
+    }
+
+    #[test]
+    fn alignment_escapes_and_ragged_rows() {
+        use crate::doc::Align;
+        let (_, doc) = parse(
+            "T | Qty | Note\n:-- | --: | :-:\nshirt | 2\nhat \\| cap | 1 | `a\\|b` | extra\n",
+        );
+        let aligns: Vec<Align> = doc.blocks[..3]
+            .iter()
+            .map(|b| b.kind.cell().unwrap().align)
+            .collect();
+        assert_eq!(aligns, [Align::Left, Align::Right, Align::Center]);
+        let cells = cells(&doc);
+        assert_eq!(cells.len(), 9, "short row padded, long row cut");
+        assert_eq!(cells[5].3, "");
+        assert_eq!(cells[6].3, "hat | cap");
+        assert_eq!(doc.blocks[8].text, "a|b");
+        assert_eq!(doc.blocks[8].marks[0].style, Style::Code);
+        let text = write(&FrontMatter::default(), &doc);
+        assert!(text.contains("| :-"), "{text}");
+        assert!(text.contains("hat \\| cap"), "{text}");
+        round_trip(&doc);
+    }
+
+    #[test]
+    fn tables_never_swallow_other_lines() {
+        let (_, doc) = parse(
+            "# T\n\nintro | with a pipe\n\n| a | b |\n| - | - |\n| 1 | 2 |\n- a list item | with pipe\n\nafter\n\n| x |\n| --- |\n\n| y |\n| --- |\n| 3 |\n\nno delimiter | here\nstill text\n",
+        );
+        let kinds: Vec<String> = doc
+            .blocks
+            .iter()
+            .map(|b| match b.kind {
+                BlockKind::Cell(c) if c.col == 0 && c.header => "table".into(),
+                BlockKind::Cell(_) => "cell".into(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "Paragraph",
+                "table",
+                "cell",
+                "cell",
+                "cell",
+                "Bullet",
+                "Paragraph",
+                "table",
+                "table",
+                "cell",
+                "Paragraph"
+            ]
+        );
+        assert_eq!(
+            doc.blocks.last().unwrap().text,
+            "no delimiter | here\nstill text"
+        );
+        round_trip(&doc);
+    }
+
+    #[test]
+    fn text_that_looks_like_a_delimiter_row_stays_text() {
+        let doc = Document::new(
+            "",
+            vec![
+                b(BlockKind::Paragraph, "a | b\n--- | ---"),
+                b(BlockKind::Paragraph, "|x|"),
+            ],
+        );
+        let text = write(&FrontMatter::default(), &doc);
+        let (_, parsed) = parse(&text);
+        assert!(parsed.blocks.iter().all(|b| !b.kind.is_cell()), "{text}");
+        round_trip(&doc);
+    }
+
     #[test]
     fn random_notes_round_trip() {
         // A tiny deterministic generator keeps the fuzz reproducible without
@@ -1225,7 +1556,7 @@ mod tests {
             seed ^= seed << 17;
             seed % n
         };
-        let alphabet: Vec<char> = "ab c_*`[]~#->1.\\é漢 ".chars().collect();
+        let alphabet: Vec<char> = "ab c_*`[]~#->1.\\é漢 |:".chars().collect();
         let kinds = [
             BlockKind::Paragraph,
             BlockKind::Heading(2),
@@ -1248,6 +1579,7 @@ mod tests {
             Style::Link("diri://note/20260930-142501-3fa9".into()),
         ];
         let mut mentions = 0;
+        let mut tables = 0;
         for _ in 0..4000 {
             let mut blocks = Vec::new();
             for _ in 0..(1 + next(4)) {
@@ -1308,11 +1640,60 @@ mod tests {
                 }
                 blocks.push(block);
             }
+            // A table now and then, between the other blocks: random cells
+            // (pipes and colons included), alignments, and whole-cell marks.
+            if next(3) == 0 {
+                use crate::doc::{Align, Cell};
+                let cols = 1 + next(4) as usize;
+                let rows = 1 + next(4) as usize;
+                let aligns: Vec<Align> = (0..cols)
+                    .map(|_| {
+                        [Align::None, Align::Left, Align::Center, Align::Right][next(4) as usize]
+                    })
+                    .collect();
+                let at = next(blocks.len() as u64 + 1) as usize;
+                let mut table = Vec::new();
+                for r in 0..rows {
+                    for (col, &align) in aligns.iter().enumerate() {
+                        let len = next(9) as usize;
+                        let text: String = (0..len)
+                            .map(|_| alphabet[next(alphabet.len() as u64) as usize])
+                            .collect();
+                        let text = text.trim().to_owned();
+                        let mut cell = Block::cell(
+                            0,
+                            Cell {
+                                col: col as u16,
+                                cols: cols as u16,
+                                align,
+                                header: r == 0,
+                            },
+                            text.clone(),
+                        );
+                        if !text.is_empty() && next(3) == 0 {
+                            let style = styles[next(styles.len() as u64) as usize].clone();
+                            if style == Style::Code
+                                || matches!(style, Style::Link(_))
+                                || expressible(&text, 0..text.len())
+                            {
+                                cell.add_mark(0..text.len(), style);
+                            }
+                        }
+                        table.push(cell);
+                    }
+                }
+                // Two tables must not touch, or they would read back as one.
+                let touches = |i: usize| blocks.get(i).is_some_and(|b: &Block| b.kind.is_cell());
+                if !touches(at) && !(at > 0 && touches(at - 1)) {
+                    blocks.splice(at..at, table);
+                }
+            }
             if blocks.is_empty() {
                 continue;
             }
             let doc = Document::new("", blocks);
             mentions += doc.mentions().len();
+            tables += doc.blocks.iter().filter(|b| b.kind.starts_table()).count();
             let text = write(&FrontMatter::default(), &doc);
             let (_, parsed) = parse(&text);
             if !equivalent(&parsed, &doc) {
@@ -1333,5 +1714,6 @@ mod tests {
             mentions > 500,
             "the fuzz barely exercised mentions: {mentions}"
         );
+        assert!(tables > 800, "the fuzz barely exercised tables: {tables}");
     }
 }
