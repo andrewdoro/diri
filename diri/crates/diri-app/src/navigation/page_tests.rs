@@ -526,7 +526,8 @@ impl Render for ActionHarness {
             VerticalTabs,
             OpenSettings,
             ToggleNotifications,
-            CheckForUpdates
+            CheckForUpdates,
+            ShowWhatsNew
         );
         root
     }
@@ -564,7 +565,7 @@ fn every_static_palette_action_dispatches_once_by_mouse_and_keyboard(cx: &mut Te
     };
     assert_eq!(
         actions.len(),
-        35,
+        36,
         "new static actions need a dispatch probe"
     );
     for action in actions {

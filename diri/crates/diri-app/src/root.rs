@@ -53,8 +53,8 @@ use crate::commands::{
     SESSION_NAVIGATION_CONTEXT, SearchNotes, SelectLastSession, SelectNextAttentionSession,
     SelectNextSession, SelectPreviousSession, SelectSession1, SelectSession2, SelectSession3,
     SelectSession4, SelectSession5, SelectSession6, SelectSession7, SelectSession8, ShowTodos,
-    ToggleAuxiliaryTerminal, ToggleCommandPalette, ToggleHistory, ToggleInspector, ToggleOverview,
-    ToggleQuickOpen, ToggleSidebar, ToggleTabPeek,
+    ShowWhatsNew, ToggleAuxiliaryTerminal, ToggleCommandPalette, ToggleHistory, ToggleInspector,
+    ToggleOverview, ToggleQuickOpen, ToggleSidebar, ToggleTabPeek,
 };
 use crate::external_drop::ExternalDropAction;
 use crate::haptics::{self, Haptic};
@@ -808,6 +808,16 @@ impl RootView {
             {
                 subscription.detach();
             }
+            cx.subscribe_in(
+                surfaces,
+                window,
+                |this, _, event: &crate::surface_shell::UtilitySurfacesEvent, window, cx| {
+                    if let crate::surface_shell::UtilitySurfacesEvent::ShowWhatsNew(page) = event {
+                        this.open_whats_new_at(*page, window, cx);
+                    }
+                },
+            )
+            .detach();
         }
         cx.subscribe_in(
             &launcher,
@@ -2409,6 +2419,7 @@ impl RootView {
                     .update(cx, |sidebar, cx| sidebar.select_next_needing_input(cx));
             }
             CommandId::CheckForUpdates => self.services.updates.check(true),
+            CommandId::ShowWhatsNew => self.open_whats_new_at(0, window, cx),
             CommandId::SelectPreviousSession if !self.arrow_surface_visible() => {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.select_relative(-1, cx));
@@ -2502,6 +2513,16 @@ impl RootView {
     /// Opens the What's New sheet on the releases not seen yet, or on the
     /// newest one when opened with nothing new, and marks them seen.
     pub(crate) fn open_whats_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_whats_new_at(0, window, cx);
+    }
+
+    /// [`Self::open_whats_new`] on highlight `page` (Settings' thumbnails).
+    pub(crate) fn open_whats_new_at(
+        &mut self,
+        page: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use crate::whats_new::{WhatsNewEvent, WhatsNewSheet, current_version, latest, unseen};
         if self.whats_new.is_some() {
             return;
@@ -2522,6 +2543,9 @@ impl RootView {
             return;
         }
         let sheet = cx.new(|cx| WhatsNewSheet::new(&releases, runtime, cx));
+        if page > 0 {
+            sheet.update(cx, |sheet, cx| sheet.go(page, window, cx));
+        }
         cx.subscribe_in(
             &sheet,
             window,
@@ -5194,6 +5218,9 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
                 this.run_command(CommandId::CheckForUpdates, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ShowWhatsNew, window, cx| {
+                this.run_command(CommandId::ShowWhatsNew, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &SelectPreviousSession, window, cx| {
                 this.run_command(CommandId::SelectPreviousSession, window, cx);
             }))
@@ -5380,9 +5407,6 @@ impl Render for RootView {
         if let Some(launches) = self.workspace_launches(colors, cx) {
             root = root.child(launches);
         }
-        if let Some(sheet) = &self.whats_new {
-            root = root.child(div().absolute().inset_0().child(sheet.clone()));
-        }
         if crate::alerts::enabled(cx) {
             self.sync_close_prompt(window, cx);
         } else if let Some(confirmation) = self.close_confirmation(colors, cx) {
@@ -5408,6 +5432,10 @@ impl Render for RootView {
         }
         if let Some(navigation) = &self.navigation {
             root = root.child(cached_window_overlay(navigation.clone()));
+        }
+        // Above Settings too: Settings › What's New opens it.
+        if let Some(sheet) = &self.whats_new {
+            root = root.child(div().absolute().inset_0().child(sheet.clone()));
         }
         if let Some(picker) = self.quote_target_picker(colors, sidebar_width, cx) {
             root = root.child(deferred(picker));

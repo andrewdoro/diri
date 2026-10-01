@@ -328,6 +328,7 @@ fn append_management_actions(
                             | CommandId::ToggleHistory
                             | CommandId::ToggleNotifications
                             | CommandId::CheckForUpdates
+                            | CommandId::ShowWhatsNew
                     )
             )
         }),
@@ -552,6 +553,7 @@ pub fn actions_for_default_host(
             keywords: "settings appearance dark light preferences".into(),
         },
         registered_action(CommandId::CheckForUpdates),
+        registered_action(CommandId::ShowWhatsNew),
     ]);
     result
 }
@@ -1131,6 +1133,7 @@ mod tests {
                 "toggle-notifications",
                 "color-theme",
                 "check-for-updates",
+                "whats-new",
             ]
         );
         assert_eq!(result[0].title, "New Codex Session");

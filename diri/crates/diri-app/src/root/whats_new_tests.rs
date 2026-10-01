@@ -112,3 +112,29 @@ fn try_it_closes_the_sheet_and_runs_the_command(cx: &mut TestAppContext) {
     root.read_with(cx, |root, _| assert!(root.whats_new.is_none()));
     crate::whats_new::set_current_version_for_test(None);
 }
+
+#[gpui::test]
+fn the_command_replays_the_highlights_after_they_were_seen(cx: &mut TestAppContext) {
+    let (root, cx) = open(cx, newest());
+    assert!(cx.debug_bounds("whats-new-pill").is_none());
+    root.update_in(cx, |root, window, cx| {
+        root.run_command(CommandId::ShowWhatsNew, window, cx)
+    });
+    cx.run_until_parked();
+    let sheet = root.read_with(cx, |root, _| root.whats_new.clone().expect("sheet open"));
+    assert_eq!(sheet.read_with(cx, |sheet, _| sheet.page()), 0);
+    crate::whats_new::set_current_version_for_test(None);
+}
+
+#[gpui::test]
+fn a_settings_thumbnail_opens_the_sheet_on_its_highlight(cx: &mut TestAppContext) {
+    let (root, cx) = open(cx, newest());
+    let surfaces = root.read_with(cx, |root, _| root.utility_surfaces.clone().unwrap());
+    surfaces.update(cx, |_, cx| {
+        cx.emit(crate::surface_shell::UtilitySurfacesEvent::ShowWhatsNew(2))
+    });
+    cx.run_until_parked();
+    let sheet = root.read_with(cx, |root, _| root.whats_new.clone().expect("sheet open"));
+    assert_eq!(sheet.read_with(cx, |sheet, _| sheet.page()), 2);
+    crate::whats_new::set_current_version_for_test(None);
+}

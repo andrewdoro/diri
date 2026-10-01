@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Records the What's New clips from the real window and encodes them as the
-# animated WebP files the app embeds (crates/diri-app/assets/whats-new).
+# animated WebP files the app embeds (crates/diri-app/assets/whats-new). The
+# dark recordings also go to the website's What's New page
+# (website/assets/whats-new), which matches the site's dark palette.
 #
 #   scripts/whats-new-clips.sh            # record every clip, then encode
 #   scripts/whats-new-clips.sh <frames>   # encode frames recorded earlier
@@ -36,4 +38,7 @@ for dir in "$frames"/*/; do
   img2webp "${args[@]}" -o "$out/$name.webp"
   rm -rf "$scaled"
   printf '%-14s %s\n' "$name" "$(du -h "$out/$name.webp" | cut -f1)"
+  if [[ $name == *-dark ]]; then
+    cp "$out/$name.webp" "../website/assets/whats-new/${name%-dark}.webp"
+  fi
 done

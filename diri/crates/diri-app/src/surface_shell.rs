@@ -359,6 +359,8 @@ impl HostEditor {
 
 pub(crate) enum UtilitySurfacesEvent {
     AccountLoginOpened,
+    /// A What's New thumbnail was clicked: open the sheet on that highlight.
+    ShowWhatsNew(usize),
 }
 impl gpui::EventEmitter<UtilitySurfacesEvent> for UtilitySurfaces {}
 
@@ -396,6 +398,12 @@ pub struct UtilitySurfaces {
     usage_chart_frame_pending: bool,
     usage_numbers: crate::number_flow::Bank,
     release_notes: ReleaseNotesState,
+    /// Finished-state stills of the newest release's What's New clips, for
+    /// the thumbnails on the What's New page, in the appearance they match.
+    whats_new_posters: Option<(
+        diri_ui::Appearance,
+        Vec<gpui::Entity<crate::whats_new::ClipPlayer>>,
+    )>,
     settings_scroll: ScrollHandle,
     settings_scroller: diri_ui::ScrollerState,
     settings_search: QueryEditor,
@@ -590,6 +598,7 @@ impl UtilitySurfaces {
             usage_chart_frame_pending: false,
             usage_numbers: crate::number_flow::Bank::default(),
             release_notes: ReleaseNotesState::default(),
+            whats_new_posters: None,
             settings_scroll: ScrollHandle::new(),
             settings_scroller: diri_ui::ScrollerState::new(),
             settings_search: QueryEditor::default(),
@@ -1606,6 +1615,7 @@ impl UtilitySurfaces {
         }
         if self.settings_tab == SettingsTab::WhatsNew {
             self.refresh_release_notes(cx);
+            self.load_whats_new_posters(cx);
         }
         cx.notify();
     }
@@ -1689,6 +1699,7 @@ impl UtilitySurfaces {
         self.settings_tab = tab;
         if tab == SettingsTab::WhatsNew {
             self.refresh_release_notes(cx);
+            self.load_whats_new_posters(cx);
         }
         if tab == SettingsTab::Worktrees {
             self.load_worktrees(cx);
@@ -2724,8 +2735,109 @@ impl UtilitySurfaces {
         settings_page("Phone access", content, colors)
     }
 
+    /// Decodes the thumbnails' stills once per appearance, off the main thread.
+    fn load_whats_new_posters(&mut self, cx: &mut Context<Self>) {
+        let appearance = self.settings_colors().appearance;
+        if self
+            .whats_new_posters
+            .as_ref()
+            .is_some_and(|(loaded, _)| *loaded == appearance)
+        {
+            return;
+        }
+        let posters = crate::whats_new::latest(&crate::whats_new::current_version())
+            .into_iter()
+            .flat_map(|release| release.highlights)
+            .map(|highlight| {
+                let clip = highlight.clip.for_appearance(appearance);
+                cx.new(|cx| crate::whats_new::ClipPlayer::new(clip, true, cx))
+            })
+            .collect();
+        self.whats_new_posters = Some((appearance, posters));
+    }
+
+    /// The newest release's highlights as thumbnails; each opens the sheet on
+    /// its clip.
+    fn whats_new_highlights(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let colors = self.settings_colors();
+        let release = *crate::whats_new::latest(&crate::whats_new::current_version()).first()?;
+        let posters = self
+            .whats_new_posters
+            .as_ref()
+            .map(|(_, posters)| posters.clone())
+            .unwrap_or_default();
+        let cards = release
+            .highlights
+            .iter()
+            .enumerate()
+            .map(|(index, highlight)| {
+                div()
+                    .id(("whats-new-highlight", index))
+                    .debug_selector(move || format!("whats-new-highlight-{index}"))
+                    .w(px(176.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .cursor_pointer()
+                    .group("whats-new-highlight")
+                    .child(
+                        div()
+                            .w(px(176.0))
+                            .h(px(110.0))
+                            .rounded(px(Radius::ROW))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(colors.primary.alpha(0.08))
+                            .bg(colors.background)
+                            .hover(move |style| style.border_color(colors.primary.alpha(0.22)))
+                            .children(posters.get(index).cloned()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(Typo::ROW.size))
+                            .text_color(colors.primary)
+                            .child(highlight.title),
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(UtilitySurfacesEvent::ShowWhatsNew(index));
+                    }))
+            })
+            .collect::<Vec<_>>();
+        Some(
+            div()
+                .p(px(16.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .text_size(px(Typo::TITLE.size))
+                                .font_weight(Typo::TITLE.weight)
+                                .text_color(colors.primary)
+                                .child(format!("New in diri {}", release.version)),
+                        )
+                        .child(surface_button(
+                            "Watch",
+                            "whats-new-watch",
+                            colors,
+                            cx,
+                            |_, cx| cx.emit(UtilitySurfacesEvent::ShowWhatsNew(0)),
+                        )),
+                )
+                .child(div().flex().flex_wrap().gap(px(12.0)).children(cards))
+                .into_any_element(),
+        )
+    }
+
     fn whats_new_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
+        let highlights = self.whats_new_highlights(cx);
         let content = match &self.release_notes {
             ReleaseNotesState::Idle | ReleaseNotesState::Loading => div()
                 .id("release-notes-loading")
@@ -2828,7 +2940,14 @@ impl UtilitySurfaces {
 
         settings_page(
             "What's New",
-            setting_section("LATEST RELEASE", content, colors),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(SETTINGS_SECTION_GAP))
+                .when_some(highlights, |page, highlights| {
+                    page.child(setting_section("HIGHLIGHTS", highlights, colors))
+                })
+                .child(setting_section("LATEST RELEASE", content, colors)),
             colors,
         )
     }
@@ -7604,6 +7723,16 @@ mod tests {
             .expect("scroll to privacy settings");
             cx.run_until_parked();
         }
+        if std::env::var("DIRI_VISUAL_SETTINGS_TAB").as_deref() == Ok("whats-new") {
+            // The thumbnails decode on their own threads.
+            for _ in 0..40 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                cx.run_until_parked();
+            }
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+        }
         let screenshot = cx
             .capture_screenshot(window.into())
             .expect("capture settings screenshot");
@@ -8498,6 +8627,7 @@ mod tests {
                     };
                     let document = Arc::new(crate::markdown::MarkdownDocument::parse(&release.body));
                     surfaces.release_notes = ReleaseNotesState::Loaded { release, document };
+                    surfaces.load_whats_new_posters(cx);
                 }
                 if tab == SettingsTab::Worktrees {
                     surfaces.worktrees.entries = worktree_settings::preview_entries();

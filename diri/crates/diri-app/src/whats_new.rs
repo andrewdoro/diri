@@ -4,7 +4,9 @@
 //! puts one quiet line in the sidebar footer, where the update pill sits; the
 //! sheet with the clips opens only when that line is clicked. Opening it, or
 //! dismissing the line, marks the release seen. A new install starts with
-//! everything seen, so a first launch shows none of this.
+//! everything seen, so a first launch shows none of this. Help › What's New,
+//! the What's New command, and the thumbnails in Settings › What's New replay
+//! the sheet any time.
 //!
 //! Each highlight carries a short clip recorded from the real window by the
 //! `render_whats_new_clips` fixture and encoded by `scripts/whats-new-clips.sh`,
@@ -31,7 +33,7 @@ pub(crate) struct Clip {
 }
 
 impl Clip {
-    fn for_appearance(&self, appearance: Appearance) -> &'static [u8] {
+    pub(crate) fn for_appearance(&self, appearance: Appearance) -> &'static [u8] {
         match appearance {
             Appearance::Light => self.light,
             Appearance::Dark => self.dark,
