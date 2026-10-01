@@ -121,6 +121,30 @@ enum SettingsMenu {
     TerminalTheme,
     HibernateAfter,
     MemoryLimit,
+    FileEditor,
+}
+
+/// Choices for where terminal file links open, in menu order.
+const FILE_EDITOR_OPTIONS: [crate::store::FileEditor; 5] = [
+    crate::store::FileEditor::Automatic,
+    crate::store::FileEditor::Cursor,
+    crate::store::FileEditor::VsCode,
+    crate::store::FileEditor::Zed,
+    crate::store::FileEditor::DefaultApp,
+];
+
+fn file_editor_label(choice: crate::store::FileEditor) -> String {
+    use crate::store::FileEditor;
+    match choice {
+        FileEditor::Automatic => match crate::file_links::editor_for(FileEditor::Automatic) {
+            Some(editor) => format!("Automatic ({})", editor.name()),
+            None => "Automatic (default app)".to_owned(),
+        },
+        FileEditor::Cursor => "Cursor".to_owned(),
+        FileEditor::VsCode => "VS Code".to_owned(),
+        FileEditor::Zed => "Zed".to_owned(),
+        FileEditor::DefaultApp => "Default app".to_owned(),
+    }
 }
 
 /// The open settings select as a panel target (see `crate::floating::Target`).
@@ -3884,6 +3908,7 @@ impl UtilitySurfaces {
             SettingsMenu::TerminalTheme => (self.terminal_theme_options(colors, cx), 252.0),
             SettingsMenu::HibernateAfter => (self.hibernate_options(colors, cx), 172.0),
             SettingsMenu::MemoryLimit => (self.memory_options(colors, cx), 132.0),
+            SettingsMenu::FileEditor => (self.file_editor_options(colors, cx), 204.0),
         })
     }
 
@@ -4080,6 +4105,46 @@ impl UtilitySurfaces {
             ));
         }
         options.into_any_element()
+    }
+
+    fn file_editor_options(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let mut options = div().p(px(4.0)).flex().flex_col();
+        for (index, choice) in FILE_EDITOR_OPTIONS.into_iter().enumerate() {
+            let is_selected = choice == self.prefs.terminal_file_editor;
+            options = options.child(settings_choice_row(
+                format!("file-editor-option-{index}"),
+                file_editor_label(choice),
+                is_selected,
+                colors,
+                cx,
+                move |this, cx| {
+                    this.settings_menu = None;
+                    this.update_prefs(move |prefs| prefs.terminal_file_editor = choice);
+                    cx.notify();
+                },
+            ));
+        }
+        options.into_any_element()
+    }
+
+    fn file_editor_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = self.settings_colors();
+        let open = self.settings_menu == Some(SettingsMenu::FileEditor);
+        let mut control = div()
+            .relative()
+            .min_w(px(132.0))
+            .child(settings_select_button(
+                file_editor_label(self.prefs.terminal_file_editor),
+                "file-editor-dropdown",
+                open,
+                SettingsMenu::FileEditor,
+                colors,
+                cx,
+            ));
+        if open {
+            control = control.child(self.settings_menu_host(cx));
+        }
+        control.into_any_element()
     }
 
     fn memory_options(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
@@ -4544,6 +4609,12 @@ impl UtilitySurfaces {
                             let enabled = !this.prefs.terminal_open_links_on_click;
                             this.update_prefs(move |prefs| prefs.terminal_open_links_on_click = enabled); cx.notify();
                         }))
+                        .child(appearance_divider(colors))
+                        .child(appearance_setting_row(
+                            "Open file links in",
+                            self.file_editor_dropdown(cx),
+                            colors,
+                        ))
                         .child(appearance_divider(colors))
                         .child(toggle_row("Hide pointer while typing", "Show it again when you use the mouse.", self.prefs.terminal_hide_pointer, "terminal_hide_pointer", colors, cx, |this,cx| {
                             let enabled = !this.prefs.terminal_hide_pointer;
@@ -8086,6 +8157,10 @@ mod tests {
         let transparency = std::env::var("DIRI_APPEARANCE_TRANSPARENCY")
             .ok()
             .and_then(|value| value.parse::<f32>().ok());
+        let height = std::env::var("DIRI_APPEARANCE_HEIGHT")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(900.0);
         let platform = gpui_platform::current_platform(true);
         let mut cx = HeadlessAppContext::with_platform(
             platform.text_system(),
@@ -8098,7 +8173,7 @@ mod tests {
         });
 
         let window = cx
-            .open_window(size(px(1200.0), px(900.0)), move |window, cx| {
+            .open_window(size(px(1200.0), px(height)), move |window, cx| {
                 let harness = cx
                     .new(|cx| SettingsWorkbenchHarness::open_at(SettingsTab::Terminal, window, cx));
                 harness.update(cx, |harness, cx| {
@@ -8115,6 +8190,12 @@ mod tests {
                     if let Some(value) = transparency {
                         harness.surfaces.update(cx, |surfaces, cx| {
                             surfaces.set_window_transparency(value, cx);
+                        });
+                    }
+                    if std::env::var_os("DIRI_APPEARANCE_FILE_EDITOR_MENU").is_some() {
+                        harness.surfaces.update(cx, |surfaces, cx| {
+                            surfaces.settings_menu = Some(SettingsMenu::FileEditor);
+                            cx.notify();
                         });
                     }
                 });

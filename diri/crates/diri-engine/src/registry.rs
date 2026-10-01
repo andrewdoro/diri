@@ -5070,7 +5070,6 @@ mod tests {
             foreground_ports: Vec::new(),
             foreground_agent: None,
             terminal_cwd: None,
-            foreground_ports: Vec::new(),
             terminal_progress: None,
             attention_state: None,
             terminal_title: None,

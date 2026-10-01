@@ -16,6 +16,7 @@ mod diagnostics;
 pub mod diff;
 mod empty_workbench;
 mod external_drop;
+mod file_links;
 mod floating;
 pub mod fonts;
 pub mod fuzzy;

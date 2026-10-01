@@ -120,11 +120,6 @@ const PARKED_GRID_CAP: usize = 12;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalPaneEvent {
     ContinueAccount(SessionId),
-    OpenFileReference {
-        reference: String,
-        cwd: String,
-        session_id: SessionId,
-    },
     /// Transient terminal feedback belongs in the window's standard toast.
     Feedback {
         message: String,
@@ -2854,16 +2849,18 @@ impl TerminalPane {
 
         match owner {
             PointerOwner::LocalSelection => {
-                // A plain press on a URL arms it like a Command-press; the
+                // A plain press on a link arms it like a Command-press; the
                 // release opens it only if the pointer never left that cell,
                 // so dragging out of a link still selects.
-                self.qol.pressed = (open_links_on_click
+                let hit = (open_links_on_click
                     && event.click_count == 1
                     && is_plain_click(&event.modifiers))
                 .then(|| resident.element.reference_hit_at(col, row))
-                .flatten()
-                .filter(|hit| matches!(hit.reference, TerminalReference::Url(_)))
-                .map(|hit| (hit, (col, row)));
+                .flatten();
+                self.qol.pressed = self.linkable(hit).map(|hit| (hit, (col, row)));
+                let Some(resident) = self.residents.get_mut(&id) else {
+                    return;
+                };
                 match event.click_count {
                     1 if event.modifiers.alt && event.modifiers.shift => {
                         resident.element.begin_rectangle_selection(col, row)
@@ -2875,10 +2872,8 @@ impl TerminalPane {
                 cx.notify();
             }
             PointerOwner::LocalReference => {
-                self.qol.pressed = resident
-                    .element
-                    .reference_hit_at(col, row)
-                    .map(|hit| (hit, (col, row)));
+                let hit = resident.element.reference_hit_at(col, row);
+                self.qol.pressed = self.linkable(hit).map(|hit| (hit, (col, row)));
                 cx.stop_propagation();
             }
             PointerOwner::Terminal => {
@@ -6679,7 +6674,17 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let session = fixture_session();
+        let mut session = fixture_session();
+        // "file-link*": a compiler error whose `src/app.rs` really exists
+        // under the session's directory, so it passes the existence check.
+        let file_link_root = scene.starts_with("file-link").then(|| {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("src")).unwrap();
+            std::fs::write(root.path().join("src/app.rs"), "fn main() {}\n").unwrap();
+            session.host = None;
+            session.cwd = root.path().display().to_string();
+            root
+        });
         let id = session.id.clone();
         {
             let mut store = runtime.store.write().unwrap();
@@ -6689,6 +6694,7 @@ mod tests {
                     if let Ok(theme) = std::env::var("DIRI_QOL_THEME") {
                         prefs.terminal_theme = theme;
                     }
+                    prefs.terminal_file_editor = crate::store::FileEditor::Cursor;
                 })
                 .unwrap();
             store.upsert_session(session);
@@ -6730,6 +6736,34 @@ mod tests {
                             });
                         }
                         grid.changed_rows.push(row);
+                    }
+                    if scene.starts_with("file-link") {
+                        grid.changed_rows.clear();
+                        for (y, text) in [
+                            "$ cargo build",
+                            "   Compiling diri v0.8.2 (/work/diri)",
+                            "error[E0308]: mismatched types",
+                            "  --> src/app.rs:42:9",
+                            "   |",
+                            "42 |     let count: u32 = \"three\";",
+                            "   |                ---   ^^^^^^^ expected `u32`, found `&str`",
+                            "   |",
+                            "  ::: src/missing.rs:7:1",
+                            "",
+                            "error: could not compile `diri` (bin \"diri\") due to 1 previous error",
+                            "$ ",
+                        ]
+                        .iter()
+                        .enumerate()
+                        {
+                            let mut cells = vec![GridCell::BLANK; 80];
+                            for (cell, ch) in cells.iter_mut().zip(text.chars()) {
+                                cell.scalar = ch as u32;
+                            }
+                            grid.changed_rows.push(ChangedRow::new(y as u16, cells));
+                        }
+                        grid.cursor_row = 11;
+                        grid.cursor_col = 2;
                     }
                     let find_fixture = if scene == "find-unicode" {
                         let mut screen = diri_engine::HeadlessScreen::new(80, 28);
@@ -6816,7 +6850,27 @@ mod tests {
                     pane.focus(window, cx);
                     pane.reset_qol_session(&id);
                     pane.qol.hover = Some((2, 1));
+                    // "col,row" of the cell the pointer rests on.
+                    if let Some((col, row)) = std::env::var("DIRI_QOL_HOVER")
+                        .ok()
+                        .and_then(|cell| {
+                            let (col, row) = cell.split_once(',')?;
+                            Some((col.parse().ok()?, row.parse().ok()?))
+                        })
+                    {
+                        pane.qol.hover = Some((col, row));
+                    }
                     match scene.as_str() {
+                        "file-link-menu" => {
+                            let (col, row) = pane.qol.hover.unwrap();
+                            pane.open_terminal_menu(
+                                gpui::point(px(col as f32 * 8.0 + 120.0), px(row as f32 * 15.0 + 70.0)),
+                                col,
+                                row,
+                                window,
+                                cx,
+                            );
+                        }
                         "menu" => pane.open_terminal_menu(
                             gpui::point(px(260.0), px(180.0)),
                             2,
@@ -6892,6 +6946,7 @@ mod tests {
         cx.update_window(window.into(), |_, window, _| window.remove_window())
             .unwrap();
         cx.run_until_parked();
+        drop(file_link_root);
     }
 
     #[gpui::test]
@@ -7573,7 +7628,22 @@ mod tests {
     }
 
     #[gpui::test]
-    fn terminal_local_file_links_open_in_the_default_app(cx: &mut TestAppContext) {
+    fn terminal_file_links_open_the_editor_at_the_line(cx: &mut TestAppContext) {
+        // Real files, so the existence check has something to find. The
+        // opener is GPUI's test platform: it records the URL and launches
+        // nothing.
+        let launch = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(launch.path().join("src")).unwrap();
+        std::fs::write(launch.path().join("src/app.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(launch.path().join("preview.html"), "<p>").unwrap();
+        std::fs::write(live.path().join("notes.md"), "# notes").unwrap();
+        let encoded =
+            |path: std::path::PathBuf| url::Url::from_file_path(path).unwrap().path().to_owned();
+        let app_rs = encoded(launch.path().join("src/app.rs"));
+        let notes = encoded(live.path().join("notes.md"));
+        let preview = encoded(launch.path().join("preview.html"));
+
         let runtime = Arc::new(StoreRuntime::inert());
         let tokio = Arc::new(
             tokio::runtime::Builder::new_current_thread()
@@ -7583,63 +7653,73 @@ mod tests {
         );
         let mut session = fixture_session();
         session.host = None;
-        session.cwd = "/tmp/workspace".into();
+        session.kind = ProtoAgentKind::SHELL;
+        session.cwd = launch.path().display().to_string();
+        session.terminal_cwd = Some(live.path().display().to_string());
         {
             let mut store = runtime.store.write().unwrap();
             store.upsert_session(session.clone());
             store.select(session.id);
+            store
+                .update_preferences(|prefs| {
+                    prefs.terminal_file_editor = crate::store::FileEditor::Cursor;
+                })
+                .unwrap();
         }
         let (pane, cx) =
             cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
-        let mut events = cx.events(&pane);
         for (reference, expected) in [
-            (
-                "/Users/giga/Desktop/pr6037-current-tool-ui.png",
-                "file:///Users/giga/Desktop/pr6037-current-tool-ui.png",
-            ),
-            ("./preview.html", "file:///tmp/workspace/preview.html"),
-            (
-                "file:///tmp/my%20preview.html",
-                "file:///tmp/my%20preview.html",
-            ),
-            ("src/main.rs:42:7", "file:///tmp/workspace/src/main.rs"),
+            // From the launch directory, which an Agent prints relative to.
+            ("src/app.rs:42:9", format!("cursor://file{app_rs}:42:9")),
+            ("src/app.rs(7,3)", format!("cursor://file{app_rs}:7:3")),
+            ("src/app.rs", format!("cursor://file{app_rs}")),
+            // From the shell's live directory after a `cd`.
+            ("notes.md:4", format!("cursor://file{notes}:4:1")),
+            // A page with no line keeps its viewer, as before.
+            ("preview.html", format!("file://{preview}")),
         ] {
             pane.update_in(cx, |pane, window, cx| {
                 pane.open_reference(TerminalReference::File(reference.into()), window, cx);
             });
-            assert_eq!(cx.opened_url().as_deref(), Some(expected), "{reference}");
-            assert!(
-                events.try_recv().is_err(),
-                "local files must not reveal the inspector"
-            );
+            assert_eq!(cx.opened_url(), Some(expected), "{reference}");
         }
+
         pane.update_in(cx, |pane, window, cx| {
+            pane.runtime
+                .store
+                .write()
+                .unwrap()
+                .update_preferences(|prefs| {
+                    prefs.terminal_file_editor = crate::store::FileEditor::Zed;
+                })
+                .unwrap();
             pane.open_reference(
-                TerminalReference::Url("https://example.com".into()),
+                TerminalReference::File("src/app.rs:42:9".into()),
                 window,
                 cx,
             );
         });
-        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+        assert_eq!(cx.opened_url(), Some(format!("zed://file{app_rs}:42:9")));
+
+        // A path that is not there opens nothing and says so.
+        let mut events = cx.events(&pane);
         pane.update_in(cx, |pane, window, cx| {
-            pane.open_reference(
-                TerminalReference::File("file://remote/tmp/preview.html".into()),
-                window,
-                cx,
-            );
+            pane.open_reference(TerminalReference::File("src/gone.rs:1".into()), window, cx);
             assert_eq!(
                 pane.qol.feedback.as_deref(),
-                Some("Could not open this local file link")
+                Some("That file is not on this Mac")
             );
         });
-        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+        assert_eq!(cx.opened_url(), Some(format!("zed://file{app_rs}:42:9")));
         assert_eq!(
             events.try_recv().ok(),
             Some(TerminalPaneEvent::Feedback {
-                message: "Could not open this local file link".into(),
+                message: "That file is not on this Mac".into(),
             })
         );
 
+        // A remote session's paths name the remote host: even one that also
+        // exists here is never linked or opened.
         pane.update_in(cx, |pane, window, cx| {
             let mut session = (*pane.selected_session().unwrap()).clone();
             session.host = Some("remote-host".into());
@@ -7648,21 +7728,28 @@ mod tests {
                 .write()
                 .unwrap()
                 .upsert_session(session.clone());
+            let absolute = format!("{}:3", launch.path().join("src/app.rs").display());
+            let hit = diri_term::element::ReferenceHit {
+                reference: TerminalReference::File(absolute.clone()),
+                spans: vec![(0, 0, 4)],
+            };
+            assert_eq!(pane.linkable(Some(hit)), None);
+            pane.open_reference(TerminalReference::File(absolute), window, cx);
+        });
+        assert_eq!(
+            cx.opened_url(),
+            Some(format!("zed://file{app_rs}:42:9")),
+            "remote paths must not open local files"
+        );
+
+        pane.update_in(cx, |pane, window, cx| {
             pane.open_reference(
-                TerminalReference::File("/tmp/preview.html".into()),
+                TerminalReference::Url("https://example.com".into()),
                 window,
                 cx,
             );
         });
-        assert!(matches!(
-            events.try_recv(),
-            Ok(TerminalPaneEvent::OpenFileReference { .. })
-        ));
-        assert_eq!(
-            cx.opened_url().as_deref(),
-            Some("https://example.com"),
-            "remote paths must not open local files"
-        );
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
     }
 
     #[gpui::test]
