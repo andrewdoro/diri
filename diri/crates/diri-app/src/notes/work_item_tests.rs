@@ -30,6 +30,7 @@ We ship the new onboarding on Thursday.
 ";
 
 /// A launch plan mid-flight, for screenshots: work in every state.
+#[cfg(target_os = "macos")]
 pub(crate) const TRACKING: &str = "# Launch plan
 
 We ship the new onboarding on Thursday. Everything below is due Wednesday.
