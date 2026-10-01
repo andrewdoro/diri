@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::window_chrome::TitlebarDragArea as _;
 use crate::delegation::worktree_move_proposal;
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::query_label;
@@ -2548,6 +2549,17 @@ impl UtilitySurfaces {
                 }),
             )
             .child(pane)
+            // Settings fills the title row beside the sidebar, so the window
+            // drags from its empty band.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(Metrics::TITLE_BAR))
+                    .titlebar_drag_area(),
+            )
             .child(notification_titlebar_button(unread, colors))
             .when_some(self.nested_root.as_ref(), |shell, prompt| {
                 let parent = prompt.parent.clone();
@@ -6464,7 +6476,7 @@ fn notification_titlebar_button(unread: usize, colors: SemanticColors) -> AnyEle
         .debug_selector(|| "notification-inbox-button".into())
         .absolute()
         .top(px(7.0))
-        .right(px(14.0))
+        .right(px(14.0 + crate::window_chrome::caption_lane()))
         .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
         .flex()
         .items_center()

@@ -3613,6 +3613,10 @@ impl RootView {
                 });
             let strip = self.sidebar.update(cx, |sidebar, cx| {
                 sidebar.strip_held_hint = held_hint;
+                sidebar.strip_caption_inset = crate::window_chrome::caption_inset(
+                    0.0,
+                    f32::from(viewport_size.width) - (sidebar_width + card_width),
+                );
                 sidebar.render_horizontal_tabs(card_width, trailing, cx)
             });
             card = card.child(
@@ -5236,6 +5240,11 @@ impl Render for RootView {
         }
         if let Some(build) = &self.services.dev_build {
             root = root.child(dev_build_marker(build.marker_label(), colors, 10.0));
+        }
+        // Over every surface, settings included, as the platform's own
+        // caption would be. The toolbar under them leaves their lane free.
+        if let Some(caption) = crate::window_chrome::caption_buttons(window, colors) {
+            root = root.child(caption);
         }
         root.child(crate::telemetry::frame_probe(
             frame_started,
@@ -9099,6 +9108,90 @@ mod tests {
         }
     }
 
+    /// The window as Windows draws it: no native caption strip, the caption
+    /// buttons in the corner of diri's own title row. Rendered on a Mac with
+    /// the caption forced on. `DIRI_CAPTION_SCREENSHOTS=<dir>`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes Windows caption previews to DIRI_CAPTION_SCREENSHOTS"]
+    fn render_windows_caption_screenshots() {
+        use gpui::{AppContext as _, HeadlessAppContext};
+        let output =
+            std::env::var("DIRI_CAPTION_SCREENSHOTS").expect("DIRI_CAPTION_SCREENSHOTS");
+        std::fs::create_dir_all(&output).unwrap();
+        let _caption = ForcedCaption::on();
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| {
+            crate::fonts::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        // name, horizontal, light, sidebar, inspector
+        for (name, horizontal, light, sidebar, inspector) in [
+            ("vertical-dark", false, false, true, false),
+            ("vertical-light", false, true, true, false),
+            ("vertical-no-sidebar-dark", false, false, false, false),
+            ("vertical-inspector-dark", false, false, true, true),
+            ("horizontal-dark", true, false, false, false),
+            ("horizontal-light", true, true, false, false),
+            ("horizontal-inspector-dark", true, false, false, true),
+        ] {
+            let services = test_services();
+            let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+            {
+                let mut store = services.store.store.write().unwrap();
+                store.hydrate(fixture.list);
+                store.select(fixture.selected_session_id.unwrap());
+                store
+                    .update_preferences(|prefs| {
+                        prefs.sidebar_visible = sidebar;
+                        prefs.terminal_theme = if light {
+                            "dirijor-light"
+                        } else {
+                            "dirijor-dark"
+                        }
+                        .into();
+                    })
+                    .unwrap();
+            }
+            let window = cx
+                .open_window(size(px(1100.0), px(640.0)), |window, cx| {
+                    cx.new(|cx| RootView::new(services, false, PreviewScenario::Empty, window, cx))
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.update_window(window.into(), |view, window, cx| {
+                view.downcast::<RootView>().unwrap().update(cx, |root, cx| {
+                    root.run_command(
+                        if horizontal {
+                            CommandId::HorizontalTabs
+                        } else {
+                            CommandId::VerticalTabs
+                        },
+                        window,
+                        cx,
+                    );
+                    if inspector {
+                        root.set_inspector_open(true, cx);
+                    }
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.capture_screenshot(window.into())
+                .unwrap()
+                .save(std::path::Path::new(&output).join(format!("{name}.png")))
+                .unwrap();
+            cx.update_window(window.into(), |_, window, _| window.remove_window())
+                .unwrap();
+            cx.run_until_parked();
+        }
+    }
+
     /// The first-run and resting pages inside the real window, so they are
     /// judged beside the sidebar and title bar they ship with.
     /// `DIRI_FIRST_RUN_SCREENSHOTS=<dir>`; `DIRI_VISUAL_BACKDROP=62616e` paints
@@ -9502,6 +9595,148 @@ mod tests {
             root.read_with(cx, |root, _| root.titlebar_drag_armed),
             cfg!(target_os = "macos"),
             "macOS arms window move on empty chrome; Linux leaves it to the compositor"
+        );
+    }
+
+    /// Lays the window out as Windows does for the life of a test.
+    struct ForcedCaption;
+
+    impl ForcedCaption {
+        fn on() -> Self {
+            crate::window_chrome::force_caption_buttons(true);
+            Self
+        }
+    }
+
+    impl Drop for ForcedCaption {
+        fn drop(&mut self) {
+            crate::window_chrome::force_caption_buttons(false);
+        }
+    }
+
+    #[gpui::test]
+    fn windows_caption_buttons_sit_in_the_toolbar_for_both_tab_orientations(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::WindowControlArea;
+        let _caption = ForcedCaption::on();
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let services = test_services();
+        let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+        {
+            let mut store = services.store.store.write().unwrap();
+            store.hydrate(fixture.list);
+            store.select(fixture.selected_session_id.unwrap());
+            store
+                .update_preferences(|prefs| {
+                    prefs.tab_orientation = crate::store::TabOrientation::Vertical;
+                    prefs.sidebar_visible = true;
+                })
+                .unwrap();
+        }
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            RootView::new(services, false, PreviewScenario::Empty, window, cx)
+        });
+        cx.simulate_resize(size(px(1000.0), px(700.0)));
+        cx.run_until_parked();
+        let area_at = |cx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>| {
+            cx.update(|window, _| window.window_control_area_at(at))
+        };
+
+        let caption = cx
+            .debug_bounds("window-caption-buttons")
+            .expect("diri draws the caption buttons");
+        assert_eq!(caption.top(), px(0.0));
+        assert_eq!(caption.right(), px(1000.0));
+        assert_eq!(caption.size.height, px(Metrics::TITLE_BAR));
+        assert_eq!(
+            caption.size.width,
+            px(crate::window_chrome::caption_lane()),
+            "no native caption strip: the buttons are the toolbar's own"
+        );
+        for (selector, area) in [
+            ("window-minimize", WindowControlArea::Min),
+            ("window-maximize", WindowControlArea::Max),
+            ("window-close", WindowControlArea::Close),
+        ] {
+            let button = cx.debug_bounds(selector).unwrap();
+            assert_eq!(area_at(cx, button.center()), Some(area), "{selector}");
+        }
+
+        // Vertical tabs: the pane's title bar reaches the corner and keeps
+        // its actions clear of the caption.
+        for selector in ["toggle-inspector", "notification-inbox-button"] {
+            let control = cx.debug_bounds(selector).unwrap();
+            assert!(
+                control.center().y < px(Metrics::TITLE_BAR)
+                    && control.right() <= caption.left() - px(Metrics::TOOLBAR_EDGE_INSET),
+                "{selector} must sit beside the caption: {control:?} vs {caption:?}"
+            );
+            assert_eq!(area_at(cx, control.center()), None, "{selector} stays a button");
+        }
+        let sidebar_toggle = cx.debug_bounds("sidebar-toggle").unwrap();
+        assert_eq!(area_at(cx, sidebar_toggle.center()), None);
+        assert_eq!(
+            area_at(cx, point(px(40.0), px(20.0))),
+            Some(WindowControlArea::Drag),
+            "the sidebar's empty title row moves the window"
+        );
+        let bell = cx.debug_bounds("notification-inbox-button").unwrap();
+        assert_eq!(
+            area_at(cx, point(bell.left() - px(80.0), px(20.0))),
+            Some(WindowControlArea::Drag),
+            "so does the pane's title bar"
+        );
+        assert_eq!(area_at(cx, point(px(500.0), px(300.0))), None);
+
+        // Horizontal tabs: the strip takes the title row and the corner.
+        root.update_in(cx, |root, window, cx| {
+            root.run_command(CommandId::HorizontalTabs, window, cx)
+        });
+        cx.run_until_parked();
+        let strip = cx
+            .debug_bounds("horizontal-tabs")
+            .expect("horizontal strip");
+        assert_eq!(strip.top(), px(0.0));
+        let actions = cx
+            .debug_bounds("hosted-header-actions")
+            .expect("the strip hosts the pane's actions");
+        assert!(
+            actions.right() <= caption.left() - px(10.0),
+            "the hosted actions sit beside the caption: {actions:?} vs {caption:?}"
+        );
+        let new_tab = cx.debug_bounds("horizontal-new-tab").unwrap();
+        assert_eq!(area_at(cx, new_tab.center()), None);
+        assert_eq!(
+            area_at(cx, point(strip.left() + px(4.0), strip.center().y)),
+            Some(WindowControlArea::Drag),
+            "the strip's padding moves the window"
+        );
+        for (selector, area) in [
+            ("window-minimize", WindowControlArea::Min),
+            ("window-close", WindowControlArea::Close),
+        ] {
+            let button = cx.debug_bounds(selector).unwrap();
+            assert_eq!(area_at(cx, button.center()), Some(area), "{selector}");
+        }
+
+        // The inspector takes the corner from the strip, which then needs
+        // no room of its own.
+        root.update_in(cx, |root, _, cx| root.set_inspector_open(true, cx));
+        cx.run_until_parked();
+        let actions = cx.debug_bounds("hosted-header-actions").unwrap();
+        let strip = cx.debug_bounds("horizontal-tabs").unwrap();
+        assert!(
+            strip.right() < caption.left(),
+            "fixture: the inspector sits beside the strip"
+        );
+        assert!(
+            actions.right() >= strip.right() - px(10.0 + Metrics::TOOLBAR_CONTROL_SIZE),
+            "a strip clear of the corner keeps its trailing actions at its edge: {actions:?}"
+        );
+        assert!(
+            cx.debug_bounds("window-caption-buttons").is_some(),
+            "the caption stays over the inspector's title bar"
         );
     }
 

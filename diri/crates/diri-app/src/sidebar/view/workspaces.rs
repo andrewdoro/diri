@@ -1398,6 +1398,7 @@ impl Sidebar {
                     this.track_lift_pointer(event.event.position, cx);
                 },
             ))
+            .titlebar_drag_area()
             .h(px(crate::tab_navigation::TAB_STRIP_HEIGHT))
             .w_full()
             .flex_none()
@@ -1411,7 +1412,7 @@ impl Sidebar {
             } else {
                 10.0
             }))
-            .pr(px(10.0))
+            .pr(px(10.0 + self.strip_caption_inset))
             .child(
                 div()
                     .absolute()

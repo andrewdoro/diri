@@ -27,6 +27,7 @@ use gpui::{
 };
 
 use crate::code_viewer::CodeViewer;
+use crate::window_chrome::TitlebarDragArea as _;
 use crate::diff::{
     DiffFile, DiffHunk, DiffLayer, DiffRow, DiffRowKind, DiffSelection, DiffSnapshot,
     load_local_diff, snapshot_from_read_diff,
@@ -1754,11 +1755,16 @@ impl WorkbenchInspector {
             );
         }
 
+        // The inspector reaches the window's top-right corner, so its title
+        // bar makes room for the caption buttons where diri draws them.
         div()
+            .titlebar_drag_area()
             .h(px(Metrics::TITLE_BAR))
             .flex_none()
             .pl(px(8.0))
-            .pr(px(Metrics::TOOLBAR_EDGE_INSET))
+            .pr(px(
+                Metrics::TOOLBAR_EDGE_INSET + crate::window_chrome::caption_lane()
+            ))
             .flex()
             .items_center()
             .gap(px(Metrics::TOOLBAR_COMPACT_GAP))
@@ -2033,11 +2039,14 @@ impl WorkbenchInspector {
 
         let mut header = div()
             .id("workspace-surface-header")
+            .titlebar_drag_area()
             .relative()
             .h(px(Metrics::TITLE_BAR))
             .flex_none()
             .pl(px(8.0))
-            .pr(px(Metrics::TOOLBAR_EDGE_INSET))
+            .pr(px(
+                Metrics::TOOLBAR_EDGE_INSET + crate::window_chrome::caption_lane()
+            ))
             .flex()
             .items_center()
             .gap(px(4.0))

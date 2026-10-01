@@ -54,6 +54,7 @@ use crate::store::{
 };
 use crate::switcher::display_title;
 use crate::updates::{UpdateCommand, UpdatePhase, UpdateState};
+use crate::window_chrome::TitlebarDragArea;
 use crate::usage::{UsageFormat, UsageSnapshot};
 
 use crate::session_presentation::{activity_mark, is_loading, status_state, ui_agent_kind};
@@ -667,6 +668,9 @@ pub struct Sidebar {
     /// Hold-⌘ hint opacity for the horizontal strip, which `RootView`
     /// renders inline and so samples for it.
     pub(crate) strip_held_hint: f32,
+    /// Room the horizontal strip leaves at its trailing edge for the window's
+    /// caption buttons, set by RootView, which paints the strip inline.
+    pub(crate) strip_caption_inset: f32,
     preview: bool,
     /// Which face the New Agent menu shows. The remote directory listing
     /// itself lives in the Store so the daemon adapter can complete it
@@ -838,6 +842,7 @@ impl Sidebar {
             hues: Default::default(),
             shortcut_ranks: HashMap::new(),
             strip_held_hint: 0.0,
+            strip_caption_inset: 0.0,
             lineage_roles: HashMap::new(),
             focus_handle: cx.focus_handle(),
             hover_task: None,
@@ -1982,6 +1987,7 @@ impl Sidebar {
             )
         };
         div()
+            .titlebar_drag_area()
             .h(px(Metrics::TITLE_BAR))
             .flex_none()
             .flex()

@@ -866,6 +866,7 @@ impl Sidebar {
             ))
             .role(Role::TabList)
             .aria_label("Project sessions")
+            .titlebar_drag_area()
             .flex_none()
             .h(px(TAB_STRIP_HEIGHT))
             .w_full()
@@ -879,7 +880,7 @@ impl Sidebar {
             } else {
                 10.0
             }))
-            .pr(px(10.0))
+            .pr(px(10.0 + self.strip_caption_inset))
             .child(
                 div()
                     .absolute()

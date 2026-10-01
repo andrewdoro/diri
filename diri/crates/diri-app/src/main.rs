@@ -76,6 +76,7 @@ mod tooltip_warmth;
 pub mod transcript;
 pub mod updates;
 pub mod usage;
+mod window_chrome;
 mod window_restore;
 #[cfg(windows)]
 mod windows_notifications;
@@ -843,7 +844,9 @@ fn open_window(
             app_owns_titlebar_drag: cfg!(target_os = "macos"),
             titlebar: Some(TitlebarOptions {
                 title,
-                appears_transparent: cfg!(target_os = "macos"),
+                // On Windows this hides the native caption strip; diri draws
+                // the caption buttons into its own toolbar (`window_chrome`).
+                appears_transparent: cfg!(any(target_os = "macos", windows)),
                 // GPUI uses top/left insets here: AppKit's native 8 pt origin plus the
                 // spec's +12 x / -6 frame-origin nudge maps to 20 pt left and 14 pt top.
                 traffic_light_position: cfg!(target_os = "macos")
