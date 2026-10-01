@@ -566,7 +566,7 @@ impl NoteEditorView {
         self.blinking
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn scroll_by_for_test(&mut self, dy: Pixels, cx: &mut Context<Self>) {
         let offset = self.scroll.offset();
         let max = self.scroll.max_offset().y;

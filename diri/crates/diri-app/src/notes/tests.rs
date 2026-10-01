@@ -736,6 +736,7 @@ fn a_callout_glyph_cycles_its_tone(cx: &mut gpui::TestAppContext) {
 /// A long, realistic note: sections of paragraphs with bold and links,
 /// to-dos, bullets with children, quotes, a code block, mention and tool
 /// chips, repeated to `blocks` blocks.
+#[cfg(target_os = "macos")]
 pub(crate) fn big_note_markdown(blocks: usize) -> String {
     let mut out = String::from("# Research log\n\n");
     let mut count = 0;
