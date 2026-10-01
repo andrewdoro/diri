@@ -188,6 +188,11 @@ impl TodosModel {
         });
     }
 
+    /// The next `sync` re-reads the folder (without starting it now).
+    pub(crate) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
     pub(crate) fn mark_dirty(&mut self, cx: &mut Context<Self>) {
         self.dirty = true;
         self.sync(cx);

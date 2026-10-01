@@ -1196,7 +1196,7 @@ impl NavigationOverlay {
         match page {
             Overlay::CommandPalette => {
                 // Notes join ⌘K's results as soon as the query finds one.
-                self.refresh_notes(cx);
+                self.reread_notes(cx);
                 self.refresh_command_items();
             }
             Overlay::QuickOpen => {
@@ -1213,7 +1213,7 @@ impl NavigationOverlay {
             }
             Overlay::Notes => {
                 crate::telemetry::notes_event("notes.search.opened", "");
-                self.refresh_notes(cx);
+                self.reread_notes(cx);
                 self.filter_notes();
             }
             Overlay::Settings => {}

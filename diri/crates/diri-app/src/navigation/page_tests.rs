@@ -1180,3 +1180,54 @@ pub(super) fn seed_notes(overlay: &mut NavigationOverlay, cx: &mut Context<Navig
     let model = cx.new(|cx| TodosModel::with_store(runtime, Some(notes), false, cx));
     TodosModel::install(model, cx);
 }
+
+/// A note written after search last looked (here, with no file watcher at
+/// all) is found the next time search opens; so is a note whose tab was
+/// closed. Regression: an agent's note stayed invisible ("No notes yet")
+/// until diri restarted.
+#[gpui::test]
+fn search_finds_notes_written_since_it_last_looked(cx: &mut TestAppContext) {
+    use crate::notes::todos::TodosModel;
+
+    let dir = tempfile::tempdir().unwrap();
+    let notes = Arc::new(diri_notes::store::NoteStore::open(dir.path().join("notes")).unwrap());
+    let runtime = Arc::new(StoreRuntime::inert());
+    let (overlay, cx) = cx.add_window_view(|_, cx| {
+        let model = cx.new(|cx| {
+            TodosModel::with_store(Arc::clone(&runtime), Some(Arc::clone(&notes)), false, cx)
+        });
+        TodosModel::install(model, cx);
+        let mut overlay = NavigationOverlay::opened_for_test(Arc::clone(&runtime), cx);
+        overlay.overlay = None;
+        overlay
+    });
+    let open_search = |cx: &mut gpui::VisualTestContext| {
+        overlay.update_in(cx, |overlay, window, cx| {
+            overlay.toggle_search_notes(&SearchNotes, window, cx);
+        });
+        cx.run_until_parked();
+    };
+    let close = |cx: &mut gpui::VisualTestContext| {
+        overlay.update_in(cx, |overlay, window, cx| {
+            overlay.toggle_search_notes(&SearchNotes, window, cx);
+        });
+        cx.run_until_parked();
+    };
+
+    // Search runs once while there are no notes.
+    open_search(cx);
+    overlay.read_with(cx, |overlay, _| assert!(overlay.notes.hits.is_empty()));
+    close(cx);
+
+    // An agent writes a note; no watcher event arrives.
+    let (_, doc) = diri_notes::markdown::parse("# Superlogical parity\n\nWhat's missing.\n");
+    notes.create(doc, Some("/work/diri")).unwrap();
+
+    open_search(cx);
+    overlay.update_in(cx, |overlay, _, cx| {
+        assert_eq!(overlay.notes.hits.len(), 1, "the new note is listed");
+        overlay.query.insert("parity");
+        overlay.query_changed(cx);
+        assert_eq!(overlay.notes.hits.len(), 1, "and found by its title");
+    });
+}

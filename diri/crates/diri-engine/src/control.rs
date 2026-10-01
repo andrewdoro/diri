@@ -2807,14 +2807,9 @@ impl ControlServer {
         if let Some(store) = &self.remote_bindings {
             let _ = store.remove(&p.session_id.0);
         }
-        // Closing a note's tab puts its file in the notes trash, from which
-        // "reopen closed" brings it back; its history stays either way.
-        if removed.is_note()
-            && let Some(note_id) = &removed.note_id
-            && let Ok(store) = self.note_store()
-        {
-            let _ = store.trash(note_id);
-        }
+        // Closing a note's tab never touches its file: the note stays in
+        // Search notes (as a closed note) and opening it there brings its tab
+        // back, the way closed chats stay in conversation search.
         self.events.record_removed(&removed);
         self.events.publish(
             diri_proto::EventName::SESSION_REMOVED,
@@ -6043,13 +6038,14 @@ mod tests {
         assert_eq!(note.doc.todo_progress(), (0, 1));
         assert_eq!(note.project(), Some(project.to_string_lossy().as_ref()));
 
-        // Closing the note's tab trashes its file; reopening brings it back.
+        // Closing the note's tab keeps its file, so search can still find it;
+        // reopening brings the tab back.
         ok_of(call(
             &server,
             "session.remove",
             Some(json!({ "sessionID": record.id.0 })),
         ));
-        assert!(store.load(&note_id).is_err(), "closed note is in the trash");
+        assert!(store.load(&note_id).is_ok(), "a closed note stays findable");
         let reopened = ok_of(call(&server, "session.reopen_last", None));
         assert_eq!(reopened["id"], record.id.0.as_str());
         assert_eq!(store.load(&note_id).unwrap().doc.title, "Launch plan");
