@@ -1217,3 +1217,13 @@ html { overflow-x: clip; }
   .intro-actions { margin-top: 28px !important; }
 }
 @media (max-width: 600px) { .intro { padding-top: 56px !important; } }
+
+/* Display type: Geist (SIL OFL 1.1, assets/fonts/GEIST-OFL.txt) for headings only; body and UI stay on the system font. */
+@font-face { font-family: "Geist"; src: url("/assets/fonts/geist.woff2") format("woff2"); font-weight: 100 900; font-style: normal; font-display: swap; }
+.intro-heading h1, .features-heading h2, .more-section h2, .closing h2, .bento-card dt { font-family: "Geist", -apple-system, BlinkMacSystemFont, sans-serif; }
+@media (min-width: 601px) {
+  .intro-heading h1 { font-size: 40px !important; font-weight: 560 !important; letter-spacing: -.035em !important; line-height: 1.1 !important; }
+}
+@media (max-width: 600px) { .intro-heading h1 { font-size: 32px !important; font-weight: 560 !important; letter-spacing: -.03em !important; } }
+.features-heading h2, .more-section h2, .closing h2 { font-weight: 560; letter-spacing: -.03em; }
+.bento-card dt { font-weight: 540; letter-spacing: -.012em; }
