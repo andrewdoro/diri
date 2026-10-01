@@ -44,6 +44,135 @@ if needed), or takes `DIRI_LINUX_DIST` pointing at a downloaded artifact
 directory; the release is then created once with both platforms' immutable
 assets.
 
+### Linux signatures
+
+The Nightly `linux-package` job signs the AppImage, the Debian package,
+`SHA256SUMS`, and `linux-release.json` with Sigstore keyless signing
+(`scripts/linux-signatures.sh sign`), then verifies them before uploading.
+cosign exchanges the job's GitHub OIDC token for a short-lived certificate
+whose identity is
+`https://github.com/cristicretu/diri/.github/workflows/nightly.yml@refs/heads/main`,
+and records the signature in the public Rekor transparency log. Each file gets
+a `<file>.sigstore.json` bundle. Only `main` runs sign; pull-request runs do
+not. The Ubuntu 24.04 smoke job verifies the bundles again on a machine that
+did not sign them, and `release.sh` verifies them with the pinned identity
+before publishing, so an unsigned or wrongly signed Linux artifact cannot ship.
+The release carries CI's signed Linux checksum list as `SHA256SUMS-linux`
+beside the release-wide `SHA256SUMS`, which `release.sh` writes on the Mac and
+therefore cannot carry a CI signature. User commands are in
+[`LINUX.md`](LINUX.md#install).
+
+Why Sigstore rather than a long-lived GPG or minisign key:
+
+- **No key to keep.** The packages are built in CI, so the strongest statement
+  available is "this workflow on `main` built these bytes", and keyless
+  signing states exactly that. A GPG or minisign key would have to live in a
+  GitHub secret, where anyone able to exfiltrate it could sign anything until
+  it is revoked, and losing it strands every user who pinned its fingerprint.
+- **Tamper evidence.** Every signature is in a public, append-only log, so a
+  signature made outside this workflow would be visible.
+- **Cost to users.** Verification needs `cosign`, which Ubuntu does not
+  preinstall, whereas it does ship `gpg`. That is the main tradeoff, and the
+  reason plain `SHA256SUMS` stays the first instruction.
+- **Debian.** `dpkg-sig` is unmaintained and dpkg does not check embedded
+  `.deb` signatures by default (`debsig-verify` is opt-in policy), so signing
+  inside the package would protect almost nobody. The Debian-native trust path
+  is a signed APT repository `InRelease` file whose key is installed with
+  `signed-by`; that needs repository hosting and a long-lived GPG key, and is a
+  separate decision (see "Not yet" below).
+- **AppImage.** appimagetool can embed a GPG signature, but cargo-packager
+  does not produce one, it again needs a long-lived key, and few tools check
+  it. A detached bundle covers the same bytes.
+
+Rehearse the path locally with a throwaway key, never a release key:
+
+```sh
+export COSIGN_PASSWORD=
+cosign generate-key-pair --output-key-prefix "$TMPDIR/rehearsal"
+DIRI_COSIGN_KEY="$TMPDIR/rehearsal.key" scripts/linux-signatures.sh sign <dist>
+DIRI_COSIGN_PUBLIC_KEY="$TMPDIR/rehearsal.pub" scripts/linux-signatures.sh verify <dist>
+```
+
+Key mode stays offline and never uploads to the transparency log. `release.sh`
+clears both variables before its own verification, and needs `cosign` on the
+release Mac (`brew install cosign`).
+
+Not yet: an APT repository with a signed `InRelease` (so `apt upgrade`
+verifies updates), GitHub build-provenance attestations, and aarch64 packages.
+The in-app updater does not download Linux artifacts (it tells Linux users to
+update through APT or a newer download), so it has nothing to verify. If a
+Linux self-updater is ever added, it must verify these bundles against the same
+pinned identity.
+
+## Windows code signing (planned)
+
+There is no Windows build on `main`. This section is the signing design the
+Windows packaging work plugs into, and the list of what the maintainer must
+buy and configure first. `.github/workflows/windows-sign.yml` is the seam: a
+reusable workflow that Authenticode-signs every `.exe`/`.msi` in a workflow
+artifact, verifies each with `signtool verify /pa /all`, and uploads
+`<artifact>-signed`. It is skipped unless the repository variable
+`DIRI_WINDOWS_SIGNING` is `artifact-signing`.
+
+### Recommendation: Azure Artifact Signing
+
+Azure Artifact Signing (renamed from Trusted Signing) is the recommended
+option over buying an OV or EV certificate:
+
+| | Azure Artifact Signing | OV / EV certificate |
+|---|---|---|
+| Cost | Monthly subscription (Basic tier, check current Azure pricing) | Annual certificate from a CA, plus a hardware token or cloud HSM |
+| Private key | Held by Microsoft; never exported | Must be on FIPS hardware since the 2023 CA/B Forum rule, so a `.pfx` in a GitHub secret is no longer allowed |
+| CI | Official action, GitHub OIDC federation, no stored secret | Needs a cloud HSM (Azure Key Vault, a CA's signing service) or a self-hosted runner with the token |
+| SmartScreen | Reputation accrues to the validated identity and survives certificate renewal | Reputation accrues to the certificate; Microsoft no longer gives EV certificates an instant SmartScreen bypass |
+| Eligibility | Identity validation; check the current organization/individual and country rules | Any CA customer; EV requires a registered organization |
+
+The decisive points are no key custody and OIDC from GitHub Actions. The
+certificate Artifact Signing issues is short-lived and renewed automatically,
+which has one consequence for the Windows updater (next section).
+
+### What the Windows packaging branch must do
+
+- **Sign before and after packaging.** The installer embeds the payload
+  executables, so `diri.exe`, `dirijord-rs.exe`, `diri-holder.exe`,
+  `diri-ssh-askpass.exe`, `dirijor.exe`, and `dirijor-mcp.exe` must be signed
+  before the installer is compiled, then the installer itself. Either upload
+  the payload as an artifact, call `windows-sign.yml`, compile the installer
+  from the `-signed` artifact and call it again, or run the same three steps
+  (`azure/login`, `azure/artifact-signing-action`, `signtool verify`) inline in
+  the packaging job between the two stages.
+- **Do not pin a certificate thumbprint in the updater.** The branch's updater
+  currently accepts an update only with the same certificate thumbprint as the
+  running app. Artifact Signing certificates rotate every few days, so that
+  rule would reject every release. Pin what stays stable instead: a valid
+  Authenticode chain to a trusted root plus the leaf certificate's subject
+  (publisher name) and the Artifact Signing identity-validation EKU, and keep
+  the existing HTTPS, length, SHA-256, product, and version checks.
+- **Timestamp every signature** (`http://timestamp.acs.microsoft.com`), so the
+  signature stays valid after the short-lived certificate expires.
+
+### What the maintainer must buy and configure
+
+1. Create an Azure subscription, an Artifact Signing account, and complete
+   identity validation (organization or individual, whichever is eligible).
+2. Create a certificate profile (Public Trust) for that validated identity.
+3. Create an Entra app registration with a federated credential for
+   `repo:cristicretu/diri:environment:windows-signing`, and grant it the
+   **Artifact Signing Certificate Profile Signer** role on the account.
+4. In GitHub, create the `windows-signing` environment, restricted to `main`
+   (and required reviewers if wanted). Add these environment secrets:
+   `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`.
+5. Add repository variables `DIRI_ARTIFACT_SIGNING_ENDPOINT` (the regional
+   endpoint, for example `https://eus.codesigning.azure.net/`),
+   `DIRI_ARTIFACT_SIGNING_ACCOUNT`, and `DIRI_ARTIFACT_SIGNING_PROFILE`.
+6. Last, set `DIRI_WINDOWS_SIGNING=artifact-signing` to enable the workflow,
+   and run it once with `workflow_dispatch` against an unsigned review build.
+
+If Artifact Signing is unavailable to the maintainer, the fallback is an OV
+certificate on a cloud HSM signed through `signtool`; the existing
+`-CertificateThumbprint` path in the branch's `package-windows.ps1` fits a
+self-hosted runner with a hardware token, not GitHub-hosted runners.
+
 ## macOS
 
 `scripts/package.sh` builds `diri` for Apple silicon and Intel, combines the two slices with `lipo`, asks cargo-packager to assemble `dist/diri.app`, and signs the result. The bundle identifier is `com.dirijor.diri`, the deployment target is macOS 15.0, and the app does not use App Sandbox.
