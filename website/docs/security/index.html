@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Security model · Diri docs</title>
+  <meta name="description" content="What diri protects and what it does not. Agent privileges, MCP and CLI authority, lineage rules, remote trust, diagnostics and privacy, and how to report a vulnerability.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/security/">
+  <link rel="alternate" type="text/markdown" href="/docs/security.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Security model">
+  <meta property="og:description" content="What diri protects and what it does not. Agent privileges, MCP and CLI authority, lineage rules, remote trust, diagnostics and privacy, and how to report a vulnerability.">
+  <meta property="og:url" content="https://diri.sh/docs/security/">
+  <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Security model","description":"What diri protects and what it does not. Agent privileges, MCP and CLI authority, lineage rules, remote trust, diagnostics and privacy, and how to report a vulnerability.","url":"https://diri.sh/docs/security/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Reference<span class="docs-menu-sep">/</span><strong>Security model</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Recipes</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/" aria-current="page"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/security.md">
+        <header class="docs-heading"><span class="eyebrow">Reference</span><h1>Security model</h1><p>What diri protects and what it does not. Agent privileges, MCP and CLI authority, lineage rules, remote trust, diagnostics and privacy, and how to report a vulnerability.</p></header>
+        <article class="docs-content">
+<p>diri is a local developer tool that launches other powerful developer tools. It helps you avoid orchestration mistakes. It is not a sandbox.</p>
+<h2 id="what-agents-can-do"><a class="anchor" href="#what-agents-can-do" aria-hidden="true" tabindex="-1">#</a>What agents can do</h2>
+<p>Shells, coding agents, hooks, MCP servers and browser automation run as your user. They can read any file your account and the operating system allow, use inherited environment variables and configured credentials, and reach the network. diri does not inspect or approve each action they take. Each agent's own permission settings still apply.</p>
+<ul><li>Worktrees keep agents from editing the same files by accident. They are not a security boundary.</li><li>For untrusted code, use a separate OS account, VM or container, with limited credentials and network access.</li><li>Only run agents and MCP servers you trust.</li></ul>
+<h3 id="the-engine-and-its-socket"><a class="anchor" href="#the-engine-and-its-socket" aria-hidden="true" tabindex="-1">#</a>The Engine and its socket</h3>
+<p>The app, the CLI and agents talk to the background Engine over a Unix socket. The socket and state files are scoped to your user. Any process already running as your user is inside the same trust boundary and can drive diri.</p>
+<p>The <a href="/docs/cli/"><code>dirijor</code> CLI</a> acts with your full authority. It is a tool for you and your scripts.</p>
+<h2 id="mcp-authority-and-lineage"><a class="anchor" href="#mcp-authority-and-lineage" aria-hidden="true" tabindex="-1">#</a>MCP authority and lineage</h2>
+<p>Agents that diri starts can use its <a href="/docs/mcp/">MCP server</a> to start and coordinate other agents. Writes through MCP are limited by where the calling agent sits in the session tree:</p>
+<div class="table-wrap"><table><thead><tr><th>Caller</th><th>Reads</th><th>Messages</th><th>Stop, wake, resume, fork, integrate</th></tr></thead><tbody><tr><td>Root agent (started by you, or from a note)</td><td>All sessions</td><td>Sessions in its project, and its direct children on any host</td><td>Sessions in its project</td></tr><tr><td>Delegated agent (started by another agent)</td><td>All sessions</td><td>Only its parent and direct children</td><td>Only its direct children</td></tr></tbody></table></div>
+<p>More rules:</p>
+<ul><li>Every write needs a live diri session identity. A stale or unhosted MCP process is refused.</li><li>An agent cannot target itself, and cannot stop the session waiting on its result.</li><li>Worktree writes must stay inside the caller's project.</li><li>Messages to a session outside the caller's own line are labelled with who sent them.</li><li>A delegated agent can add only to the note it was started from, or to notes that mention it or one of its ancestors.</li><li>Delegation is capped at 3 levels deep and 16 live children per session. Set <code>DIRIJOR_MAX_SPAWN_DEPTH</code> and <code>DIRIJOR_MAX_LIVE_CHILDREN</code> in diri's environment to change the caps.</li></ul>
+<p>Every tool and its arguments are in the <a href="/docs/mcp-tools/">MCP tool reference</a>.</p>
+<h2 id="remote-hosts"><a class="anchor" href="#remote-hosts" aria-hidden="true" tabindex="-1">#</a>Remote hosts</h2>
+<p>Remote sessions run under the account you connect as. diri relies on SSH for host verification, keys and encryption. It does not add its own relay or authorization layer.</p>
+<ul><li>Prefer a dedicated non-admin account with narrowly scoped credentials.</li><li>diri never runs <code>sudo</code> and never changes host-wide configuration.</li><li>The remote helper is verified by length, SHA-256, build ID and protocol before use. Its folders are <code>0700</code>, its files and sockets <code>0600</code>.</li><li>Your local environment, local sockets and credentials are not copied to the server.</li><li>SSH password and host-key prompts are shown by a separate helper with no logging, so answers never reach diri's state or diagnostics.</li></ul>
+<p>Details are in <a href="/docs/remote-hosts/">Remote hosts</a>.</p>
+<h2 id="secrets-in-terminals"><a class="anchor" href="#secrets-in-terminals" aria-hidden="true" tabindex="-1">#</a>Secrets in terminals</h2>
+<p>Terminal replay logs and scrollback can contain prompts, output, paths and secrets a program printed. Treat them as sensitive.</p>
+<p>A password typed at a prompt that turns echo off, such as <code>sudo</code>, <code>ssh</code> or <code>read -s</code>, is never echoed, so it never reaches the replay log, scrollback or exports. While a local session sits at such a prompt, diri does not use your typing to name the session, hides clipboard text in the paste review, and on macOS turns on Secure Keyboard Entry for that terminal. Remote sessions do not report this state yet. A program that reads a secret in raw mode and draws its own mask looks like any other full-screen program.</p>
+<h2 id="account-credentials"><a class="anchor" href="#account-credentials" aria-hidden="true" tabindex="-1">#</a>Account credentials</h2>
+<p>Saved Claude and Codex logins are stored in owner-only files beside the Engine's state. They are never returned in responses, logged or passed as command-line arguments. See <a href="/docs/accounts/">Accounts and usage</a>.</p>
+<h2 id="updates"><a class="anchor" href="#updates" aria-hidden="true" tabindex="-1">#</a>Updates</h2>
+<p>On macOS the updater downloads a versioned ZIP from GitHub Releases, checks its SHA-256 against the release feed, verifies the code signature, Team ID, bundle identifier and notarization, and refuses downgrades. Linux packages do not update in place. Each Linux release file has a Sigstore signature you can check with <code>cosign verify-blob</code>, as described in <a href="https://github.com/cristicretu/diri/blob/main/diri/LINUX.md" rel="noopener">diri/LINUX.md</a>.</p>
+<h2 id="diagnostics-and-privacy"><a class="anchor" href="#diagnostics-and-privacy" aria-hidden="true" tabindex="-1">#</a>Diagnostics and privacy</h2>
+<p>diri has no account system and no advertising. It records diagnostics so bugs can be fixed from a report, and shares them with the project unless you turn sharing off.</p>
+<p>Every diri process keeps a local log in <code>~/Library/Application Support/Dirijor/telemetry/spool</code>, capped at 64 MiB.</p>
+<div class="table-wrap"><table><thead><tr><th>Recorded</th><th>Never recorded</th></tr></thead><tbody><tr><td>App, OS and CPU versions</td><td>Terminal output or input</td></tr><tr><td>Crashes with stack frames, hangs, slow frames</td><td>Prompts, pasted or copied text</td></tr><tr><td>Memory, CPU and open-file counts</td><td>File contents</td></tr><tr><td>Session start, attach and first-draw times</td><td>Environment variables</td></tr><tr><td>Error codes and classes</td><td>Command lines</td></tr><tr><td>Whether copy, paste, file drops and updates worked, with size classes</td><td>URLs you open</td></tr><tr><td>Command names, session ids, agent names, conversation ids</td><td>Passwords or keys</td></tr><tr><td>Folders, only as a one-way hash</td><td>Free-form error messages and stderr</td></tr></tbody></table></div>
+<p>Unless you turn sharing off, the Engine uploads the log about once an hour, or within a minute after a crash, to a Cloudflare Worker run by the project. Uploads carry a random install id, your short Support ID and a name, which defaults to your macOS login name. They are kept for 30 days and readable only by the maintainers.</p>
+<h3 id="your-controls"><a class="anchor" href="#your-controls" aria-hidden="true" tabindex="-1">#</a>Your controls</h3>
+<p>Open <strong>Settings → General → Privacy</strong>:</p>
+<div class="table-wrap"><table><thead><tr><th>Control</th><th>What it does</th></tr></thead><tbody><tr><td><strong>Share diagnostics to help fix bugs</strong></td><td>Turns uploads on or off. Off stops uploads at the next cycle. Recording stays local.</td></tr><tr><td>Name</td><td>Change or clear the name sent with uploads.</td></tr><tr><td>Support ID</td><td>The id to quote in a bug report.</td></tr><tr><td><strong>Send now</strong></td><td>Uploads what has been recorded so far, once, even with sharing off.</td></tr><tr><td><strong>Show in Finder</strong></td><td>Opens the local log folder.</td></tr></tbody></table></div>
+<p>To turn recording off entirely, set <code>DIRI_TELEMETRY=off</code> in diri's environment. Missing or unreadable privacy settings turn uploads off.</p>
+<p>diri also connects to GitHub Releases for updates, and makes network connections when you use remote hosts, pull request monitoring, browser automation, or an agent that uses the network. diri does not proxy that traffic. The full policy is in <a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md" rel="noopener">PRIVACY.md</a>.</p>
+<h2 id="report-a-vulnerability"><a class="anchor" href="#report-a-vulnerability" aria-hidden="true" tabindex="-1">#</a>Report a vulnerability</h2>
+<p>Use <a href="https://github.com/cristicretu/diri/security/advisories/new" rel="noopener">GitHub private vulnerability reporting</a>. Do not put exploits, private terminal output, tokens or personal paths in a public issue.</p>
+<p>Include the diri and OS versions, a minimal reproduction, the impact you believe is possible, and any suggested fix. You should get an acknowledgement within seven days. Fixes go into the latest release.</p>
+<p>In scope: permission-boundary bypasses, unsafe update or IPC behaviour, credential disclosure, session isolation failures and unintended remote execution. A tool doing something you explicitly allowed is not a diri vulnerability.</p>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><a class="prev" href="/docs/remote-hosts/"><span>Previous</span>Remote hosts</a><a class="next" href="/docs/troubleshooting/"><span>Next</span>Troubleshooting</a></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#what-agents-can-do">What agents can do</a><a href="#mcp-authority-and-lineage">MCP authority and lineage</a><a href="#remote-hosts">Remote hosts</a><a href="#secrets-in-terminals">Secrets in terminals</a><a href="#account-credentials">Account credentials</a><a href="#updates">Updates</a><a href="#diagnostics-and-privacy">Diagnostics and privacy</a><a href="#report-a-vulnerability">Report a vulnerability</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/security.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Fsecurity.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/security.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>

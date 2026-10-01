@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Troubleshooting · Diri docs</title>
+  <meta name="description" content="Diagnose diri problems with dirijor doctor, find logs and state on macOS and Linux, fix common agent and remote issues, and file a useful bug report.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/troubleshooting/">
+  <link rel="alternate" type="text/markdown" href="/docs/troubleshooting.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Troubleshooting">
+  <meta property="og:description" content="Diagnose diri problems with dirijor doctor, find logs and state on macOS and Linux, fix common agent and remote issues, and file a useful bug report.">
+  <meta property="og:url" content="https://diri.sh/docs/troubleshooting/">
+  <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Troubleshooting","description":"Diagnose diri problems with dirijor doctor, find logs and state on macOS and Linux, fix common agent and remote issues, and file a useful bug report.","url":"https://diri.sh/docs/troubleshooting/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Reference<span class="docs-menu-sep">/</span><strong>Troubleshooting</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Recipes</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/" aria-current="page"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/troubleshooting.md">
+        <header class="docs-heading"><span class="eyebrow">Reference</span><h1>Troubleshooting</h1><p>Diagnose diri problems with dirijor doctor, find logs and state on macOS and Linux, fix common agent and remote issues, and file a useful bug report.</p></header>
+        <article class="docs-content">
+<p>Start with <code>dirijor doctor</code>, then check the problem list below. If you still need help, file a bug with the diagnostics report from Settings.</p>
+<h2 id="run-dirijor-doctor"><a class="anchor" href="#run-dirijor-doctor" aria-hidden="true" tabindex="-1">#</a>Run dirijor doctor</h2>
+<p><code>dirijor doctor</code> checks the parts of diri that run without the window:</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">/Applications/diri.app/Contents/Resources/bin/dirijor</span> doctor</code></pre></div>
+<p>On Linux, run <code>dirijor doctor</code>. The output looks like this:</p>
+<div class="code-block" data-lang="text"><div class="code-head"><span>text</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code>✓ Rust Engine reachable (build ..., pid 4242, proto 1)
+✓ Claude Code (claude) found at /Users/you/.local/bin/claude
+✗ Aider (aider) not found on PATH
+✓ state file present at /Users/you/Library/Application Support/Dirijor/state.json</code></pre></div>
+<div class="table-wrap"><table><thead><tr><th>Line</th><th>Meaning</th></tr></thead><tbody><tr><td>Engine reachable</td><td>The background Engine answers on its socket. If it is unreachable, doctor exits with code <code>4</code>.</td></tr><tr><td>Agent found or not found</td><td>Whether each known agent's command is on the <code>PATH</code> of the shell you ran doctor from.</td></tr><tr><td>State file</td><td>Whether the Engine's saved session state exists.</td></tr></tbody></table></div>
+<p>Agent checks use your terminal's <code>PATH</code>. <strong>Settings → Agents</strong> shows what diri itself detected, which is the result that counts. See the <a href="/docs/cli/">CLI reference</a> for every command.</p>
+<h2 id="logs-and-state"><a class="anchor" href="#logs-and-state" aria-hidden="true" tabindex="-1">#</a>Logs and state</h2>
+<div class="table-wrap"><table><thead><tr><th>Platform</th><th>What</th><th>Path</th></tr></thead><tbody><tr><td>macOS</td><td>Engine state, sockets, host config, manifest overrides</td><td><code>~/Library/Application Support/Dirijor</code></td></tr><tr><td>macOS</td><td>Engine log</td><td><code>~/Library/Application Support/Dirijor/logs/dirijord.log</code></td></tr><tr><td>macOS</td><td>Diagnostics log</td><td><code>~/Library/Application Support/Dirijor/telemetry/spool</code></td></tr><tr><td>macOS</td><td>App preferences and caches</td><td><code>~/Library/Application Support/diri</code></td></tr><tr><td>macOS</td><td>Downloaded updates</td><td><code>~/Library/Caches/diri/updates</code></td></tr><tr><td>Linux</td><td>Session state and logs</td><td><code>~/.local/state/diri</code></td></tr><tr><td>Linux</td><td>Engine log</td><td><code>~/.local/state/diri/logs/dirijord.log</code></td></tr><tr><td>Linux</td><td>Host config, preferences, manifest overrides</td><td><code>~/.config/diri</code></td></tr><tr><td>Linux</td><td>Data</td><td><code>~/.local/share/diri</code></td></tr><tr><td>Linux</td><td>Cache</td><td><code>~/.cache/diri</code></td></tr></tbody></table></div>
+<p>On Linux the <code>XDG_*</code> variables override these roots. On a remote host, each session's files are under <code>~/.local/state/diri/sessions/</code> and helpers under <code>~/.cache/diri/bin/</code>.</p>
+<aside class="callout warning"><strong>Warning</strong><p>Logs and terminal replay files can contain prompts, command output, personal paths and credentials. Share only the lines that matter and redact the rest.</p></aside>
+<h2 id="common-problems"><a class="anchor" href="#common-problems" aria-hidden="true" tabindex="-1">#</a>Common problems</h2>
+<h3 id="an-agent-is-not-detected"><a class="anchor" href="#an-agent-is-not-detected" aria-hidden="true" tabindex="-1">#</a>An agent is not detected</h3>
+<ol><li>Open <strong>Settings → Agents</strong> and click <strong>Refresh</strong>.</li><li>Check that the agent runs in a new terminal window. diri reads the <code>PATH</code> from your login shell, then looks in common user install folders such as pnpm, Bun, Cargo, mise and Volta.</li><li>If it is installed somewhere unusual, click <strong>Add…</strong> next to the agent and choose its executable.</li></ol>
+<p>For a remote host, pick the host under <strong>Execution target</strong> first. The agent has to be installed on the server and on the <code>PATH</code> of your login shell there.</p>
+<h3 id="a-tab-shows-a-shell-instead-of-the-agent"><a class="anchor" href="#a-tab-shows-a-shell-instead-of-the-agent" aria-hidden="true" tabindex="-1">#</a>A tab shows a shell instead of the agent</h3>
+<p>Most agents return to your login shell when they exit, so the tab stays useful. Scroll up to see why the agent stopped. To start it again, type its command or use the exit card's <strong>Resume Conversation</strong> where offered.</p>
+<p>If a custom agent opens a bare shell from the start, its manifest may have failed to load. A malformed manifest file is skipped without an error dialog. Check the file name, <code>id</code> and JSON against <a href="/docs/agents/">Add your own agent</a>.</p>
+<h3 id="a-session-shows-as-exited"><a class="anchor" href="#a-session-shows-as-exited" aria-hidden="true" tabindex="-1">#</a>A session shows as exited</h3>
+<p>The agent's process ended. The pane shows why, with <strong>Resume Conversation</strong> for agents that can resume, or <strong>Restart Terminal</strong> for shells. Agents that resume only the &quot;latest in folder&quot; conversation can reopen a different one if you used them elsewhere in the same folder. See the resume column in <a href="/docs/agents/">Supported agents</a>.</p>
+<h3 id="status-looks-wrong"><a class="anchor" href="#status-looks-wrong" aria-hidden="true" tabindex="-1">#</a>Status looks wrong</h3>
+<p>Open <strong>Session Inspector → Info → Why Diri thinks this</strong> and click <strong>Copy status debug info</strong>. It shows which detection rule matched and its timing, without a screenshot or your prompt. Paste it into a bug report.</p>
+<h3 id="agent-output-has-no-colour"><a class="anchor" href="#agent-output-has-no-colour" aria-hidden="true" tabindex="-1">#</a>Agent output has no colour</h3>
+<p>diri sets <code>TERM=xterm-256color</code> and <code>COLORTERM=truecolor</code> for every agent it starts and removes inherited <code>NO_COLOR</code>, <code>FORCE_COLOR</code>, <code>CLICOLOR</code> and <code>CLICOLOR_FORCE</code>. If an agent is still monochrome, check whether your own shell startup files or the agent's settings turn colour off.</p>
+<h3 id="remote-errors"><a class="anchor" href="#remote-errors" aria-hidden="true" tabindex="-1">#</a>Remote errors</h3>
+<div class="table-wrap"><table><thead><tr><th>Error</th><th>What to do</th></tr></thead><tbody><tr><td><code>remote_transport_unavailable</code></td><td>This build cannot run remote sessions. Install an official release.</td></tr><tr><td><code>unsupported remote platform</code></td><td>Use a Linux x86_64, Linux aarch64 or Apple silicon macOS server.</td></tr><tr><td><strong>No detach</strong> on a remote session</td><td>The host may stop sessions when SSH disconnects. Stay connected or use another host.</td></tr><tr><td><strong>Connection lost · Last received screen</strong></td><td>diri is reconnecting. Click <strong>Reconnect</strong> to retry now.</td></tr><tr><td>Prompt for password never appears (Linux)</td><td>Install <code>zenity</code> or <code>kdialog</code>, or use key-based login.</td></tr></tbody></table></div>
+<p>More in <a href="/docs/remote-hosts/">Remote hosts</a>.</p>
+<h2 id="report-a-bug"><a class="anchor" href="#report-a-bug" aria-hidden="true" tabindex="-1">#</a>Report a bug</h2>
+<ol><li>Check for an existing issue and try the latest release.</li><li>Open <strong>Settings → General → Support</strong> and click <strong>Copy diagnostics</strong>. Review the preview, then paste it into the issue. It includes app, platform and Engine details, agent availability, remote host reachability and storage reachability. It does not include raw logs.</li><li>Or choose <strong>Help → Report a Problem…</strong>. It marks the moment in the diagnostics log, sends it, copies your Support ID and opens a GitHub issue with the ID filled in.</li></ol>
+<p>File it with the <a href="https://github.com/cristicretu/diri/issues/new?template=bug_report.yml" rel="noopener">bug report form</a>. Include:</p>
+<ul><li>Steps to reproduce, what you expected and what happened.</li><li>diri version, OS version and how you installed diri.</li><li>The agent CLI's version, and whether the session was local or on an SSH host.</li><li>On macOS, your chip. For Linux display problems, the display server, desktop environment, GPU and driver.</li></ul>
+<p>Questions about setup and workflows go to <a href="https://github.com/cristicretu/diri/discussions" rel="noopener">Discussions</a>. Report security problems privately, as described in the <a href="/docs/security/">security model</a>.</p>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><a class="prev" href="/docs/security/"><span>Previous</span>Security model</a><span></span></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#run-dirijor-doctor">Run dirijor doctor</a><a href="#logs-and-state">Logs and state</a><a href="#common-problems">Common problems</a><a href="#report-a-bug">Report a bug</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/troubleshooting.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Ftroubleshooting.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/troubleshooting.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>

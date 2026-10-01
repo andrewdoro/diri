@@ -24,6 +24,16 @@ The workspace contains curated demonstration data, not a live Diri session. Down
 
 `index.html`, `style.css`, `app.js`, `agent-previews.js`, `downloads.js`, and `assets/` can be served by any static host. `server.mjs` is a loopback-only development server. There are no external fonts, analytics, runtime dependencies, or third-party scripts.
 
+## Documentation
+
+`/docs/` is generated from Markdown in `docs-src/` by `scripts/docs.mjs` (no dependencies). Edit a page, then run `npm run docs`; the HTML in `docs/`, the Markdown twins (`docs/<page>.md`), `docs/search.json`, `llms.txt`, `llms-full.txt`, and the sitemap entries are rewritten and committed, so `npm run dev` still needs no build step. `npm run verify` fails when the generated files are stale. The sidebar order lives in `NAV` at the top of the script; every page must be listed there exactly once.
+
+Pages use a small Markdown subset: `##`–`####` headings (ids are generated), paragraphs, single-level lists, GFM tables, fenced code with an optional title after the language (```` ```toml ~/.codex/config.toml ````), `> [!NOTE]` / `[!TIP]` / `[!WARNING]` callouts, images on their own line, and inline `<kbd>`. Frontmatter needs `title` and an 80–180 character `description`; `nav` and `lead` are optional.
+
+The [MCP tool reference](https://diri.sh/docs/mcp-tools/) is generated from `docs-src/mcp-tools.json`, which a Rust test (`diri/crates/dirijor-mcp/tests/docs_catalog.rs`) keeps identical to the server's real tool catalog. After changing a tool, run `DIRI_UPDATE_DOCS=1 cargo test -p dirijor-mcp --test docs_catalog` from `diri/`, then `npm run docs`.
+
+Agents can read the docs three ways: the Markdown twin of every page, `llms.txt` / `llms-full.txt`, and the read-only docs MCP server at `/mcp` (`functions/mcp.js`, see [CLOUDFLARE.md](CLOUDFLARE.md)). ⌘K search and the MCP server share one ranking function, `docs-search.js`.
+
 ## Release downloads
 
 On each page load, `downloads.js` checks GitHub's public [latest release API](https://docs.github.com/en/rest/releases/releases#get-the-latest-release). The primary button links directly to that release's universal macOS DMG, with its version and release notes beside it. Other downloads lists the macOS ZIP and Linux x86_64 AppImage/DEB only when those assets exist in the same release. Linux is not included in every release; the full release history and Linux installation guide are always available.

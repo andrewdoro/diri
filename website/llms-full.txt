@@ -1,0 +1,2295 @@
+# Diri documentation
+
+
+---
+
+Source: https://diri.sh/docs/
+
+# Diri documentation
+
+> How to install diri, run coding agents side by side, keep their work apart, review it, and let agents start and coordinate other agents over MCP.
+
+diri runs Claude Code, Codex, Cursor, Gemini and 16 other terminal agents side by side in one native window. It tells you which agents are working, which ones need you, and which are done. Every agent can get its own git worktree, and every change lands in one place to review.
+
+## Start here
+
+| Page | What you get |
+| --- | --- |
+| [Install](/docs/install/) | macOS and Linux packages, updates, and where diri keeps its data. |
+| [Quickstart](/docs/quickstart/) | Your first agent session, start to finish. |
+| [Keyboard shortcuts](/docs/keyboard-shortcuts/) | Every binding, grouped by task. |
+
+## How diri fits together
+
+diri has three parts. You mostly see the first one.
+
+| Part | What it does |
+| --- | --- |
+| The app | The window: sidebar, terminals, changes, notes, settings. Closing it never stops an agent. |
+| The Engine | A background process that owns every session, its status, worktrees and history. The app and the CLI both talk to it. |
+| Holders | One small process per session that owns the terminal. Agents keep running when the app or the Engine restarts. |
+
+Agents you start inside diri can reach the Engine too, through the built-in [MCP server](/docs/mcp/). That is how one agent starts helpers, hands them tasks, waits for results and merges their branches.
+
+## Work with many agents
+
+- [Sessions](/docs/sessions/): status, notifications, the sidebar, history, and what survives a restart.
+- [Worktrees and review](/docs/worktrees/): give each task its own checkout, then review and bring the changes back.
+- [Notes](/docs/notes/): plans and to-do lists you can hand to agents.
+- [Recipes](/docs/scheduled-tasks/): save a task and rerun it in one click.
+- [Accounts and usage](/docs/accounts/): switch accounts and see what you spend.
+
+## Automate
+
+- [MCP server](/docs/mcp/): what agents can do with diri, and how to connect any agent.
+- [MCP tool reference](/docs/mcp-tools/): every tool and argument, generated from the server itself.
+- [dirijor CLI](/docs/cli/): script sessions, worktrees and notes from a terminal.
+- [Supported agents](/docs/agents/): what each agent supports, and how to add your own.
+
+## Use these docs from an agent
+
+Every page has a Markdown version: add `.md` to its path, for example [/docs/mcp.md](/docs/mcp.md). [llms.txt](/llms.txt) lists them all and [llms-full.txt](/llms-full.txt) has the whole set in one file. To let an agent search the docs itself, add the [docs MCP server](/docs/mcp/#docs-mcp):
+
+```sh
+claude mcp add --transport http diri-docs https://diri.sh/mcp
+```
+
+
+---
+
+Source: https://diri.sh/docs/install/
+
+# Install
+
+> Install diri on macOS with the DMG or Homebrew, understand how updates arrive, try the Linux and iPhone betas, and remove every local file.
+
+diri is a native app for macOS 15 or newer. A Linux beta runs on x86_64 Ubuntu, and an iPhone companion is in beta. Agents are installed separately; diri runs the CLIs and accounts already on your machine.
+
+## macOS
+The macOS build is universal (Apple silicon and Intel), signed with a Developer ID, and notarized.
+
+### Homebrew
+
+```sh
+brew install --cask cristicretu/diri/diri
+```
+
+### DMG
+1. Download the latest DMG from [GitHub Releases](https://github.com/cristicretu/diri/releases/latest).
+2. Open it and drag diri to Applications.
+3. Open diri. The first launch checks which agents are installed and offers to install one if none are. See the [Quickstart](/docs/quickstart/).
+
+| Requirement | Value |
+| --- | --- |
+| macOS | 15 or newer |
+| Architecture | Apple silicon or Intel (one universal app) |
+| Agents | Installed separately, for example Claude Code or Codex |
+
+## Updates
+diri updates itself from the same GitHub release feed. It checks 20 seconds after launch and then every 6 hours. Downloads are verified before they are offered: the code signature, the Team ID and bundle identifier must match the running app, Gatekeeper must accept the notarization, and the version must match the one the feed promised. Only newer versions are offered.
+
+diri never quits or relaunches by itself, because it is holding your sessions. When an update is ready:
+1. The sidebar footer shows **Restart to update to** followed by the version.
+2. Click it to install and relaunch now, or just quit diri normally. A normal quit installs the update without reopening the app.
+3. Running agents keep running. The background Engine is replaced with the new one, and every session reconnects.
+
+To check by hand, open the command palette (<kbd>⌘</kbd><kbd>K</kbd>) and run **Check for Updates…**. It reports "up to date" instead of staying silent.
+
+### Update settings
+Open **Settings → General → Software updates**.
+
+| Setting | What it does |
+| --- | --- |
+| Update automatically | Download verified GitHub releases and install when diri quits. |
+| Check Now | Run a check right away. Becomes **Download** or **Restart** when an update is waiting. |
+| Skip this version | Hide the offered release until a newer one is available. |
+
+To install a specific release, including an older one, **Option-click** the update button. A **Switch version** list shows the releases the feed still carries, with **Install** next to each. Choosing one turns off **Update automatically** so it is not replaced on the next check. Turn it back on to return to the latest release.
+
+> [!NOTE]
+> A build that is not inside a signed `.app`, such as one you built from source, shows "Updates off for this build". If diri sits in a folder your user cannot write to, download the DMG by hand instead.
+
+## Linux beta
+diri runs on x86_64 Ubuntu 22.04 and 24.04 under Wayland or X11. Linux packages are not included in every release, so check the [release list](https://github.com/cristicretu/diri/releases) for one with Linux assets.
+
+| Requirement | Value |
+| --- | --- |
+| Distribution | Ubuntu 22.04 or 24.04, x86_64 (glibc 2.35 or newer) |
+| Display | Wayland or X11 |
+| Graphics | A Vulkan 1.3 driver |
+| Packages | `.deb` and `.AppImage` |
+
+Verify the download against the `SHA256SUMS` file from the same release:
+
+```sh
+sha256sum --ignore-missing --check SHA256SUMS
+```
+
+Each Linux file also has a Sigstore bundle. The [Linux guide](https://github.com/cristicretu/diri/blob/main/diri/LINUX.md) has the `cosign verify-blob` command that proves a file was built by the project's CI.
+
+Install the Debian package with APT so its dependencies resolve. It adds the desktop entry and the `diri`, `dirijor` and `dirijor-mcp` commands:
+
+```sh
+sudo apt install ./diri_<version>_amd64.deb
+```
+
+Or run the AppImage directly:
+
+```sh
+chmod +x diri_<version>_amd64.AppImage
+./diri_<version>_amd64.AppImage
+```
+
+diri does not update itself on Linux. Settings shows the installed version; update by installing a newer package the same way.
+
+### Linux limits
+- No aarch64 packages.
+- No native tray or notification actions. Approvals and status still work inside diri.
+- No automatic in-app updates.
+- No iPhone companion or remote port forwarding.
+- Start at login is hidden.
+
+Shortcuts use Ctrl where macOS uses ⌘. See [Keyboard shortcuts](/docs/keyboard-shortcuts/).
+
+## iPhone companion (beta)
+The iPhone app starts, watches and answers sessions on your Mac over [Tailscale](https://tailscale.com). It needs a signed build of the app; there is no App Store release.
+1. On the Mac, open **Settings → Phone access** and click **Check this Mac**. Follow the Tailscale guidance until the check passes.
+2. On the iPhone, install Tailscale and sign in with the same account.
+3. On the Mac, click **Enable phone access & show code**. On the iPhone, tap **Scan pairing code**, or paste the link from **Copy pairing link**.
+4. Keep diri open and the Mac plugged in with the lid open. Closing the lid or quitting diri disconnects the phone.
+
+The pairing code controls every session on that Mac, so do not share it. Turning access off closes existing connections, and enabling it again makes a new code. Build details are in [ios/README.md](https://github.com/cristicretu/diri/blob/main/ios/README.md).
+
+## Local data
+| Platform | Path | Contents |
+| --- | --- | --- |
+| macOS | `~/Library/Application Support/Dirijor` | Engine state, session records, logs |
+| macOS | `~/Library/Application Support/diri` | App data |
+| macOS | `~/Library/Caches/diri/updates` | Downloaded updates and `install.log` |
+| Linux | `~/.local/share/diri` | Data and PTY holders |
+| Linux | `~/.local/state/diri` | Session state and logs |
+| Linux | `~/.config/diri` | Host config and manifest overrides |
+| Linux | `~/.cache/diri` | Cache |
+
+On Linux the usual `XDG_*` variables override these roots.
+
+To check the Engine, agent discovery and state file without opening the window, run `dirijor doctor`. On macOS the command lives inside the app:
+
+```sh
+/Applications/diri.app/Contents/Resources/bin/dirijor doctor
+```
+
+> [!WARNING]
+> Logs can contain terminal output, paths and anything a process printed, including secrets. Redact them before attaching them to an issue.
+
+## Uninstall
+Quitting diri does not stop your agents. Each session runs in its own background process so it survives the app closing.
+1. Close the sessions you want to stop (<kbd>⌘</kbd><kbd>W</kbd>), then quit diri.
+2. On macOS, delete diri from Applications, or run `brew uninstall --cask diri` if you used Homebrew. On Linux, run `sudo apt remove diri` or delete the AppImage.
+3. To remove your sessions and settings too, delete the data folders listed above.
+
+Package removal never deletes your sessions or preferences on its own. Your project folders and any git worktrees are not touched.
+
+
+---
+
+Source: https://diri.sh/docs/quickstart/
+
+# Quickstart
+
+> Go from a fresh install to a running agent in diri: install an agent, pick a folder, start a session, read its status, and answer when it asks.
+
+This page takes you from a fresh install to a working agent in a few minutes. If you have never used a coding agent before, the slower walkthrough in [Your first agent](/guides/first-agent/) explains each step.
+
+## 1. Install diri
+Install with Homebrew or the DMG. You need macOS 15 or newer. See [Install](/docs/install/) for Linux and details.
+
+```sh
+brew install --cask cristicretu/diri/diri
+```
+
+## 2. Add an agent
+diri runs the agent CLIs already on your machine. On first launch it checks which ones are installed.
+- **If none are found**, the welcome screen says "Install a coding agent to get started." and lists a few agents with an **Install** button.
+- **Click Install.** diri shows the agent's official install command in a confirmation sheet. Click **Install** again and it runs in a new terminal tab you can watch.
+- **Sign in once.** Start the agent and follow its own sign-in steps. diri never handles agent passwords.
+
+The one-click install covers Claude Code, Codex, Gemini CLI and OpenCode. **More agents…** opens **Settings → Agents**, which lists every supported agent. If you install an agent while diri is open, click **Refresh** there. If one still is not detected, use **Add…** on its row to choose the executable.
+
+> [!TIP]
+> Claude Code and Codex have the deepest status and resume support. Every other agent still runs in a real terminal.
+
+## 3. Pick a folder
+An agent works inside one folder and can change files there.
+- On the welcome screen, click **Choose a folder…**.
+- Or open **New Agent** at the top of the sidebar, click the folder row at the bottom (the **Where** panel), and choose a recent folder or **Choose Folder…**.
+
+diri remembers every folder you use, so next time it is one click. A folder that is a git repository can also give each agent its own worktree; see [Worktrees and review](/docs/worktrees/).
+
+## 4. Start a session
+| Way to start | What it does |
+| --- | --- |
+| **New Agent** in the sidebar | Pick an agent from the ones installed |
+| <kbd>⌘</kbd><kbd>T</kbd> | Start the default agent right away |
+| <kbd>⌘</kbd><kbd>N</kbd> | Open the launcher: pick project and agent, type the first prompt |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>T</kbd> | Start a plain terminal |
+
+Set the agent ⌘T uses in **Settings → General → Default agent**. The new session opens on the right with the agent's own screen, and a row appears in the sidebar. Type your task and press Return.
+
+## 5. Read the sidebar
+The mark on the left of each row shows what the session is doing. The agent's logo is on the right.
+
+| Mark | Meaning |
+| --- | --- |
+| Spinning | Working. Leave it alone. |
+| Amber | Needs you: a question or a permission prompt |
+| Green | Done, and you have not looked yet |
+| Grey | Idle, or done and already seen |
+| Moon | Hibernated to save memory. Open it to wake it. |
+
+[Sessions](/docs/sessions/) covers the full status model.
+
+## 6. Answer when it asks
+When an agent needs you, its row turns amber and diri sends a notification.
+1. Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>J</kbd> to jump to the next session that needs you, or click the row.
+2. Answer in the agent's screen. Permission prompts usually take the arrow keys and Return.
+3. For a plain question, you can reply from the macOS notification with **Reply**.
+
+The bell (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>I</kbd>) collects every "needs you" and "finished" moment.
+
+## 7. Quit without losing anything
+Each session runs in its own background process, not inside the window. Quit diri (<kbd>⌘</kbd><kbd>Q</kbd>) and reopen it later: agents that were working are still working, with their full screen history. The same holds when diri updates its background Engine.
+
+A restart of your Mac does stop agents. Their sessions then offer **Resume**, which continues the same conversation for agents that support it. [Never lose your work](/guides/never-lose-work/) explains what survives and what does not.
+
+## Next steps
+- [Sessions](/docs/sessions/): status, sidebar, history, resume and terminal features.
+- [Worktrees and review](/docs/worktrees/): parallel agents on separate branches, and reviewing their changes.
+- [Keyboard shortcuts](/docs/keyboard-shortcuts/): every binding.
+- [Run several agents at once](/guides/parallel-agents/) and [Let agents work as a team](/guides/agent-teams/).
+
+
+---
+
+Source: https://diri.sh/docs/keyboard-shortcuts/
+
+# Keyboard shortcuts
+
+> Every diri keyboard shortcut grouped by task, plus which surface wins a contested key, how to rebind, and the Linux equivalents.
+
+diri is keyboard-first. This page groups every default binding by what you are trying to do. Unless a row says otherwise, a shortcut works whenever the main window is focused, including while you type in a terminal.
+
+Modifiers use the macOS glyphs: ⌘ Command, ⇧ Shift, ⌥ Option, ⌃ Control. For a gentler introduction to the handful worth learning first, read [Shortcuts worth learning](/guides/shortcuts/).
+
+## Change a shortcut
+Open **Settings → Shortcuts** to see every command with its description and rebind or clear it. Custom bindings take precedence over the defaults below, and the native menus, the command palette and the hold-⌘ hints all follow them.
+
+### Linux
+On Linux, ⌘ becomes Ctrl and ⌃⌘ becomes Ctrl+Shift. A few bindings move to avoid collisions:
+
+| Command | macOS | Linux |
+| --- | --- | --- |
+| Toggle inspector | ⇧⌘D | Ctrl+Shift+D |
+| Delegate session | ⌃⌘D | Ctrl+Alt+D |
+| To-dos | ⌃⌘T | Ctrl+Alt+Shift+T |
+| Focus pane left / right / up / down | ⌃⌥ + arrow | Ctrl+Alt+H / L / K / J |
+| Hide diri | ⌘H | none |
+
+## See shortcuts in place
+Hold ⌘ on its own for a moment (700 ms) and the ⌘ shortcuts appear on the controls they operate: ⌘1 … ⌘9 on session rows and tabs, ⌘T on New Agent and the new-tab button, ⌘B on the sidebar toggle, ⇧⌘D on the inspector toggle, ⇧⌘H on search, and ⌘W under the selected tab's close button. Release ⌘ and they fade out.
+
+Pressing another key or clicking while ⌘ is down counts as a shortcut, so the labels never flash during ⌘C or ⌘T. A command rebound away from ⌘ shows nothing. With Reduce Motion they appear and disappear without a fade.
+
+## Sessions
+| Shortcut | Action |
+| --- | --- |
+| <kbd>⌘</kbd><kbd>N</kbd> | Show or hide the launcher: pick a project and agent, then type the first prompt |
+| <kbd>⌘</kbd><kbd>T</kbd> | Start a session with the default agent, no launcher |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>T</kbd> | Start a plain terminal session |
+| <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>N</kbd> | Start a Codex session |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>N</kbd> | New note in the current project |
+| <kbd>⌘</kbd><kbd>R</kbd> | Rename the selected session in place |
+| <kbd>⌃</kbd><kbd>⌘</kbd><kbd>D</kbd> | Delegate: mark the selected session as a handoff source; select a target and press again to review and send |
+| <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>W</kbd> | Archive the selected session |
+| <kbd>⌘</kbd><kbd>W</kbd> | Close a focused auxiliary terminal; otherwise close the selected session, or the window when none is selected |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>T</kbd> | Reopen the most recently closed session |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>N</kbd> | New window for the current workspace |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>W</kbd> | Close the window; sessions keep running |
+| <kbd>⌘</kbd><kbd>Q</kbd> | Quit diri; the Engine keeps sessions alive |
+| <kbd>⌘</kbd><kbd>H</kbd> | Hide diri |
+
+Set the default agent for ⌘T in **Settings → General → Default agent**.
+
+## Move between sessions
+| Shortcut | Action |
+| --- | --- |
+| <kbd>⌘</kbd><kbd>1</kbd> … <kbd>⌘</kbd><kbd>8</kbd> | Select the nth session; hold ⌘ to see each row's number |
+| <kbd>⌘</kbd><kbd>9</kbd> | Select the last session |
+| <kbd>⌘</kbd><kbd>[</kbd> / <kbd>⌘</kbd><kbd>]</kbd> | Previous / next session in sidebar order, wrapping |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>←</kbd> / <kbd>⌥</kbd><kbd>⌘</kbd><kbd>→</kbd> | Previous / next session |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>↑</kbd> / <kbd>⌥</kbd><kbd>⌘</kbd><kbd>↓</kbd> | Previous / next session |
+| <kbd>⌃</kbd><kbd>⌘</kbd><kbd>↑</kbd> / <kbd>⌃</kbd><kbd>⌘</kbd><kbd>↓</kbd> | Move the selected row up or down among its siblings |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>J</kbd> | Jump to the next session that needs you |
+| <kbd>⌃</kbd><kbd>⇥</kbd> | Most-recently-used switcher; hold ⌃ and press ⇥ again to advance |
+| <kbd>⌃</kbd><kbd>⇧</kbd><kbd>Space</kbd> | Peek tabs: preview sessions across projects without switching |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>B</kbd> | Move keyboard focus to the sidebar |
+
+Selecting a session also focuses its terminal.
+
+While the switcher is open: ⇧⌃⇥ cycles backwards, ← ↑ go back, → ↓ go forward, ↵ commits the highlighted session, Esc cancels, and releasing ⌃ commits. Every other key is swallowed until it closes.
+
+## Surfaces
+| Shortcut | Action |
+| --- | --- |
+| <kbd>⌘</kbd><kbd>K</kbd> | Command palette |
+| <kbd>⌘</kbd><kbd>P</kbd> | Open project (the palette's project page) |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>H</kbd> | Search chats (the palette's history page) |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>F</kbd> | Search notes |
+| <kbd>⌃</kbd><kbd>⌘</kbd><kbd>T</kbd> | To-dos across every note |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>I</kbd> | Notifications inbox |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>O</kbd> | Session overview |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>W</kbd> | Worktrees overview |
+| <kbd>⌘</kbd><kbd>,</kbd> | Settings |
+| <kbd>⌘</kbd><kbd>B</kbd> | Show or hide the sidebar (or the top bar with horizontal tabs) |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>S</kbd> | Switch tabs between the sidebar and the top |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>D</kbd> | Show or hide the inspector |
+| <kbd>⌘</kbd><kbd>J</kbd> | Show or hide an auxiliary terminal below the selected session |
+
+⌘K, ⌘P and ⇧⌘H open the same palette on different pages. The palette lists most commands with their shortcuts, so it doubles as a reminder for the ones you use least. **Check for Updates…**, **What's New** and **Review session launches** have no default shortcut and live in the palette.
+
+## Panes
+| Shortcut | Action |
+| --- | --- |
+| <kbd>⌘</kbd><kbd>D</kbd> | Split right and choose a session for the new pane |
+| <kbd>⇧</kbd><kbd>⌥</kbd><kbd>⌘</kbd><kbd>D</kbd> | Split below and choose a session |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>↵</kbd> | Zoom the focused pane, or restore the layout |
+| <kbd>⌃</kbd><kbd>⌥</kbd> + arrow | Focus the nearest pane in that direction |
+| <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd> + arrow | Resize the nearest split divider by five percent |
+
+Swapping, moving and removing panes are in the command palette without default shortcuts. Removing a pane keeps its session running.
+
+## Inside the palette
+| Shortcut | Action |
+| --- | --- |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Move the highlight |
+| <kbd>⌃</kbd><kbd>P</kbd> / <kbd>⌃</kbd><kbd>N</kbd> | Move the highlight, readline style |
+| <kbd>↵</kbd> | Run the highlighted entry |
+| <kbd>⌘</kbd><kbd>↵</kbd> | Open project only: open a plain terminal in that folder instead of the default agent |
+| <kbd>⌘</kbd><kbd>[</kbd> | Back to the previous palette page |
+| <kbd>⌫</kbd> with an empty query | Back to the previous palette page |
+| <kbd>Esc</kbd> | Close the palette and cancel any theme preview |
+
+Choose **Settings → Color theme** in the palette, or search for **Color theme**. Arrow keys and hover preview each theme across the app. Enter or a click saves it; Escape, Back or switching pages restores the saved theme.
+
+## Inside the launcher
+| Shortcut | Action |
+| --- | --- |
+| <kbd>⇥</kbd> / <kbd>⇧</kbd><kbd>⇥</kbd> | Cycle the agent forward or backward |
+| <kbd>↵</kbd> | Start the session |
+| <kbd>⇧</kbd><kbd>↵</kbd> | New line in the prompt |
+| <kbd>⌘</kbd><kbd>R</kbd> | Show saved recipes |
+| <kbd>⌘</kbd><kbd>S</kbd> | Save the prompt as a recipe, or update the active one |
+| <kbd>⌘</kbd><kbd>1</kbd> … <kbd>⌘</kbd><kbd>3</kbd> | With an empty prompt, run the first three recipes |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>A</kbd> | Choose the account (Claude Code and Codex) |
+| <kbd>Esc</kbd> | Close the launcher |
+
+When the agent or project picker is open it takes the arrows first: ↑ ↓ move the highlight, ↵ commits it, and Esc closes the picker without closing the launcher. Recipes are covered in [Recipes and scheduled tasks](/docs/scheduled-tasks/).
+
+A handoff opens in the same surface with the generated context editable. Nothing is sent until you activate **Send handoff** or press Return. Esc cancels without sending.
+
+## Inside the overview
+| Shortcut | Action |
+| --- | --- |
+| Arrow keys | Move focus between sessions |
+| <kbd>↵</kbd> | Activate the focused session |
+| <kbd>⌘</kbd><kbd>A</kbd> | Select every session |
+| Any character | Add to the filter query |
+| <kbd>⌫</kbd> / <kbd>⌦</kbd> | Delete from the query; with an empty query and a selection, close the selected sessions |
+| <kbd>Esc</kbd> | Step back, then close |
+
+In Settings and the worktrees overview, Esc closes the surface. In Settings, Esc first dismisses an open menu or the remote-host editor. Inside the inspector, the ask and commit composers take ↵ to submit and Esc to cancel.
+
+## Terminal
+| Shortcut | Action |
+| --- | --- |
+| <kbd>⌘</kbd><kbd>F</kbd> | Find in the terminal |
+| <kbd>⌘</kbd><kbd>G</kbd> / <kbd>⇧</kbd><kbd>⌘</kbd><kbd>G</kbd> | Next / previous match |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>F</kbd> | Find the selected text |
+| <kbd>⌘</kbd><kbd>C</kbd> | Copy the selection |
+| <kbd>⌘</kbd><kbd>V</kbd> | Paste, including images |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>C</kbd> | Keyboard copy mode |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>C</kbd> | Quote the selection into this session's composer |
+| <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>C</kbd> | Send the selection to another session |
+| <kbd>⌘</kbd><kbd>E</kbd> | Insert path: pick a file under the session's folder and type its path |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>E</kbd> | Open the scrollback in your text editor |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>↑</kbd> / <kbd>⇧</kbd><kbd>⌘</kbd><kbd>↓</kbd> | Previous / next shell prompt (OSC 133) |
+| <kbd>⌘</kbd><kbd>=</kbd> or <kbd>⌘</kbd><kbd>+</kbd> | Bigger text |
+| <kbd>⌘</kbd><kbd>-</kbd> | Smaller text |
+| <kbd>⌘</kbd><kbd>0</kbd> | Reset text size |
+
+With the find bar open, ↵ jumps to the next match, ⇧↵ to the previous one, and Esc closes it.
+
+Apart from ⌃⇥ and the surface shortcuts above, keys without ⌘ go to the running program, modifiers and all. Keys with ⌘ do not reach the program, with one exception: ⌥⌫ and ⌘⌫ still delete a word or a line in the shell.
+
+## Notes
+These work while a note's editor has focus.
+
+| Shortcut | Action |
+| --- | --- |
+| <kbd>⌃</kbd><kbd>⌘</kbd><kbd>↵</kbd> | Start an agent on the to-do under the caret |
+| <kbd>⌘</kbd><kbd>↵</kbd> | Tick or untick a to-do |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>↵</kbd> | Fold or unfold |
+| <kbd>⌘</kbd><kbd>B</kbd> / <kbd>⌘</kbd><kbd>I</kbd> | Bold / italic |
+| <kbd>⌘</kbd><kbd>E</kbd> | Inline code |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>X</kbd> | Strikethrough |
+| <kbd>⌘</kbd><kbd>K</kbd> | Link |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>0</kbd> … <kbd>3</kbd> | Turn into text, heading 1, 2 or 3 |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>8</kbd> / <kbd>7</kbd> / <kbd>9</kbd> | Turn into bulleted list / numbered list / to-do |
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>Q</kbd> / <kbd>⌥</kbd><kbd>⌘</kbd><kbd>C</kbd> | Turn into quote / code |
+| <kbd>⌥</kbd><kbd>⇧</kbd><kbd>↑</kbd> / <kbd>↓</kbd> | Move the block up or down |
+| <kbd>⌃</kbd><kbd>↵</kbd> | Table menu |
+| <kbd>⌘</kbd><kbd>Z</kbd> / <kbd>⇧</kbd><kbd>⌘</kbd><kbd>Z</kbd> | Undo / redo |
+
+See [Notes](/docs/notes/) for blocks, mentions and starting agents from to-dos.
+
+## Text fields
+The command palette, the terminal find bar, the history filter, the launcher prompt and the inspector composers share one keymap.
+
+| Shortcut | Action |
+| --- | --- |
+| <kbd>⌘</kbd><kbd>A</kbd> | Select all |
+| <kbd>⌘</kbd><kbd>C</kbd> / <kbd>⌘</kbd><kbd>X</kbd> / <kbd>⌘</kbd><kbd>V</kbd> | Copy, cut, paste |
+| <kbd>←</kbd> / <kbd>→</kbd> | Move the caret; ⇧ extends the selection |
+| <kbd>⌥</kbd><kbd>←</kbd> / <kbd>⌥</kbd><kbd>→</kbd> | Move by word |
+| <kbd>⌘</kbd><kbd>←</kbd> / <kbd>⌘</kbd><kbd>→</kbd> | Start or end of the line |
+| <kbd>Home</kbd> / <kbd>End</kbd> | Start or end of the line |
+| <kbd>⌫</kbd> / <kbd>⌦</kbd> | Delete a character; ⌥ deletes a word, ⌘ deletes to the line edge |
+| <kbd>⌃</kbd><kbd>A</kbd> / <kbd>⌃</kbd><kbd>E</kbd> | Start or end of the line |
+| <kbd>⌃</kbd><kbd>B</kbd> / <kbd>⌃</kbd><kbd>F</kbd> | Back or forward one character |
+| <kbd>⌃</kbd><kbd>H</kbd> / <kbd>⌃</kbd><kbd>D</kbd> | Delete the character before or after the caret |
+| <kbd>⌃</kbd><kbd>W</kbd> | Delete the word before the caret |
+| <kbd>⌃</kbd><kbd>U</kbd> / <kbd>⌃</kbd><kbd>K</kbd> | Delete to the start or end of the line |
+
+## When two surfaces want the same key
+diri asks which surface is in front, then falls back to the terminal.
+- **An unhandled global shortcut is not swallowed.** ⌘R or ⌘J with nothing selected, or ⌘9 with no sessions, leaves the keystroke alone.
+- **The launcher takes everything while it is open**, except ⌘N, which closes it.
+- **Settings and the worktrees overview take everything** except ⇧⌘H, ⌘K, ⌘P and ⌘,.
+- **The switcher and the overview own the arrow keys** while they are visible, so ⌥⌘↑, ⌘[ and ⌃⌘↑ stand down.
+- **Esc is shared.** With the overview closed, Esc clears a multi-session sidebar selection but still reaches the focused terminal, so Esc in vim never depends on the sidebar.
+- **⌘W is three commands.** It closes a focused auxiliary terminal first, then the selected session, and only with no session selected the window.
+- **⌘J and ⇧⌘J are unrelated.** ⌘J toggles the auxiliary terminal; ⇧⌘J jumps to the next session that needs you.
+
+
+---
+
+Source: https://diri.sh/docs/sessions/
+
+# Sessions
+
+> How diri sessions work: status colors, notifications, the sidebar, searching and resuming past chats, persistence across quits, hibernation and terminal features.
+
+A session is one agent, terminal or note running in diri. Each gets a row in the sidebar and its own terminal. Sessions run in background processes, so they keep going when you close the window or quit the app.
+
+## Status
+The mark on the left of a row shows what the session is doing; the agent's logo is on the right.
+
+| Mark | Meaning |
+| --- | --- |
+| Spinner | Working |
+| Amber warning sign | Needs you: a question or a permission prompt. It turns red when the prompt looks destructive |
+| Green check | Done, and you have not looked yet |
+| No mark | Idle, or done and already seen |
+| Moon | Hibernated to save memory; opening it wakes it |
+
+Claude Code reports its status through hooks, which is the most reliable signal. Codex also reports each finished turn. For every other agent, diri reads the status from its screen. Every agent still runs as a normal terminal.
+
+Right-click a row to **Mark as Read** or **Mark as Unread**.
+
+## Notifications
+When a session needs you or finishes, diri sends a macOS notification.
+- **Reply.** For a plain question, answer straight from the notification banner.
+- **Inbox.** <kbd>⇧</kbd><kbd>⌘</kbd><kbd>I</kbd> opens the bell, which collects every "needs you" and "finished" moment. The Dock icon shows the unread count.
+- **Jump.** <kbd>⇧</kbd><kbd>⌘</kbd><kbd>J</kbd> selects the next session that needs you.
+- **Sounds.** **Settings → General → Gentle status chimes** plays quiet cues for input, completion and memory pauses.
+
+## The sidebar
+Sessions are grouped by project folder. Sessions started by another agent nest under it; selecting a session highlights its parent and children (turn off **Highlight parent and children** in Settings → General).
+
+| Task | How |
+| --- | --- |
+| Rename | Double-click the row, <kbd>⌘</kbd><kbd>R</kbd>, or **Rename…** |
+| Pin | **Pin Session** in the row's menu |
+| Reorder | Drag between rows, or <kbd>⌃</kbd><kbd>⌘</kbd><kbd>↑</kbd> / <kbd>↓</kbd> |
+| Reorder projects | Drag the project header |
+| Hand off work | Drop a session onto another session's row |
+| Start a sibling with the same prompt | Drop a session on the zone below the last project |
+| Archive | **Archive Session**, or <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>W</kbd> |
+| Remove | **Remove from Sidebar**, or <kbd>⌘</kbd><kbd>W</kbd> |
+| Close a project | **Close All Sessions** on the project |
+
+Escape cancels a drag. Select several rows to act on them together. <kbd>⇧</kbd><kbd>⌘</kbd><kbd>S</kbd> moves tabs from the sidebar to the top of the window and back.
+
+### Archive, remove and reopen
+- **Archive Session** stops the agent and keeps the session in an **Archived** group under its project. Right-click it and choose **Revive** to continue the conversation. For an agent that cannot resume, the menu item reads **Archive (won't be resumable)**.
+- **Remove from Sidebar** stops the agent and removes the session and its screen history. With **Confirm before closing a session** on, diri asks first if a process is still running.
+- <kbd>⇧</kbd><kbd>⌘</kbd><kbd>T</kbd> reopens the most recently closed session.
+
+Neither touches your files.
+
+## Search past chats
+Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>H</kbd> for **Search chats**. It lists Claude Code and Codex conversations on this machine, including ones started outside diri. Type to filter and press Return to continue that conversation in a new session.
+
+## Resume and fork
+After your Mac restarts, sessions whose agent stopped offer **Resume**. Resuming continues the same conversation for agents that support it. A local terminal shows **Restart** instead and starts a fresh shell in the same folder. Both are also in the row's menu.
+
+Forking copies a conversation into a new session so you can try another approach. It works for Claude Code and Codex, from an agent's `fork_agent` tool or the CLI:
+
+```sh
+dirijor session fork <session>
+```
+
+## Persistence
+Each session is owned by its own holder process, not by the window. The background Engine keeps the record of every session.
+
+| Event | What happens |
+| --- | --- |
+| Close the window or quit diri | Agents keep running with their full screen history |
+| diri updates its Engine | Sessions are picked up again where they were |
+| Mac restarts | Agents stop; sessions offer **Resume** |
+
+## Hibernation
+Idle agents still use memory. In **Settings → Resources**, **Hibernate idle sessions** freezes a session after it has had no output or CPU activity for a set time (1 hour by default, or off), and **Memory limit** freezes an idle session that grows past a size you choose. Frozen sessions show a moon and are never killed; opening one wakes it exactly where it was.
+
+## Terminal features
+| Feature | How |
+| --- | --- |
+| Find, including scrollback | <kbd>⌘</kbd><kbd>F</kbd>, then <kbd>⌘</kbd><kbd>G</kbd> / <kbd>⇧</kbd><kbd>⌘</kbd><kbd>G</kbd> |
+| Insert a file path | <kbd>⌘</kbd><kbd>E</kbd> opens a picker under the session's folder |
+| Drop files | Drop files from Finder on the terminal to paste their escaped paths |
+| Paste images | <kbd>⌘</kbd><kbd>V</kbd> |
+| Quote a selection into your reply | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>C</kbd> |
+| Open scrollback in your editor | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>E</kbd> |
+| Jump between shell prompts | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>↑</kbd> / <kbd>↓</kbd> |
+| Auxiliary terminal | <kbd>⌘</kbd><kbd>J</kbd> opens a shell below the session |
+| Split panes | <kbd>⌘</kbd><kbd>D</kbd> splits right, <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>D</kbd> splits below |
+
+Links in the output open with a click, and `file:line` links open in your editor at that line (set it in **Settings → Appearance → Open file links in**). Clipboard writes from programs over OSC 52, such as Codex copying text, reach your clipboard. Themes, terminal font and line height are in **Settings → Appearance**.
+
+See [Keyboard shortcuts](/docs/keyboard-shortcuts/) for every binding and [Never lose your work](/guides/never-lose-work/) for a beginner's view of persistence.
+
+
+---
+
+Source: https://diri.sh/docs/worktrees/
+
+# Worktrees and review
+
+> Give each diri agent its own git worktree and branch, review its diff in the Review panel, commit, follow pull request checks, and clean up afterwards.
+
+When several agents work in one repository, give each its own git worktree: a separate checkout on its own branch, so nothing one agent does touches another until you bring it back. diri then shows every change in one place to review.
+
+## Give an agent its own worktree
+Worktrees need a git repository. There are three ways to get one.
+- **Ask the agent.** Agents in diri have tools to create worktrees and to start helpers in them. Say so in the task: "Use diri to do this in a new worktree so it does not touch my current files."
+- **From the launcher.** A [recipe](/docs/scheduled-tasks/) can use a fresh worktree. Each run creates a new branch from the recipe's branch prefix plus a unique suffix. Fresh worktrees are local only.
+- **From the command line.** `dirijor worktree list`, `create` and `remove` work from any shell.
+
+Treat a worktree like any checkout. Its branch and commits belong to the repository, so commit or move changes before you delete one.
+
+> [!NOTE]
+> Worktrees separate files only. Agents still share your accounts, the network, and anything running on your machine.
+
+## The Review panel
+Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>D</kbd> to open the right panel and choose **Review**. It follows the selected session and lists every file changed in that session's checkout, with added and removed lines. A folder that is not a git repository shows "Not a Git repository".
+
+### Choose what to compare
+| Compare against | Shows |
+| --- | --- |
+| Default branch | Everything this session changed, committed or not |
+| HEAD | Only changes that are not committed yet |
+
+Choose the working or staged layer to act on individual hunks.
+
+### Stage, discard and commit
+| Action | What it does |
+| --- | --- |
+| Stage | Stage one file or hunk |
+| Stage all | Stage every current change |
+| Unstage | In the Staged layer, unstage a file or everything staged |
+| Discard | Throw a hunk or your working changes away. Asks you to confirm, because it cannot be undone |
+| Commit | Commit the staged changes with the message you type |
+
+Changes on a remote host are view-only in the panel.
+
+### Ask the agent to check itself
+**Ask active agent** sends a ready-made request to the session's agent:
+
+| Button | Request |
+| --- | --- |
+| Review | Review this for correctness, regressions, and missing tests |
+| Find risks | Find the highest-risk behavior changes and explain why they matter |
+| Suggest tests | Identify missing tests and propose concrete cases for this context |
+
+You can also type your own follow-up.
+
+## Pull requests and checks
+When a session has a pull request, the session header links to it with its check status: passed, failed or still running. The panel shows checks, review state and comments, with a link to the conversation on GitHub. For an open pull request, **Merge pull request** opens GitHub so you can review and confirm the merge there. Next to it, the panel says "Ready to merge" when nothing blocks it.
+
+To open file links in your editor, set **Settings → Appearance → Open file links in**.
+
+## Bring work back
+When helpers worked in separate worktrees, review each one in the Review panel and merge them one at a time. An agent that started helpers can do this itself with diri's `integrate` tool: it brings a helper's committed branch into the agent's own checkout as a merge, squash, or cherry-pick. Both checkouts must have no uncommitted tracked changes. On conflict nothing changes, and the conflicting paths are reported back. It works for local sessions in the same project only.
+
+Try asking the lead agent: "Use diri to give each sub-task its own agent in a separate worktree, review their changes, and merge only the ones whose tests pass." See [Let agents work as a team](/guides/agent-teams/).
+
+## Hand work to another session
+- **Keyboard.** Select the source session and press <kbd>⌃</kbd><kbd>⌘</kbd><kbd>D</kbd>, select the target, and press it again.
+- **Drag and drop.** Drop a session onto another session's row to hand its work to that session.
+
+Either way, a handoff sheet opens with the generated context. You can edit it, remote targets carry a Remote badge, and nothing is sent until you click **Send handoff** or press Return. Esc cancels.
+
+Dropping a session on the zone below the last project instead starts a sibling with the same prompt.
+
+## Clean up
+Open **Settings → Worktrees** to see the linked worktrees of your local projects, with their age and pull request state (Open, Merged or Closed). Filter by **All**, **Ready to clean** or **Older than 30 days**. Each worktree shows what keeps it from being cleaned up:
+
+| Label | Meaning |
+| --- | --- |
+| Main checkout | The repository's own checkout |
+| Default branch | It is on the repository's default branch |
+| Session in use or status unknown | A diri session still runs in it |
+| Local changes | It has uncommitted work |
+| Open pull request | Its pull request is still open |
+| Merge not verified | diri could not confirm its branch was merged |
+| Ready to clean | Nothing stands in the way |
+
+**Clean up…** asks first, then **Remove worktree** deletes the checkout and its ignored files, including build output. The git branch and its commits are kept. **Measure cleanup size** shows how much space you would get back. <kbd>⌥</kbd><kbd>⌘</kbd><kbd>W</kbd> opens the worktrees overview.
+
+
+---
+
+Source: https://diri.sh/docs/notes/
+
+# Notes
+
+> Write plans and to-dos in diri Notes, hand any to-do to an agent with the note as context, follow its progress live, and let agents write back.
+
+Notes are plain Markdown documents that live next to your agents. Write a plan, break it into to-dos, and send any to-do to an agent. The agent gets the note as context, its progress shows under the to-do, and it can write its findings back into the note.
+
+## Create a note
+- Press <kbd>⌥</kbd><kbd>⌘</kbd><kbd>N</kbd>, or run **New Note** from the command palette.
+- Or choose **Note** in the sidebar's new-session menu.
+
+A note is a session. It sits in the sidebar with your agents and terminals, and it sorts, pins, archives and nests the same way. An agent started from a note appears as the note's child. The first line is the title; a note with no title shows as "Untitled".
+
+## Write
+Type <kbd>/</kbd> for the block menu or <kbd>@</kbd> to mention something. Markdown shortcuts also work as you type.
+
+| Block | Type this | Or turn into |
+| --- | --- | --- |
+| Heading 1, 2, 3 | `# `, `## `, `### ` | <kbd>⌥</kbd><kbd>⌘</kbd><kbd>1</kbd> … <kbd>3</kbd> |
+| Bulleted list | `- `, `* ` or `+ ` | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>8</kbd> |
+| Numbered list | `1. ` or `1) ` | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>7</kbd> |
+| To-do | `[] `, `[ ] ` or `[x] ` | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>9</kbd> |
+| Quote | `> ` | <kbd>⌥</kbd><kbd>⌘</kbd><kbd>Q</kbd> |
+| Code | three backticks | <kbd>⌥</kbd><kbd>⌘</kbd><kbd>C</kbd> |
+| Divider | `---` | |
+
+The `/` menu adds **Callout**, **Table** and **Image**. Callouts are stored as GitHub alerts such as `> [!NOTE]`. Tables are GFM tables; <kbd>⌃</kbd><kbd>↵</kbd> opens the table menu for inserting rows and columns, alignment and deleting. Pasted or dropped images are saved next to the note, up to 25 MB each.
+
+Tick a to-do with <kbd>⌘</kbd><kbd>↵</kbd>. Move a block with <kbd>⌥</kbd><kbd>⇧</kbd><kbd>↑</kbd> / <kbd>↓</kbd>. The full list is in [Keyboard shortcuts](/docs/keyboard-shortcuts/#notes).
+
+### Mentions and links
+Type <kbd>@</kbd> to mention a diri session or another note. A mention is stored as an ordinary Markdown link, for example `[@Release plan](diri://note/<id>)`, and shown as a chip. Pasted links to tools such as GitHub pull requests, Linear, Figma, Notion, Google Docs and Slack show as chips too. diri does not fetch their contents.
+
+## To-dos
+Press <kbd>⌃</kbd><kbd>⌘</kbd><kbd>T</kbd>, or click **To-dos** in the sidebar, to see every open to-do across your notes. Ticking one there writes it back to its note.
+
+## Start an agent from a to-do
+1. Put the caret on an open to-do, or hover it, and click **Start** (<kbd>⌃</kbd><kbd>⌘</kbd><kbd>↵</kbd>).
+2. Under **Start with**, choose an agent. The default is marked.
+3. **What the agent gets** shows the exact brief before you send it.
+
+The brief contains the to-do, the indented lines under it, the heading section it sits in, short excerpts of notes it mentions, the sessions it mentions with their status, and any earlier attempt's report. It is capped at 24 KB. The agent is told to report back and not to tick the to-do itself.
+
+### Follow it live
+The new session's chip is added to the to-do, and a status line appears under it:
+
+| Status | Meaning |
+| --- | --- |
+| Starting… | The session is launching |
+| Working on it | The agent is busy |
+| Needs you | It asked a question; **Answer in session** opens it |
+| Ready to review | It finished a turn or exited cleanly; shows an open PR if there is one |
+| Stopped | The session ended; **Start again** tries once more |
+| Couldn't start | The launch failed; **Try again** |
+
+This status comes live from the Engine and is never written into the file. Each attempt adds one more chip, newest last. The agent's session shows the note's title above its own; click it to jump back to the to-do.
+
+When you are happy with the work, tick the to-do. If the agent is still running, diri asks whether to **Tick and stop the agent** or **Tick, keep it running**.
+
+## How agents write back
+diri's MCP server gives agents tools for notes. Agents are asked to add short entries (decisions, findings, blockers, results, links) rather than progress chatter, to prefer adding over rewriting, and never to delete silently.
+
+| Tool | What it does |
+| --- | --- |
+| `list_notes` | Find notes in this project, all projects, or ones that mention the agent |
+| `read_note` | Read a note as Markdown, with to-dos, linked sessions and their live status |
+| `write_note` | Add an entry, tick a to-do, link a session, or append Markdown |
+| `edit_note` | Replace an exact piece of text |
+| `replace_section` | Replace everything under one heading |
+| `create_note` | Write a new note; it appears under the agent in the sidebar |
+| `start_from_note` | Start another agent from a note or one of its to-dos |
+| `note_history` | List or read earlier versions (read-only) |
+
+A report from a to-do's own agent lands as a bullet under that to-do. Anything else goes into an `## Updates` section, created if missing, with the agent's chip and a timestamp. An agent started from a note may only write to that note or to notes that mention it.
+
+### From the command line
+The `dirijor note` command does the same from any shell:
+
+```sh
+dirijor note "Ship the beta"                    # quick note; first line is the title
+dirijor note todo "Write release notes"         # add to this project's To-dos note
+dirijor note list --all
+dirijor note show "Release plan"
+dirijor note check "Release plan" "Write release notes"
+dirijor note append "Release plan" "Beta is out"
+dirijor note history "Release plan"
+dirijor note path                               # print the notes folder
+```
+
+Run `dirijor note help` for every subcommand and flag, including `add --pin --open`, `edit --old --new`, `replace-section` and `link`.
+
+## Search
+Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>F</kbd> for **Search notes**. It searches titles and the whole body, including to-dos, table cells and mention labels, across live and archived notes. Every word you type must appear. Archived notes show dimmed, and opening one unarchives it. The command palette also shows up to three matching notes while you type.
+
+## Version history
+diri keeps earlier versions of every note. With a note open, run **Version History…** from the command palette. Pick a version to preview it, then **Restore This Version…**. The text you replace stays in history.
+
+| When | Versions kept |
+| --- | --- |
+| While you type | At most one per minute |
+| Before an agent, the CLI or another editor changes the note | Always |
+| Last hour | All of them |
+| Last day | One per 10 minutes |
+| Last month | One per day |
+| Older | One per week |
+
+Each note keeps up to 200 versions or 20 MB. Only you can restore a version; agents can read history but not restore it.
+
+## Edits from elsewhere
+Agents, the CLI and other editors can change a note while you have it open. With no unsaved typing, the note simply reloads. Otherwise diri merges block by block: additions from both sides are kept, and if both changed the same block your text wins while an outside tick or chip is kept. The losing edit stays in version history.
+
+## Where notes live
+Each note is one Markdown file with a small front matter block.
+
+| Platform | Folder |
+| --- | --- |
+| macOS | `~/Library/Application Support/Dirijor/notes` |
+| Linux | `~/.local/share/diri/notes` |
+
+You can edit the files with any editor; diri notices and records a version. Images live in `assets/`, history in `.history/`, and deleted notes in `.trash/` inside the same folder.
+
+
+---
+
+Source: https://diri.sh/docs/scheduled-tasks/
+
+# Recipes and scheduled tasks
+
+> Save a prompt, agent, project and worktree choice as a recipe and rerun it in one click. Timed schedules are not available in diri yet.
+
+A recipe is a saved task you can run again: the agent, the project or host, the prompt, an optional session title, and whether to use a fresh worktree. Each run starts a brand new session. diri does not run recipes on a timer yet; see [Scheduling](#scheduling) below.
+
+## Save a recipe
+1. Press <kbd>⌘</kbd><kbd>N</kbd> to open the launcher.
+2. Choose the agent and project, and type the prompt.
+3. Click **Save recipe** or press <kbd>⌘</kbd><kbd>S</kbd>.
+
+diri confirms with "it is now a one-click recipe". Saving works even while agent detection is still running or a remote host is offline; diri checks the destination and agent when you run it.
+
+If you started from a recipe and changed some fields, the button reads **Update recipe** instead. Changes you make without updating apply to that one run only, and the saved recipe stays as it was.
+
+## Run a recipe
+With an empty prompt, the launcher shows your first three recipes under **Saved tasks · a fresh session each run**, each with a **Run** button.
+
+| Action | How |
+| --- | --- |
+| Run one of the first three | <kbd>⌘</kbd><kbd>1</kbd>, <kbd>⌘</kbd><kbd>2</kbd> or <kbd>⌘</kbd><kbd>3</kbd> in an empty launcher |
+| Open the full list | <kbd>⌘</kbd><kbd>R</kbd> in the launcher |
+| Preview and change it for one run | <kbd>Space</kbd> on a highlighted recipe |
+| Edit name, session title or branch prefix | <kbd>E</kbd> on a highlighted recipe |
+| Duplicate | <kbd>⌘</kbd><kbd>D</kbd> |
+| Reorder | <kbd>⌘</kbd><kbd>↑</kbd> / <kbd>⌘</kbd><kbd>↓</kbd> |
+| Delete | <kbd>⌫</kbd>, then press it again to confirm |
+
+The order of the list decides which recipes get ⌘1, ⌘2 and ⌘3.
+
+## What a run does
+- **Starts a new session** with the saved prompt, agent, project or host, title and worktree choice. It never resumes or depends on the session from an earlier run.
+- **Creates a fresh branch each time** when the recipe uses a new worktree. The branch prefix is a naming pattern; diri adds a unique suffix per run. Fresh worktrees are local only, so a recipe that targets a remote host cannot use one.
+- **Follows moved projects.** A recipe points at the tracked project, so it uses the project's current folder.
+- **Refuses to guess.** If the folder, host or agent is missing, the recipe asks you to repair it rather than launching somewhere else.
+
+Prompts keep their exact whitespace. A prompt over 32,768 characters is rejected with an error, never cut short. You can keep up to 64 recipes.
+
+> [!NOTE]
+> Recipes store launch settings only. They do not store credentials, the agent's conversation, or a copy of the agent's own configuration, so your current agent settings apply to every run.
+
+## Scheduling
+diri cannot run a recipe at a set time yet. Nothing in the app installs cron jobs, LaunchAgents or any other background scheduler, and an agent does not need to stay open to act as one.
+
+The design for Engine-owned schedules, including missed runs while the Mac sleeps and overlap rules, is in [SCHEDULED_TASKS.md](https://github.com/cristicretu/diri/blob/main/diri/SCHEDULED_TASKS.md). Until it ships, run a recipe by hand with <kbd>⌘</kbd><kbd>N</kbd> then <kbd>⌘</kbd><kbd>1</kbd>.
+
+## Related
+- [Sessions](/docs/sessions/) covers what happens to a session after it starts.
+- [Worktrees and review](/docs/worktrees/) explains fresh worktrees and how to bring their work back.
+- [Keyboard shortcuts](/docs/keyboard-shortcuts/) lists every launcher key.
+
+
+---
+
+Source: https://diri.sh/docs/accounts/
+
+# Accounts and usage
+
+> Save Claude Code and Codex logins as profiles, switch every open tab to another account in one click, and see estimated cost, tokens and plan limits.
+
+diri can remember more than one Claude Code or Codex login, such as work and personal, and switch every open tab of that agent between them. It also estimates what you spend from the agents' own transcripts and shows how much of your plan's limits you have used.
+
+## Account profiles
+A profile is a named login for one agent on one machine. Profile names are your own labels. diri does not check them against an email address.
+
+Open **Settings → Accounts**, or choose **Manage accounts…** in the account menu at the bottom left of the sidebar.
+
+1. Click **Add profile** and choose the agent.
+2. Give it a name, such as `Work`.
+3. Save it with one of these:
+
+| Action | What it does |
+| --- | --- |
+| **Save current login** | Stores the login already active on this Mac in the profile. It replaces anything the profile held before. It does not switch accounts. |
+| **Sign in** | Opens a login-only tab. Finish the browser login, then close the tab. The new login goes into the profile's private store. It does not change the active login. |
+
+Each profile can also choose where it runs with **Run on** (this Mac or one of your [remote hosts](/docs/remote-hosts/)) and can be marked **Use by default for this Agent on this host**.
+
+## Switch accounts
+Choose an account in the account menu at the bottom left. diri then:
+
+1. Stops that agent's conversations open in tabs and split panes.
+2. Installs the selected login.
+3. Resumes the same conversations on the new login. Sleeping tabs restart and go back to sleep. Stopped tabs stay stopped.
+4. Makes that account the default for new tabs.
+
+Nothing is copied or migrated. Conversations, MCP setup and settings stay in the agent's usual home folder (`~/.claude` or `~/.codex`).
+
+| Agent | How the switch works |
+| --- | --- |
+| Codex | Swaps only `auth.json` in `~/.codex`. Open tabs relaunch with `codex resume <thread>`. |
+| Claude Code | Each profile owns a private credential store, so no tokens are copied. Open tabs relaunch with `claude --resume <conversation>`. A tab that has not saved a transcript yet starts fresh with the same conversation id. |
+
+> [!WARNING]
+> Running tools are interrupted, not replayed. Let long tool calls finish before you switch.
+
+### Things to know
+- A switch is never refused because of one tab. A Codex tab diri cannot identify keeps the previous login and is reported. It switches the next time it restarts.
+- Closed and archived sessions are not restarted. They use whatever login is current when you resume them.
+- Agent processes started outside diri are not restarted and may keep their cached login.
+- Hosted connectors are tied to the provider account, not to files on your Mac. After a switch, a connector such as Slack can show as not installed until you connect it on the selected account.
+- Codex switching works with Codex's file credential store. If Codex is set to use the Keychain or another backend, the switch stops with an error before changing anything.
+- Editing or removing a profile affects future launches. Running sessions keep their account. Removing a profile leaves the provider's files and credentials in place.
+
+## Where logins are stored
+Profiles are kept in `accounts.json` next to the Engine's socket, in `~/Library/Application Support/Dirijor` on macOS. Saved Codex logins live under `codex-logins/` and Claude stores under `claude-logins/` in the same folder. Everything is owner-only.
+
+These files are credentials. Protect the folder like the agent's own login file. diri never returns them in responses, logs them or passes them as command-line arguments. Before replacing a Codex login it keeps the previous one in `codex-logins/previous-auth.json`.
+
+## Usage and cost
+Open **Settings → Usage** to see tokens and estimated cost over a date range.
+
+| Source | How it is counted |
+| --- | --- |
+| Claude Code | Read from local and remote transcripts, priced at diri's bundled model rates. |
+| Codex | Read from local and remote transcripts, priced at diri's bundled model rates. |
+| Cursor | Billed usage from Cursor's dashboard, when you are signed in on this Mac. |
+
+The page shows processed tokens, cached and uncached input, output, and cache read savings, compared with the previous period of the same length. Switch between **This Mac** and **All machines** to include remote hosts.
+
+- Transcripts are included even for sessions you ran outside diri.
+- Claude and Codex costs are estimates at API rates, not your bill. Usage on an unknown model is left out of cost.
+- Cache read savings compare cached reads with uncached input rates. Cache write premiums are excluded.
+- Remote hosts refresh every 5 minutes over SSH. Only totals cross SSH. An unreachable host keeps its last saved totals.
+
+Click **Share** to make an image of your usage. You can pick cost or tokens, the graph, a per-agent breakdown and a theme, then copy, save or post it.
+
+## Plan limits
+The account menu at the bottom left shows one meter per plan window that Claude or Codex reports, such as the 5-hour and weekly limits, with time until reset. Limits refresh when you open the menu. A meter marked **stale** has passed its reset time or could not be refreshed.
+
+These numbers come from the provider for your signed-in account. They are separate from the cost estimates above. If you see **Sign in to Claude to see limits** or **Sign in to Codex to see limits**, sign in to that agent first.
+
+## Learn more
+- [Account profiles design](https://github.com/cristicretu/diri/blob/main/diri/ACCOUNTS.md)
+- [Supported agents](/docs/agents/)
+- [Remote hosts](/docs/remote-hosts/)
+
+
+---
+
+Source: https://diri.sh/docs/mcp/
+
+# MCP server
+
+> diri's built-in MCP server lets agents start other agents, assign tracked tasks, wait for results, review diffs and merge branches. Set it up and use it well.
+
+The server ships inside the app. Claude Code, Codex and Cursor get it automatically when diri starts them, so most people never configure anything. This page covers what it can do, how to connect other agents, and the rules it enforces. Every tool and argument is listed in the [MCP tool reference](/docs/mcp-tools/).
+
+## What agents can do
+
+| Area | Tools | For example |
+| --- | --- | --- |
+| Start agents | `spawn_agent`, `spawn_agents`, `fork_agent` | Start three Codex agents, each in its own worktree, with one prompt each. |
+| Track work | `submit_task`, `wait_any`, `report_task`, `answer_task` | Assign a task, get notified the moment it finishes or gets stuck, answer its question. |
+| Read results | `read_output`, `get_status`, `summarize_children` | Read a helper's final answer from its transcript instead of scraping the screen. |
+| Review and merge | `get_diff`, `integrate`, `get_artifacts` | See which files a helper changed, spot overlaps, merge its branch, find its PR. |
+| Manage | `manage_agent`, `release_agent`, worktree tools | Hibernate an idle helper, resume an exited one, close it when done. |
+| Notes | `read_note`, `write_note`, `create_note`, `start_from_note` | Read a brief from a note, write findings back, tick its to-dos. |
+| Browser | `browser` | Drive a real browser isolated to the session. |
+
+You do not need to name tools. Ask in plain words and the agent picks them:
+
+> Split this refactor into three parts. Start a Codex agent for each in its own worktree, wait for them, review each diff, and merge the ones that pass the tests.
+
+## Set up
+
+### Agents started by diri
+
+Nothing to do. When diri starts an agent whose manifest opts in, it passes the server along with the launch:
+
+| Agent | How diri connects it |
+| --- | --- |
+| Claude Code | `--mcp-config` pointing at a file diri writes at startup |
+| Codex | `-c mcp_servers.dirijor.command=…` overrides |
+| Cursor | A session-local plugin directory whose `mcp.json` lists the server |
+
+Each agent session also gets three environment variables. The server uses them to know which session is calling.
+
+| Variable | Meaning |
+| --- | --- |
+| `DIRIJOR_SESSION_ID` | The calling session. Required for anything that starts, messages or changes something. |
+| `DIRIJOR_SOCKET` | The Engine's control socket. |
+| `DIRIJOR_CLI` | Path to the bundled [`dirijor` CLI](/docs/cli/). |
+
+To check, run `/mcp` in Claude Code. You should see `dirijor` with its tools.
+
+### Other agents inside diri
+
+Any agent that speaks MCP over stdio can use the same server. Add a server named `dirijor` to that agent's own MCP settings, with this command and no arguments:
+
+```text
+/Applications/diri.app/Contents/Resources/bin/dirijor-mcp
+```
+
+Started from diri, the agent inherits `DIRIJOR_SESSION_ID`, so every tool works with the same permissions as a built-in integration. For an agent that uses the common `mcpServers` JSON shape (Gemini CLI's `settings.json`, for example):
+
+```json
+{
+  "mcpServers": {
+    "dirijor": {
+      "command": "/Applications/diri.app/Contents/Resources/bin/dirijor-mcp"
+    }
+  }
+}
+```
+
+If you installed diri somewhere else, use that path. On Linux the binary sits next to the `diri` executable your package installed.
+
+### Agents outside diri
+
+You can connect an agent that runs in another terminal, or a desktop MCP client, to the same server. Without a diri session behind it, the caller has no identity, so only reads work: `list_agents`, `get_status`, `read_output`, `get_diff`, `get_artifacts`, `list_worktrees` and the note readers. Tools that start, message or change something fail with an error saying they need `DIRIJOR_SESSION_ID` and must run inside a live Diri session.
+
+```sh
+claude mcp add dirijor -- /Applications/diri.app/Contents/Resources/bin/dirijor-mcp
+```
+
+```toml ~/.codex/config.toml
+[mcp_servers.dirijor]
+command = "/Applications/diri.app/Contents/Resources/bin/dirijor-mcp"
+```
+
+diri must be running. The server talks to the Engine over its local socket and fails with `daemon socket: …` when the Engine is not up.
+
+## Permissions
+
+Reads are open: any agent can list sessions and read their status and output. Writes follow the session tree you see in the sidebar.
+
+| Caller | May write to |
+| --- | --- |
+| A root agent (one you started) | Sessions in its own project, and its direct children on any host. |
+| A delegated agent (started by another agent) | Only its parent and its direct children. |
+
+- Agents can never target themselves, and the caller and its ancestors are protected from `release_agent`.
+- Messages that cross lineages are delivered with a line saying who sent them.
+- Every write is checked against the Engine's latest snapshot, so a stale MCP process fails closed.
+- Delegation is capped at 3 levels deep and 16 live children per session. Set `DIRIJOR_MAX_SPAWN_DEPTH` and `DIRIJOR_MAX_LIVE_CHILDREN` in the environment diri starts with to change that.
+
+Ask an agent to run `whoami` to see its identity, parent, children, worktree and the exact policy that applies to it.
+
+> [!WARNING]
+> Spawned agents run with your user's permissions, like any process you start. Only let agents you trust coordinate others, and review what they merge. See the [security model](/docs/security/).
+
+## Delivery and waiting
+
+Agents retry. The server is built so a retry never doubles the work.
+
+- **Deduplicated.** Spawns, messages and tasks are delivered at most once. Identical arguments from the same caller return the original result. Reuse `operation_id`, `message_id` or `request_id` on a retry; pass a new one only when you really want a second copy.
+- **Receipts, not guesses.** A spawn or message returns a receipt. `sent` means the input reached the terminal, not that the agent finished. An `unknown` outcome should be inspected with `get_task` or `get_status`, never resent under a new id.
+- **Wait without polling.** `wait_any` blocks until at least one task or session needs attention, then returns everything that is `ready` and what is still `pending`. Pass `since_ms` from the spawn or send result so an agent that was idle before your message does not count as done.
+- **Tasks have real results.** A tracked task completes only when the assigned agent calls `report_task` with `completed`. An agent going idle or exiting cannot fake it.
+
+## Patterns
+
+### Fan out and merge
+
+The loop diri's own server instructions teach every agent:
+
+1. `spawn_agents` with one entry per subtask: `worktree: true`, a `prompt`, and `task: true`.
+2. `wait_any` with the returned `task_ids`.
+3. For each ready task: `read_output` with `mode: "last_message"` for detail, `answer_task` if it is blocked, `get_diff` to review, `integrate` to bring its branch into your checkout.
+4. Call `wait_any` again with the pending ids.
+5. `release_agent` when a helper is done.
+
+```json spawn_agents
+{
+  "agents": [
+    { "kind": "codex", "cwd": "~/code/app", "worktree": true, "task": true, "name": "API client", "prompt": "Generate a typed client for openapi.yaml and add tests." },
+    { "kind": "claude", "cwd": "~/code/app", "worktree": true, "task": true, "name": "Docs", "prompt": "Document every public endpoint in docs/api.md." }
+  ]
+}
+```
+
+### Structured results
+
+Pass `result_schema` with a task and the helper must report JSON of that shape. Use it when a parent agent will act on the answer.
+
+```json submit_task
+{
+  "session_id": "…",
+  "text": "Find every call site of parseConfig and say whether it handles errors.",
+  "result_schema": {
+    "type": "object",
+    "properties": {
+      "call_sites": { "type": "array", "items": { "type": "string" } },
+      "unhandled": { "type": "integer" }
+    },
+    "required": ["call_sites", "unhandled"]
+  }
+}
+```
+
+### Agents and plain terminals
+
+To start another agent, use its own kind (`claude`, `codex`, `gemini`…) and pass the task as `prompt`. A `shell` child is a raw terminal in the parent's <kbd>⌘</kbd><kbd>J</kbd> pane: its prompt runs as shell commands, so never use it to launch an agent CLI.
+
+### Notes as briefs
+
+An agent started from a note sees `origin_note` in `whoami`. It reads the brief with `read_note`, adds short findings with `write_note`, ticks its own sub-tasks, and finishes with `report_to_parent`, which lands in the note. The person ticks the original to-do after reviewing. More in [Notes](/docs/notes/).
+
+## Protocol details
+
+| | |
+| --- | --- |
+| Transport | stdio, newline-delimited JSON-RPC 2.0 |
+| Protocol versions | `2025-06-18` (default), `2025-03-26`, `2024-11-05` |
+| Capabilities | `tools`. Results include `structuredContent` for clients that read it, plus a text block for the rest. |
+| Server name | `dirijor` |
+| Instructions | Sent on `initialize`: the fan-out loop, delivery rules and the notes contract. |
+
+From a terminal, the [`dirijor` CLI](/docs/cli/) exposes the same catalog. `dirijor mcp-tools` prints every tool definition, and `dirijor mcp-call --tool <name>` calls one with JSON arguments on stdin:
+
+```sh
+echo '{}' | dirijor mcp-call --tool list_agents
+```
+
+## Docs MCP
+
+These docs have their own small, read-only MCP server, separate from `dirijor`. It lets an agent search and read diri's documentation while it helps you. It runs at `https://diri.sh/mcp` over streamable HTTP, needs no account, and has three tools: `search_docs`, `read_doc` and `list_docs`.
+
+```sh
+claude mcp add --transport http diri-docs https://diri.sh/mcp
+```
+
+```toml ~/.codex/config.toml
+[mcp_servers.diri-docs]
+url = "https://diri.sh/mcp"
+```
+
+Prefer files? Every page is also plain Markdown: add `.md` to its path, or point your agent at [llms.txt](/llms.txt).
+
+
+---
+
+Source: https://diri.sh/docs/mcp-tools/
+
+# MCP tool reference
+
+> Every tool the dirijor MCP server exposes, with its arguments, types and defaults. Generated from the server's own catalog, so it always matches the app.
+
+For setup, permissions and patterns, read [MCP server](/docs/mcp/) first. Descriptions below are the exact text agents see. `kind` accepts the short label of any [supported agent](/docs/agents/) installed on your machine, or `shell`.
+
+> [!TIP]
+> On your own machine, `dirijor mcp-tools` prints this catalog as JSON, with `kind` limited to the agents you have installed.
+
+## Start and manage agents
+
+### `spawn_agent`
+
+Open a new Diri session running an agent or shell, locally or on a configured remote host. Use this whenever the user asks to spawn another agent, session, or terminal. Identical arguments are deduplicated for this caller; reuse operation_id on retries and supply a new operation_id only for an intentional additional session. Inspect spawn_receipt: unknown/failed must never be retried under a new identity blindly.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `cwd` | string | **Required.** |
+| `kind` | agent label or `shell` ([list](/docs/agents/)) | **Required.** |
+| `base` | string | Starting ref for a new worktree, e.g. main. Omitted preserves HEAD behavior. |
+| `branch` | string |  |
+| `host` | string |  |
+| `name` | string |  |
+| `operation_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `prompt` | string |  |
+| `result_schema` | object | Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked). |
+| `task` | boolean | Deliver prompt as a tracked Diri task instead of an untracked initial prompt. The result then includes task.task_id for wait_any or wait_for_task. |
+| `worktree` | boolean |  |
+
+### `spawn_agents`
+
+Fan out: open several sessions in one call (at most 8), concurrently. Each entry takes the same fields as spawn_agent (kind, cwd, worktree, branch, base, host, prompt, name, operation_id, task, result_schema) and is deduplicated the same way. Use worktree:true per entry for parallel edits. Returns one result per entry in order, plus the session_ids and task_ids to pass to wait_any.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `agents` | array of objects | **Required.** Each item: `base`, `branch`, `cwd`, `host`, `kind`, `name`, `operation_id`, `prompt`, `result_schema`, `task`, `worktree`. |
+
+### `fork_agent`
+
+Fork an authorized session's conversation into a new child of yours, keeping its context, for example to try an alternative approach. Optionally send the fork a prompt (as a tracked task with task:true). Supported for agents whose conversations can be forked (Claude Code, Codex).
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `prompt` | string |  |
+| `result_schema` | object | Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked). |
+| `task` | boolean |  |
+
+### `manage_agent`
+
+Park or revive an authorized session without losing it: hibernate freezes its whole process tree (no CPU) while keeping the conversation and terminal, wake resumes it, and resume restarts an exited Agent in its saved conversation. Same authorization as release_agent.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `action` | `hibernate`, `wake`, `resume` | **Required.** |
+| `session_id` | string | **Required.** |
+
+### `release_agent`
+
+Terminate an authorized agent session. Delegated agents may release direct children; root agents may release sessions in their project. The caller and its ancestors are protected.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+
+### `list_agents`
+
+List every agent session with its id, kind, title, status, parent, host, and working directory.
+
+No arguments.
+
+### `get_status`
+
+Read the current status, title, and working directory of one session.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+
+
+## Talk to agents and wait
+
+### `send_prompt`
+
+Type into an authorized session and optionally press Enter. Delegated agents may message their parent or direct children; root agents may coordinate their project and message direct children on any host. Cross-lineage messages are attributed to their sender. Identical messages from the same sender to the same target are delivered at most once, including across retries and restarts. Reuse message_id on retries; use a new message_id only to intentionally repeat identical text. A receipt acknowledges input delivery, not agent completion. Inspect an unknown outcome; never resend it under a new identity.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `text` | string | **Required.** |
+| `message_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `submit` | boolean | Press Enter after typing; defaults to true. |
+
+### `wait_any`
+
+Wait until at least one of the given tasks or sessions needs attention, then return every one that does (ready) and the rest (pending). Tasks are ready when completed, failed, cancelled, or blocked. Sessions are ready per until: settled (default: turn done, needs input, or exited), done, needs_me, or exited. Pass since_ms from the spawn/send/submit result so a session that was already idle before your message does not count as done. Handle the ready items, then call again with only the pending ids. Returns immediately if something is already ready.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_ids` | string array |  |
+| `since_ms` | number | Unix time in milliseconds, as returned in since_ms by spawn_agent, send_prompt, and submit_task. A session counts as done only after a turn that finished later. |
+| `task_ids` | string array |  |
+| `timeout_s` | number | Default `600`. |
+| `until` | `settled`, `done`, `needs_me`, `exited` |  |
+
+### `wait_for_agent`
+
+Wait for a session status without model polling. Already matching states return immediately unless since_ms is given: then done/idle require a turn that finished after that time (pass since_ms from your send_prompt/spawn result). This does not acknowledge completion of a particular message. Exit or removal also ends the wait; inspect matched, removed, and session before assuming success.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `since_ms` | number | Unix time in milliseconds, as returned in since_ms by spawn_agent, send_prompt, and submit_task. A session counts as done only after a turn that finished later. |
+| `timeout_s` | number | Default `600`. |
+| `until` | `done`, `needs_me`, `idle`, `exited` |  |
+
+### `read_output`
+
+Read what a session produced. last_message (best for results) returns the Agent's final answer from its transcript; transcript returns the last N turns; since returns only terminal lines added after cursor (pass back the returned cursor next time); screen/tail return the rendered screen. Transcript modes fall back to the screen tail when a session has no readable transcript (remote, shells, other agents).
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `cursor` | number |  |
+| `lines` | number | Default `50`. |
+| `mode` | `screen`, `tail`, `last_message`, `transcript`, `since` |  |
+| `turns` | number | Default `6`. |
+
+
+## Tracked tasks
+
+### `submit_task`
+
+Assign a tracked task to an authorized Agent. Returns a durable task_id and delivery receipt, and tells the Agent to acknowledge and report that exact task. Reuse request_id on retries. Identical target/text defaults to one task; use a new request_id only for intentional additional work. Unknown delivery never permits a fresh copy. Pass result_schema to require a JSON result of that shape. Await it with wait_any (several tasks) or wait_for_task.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `text` | string | **Required.** |
+| `request_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `result_schema` | object | Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked). |
+
+### `submit_tasks`
+
+Assign several tracked tasks in one call (at most 16). Each entry behaves exactly like submit_task, including request_id deduplication; one failure does not stop the others. Returns one result per entry, in order, and the task_ids to pass to wait_any.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `tasks` | array of objects | **Required.** Each item: `request_id`, `result_schema`, `session_id`, `text`. |
+
+### `get_task`
+
+Read the durable receipt for one task you assigned or received. Provide exactly one of task_id or your original request_id; request_id recovers a lost submission reply even after the target disappears. Delivery, Agent acknowledgement, and task result are separate facts. Status survives Engine restarts; terminal idle is not task completion.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `request_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `task_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+
+### `wait_for_task`
+
+Wait for the explicit completed or failed result of this exact task. Already terminal tasks return immediately. timed_out means no terminal result was observed; completed is true only for a reported successful result. Agent idle/exit/removal cannot fabricate completion.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `task_id` | string | **Required.** Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `timeout_s` | number | Default `600`. |
+
+### `report_task`
+
+Acknowledge or report the exact Diri task assigned to you. Call acknowledged before starting; report completed only after verifying the requested outcome and include result evidence. Use blocked for a blocker and failed for terminal failure. Only the assigned Agent can report; terminal results are immutable and identical retries are safe.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `status` | `acknowledged`, `blocked`, `completed`, `failed` | **Required.** |
+| `task_id` | string | **Required.** Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `result` | string |  |
+
+### `answer_task`
+
+Answer a task you submitted, typically after it reported blocked with a question. The answer is recorded on the task, delivered to the assigned Agent, and a blocked task returns to acknowledged. Only the submitting session may answer.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `task_id` | string | **Required.** Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `text` | string | **Required.** |
+
+### `cancel_task`
+
+Withdraw a task you submitted. It becomes terminal (cancelled) immediately and the assigned Agent is told to stop. Only the submitting session may cancel; finished tasks cannot be cancelled.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `task_id` | string | **Required.** Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `reason` | string |  |
+
+### `list_tasks`
+
+List tasks you submitted (role sent), were assigned (role assigned), or both, newest first. Open tasks only unless include_terminal is true.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `include_terminal` | boolean |  |
+| `limit` | number |  |
+| `role` | `sent`, `assigned`, `all` |  |
+
+
+## Lineage
+
+### `whoami`
+
+Describe this session's identity, parent, ancestors, children, worktree, and cross-session write policy. origin_note, when present, is the note you were started from: read it first with read_note {"note":"origin"}.
+
+No arguments.
+
+### `list_children`
+
+List the sessions spawned by this one, optionally including the whole descendant tree.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `include_exited` | boolean | Default `true`. |
+| `recursive` | boolean |  |
+
+### `wait_for_children`
+
+Wait until ALL selected child sessions settle, finish, or exit (use wait_any to handle each as soon as it is ready). Already matching states return immediately. Removed children are reported separately and cannot settle other working children. Omit session_ids for all direct children; an explicit empty array selects none.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_ids` | string array |  |
+| `since_ms` | number | Unix time in milliseconds, as returned in since_ms by spawn_agent, send_prompt, and submit_task. A session counts as done only after a turn that finished later. |
+| `timeout_s` | number | Default `600`. |
+| `until` | `settled`, `done`, `exited` |  |
+
+### `summarize_children`
+
+Collect compact screen tails, each child's last agent message (when its transcript is readable), status, and artifacts for this session's children without interpreting their output.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `rows` | number | Default `14`. |
+| `session_ids` | string array |  |
+
+### `report_to_parent`
+
+If your parent is a note, the report is added to the note: finish with status done and a one-paragraph result in summary (what you did, what changed, what is left), in plain words. Otherwise: deliver a structured update, result, blocker, or question to the session that delegated this work at most once. If your parent assigned you an open Diri task, the report is recorded on that task instead (update→progress, blocked→blocked, done→completed, failed→failed) and reaches the parent through wait_any/wait_for_task; set deliver:true to also type it into the parent's terminal. Identical reports are deduplicated. Reuse message_id on retries; choose a new one only for an intentional repeat. Inspect unknown outcomes without resending.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `summary` | string | **Required.** |
+| `artifacts` | string array |  |
+| `blockers` | string array |  |
+| `changed_paths` | string array |  |
+| `deliver` | boolean |  |
+| `details` | string |  |
+| `message_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `next_steps` | string array |  |
+| `proof` | string array |  |
+| `questions` | string array |  |
+| `status` | `update`, `done`, `blocked`, `failed` |  |
+| `submit` | boolean |  |
+
+
+## Code and worktrees
+
+### `get_diff`
+
+Summarize a session's code changes: changed files with +/- counts against its base (default branch merge-base, or HEAD for uncommitted work only), whether it is committed, and overlaps: files also changed by its live sibling sessions, which would conflict on integration. Set patch:true to include the unified diff (bounded by max_patch_bytes).
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `base` | `default_branch`, `head` |  |
+| `max_patch_bytes` | number | Default `32768`. |
+| `overlaps` | boolean | Default `true`. |
+| `patch` | boolean |  |
+
+### `integrate`
+
+Bring an authorized child session's committed branch into your own checkout (merge, squash, or cherry_pick). Both checkouts must have no uncommitted tracked changes. Conflicts abort cleanly, change nothing, and are returned as paths. Local sessions in the same project only.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `message` | string |  |
+| `strategy` | `merge`, `squash`, `cherry_pick` |  |
+
+### `create_worktree`
+
+Create a git worktree in the calling session's project so parallel work does not collide in one checkout.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `repo` | string | **Required.** |
+| `base` | string |  |
+| `branch` | string |  |
+
+### `list_worktrees`
+
+List a repository's worktrees with their paths and branches.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `repo` | string | **Required.** |
+
+### `remove_worktree`
+
+Remove a git worktree from the calling session's project.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `path` | string | **Required.** |
+| `repo` | string | **Required.** |
+| `force` | boolean |  |
+
+### `get_artifacts`
+
+Return PRs, issues, preview URLs, and listening ports discovered for a session.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+
+### `quick_open_include`
+
+Read or change ~/.diri-include, the gitignore-style extra folders Quick Open (Cmd+P) indexes even when hidden or skipped. action get returns the path, text, and patterns; add appends unique patterns (e.g. **/.worktrees/); set replaces the whole file with text (empty clears it).
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `action` | `get`, `add`, `set` | **Required.** |
+| `patterns` | string array |  |
+| `text` | string |  |
+
+
+## Browser
+
+### `browser`
+
+Drive a real browser isolated to this Diri session. Open a URL, inspect snapshot refs, act on those refs, and request a new snapshot after page changes.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `action` | `open`, `snapshot`, `click`, `fill`, `type`, `press`, `hover`, `select`, `check`, `scroll`, `get`, `wait`, `screenshot`, `console`, `back`, `close`, `list` | **Required.** |
+| `amount` | number |  |
+| `annotate` | boolean |  |
+| `button` | `left`, `right`, `middle` |  |
+| `direction` | `up`, `down`, `left`, `right` |  |
+| `double` | boolean |  |
+| `engine` | `chromium`, `webkit`, `firefox` |  |
+| `full` | boolean |  |
+| `key` | string |  |
+| `ms` | number |  |
+| `profile` | string |  |
+| `ref` | string |  |
+| `selector` | string |  |
+| `state` | string |  |
+| `text` | string |  |
+| `url` | string |  |
+| `value` | string |  |
+| `what` | `url`, `title`, `text`, `html`, `value`, `count` |  |
+
+
+## Notes
+
+### `list_notes`
+
+Find the person's Diri Notes (briefs, plans, to-do lists). Notes are kept by Diri, not in the project folder, so use this rather than searching files. Defaults to notes for your project; project:"all" lists every note, or pass a project folder. mentions:"me" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body. session_id is the note's sidebar Session.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `include_archived` | boolean |  |
+| `limit` | integer |  |
+| `mentions` | string |  |
+| `project` | string |  |
+| `query` | string |  |
+
+### `read_note`
+
+Read one Diri note as Markdown. If you were started from a note, read note "origin" first: it is your brief. markdown is the note's canonical text (title first as a # line, tidy tables, normalised list markers): exactly what edit_note matches, so copy old_string from it. path is the note's .md file, which you may also edit with your own file tools; Diri keeps the change, a version before it, and the note's identity. Returns the text, its to-dos (block index, checked, linked sessions and their live status) and its @-mentions resolved to sessions or notes. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, part of a title, a note Session id, or "origin": the note you were started from (whoami shows it as origin_note).
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `note` | string | **Required.** |
+
+### `write_note`
+
+Add to a Diri note without rewriting it; never deletes the person's text. entry: one short line when something matters (a decision, a finding, a blocker, a result, a link), filed under your to-do (or the one you name) or in the note's Updates; keep entries sparing, no progress chatter. checked: tick a to-do, e.g. your own sub-tasks as you finish them (the to-do you were started from is the person's to tick). link_session: put a session's chip on a to-do. append: longer Markdown at the end, rarely needed. Pick the to-do by todo (its text or part of it) or todo_index (from read_note). Delegated agents may write only to the note they were started from or notes that mention them.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `note` | string | **Required.** |
+| `append` | string |  |
+| `checked` | boolean |  |
+| `entry` | string |  |
+| `link_session` | string |  |
+| `todo` | string |  |
+| `todo_index` | integer |  |
+
+### `edit_note`
+
+Change a Diri note in place, like editing a Markdown file: old_string is exact text from read_note's markdown (title line included), new_string replaces it; an empty new_string deletes it. old_string must appear once unless replace_all. Use it when the person asks for a change, or to keep your own entries current (tick a table row, change "Fix" to "Done"); otherwise prefer write_note. Every version is kept, so the person can restore one. Returns the changed lines and the new version. Diri tidies the text after each change (tables are re-aligned); a table row still matches if only its spacing differs, and the reply says so. For anything else, copy the next old_string from the changed lines or a fresh read_note.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `new_string` | string | **Required.** |
+| `note` | string | **Required.** |
+| `old_string` | string | **Required.** |
+| `replace_all` | boolean |  |
+
+### `replace_section`
+
+Replace everything under one heading of a Diri note, up to the next heading of the same or a higher level; the heading itself stays. heading is its text, optionally with its # marks ("## Status") when two headings share a name. markdown is the new content. Same rules as edit_note: change the person's writing only when asked.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `heading` | string | **Required.** |
+| `markdown` | string | **Required.** |
+| `note` | string | **Required.** |
+
+### `create_note`
+
+Write a new Diri note for the person, e.g. an explanation ("how sign-in works") or a write-up. markdown is rich Markdown: headings, lists, to-dos, links, quotes, code. It appears under you in the sidebar, in your project (or project, a folder); open:true shows it to the person right away. Use this for anything longer than a write_note entry.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `title` | string | **Required.** |
+| `markdown` | string |  |
+| `open` | boolean |  |
+| `project` | string |  |
+
+### `start_from_note`
+
+Start an agent on a Diri note or one of its to-dos. The note becomes the agent's parent in the sidebar, the agent gets the note as its brief (plus the sessions it mentions), and its chip is added to the to-do. kind defaults to your own kind. separate_copy gives it its own copy of the project folder (projects under git only) so its changes stay apart until merged. prompt adds your own instructions. task:true tracks it like submit_task.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `note` | string | **Required.** |
+| `kind` | string |  |
+| `operation_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `prompt` | string |  |
+| `result_schema` | object | Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked). |
+| `separate_copy` | boolean |  |
+| `task` | boolean |  |
+| `todo` | string |  |
+| `todo_index` | integer |  |
+
+### `note_history`
+
+Earlier versions of a Diri note: when, by whom, and what changed, newest first. Pass version to read that version's text. Read-only: only the person restores a version.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `note` | string | **Required.** |
+| `version` | integer |  |
+
+
+---
+
+Source: https://diri.sh/docs/cli/
+
+# dirijor CLI
+
+> Reference for the dirijor command-line tool. List, read, start and drive diri sessions, manage worktrees, layouts and notes, and script diri from a shell.
+
+`dirijor` is diri's command-line tool. It talks to the same background Engine as the app, so anything you script with it shows up in the window. Agents use it too: diri's hooks and [MCP server](/docs/mcp/) run through it.
+
+## Where it lives
+
+| Platform | Path |
+| --- | --- |
+| macOS | `/Applications/diri.app/Contents/Resources/bin/dirijor` |
+| Linux | `dirijor` on your `PATH`, installed by the `.deb` package |
+
+The Engine also keeps a copy in `~/Library/Application Support/Dirijor/bin/dirijor` on macOS. Agents that diri starts get its path in `$DIRIJOR_CLI`, along with `$DIRIJOR_SESSION_ID` for their own session.
+
+To use it from your own terminal on macOS, link it onto your `PATH`:
+
+```sh
+mkdir -p ~/.local/bin
+ln -sf /Applications/diri.app/Contents/Resources/bin/dirijor ~/.local/bin/dirijor
+```
+
+The CLI finds the Engine through its socket. Set `DIRIJOR_SOCKET` to point at a different one.
+
+## Conventions
+- **Targets.** Most `session` commands take a target: a full session id, a unique id prefix, or a unique part of the session title (case-insensitive). Commands documented with `ID` need the id itself.
+- **`--json`.** Prints one line of JSON instead of a table.
+- **Arguments are literal.** `session run` passes everything after `--` as separate arguments. Nothing is run through a shell.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | Failure, including an ambiguous target or bad arguments |
+| `2` | Timed out |
+| `3` | Session not found |
+| `4` | Engine unreachable |
+
+## Overview
+
+| Command | What it does |
+| --- | --- |
+| `dirijor status [--json]` | List every session, archived ones included. |
+| `dirijor activity [--limit N] [--json]` | Recent activity. `N` is 1 to 300, default 50. |
+| `dirijor session ...` | List, read, drive, start and stop sessions. |
+| `dirijor worktree ...` | List, create and remove git worktrees. |
+| `dirijor workspace`, `tab`, `pane` | Change the window layout. |
+| `dirijor artifacts SESSION [--json]` | Links, pull requests and listening ports found for a session. |
+| `dirijor ports [--json]` | Listening ports across all sessions. |
+| `dirijor events ...` | Stream or wait for Engine events. |
+| `dirijor note ...` | Write and edit [notes](/docs/notes/). `notes` works too. |
+| `dirijor notify ...` | Post a notification from a terminal. |
+| `dirijor doctor` | Check the Engine, agents and state file. |
+| `dirijor mcp-tools` | Print the MCP tool definitions as JSON. |
+| `dirijor mcp-call --tool NAME` | Call one MCP tool with JSON from stdin. |
+| `dirijor help` | Print usage. |
+
+`dirijor hook`, `dirijor notify JSON` and `dirijor mcp-stdio` are called by agents that diri launches. You do not need to run them.
+
+## Sessions
+`dirijor session` with no action is the same as `dirijor session list`.
+
+| Command | Flags | What it does |
+| --- | --- | --- |
+| `session list` | `--all`, `--status PREFIX`, `--json` | List sessions. Archived ones appear only with `--all`. `--status` filters by status, for example `needsInput`. |
+| `session get TARGET` | `--json` | Show id, title, agent, status, folder and host. |
+| `session read TARGET` | `--source screen` or `scrollback`, `--lines N`, `--json` | Print the visible screen (default) or scrollback. `--lines` keeps the last N lines. |
+| `session send TARGET [TEXT...]` | `--no-submit`, `--json` | Type text and press Return. Reads stdin when no text is given. `--no-submit` leaves it unsent. |
+| `session key ID KEY` | `--ctrl`, `--alt`, `--shift`, `--cmd`, `--repeat`, `--json` | Press one key. |
+| `session wait TARGET` | `--until STATUS` (repeatable), `--timeout SECONDS`, `--json` | Block until the session reaches a status. Default `--until done`, default timeout 600 seconds. |
+| `session spawn KIND` | `--cwd PATH`, `--worktree`, `--branch NAME`, `--prompt TEXT`, `--title TEXT`, `--host ID`, `--json` | Start an agent, for example `claude` or `codex`. The folder defaults to the current one. |
+| `session run -- PROGRAM [ARG...]` | `--cwd PATH`, `--host ID`, `--title TEXT`, `--json` | Run a command in a new terminal session. A remote run needs `--cwd` with an absolute path on that host. |
+| `session fork TARGET` | `--json` | Fork the conversation into a new session (agents that support fork). |
+| `session release TARGET` | `--remove`, `--json` | Stop the session. `--remove` also deletes its record. |
+| `session archive TARGET` | `--undo`, `--json` | Archive the session, or unarchive it with `--undo`. |
+| `session reconnect ID` | `--json` | Reconnect a remote session whose connection failed. |
+| `session process ID` | `--json` | Show the process id, group, executable, folder and account. |
+| `session terminal-title ID` | `--json` | Print the terminal title the program set. Local sessions only. |
+| `session reset-terminal ID` | | Clear the screen, history, modes and title. The process is not touched. |
+
+`--name` is accepted as an alias for `--title`. `--host` takes a host id from your [remote hosts](/docs/remote-hosts/).
+
+### Wait statuses
+
+| `--until` value | Matches |
+| --- | --- |
+| `done`, `idle` | Idle |
+| `working` | Working |
+| `needsInput` (also `blocked`) | Waiting for you |
+| `exited` | The process ended |
+| `starting`, `unknown` | Those states |
+
+### Keys
+`KEY` is a single character or one of `enter` (or `return`), `escape` (or `esc`), `tab`, `backspace`, `delete`, `insert`, `home`, `end`, `up`, `down`, `left`, `right`, `pageup`, `pagedown`, `f1` to `f12`. Use `keypad:0` to `keypad:9` for the numeric keypad.
+
+## Worktrees
+`REPO` defaults to the current folder.
+
+| Command | Flags | What it does |
+| --- | --- | --- |
+| `worktree list [REPO]` | `--json` | List the repository's worktrees. |
+| `worktree create [REPO]` | `--branch NAME`, `--base REF`, `--json` | Create a worktree. Prints its branch and path. |
+| `worktree remove REPO PATH` | `--force`, `--json` | Remove a worktree. |
+
+See [Worktrees and review](/docs/worktrees/).
+
+## Workspaces, tabs and panes
+These commands change the layout the app shows. Each one prints the new layout as JSON. Add `--revision N` to fail if someone else changed the layout first.
+
+| Command | What it does |
+| --- | --- |
+| `workspace list` | Print the current layout, with ids. |
+| `workspace create NAME` | Add a workspace. |
+| `workspace rename ID NAME`, `workspace remove ID`, `workspace move ID INDEX` | Rename, remove or reorder a workspace. |
+| `workspace apply` | Apply a mutation read as JSON from stdin. |
+| `tab create WORKSPACE SESSION` | Open a session as a tab. |
+| `tab rename TAB TITLE`, `tab remove TAB`, `tab move TAB WORKSPACE INDEX`, `tab select WORKSPACE TAB` | Manage tabs. |
+| `pane split TAB PANE SESSION EDGE` | Split a pane and put a session in the new half. `EDGE` is `left`, `right`, `above` or `below`. |
+| `pane remove TAB PANE`, `pane focus TAB PANE`, `pane zoom TAB PANE` | Close, focus or zoom a pane. Use `none` as the pane to unzoom. |
+| `pane move SOURCE_TAB PANE DEST_TAB TARGET_PANE EDGE` | Move a pane. `pane move-group` moves a whole split. |
+| `pane swap TAB PANE TAB PANE` | Swap two panes. |
+| `pane resize TAB SPLIT FRACTION` | Resize a split. |
+
+## Events
+
+| Command | Flags | What it does |
+| --- | --- | --- |
+| `events subscribe` | `--session TARGET` (repeatable), `--kind NAME` (repeatable), `--since-seq N`, `--count N`, `--timeout SECONDS`, `--json` | Print events as they happen. Stops after `--count` events or the timeout (default one day). |
+| `events wait` | `--session TARGET`, `--until STATUS` or `--kind NAME`, `--timeout SECONDS`, `--json` | Wait for one status or event. `--until` needs `--session`. You cannot combine `--until` and `--kind`. |
+
+## Notes
+`dirijor note TEXT` writes a quick note for the current project. The first line is its title.
+
+| Command | What it does |
+| --- | --- |
+| `note add [TEXT]` | Write a note. Reads stdin when TEXT is left out. Flags: `--title T`, `--project FOLDER` or `--inbox`, `--pin`, `--open`. |
+| `note append NOTE TEXT` | Add Markdown to the end of a note. |
+| `note todo TEXT` | Add a to-do to the project's "To-dos" note, or another note with `--to NOTE`. |
+| `note list` | List notes. Flags: `--project FOLDER`, `--mentions SESSION` or `me`, `--all`, `--json`. |
+| `note check NOTE TODO` | Tick a to-do. `--undo` unticks it. |
+| `note link NOTE TODO SESSION` | Attach a session to a to-do. |
+| `note show NOTE` | Print a note as Markdown. |
+| `note edit NOTE --old TEXT --new TEXT` | Replace exact text. `--all` replaces every match. An empty `--new` deletes. |
+| `note replace-section NOTE HEADING` | Replace everything under a heading with stdin. |
+| `note history NOTE [VERSION]` | List earlier versions, or print one. |
+| `note restore NOTE VERSION` | Bring back an earlier version. The current text stays in history. |
+| `note path` | Print the notes folder. |
+
+`NOTE` is a note id or part of its title.
+
+## Notifications
+`dirijor notify --title TEXT --body TEXT` prints a notification escape sequence to the terminal, so it works in local and remote sessions without a socket. diri shows it like an agent notification.
+
+## MCP from the shell
+`dirijor mcp-tools` prints every tool the MCP server offers. `dirijor mcp-call --tool NAME` reads the tool's input as JSON from stdin and prints `{"ok": ...}` or `{"error": ...}`. Write tools need a live diri session identity, so call them from inside a diri session. See the [MCP tool reference](/docs/mcp-tools/) and the [security model](/docs/security/).
+
+## Examples
+These work in fish, zsh and bash.
+
+Find sessions waiting for you:
+
+```sh
+dirijor session list --status needsInput
+```
+
+Start Codex in a new worktree with a task, then wait for it to finish:
+
+```sh
+dirijor session spawn codex --worktree --branch fix-login --title fix-login --prompt "Fix the failing login test"
+dirijor session wait fix-login --until done --until needsInput --timeout 1800
+```
+
+Read the last 20 lines of a session's screen:
+
+```sh
+dirijor session read fix-login --lines 20
+```
+
+Run tests in their own terminal session and wait until the command exits:
+
+```sh
+dirijor session run --title tests -- cargo test --workspace
+dirijor session wait tests --until exited
+```
+
+Dismiss a prompt with Escape, then send a follow-up. `session key` needs the exact id from `session list`; replace `SESSION_ID` with it:
+
+```sh
+dirijor session key SESSION_ID escape
+dirijor session send fix-login "Use the existing helper instead"
+```
+
+Pipe a file into a new note:
+
+```sh
+cat plan.md | dirijor note add --title "Release plan" --pin
+```
+
+
+---
+
+Source: https://diri.sh/docs/agents/
+
+# Supported agents
+
+> Every coding agent diri ships a manifest for, what each supports for status, resume, fork and MCP, and how to add your own agent with a custom manifest.
+
+diri knows how to launch and read 20 terminal coding agents, plus a plain shell. Each one is described by a JSON manifest that says how to start it, how to resume it, and how to tell from its screen whether it is working, idle or waiting for you.
+
+## Agent catalog
+
+| Agent | Command | Status from | Resume | Fork | Quick approve | diri MCP | Hooks |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | `claude` | Hooks | Exact conversation | Yes | Yes | Auto | Yes |
+| Codex | `codex` | Screen | Exact conversation | Yes | Yes | Auto | Turn-complete notify |
+| Cursor | `cursor-agent` | Screen | Exact conversation | No | Yes | Auto | Yes |
+| Gemini | `gemini` | Screen | Exact conversation | No | Yes | No | No |
+| Aider | `aider` | Screen | Latest in folder | No | No | No | No |
+| Amp | `amp` | Screen | No | No | No | No | No |
+| Antigravity | `agy` | Screen | Latest in folder | No | No | No | No |
+| Cline CLI | `cline` | Screen | No | No | Yes | No | No |
+| Copilot CLI | `copilot` | Screen | Latest in folder | No | Yes | No | No |
+| Devin | `devin` | Screen | Latest in folder | No | No | No | No |
+| Droid | `droid` | Screen | Latest in folder | No | No | No | No |
+| Grok | `grok` | Screen | Latest in folder | No | Yes | No | No |
+| Hermes | `hermes` | Screen | Latest in folder | No | No | No | No |
+| Kilo Code | `kilo` | Screen | Latest in folder | No | No | No | No |
+| Kimi | `kimi` | Screen | Latest in folder | No | Yes | No | No |
+| Kiro | `kiro-cli` | Screen | Latest in folder | No | No | No | No |
+| Maki | `maki` | Screen | Latest in folder | No | Yes | No | No |
+| OpenCode | `opencode` | Screen | Latest in folder | No | Yes | No | No |
+| Pi | `pi` | Screen | Per session | No | No | No | No |
+| Qoder CLI | `qodercli` | Screen | Latest in folder | No | No | No | No |
+| Shell | your login shell | Process only | No | No | No | No | No |
+
+What the columns mean:
+
+| Column | Meaning |
+| --- | --- |
+| Status from | **Hooks**: the agent reports its own lifecycle events. **Screen**: diri reads the terminal with manifest rules. **Process only**: diri knows only whether the process is alive. |
+| Resume | **Exact conversation**: diri knows the conversation id and reopens that one. **Per session**: diri gives the agent its own storage folder per session, so "continue" picks the right one. **Latest in folder**: the agent's own "continue the most recent session" flag, which can pick a different conversation if you ran the agent elsewhere in the same folder. |
+| Fork | Start a new conversation that branches from this one. |
+| Quick approve | The manifest defines a safe one-key answer for permission prompts. |
+| diri MCP | diri's [MCP server](/docs/mcp/) is added to the agent at launch, so it can start and coordinate other agents. Any other agent can be connected by hand. |
+| Hooks | diri installs the agent's hook or notify callback for more accurate status. |
+
+> [!NOTE]
+> The table reflects the manifests in [diri/crates/diri-engine/manifests](https://github.com/cristicretu/diri/tree/main/diri/crates/diri-engine/manifests). Agents change their screens often. If status looks wrong, see [Troubleshooting](/docs/troubleshooting/).
+
+## Install and detect agents
+diri does not bundle any agent. It finds the CLIs already on your machine.
+
+Open **Settings → Agents**:
+
+| Control | What it does |
+| --- | --- |
+| **Execution target** | Pick your Mac or a [remote host](/docs/remote-hosts/). Each has its own agent list. |
+| **Refresh** | Rescan for installed agents. |
+| **Add…** | Point an agent that was not found at its executable. Shown as **Change** once an agent is found. |
+| **Install** | For agents with a published one-line installer, shows the full command in a confirmation sheet. Only after you confirm does diri type it into a Terminal session in your home folder. Offered for this Mac only. |
+| **Quick** | Include the agent in quick-create menus. |
+
+On your Mac, diri looks for agents on the `PATH` from your login shell, then in common user install folders such as pnpm, Bun, Cargo, mise and Volta. A path you choose with **Add…** wins over `PATH`. Missing agents stay listed in Settings but are hidden from quick-create menus.
+
+## Add your own agent
+You can add an agent diri does not ship, or replace a built-in manifest, without building diri.
+
+1. Write a JSON manifest. The filename, top-level `id` and `agent.id` must match, for example `my-agent.json` with `"id": "my-agent"`.
+2. Put it in the overrides folder:
+
+| Platform | Overrides folder |
+| --- | --- |
+| macOS | `~/Library/Application Support/Dirijor/manifests/overrides/` |
+| Linux | `~/.config/diri/manifests/overrides/` |
+
+3. Restart the Engine. The catalog is read once when the Engine starts. Quitting diri with no running sessions stops the Engine, and opening diri starts it again.
+
+A file with the same `id` as a built-in manifest replaces it. A new `id` adds an agent. A malformed file is skipped and the rest of the catalog still loads.
+
+### A minimal manifest
+This screen-driven manifest is enough for most terminal agents:
+
+```json
+{
+  "schemaVersion": 2,
+  "id": "my-agent",
+  "version": "2026.10.01.1",
+  "statusModel": "full",
+  "agent": {
+    "id": "my-agent",
+    "displayName": "My Agent",
+    "shortLabel": "my-agent",
+    "aliases": ["myagent"],
+    "firstClass": true,
+    "statusAuthority": "screen",
+    "binary": "my-agent",
+    "returnToLoginShell": true,
+    "approve": { "text": "y", "submit": true }
+  },
+  "rules": [
+    {
+      "id": "permission",
+      "state": "blockedPermission",
+      "priority": 1000,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 8,
+      "when": { "contains": "allow this command?" }
+    },
+    {
+      "id": "working",
+      "state": "working",
+      "priority": 900,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 3,
+      "when": { "contains": "esc to cancel" }
+    },
+    {
+      "id": "idle",
+      "state": "idle",
+      "priority": 500,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 1,
+      "when": { "lineRegex": "^>\\s*$" }
+    }
+  ]
+}
+```
+
+### Essentials
+
+| Field | What it does |
+| --- | --- |
+| `binary` | The command to run. diri runs it directly, never through a shell string. |
+| `statusModel` | `full` for rule-driven status, `processOnly` for liveness only. |
+| `returnToLoginShell` | When the agent exits, leave a login shell in the tab instead of closing it. |
+| `approve`, `deny` | Text typed for quick approve or deny. Omit `approve` when no answer is always safe. |
+| `conversation` | Argument lists for fresh, resumed and forked conversations, using `{id}`, `{newId}` and `{sessionDir}`. |
+| `rules` | Checked from highest to lowest `priority`. The first match sets the status. |
+
+Rule states are `working`, `idle`, `blockedPermission`, `blockedQuestion` and `skip`. Predicates are `contains`, `regex`, `lineRegex`, `progress`, and `any`, `all` and `not` to combine them. Regexes use Rust's `regex` syntax, which has no lookaround or backreferences.
+
+Put blockers around priority 1000, working around 900 and idle around 500, so a permission form beats a spinner still visible behind it. Match several literal strings the agent really draws rather than one broad regex.
+
+> [!WARNING]
+> The `injection` switches (MCP and hooks) select code that diri already implements for specific agents. Setting them for another CLI does not make it work.
+
+### Validate it
+- Start the agent from diri and walk it through idle, working and a permission prompt.
+- If a state is wrong, open **Session Inspector → Info → Why Diri thinks this** and use **Copy status debug info** to see which rule matched.
+- When contributing a manifest to diri, run the engine tests, which decode every bundled manifest and reject unsupported regexes:
+
+```sh
+cd diri
+cargo test -p diri-engine
+```
+
+The full schema, regions, capture settings and safe fixture capture are in [docs/AGENT-MANIFESTS.md](https://github.com/cristicretu/diri/blob/main/docs/AGENT-MANIFESTS.md).
+
+
+---
+
+Source: https://diri.sh/docs/remote-hosts/
+
+# Remote hosts
+
+> Run agents on your own servers over SSH. diri reuses your OpenSSH setup and needs no tmux, sudo or remote service. Learn what survives a dropped connection.
+
+diri can run an agent on any machine you reach with `ssh`. The agent runs on the server, its row in the sidebar works like a local one, and on most hosts it keeps running when your connection drops. For a walkthrough with screenshots, see [Run agents on your own server](/guides/remote-sessions/).
+
+## What you need
+- A server you can already reach with `ssh`, including aliases from `~/.ssh/config`.
+- A project folder on that server.
+- The agent CLI installed and signed in on the server. diri never copies your local agent logins to it.
+
+Nothing else. The server does not need `tmux`, `screen`, Node.js, Python, `curl`, a preinstalled diri service, or administrator rights. diri never runs `sudo` and never changes host-wide configuration.
+
+### Supported servers
+
+| Platform | Supported |
+| --- | --- |
+| Linux x86_64 | Yes |
+| Linux aarch64 (arm64) | Yes |
+| macOS on Apple silicon | Yes |
+| macOS on Intel | No. The host reports `unsupported-platform`. |
+
+## Add a host
+1. Open **Settings → Remote** and click **Add Host**.
+2. Fill in the form:
+
+| Field | What to enter |
+| --- | --- |
+| Name | A label for the host, such as `Forge`. |
+| SSH destination | What you would type after `ssh`, for example `you@forge` or an alias from `~/.ssh/config`. |
+| Default folder | Where the folder picker starts. Without one, it starts in the remote home folder. |
+
+3. Click **Add Host**.
+
+diri then connects, checks the platform, uploads and verifies its helper, loads the remote login environment, and tests whether sessions survive a disconnect. When it finishes, the card shows the folder, helper build, protocol version and persistence result, with **Use by default** to make it the default host.
+
+Host settings are saved in `hosts.json`, in `~/Library/Application Support/Dirijor` on macOS and `~/.config/diri` on Linux.
+
+To start a session on the host, open **New Agent**, click the folder row and pick the host under **Machine**. Then browse to a folder on it. The same path on two hosts counts as two different projects.
+
+## How it works
+SSH is only the authenticated, encrypted pipe. diri does not use the SSH terminal for the agent.
+
+1. On first use, diri uploads a small helper program, `diri-remote`, built for that exact platform and shipped inside the app. It never downloads a binary from a URL the server chooses.
+2. The upload lands in a temporary file first. diri checks its length, SHA-256, build ID and protocol before moving it into place.
+3. Each session gets its own **Holder**: one helper process that owns the agent's terminal, the agent's processes and the current screen.
+4. diri sends the agent launch as a structured argument list, folder and environment. It does not build shell command strings.
+
+Helpers live in a private cache under your remote account:
+
+| Path | Contents |
+| --- | --- |
+| `~/.cache/diri/bin/protocol-<major>/<build-id>/diri-remote` | Helper binaries, one per version |
+| `~/.local/state/diri/sessions/<session-id>/` | Per-session state, socket and output log |
+
+The state path follows `XDG_STATE_HOME` when it is set. Directories are `0700`, files and sockets are `0600`, and the helper binary is `0700`. Several helper versions can sit side by side. An update never replaces a helper that a running session still uses.
+
+> [!NOTE]
+> After you update diri, the first remote action installs the matching helper if needed. To force a fresh install, open the host in **Settings → Remote** and click **Reinstall Environment**. Running sessions are not interrupted.
+
+### Environment on the server
+diri reads your login shell from the server's user database and captures the login environment there, so tools installed with Homebrew, `nvm`, `mise` or in user folders are found. Your local environment is not copied over. Local `DIRI_` and `SSH_` variables, local sockets and credentials stay on your machine.
+
+Each host has its own agent list. Open **Settings → Agents**, choose the host under **Execution target**, and click **Refresh** to rescan it. You can point an agent at a specific executable on that host with **Add…** or **Change**. The one-click **Install** button is offered only for your own machine; remote hosts keep the guide link.
+
+## Persistence: what survives a disconnect
+Some servers kill every process from a login session when you log out. diri tests this instead of assuming. It starts a temporary Holder, closes the SSH connection, reconnects on a new connection, and checks whether the same process is still there.
+
+| Result | What it means for you |
+| --- | --- |
+| native detach | Sessions keep running on their own after you disconnect. |
+| user supervisor | The server would stop detached processes, so diri runs sessions under a supervisor your account already has, without configuring anything. They keep running after you disconnect. |
+| non-persistent | The server may stop the session when the connection closes. diri still lets you start sessions, but the row shows a **No detach** warning. Stay connected, or use another server. |
+
+diri never installs a service or a persistent user unit, never enables lingering, and never falls back to `tmux` to get around a non-persistent result.
+
+> [!WARNING]
+> No result survives the server itself rebooting.
+
+### After a dropped connection
+On a host that keeps sessions alive, the agent keeps working while you are offline. The Holder keeps the agent's processes, the current screen and up to 4 MiB of scrollback.
+
+- The terminal shows **Connection lost · Last received screen** until diri gets back in.
+- diri reconnects to the same session and redraws the current screen. Click **Reconnect** in the terminal to retry by hand, or run `dirijor session reconnect <id>`.
+- Input whose delivery is uncertain is not replayed. Check the screen before retyping.
+- Do not start a duplicate agent because the connection blinked.
+
+Only one diri window controls a session at a time. A new attach takes over and the old one is disconnected.
+
+## Passwords and host keys
+diri runs your normal OpenSSH client, so keys, agents, `ProxyJump` and the rest of `~/.ssh/config` work as usual. diri may keep a short-lived ControlMaster connection open to make repeat connections faster. Sessions never depend on it.
+
+When OpenSSH needs to ask you something, diri shows a native prompt instead of reading the answer itself:
+
+| Prompt | Dialog |
+| --- | --- |
+| New host key | **Verify SSH host**, with **Allow** and **Cancel** |
+| Password or key passphrase | **SSH authentication**, with a secure field and **Connect** |
+
+The prompt helper has no logging and no connection to the Engine, so what you type never reaches session state or diagnostics. On Linux it needs `zenity` or `kdialog`. Without either, use key-based authentication or load your key into `ssh-agent` first.
+
+## Troubleshooting
+
+| Problem | What to do |
+| --- | --- |
+| `remote_transport_unavailable` | This build has no valid remote helper catalog. Install an official release instead of a local development build. diri fails closed rather than falling back to another transport. |
+| `unsupported remote platform` | The server is not Linux x86_64, Linux aarch64 or Apple silicon macOS. |
+| Artifact length, SHA-256 or protocol mismatch | The bundled helper is damaged or does not match the app. Reinstall diri. |
+| Agent missing on the host | Install it on the server so it is on your login shell's `PATH`, then **Refresh** under **Settings → Agents** with that host selected. |
+| **No detach** warning | The host is non-persistent. Keep the connection open or use another server. |
+| `remote_reconnect_failed` or `remote_owner_unavailable` | The host is unreachable or the session has no live binding. Try again when the host is back. |
+| Remote usage shows "Usage unavailable" | diri retries every 5 minutes. Check that the host still connects in **Settings → Remote**. |
+
+Run `ssh <destination>` in a terminal first. If that fails, diri cannot connect either. See [Troubleshooting](/docs/troubleshooting/) for logs and bug reports.
+
+## Advanced: diri-node
+`diri-node` is an optional per-user service for a VPS that you run on purpose. It adds per-machine account logins, fleet usage totals and moving Claude or Codex conversations between machines. It is not needed for ordinary remote sessions, and SSH stays configured as the install and recovery path.
+
+- Run it as an ordinary user, never as root, under a systemd user service.
+- Bind it only to loopback or a Tailscale address. Public TCP is unsupported.
+- Enrollment gives you a token. Store it in an owner-only file on your Mac.
+
+In **Settings → Remote**, edit the host and fill in the **First-party node (optional)** fields: **Node endpoint** (for example `tcp://100.64.0.2:7337`), **Local token file** and **Pinned node ID**. The token stays in that file. Setup steps are in [diri/NODE.md](https://github.com/cristicretu/diri/blob/main/diri/NODE.md).
+
+## Learn more
+- [Run agents on your own server](/guides/remote-sessions/)
+- [Security model](/docs/security/)
+- [Remote architecture](https://github.com/cristicretu/diri/blob/main/diri/REMOTE_PORT.md)
+
+
+---
+
+Source: https://diri.sh/docs/security/
+
+# Security model
+
+> What diri protects and what it does not. Agent privileges, MCP and CLI authority, lineage rules, remote trust, diagnostics and privacy, and how to report a vulnerability.
+
+diri is a local developer tool that launches other powerful developer tools. It helps you avoid orchestration mistakes. It is not a sandbox.
+
+## What agents can do
+Shells, coding agents, hooks, MCP servers and browser automation run as your user. They can read any file your account and the operating system allow, use inherited environment variables and configured credentials, and reach the network. diri does not inspect or approve each action they take. Each agent's own permission settings still apply.
+
+- Worktrees keep agents from editing the same files by accident. They are not a security boundary.
+- For untrusted code, use a separate OS account, VM or container, with limited credentials and network access.
+- Only run agents and MCP servers you trust.
+
+### The Engine and its socket
+The app, the CLI and agents talk to the background Engine over a Unix socket. The socket and state files are scoped to your user. Any process already running as your user is inside the same trust boundary and can drive diri.
+
+The [`dirijor` CLI](/docs/cli/) acts with your full authority. It is a tool for you and your scripts.
+
+## MCP authority and lineage
+Agents that diri starts can use its [MCP server](/docs/mcp/) to start and coordinate other agents. Writes through MCP are limited by where the calling agent sits in the session tree:
+
+| Caller | Reads | Messages | Stop, wake, resume, fork, integrate |
+| --- | --- | --- | --- |
+| Root agent (started by you, or from a note) | All sessions | Sessions in its project, and its direct children on any host | Sessions in its project |
+| Delegated agent (started by another agent) | All sessions | Only its parent and direct children | Only its direct children |
+
+More rules:
+
+- Every write needs a live diri session identity. A stale or unhosted MCP process is refused.
+- An agent cannot target itself, and cannot stop the session waiting on its result.
+- Worktree writes must stay inside the caller's project.
+- Messages to a session outside the caller's own line are labelled with who sent them.
+- A delegated agent can add only to the note it was started from, or to notes that mention it or one of its ancestors.
+- Delegation is capped at 3 levels deep and 16 live children per session. Set `DIRIJOR_MAX_SPAWN_DEPTH` and `DIRIJOR_MAX_LIVE_CHILDREN` in diri's environment to change the caps.
+
+Every tool and its arguments are in the [MCP tool reference](/docs/mcp-tools/).
+
+## Remote hosts
+Remote sessions run under the account you connect as. diri relies on SSH for host verification, keys and encryption. It does not add its own relay or authorization layer.
+
+- Prefer a dedicated non-admin account with narrowly scoped credentials.
+- diri never runs `sudo` and never changes host-wide configuration.
+- The remote helper is verified by length, SHA-256, build ID and protocol before use. Its folders are `0700`, its files and sockets `0600`.
+- Your local environment, local sockets and credentials are not copied to the server.
+- SSH password and host-key prompts are shown by a separate helper with no logging, so answers never reach diri's state or diagnostics.
+
+Details are in [Remote hosts](/docs/remote-hosts/).
+
+## Secrets in terminals
+Terminal replay logs and scrollback can contain prompts, output, paths and secrets a program printed. Treat them as sensitive.
+
+A password typed at a prompt that turns echo off, such as `sudo`, `ssh` or `read -s`, is never echoed, so it never reaches the replay log, scrollback or exports. While a local session sits at such a prompt, diri does not use your typing to name the session, hides clipboard text in the paste review, and on macOS turns on Secure Keyboard Entry for that terminal. Remote sessions do not report this state yet. A program that reads a secret in raw mode and draws its own mask looks like any other full-screen program.
+
+## Account credentials
+Saved Claude and Codex logins are stored in owner-only files beside the Engine's state. They are never returned in responses, logged or passed as command-line arguments. See [Accounts and usage](/docs/accounts/).
+
+## Updates
+On macOS the updater downloads a versioned ZIP from GitHub Releases, checks its SHA-256 against the release feed, verifies the code signature, Team ID, bundle identifier and notarization, and refuses downgrades. Linux packages do not update in place. Each Linux release file has a Sigstore signature you can check with `cosign verify-blob`, as described in [diri/LINUX.md](https://github.com/cristicretu/diri/blob/main/diri/LINUX.md).
+
+## Diagnostics and privacy
+diri has no account system and no advertising. It records diagnostics so bugs can be fixed from a report, and shares them with the project unless you turn sharing off.
+
+Every diri process keeps a local log in `~/Library/Application Support/Dirijor/telemetry/spool`, capped at 64 MiB.
+
+| Recorded | Never recorded |
+| --- | --- |
+| App, OS and CPU versions | Terminal output or input |
+| Crashes with stack frames, hangs, slow frames | Prompts, pasted or copied text |
+| Memory, CPU and open-file counts | File contents |
+| Session start, attach and first-draw times | Environment variables |
+| Error codes and classes | Command lines |
+| Whether copy, paste, file drops and updates worked, with size classes | URLs you open |
+| Command names, session ids, agent names, conversation ids | Passwords or keys |
+| Folders, only as a one-way hash | Free-form error messages and stderr |
+
+Unless you turn sharing off, the Engine uploads the log about once an hour, or within a minute after a crash, to a Cloudflare Worker run by the project. Uploads carry a random install id, your short Support ID and a name, which defaults to your macOS login name. They are kept for 30 days and readable only by the maintainers.
+
+### Your controls
+Open **Settings → General → Privacy**:
+
+| Control | What it does |
+| --- | --- |
+| **Share diagnostics to help fix bugs** | Turns uploads on or off. Off stops uploads at the next cycle. Recording stays local. |
+| Name | Change or clear the name sent with uploads. |
+| Support ID | The id to quote in a bug report. |
+| **Send now** | Uploads what has been recorded so far, once, even with sharing off. |
+| **Show in Finder** | Opens the local log folder. |
+
+To turn recording off entirely, set `DIRI_TELEMETRY=off` in diri's environment. Missing or unreadable privacy settings turn uploads off.
+
+diri also connects to GitHub Releases for updates, and makes network connections when you use remote hosts, pull request monitoring, browser automation, or an agent that uses the network. diri does not proxy that traffic. The full policy is in [PRIVACY.md](https://github.com/cristicretu/diri/blob/main/PRIVACY.md).
+
+## Report a vulnerability
+Use [GitHub private vulnerability reporting](https://github.com/cristicretu/diri/security/advisories/new). Do not put exploits, private terminal output, tokens or personal paths in a public issue.
+
+Include the diri and OS versions, a minimal reproduction, the impact you believe is possible, and any suggested fix. You should get an acknowledgement within seven days. Fixes go into the latest release.
+
+In scope: permission-boundary bypasses, unsafe update or IPC behaviour, credential disclosure, session isolation failures and unintended remote execution. A tool doing something you explicitly allowed is not a diri vulnerability.
+
+
+---
+
+Source: https://diri.sh/docs/troubleshooting/
+
+# Troubleshooting
+
+> Diagnose diri problems with dirijor doctor, find logs and state on macOS and Linux, fix common agent and remote issues, and file a useful bug report.
+
+Start with `dirijor doctor`, then check the problem list below. If you still need help, file a bug with the diagnostics report from Settings.
+
+## Run dirijor doctor
+`dirijor doctor` checks the parts of diri that run without the window:
+
+```sh
+/Applications/diri.app/Contents/Resources/bin/dirijor doctor
+```
+
+On Linux, run `dirijor doctor`. The output looks like this:
+
+```text
+✓ Rust Engine reachable (build ..., pid 4242, proto 1)
+✓ Claude Code (claude) found at /Users/you/.local/bin/claude
+✗ Aider (aider) not found on PATH
+✓ state file present at /Users/you/Library/Application Support/Dirijor/state.json
+```
+
+| Line | Meaning |
+| --- | --- |
+| Engine reachable | The background Engine answers on its socket. If it is unreachable, doctor exits with code `4`. |
+| Agent found or not found | Whether each known agent's command is on the `PATH` of the shell you ran doctor from. |
+| State file | Whether the Engine's saved session state exists. |
+
+Agent checks use your terminal's `PATH`. **Settings → Agents** shows what diri itself detected, which is the result that counts. See the [CLI reference](/docs/cli/) for every command.
+
+## Logs and state
+
+| Platform | What | Path |
+| --- | --- | --- |
+| macOS | Engine state, sockets, host config, manifest overrides | `~/Library/Application Support/Dirijor` |
+| macOS | Engine log | `~/Library/Application Support/Dirijor/logs/dirijord.log` |
+| macOS | Diagnostics log | `~/Library/Application Support/Dirijor/telemetry/spool` |
+| macOS | App preferences and caches | `~/Library/Application Support/diri` |
+| macOS | Downloaded updates | `~/Library/Caches/diri/updates` |
+| Linux | Session state and logs | `~/.local/state/diri` |
+| Linux | Engine log | `~/.local/state/diri/logs/dirijord.log` |
+| Linux | Host config, preferences, manifest overrides | `~/.config/diri` |
+| Linux | Data | `~/.local/share/diri` |
+| Linux | Cache | `~/.cache/diri` |
+
+On Linux the `XDG_*` variables override these roots. On a remote host, each session's files are under `~/.local/state/diri/sessions/` and helpers under `~/.cache/diri/bin/`.
+
+> [!WARNING]
+> Logs and terminal replay files can contain prompts, command output, personal paths and credentials. Share only the lines that matter and redact the rest.
+
+## Common problems
+
+### An agent is not detected
+1. Open **Settings → Agents** and click **Refresh**.
+2. Check that the agent runs in a new terminal window. diri reads the `PATH` from your login shell, then looks in common user install folders such as pnpm, Bun, Cargo, mise and Volta.
+3. If it is installed somewhere unusual, click **Add…** next to the agent and choose its executable.
+
+For a remote host, pick the host under **Execution target** first. The agent has to be installed on the server and on the `PATH` of your login shell there.
+
+### A tab shows a shell instead of the agent
+Most agents return to your login shell when they exit, so the tab stays useful. Scroll up to see why the agent stopped. To start it again, type its command or use the exit card's **Resume Conversation** where offered.
+
+If a custom agent opens a bare shell from the start, its manifest may have failed to load. A malformed manifest file is skipped without an error dialog. Check the file name, `id` and JSON against [Add your own agent](/docs/agents/).
+
+### A session shows as exited
+The agent's process ended. The pane shows why, with **Resume Conversation** for agents that can resume, or **Restart Terminal** for shells. Agents that resume only the "latest in folder" conversation can reopen a different one if you used them elsewhere in the same folder. See the resume column in [Supported agents](/docs/agents/).
+
+### Status looks wrong
+Open **Session Inspector → Info → Why Diri thinks this** and click **Copy status debug info**. It shows which detection rule matched and its timing, without a screenshot or your prompt. Paste it into a bug report.
+
+### Agent output has no colour
+diri sets `TERM=xterm-256color` and `COLORTERM=truecolor` for every agent it starts and removes inherited `NO_COLOR`, `FORCE_COLOR`, `CLICOLOR` and `CLICOLOR_FORCE`. If an agent is still monochrome, check whether your own shell startup files or the agent's settings turn colour off.
+
+### Remote errors
+
+| Error | What to do |
+| --- | --- |
+| `remote_transport_unavailable` | This build cannot run remote sessions. Install an official release. |
+| `unsupported remote platform` | Use a Linux x86_64, Linux aarch64 or Apple silicon macOS server. |
+| **No detach** on a remote session | The host may stop sessions when SSH disconnects. Stay connected or use another host. |
+| **Connection lost · Last received screen** | diri is reconnecting. Click **Reconnect** to retry now. |
+| Prompt for password never appears (Linux) | Install `zenity` or `kdialog`, or use key-based login. |
+
+More in [Remote hosts](/docs/remote-hosts/).
+
+## Report a bug
+1. Check for an existing issue and try the latest release.
+2. Open **Settings → General → Support** and click **Copy diagnostics**. Review the preview, then paste it into the issue. It includes app, platform and Engine details, agent availability, remote host reachability and storage reachability. It does not include raw logs.
+3. Or choose **Help → Report a Problem…**. It marks the moment in the diagnostics log, sends it, copies your Support ID and opens a GitHub issue with the ID filled in.
+
+File it with the [bug report form](https://github.com/cristicretu/diri/issues/new?template=bug_report.yml). Include:
+
+- Steps to reproduce, what you expected and what happened.
+- diri version, OS version and how you installed diri.
+- The agent CLI's version, and whether the session was local or on an SSH host.
+- On macOS, your chip. For Linux display problems, the display server, desktop environment, GPU and driver.
+
+Questions about setup and workflows go to [Discussions](https://github.com/cristicretu/diri/discussions). Report security problems privately, as described in the [security model](/docs/security/).
+

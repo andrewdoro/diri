@@ -1,0 +1,455 @@
+# MCP tool reference
+
+> Every tool the dirijor MCP server exposes, with its arguments, types and defaults. Generated from the server's own catalog, so it always matches the app.
+
+For setup, permissions and patterns, read [MCP server](/docs/mcp/) first. Descriptions below are the exact text agents see. `kind` accepts the short label of any [supported agent](/docs/agents/) installed on your machine, or `shell`.
+
+> [!TIP]
+> On your own machine, `dirijor mcp-tools` prints this catalog as JSON, with `kind` limited to the agents you have installed.
+
+## Start and manage agents
+
+### `spawn_agent`
+
+Open a new Diri session running an agent or shell, locally or on a configured remote host. Use this whenever the user asks to spawn another agent, session, or terminal. Identical arguments are deduplicated for this caller; reuse operation_id on retries and supply a new operation_id only for an intentional additional session. Inspect spawn_receipt: unknown/failed must never be retried under a new identity blindly.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `cwd` | string | **Required.** |
+| `kind` | agent label or `shell` ([list](/docs/agents/)) | **Required.** |
+| `base` | string | Starting ref for a new worktree, e.g. main. Omitted preserves HEAD behavior. |
+| `branch` | string |  |
+| `host` | string |  |
+| `name` | string |  |
+| `operation_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `prompt` | string |  |
+| `result_schema` | object | Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked). |
+| `task` | boolean | Deliver prompt as a tracked Diri task instead of an untracked initial prompt. The result then includes task.task_id for wait_any or wait_for_task. |
+| `worktree` | boolean |  |
+
+### `spawn_agents`
+
+Fan out: open several sessions in one call (at most 8), concurrently. Each entry takes the same fields as spawn_agent (kind, cwd, worktree, branch, base, host, prompt, name, operation_id, task, result_schema) and is deduplicated the same way. Use worktree:true per entry for parallel edits. Returns one result per entry in order, plus the session_ids and task_ids to pass to wait_any.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `agents` | array of objects | **Required.** Each item: `base`, `branch`, `cwd`, `host`, `kind`, `name`, `operation_id`, `prompt`, `result_schema`, `task`, `worktree`. |
+
+### `fork_agent`
+
+Fork an authorized session's conversation into a new child of yours, keeping its context, for example to try an alternative approach. Optionally send the fork a prompt (as a tracked task with task:true). Supported for agents whose conversations can be forked (Claude Code, Codex).
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `prompt` | string |  |
+| `result_schema` | object | Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked). |
+| `task` | boolean |  |
+
+### `manage_agent`
+
+Park or revive an authorized session without losing it: hibernate freezes its whole process tree (no CPU) while keeping the conversation and terminal, wake resumes it, and resume restarts an exited Agent in its saved conversation. Same authorization as release_agent.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `action` | `hibernate`, `wake`, `resume` | **Required.** |
+| `session_id` | string | **Required.** |
+
+### `release_agent`
+
+Terminate an authorized agent session. Delegated agents may release direct children; root agents may release sessions in their project. The caller and its ancestors are protected.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+
+### `list_agents`
+
+List every agent session with its id, kind, title, status, parent, host, and working directory.
+
+No arguments.
+
+### `get_status`
+
+Read the current status, title, and working directory of one session.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+
+
+## Talk to agents and wait
+
+### `send_prompt`
+
+Type into an authorized session and optionally press Enter. Delegated agents may message their parent or direct children; root agents may coordinate their project and message direct children on any host. Cross-lineage messages are attributed to their sender. Identical messages from the same sender to the same target are delivered at most once, including across retries and restarts. Reuse message_id on retries; use a new message_id only to intentionally repeat identical text. A receipt acknowledges input delivery, not agent completion. Inspect an unknown outcome; never resend it under a new identity.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `text` | string | **Required.** |
+| `message_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `submit` | boolean | Press Enter after typing; defaults to true. |
+
+### `wait_any`
+
+Wait until at least one of the given tasks or sessions needs attention, then return every one that does (ready) and the rest (pending). Tasks are ready when completed, failed, cancelled, or blocked. Sessions are ready per until: settled (default: turn done, needs input, or exited), done, needs_me, or exited. Pass since_ms from the spawn/send/submit result so a session that was already idle before your message does not count as done. Handle the ready items, then call again with only the pending ids. Returns immediately if something is already ready.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_ids` | string array |  |
+| `since_ms` | number | Unix time in milliseconds, as returned in since_ms by spawn_agent, send_prompt, and submit_task. A session counts as done only after a turn that finished later. |
+| `task_ids` | string array |  |
+| `timeout_s` | number | Default `600`. |
+| `until` | `settled`, `done`, `needs_me`, `exited` |  |
+
+### `wait_for_agent`
+
+Wait for a session status without model polling. Already matching states return immediately unless since_ms is given: then done/idle require a turn that finished after that time (pass since_ms from your send_prompt/spawn result). This does not acknowledge completion of a particular message. Exit or removal also ends the wait; inspect matched, removed, and session before assuming success.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `since_ms` | number | Unix time in milliseconds, as returned in since_ms by spawn_agent, send_prompt, and submit_task. A session counts as done only after a turn that finished later. |
+| `timeout_s` | number | Default `600`. |
+| `until` | `done`, `needs_me`, `idle`, `exited` |  |
+
+### `read_output`
+
+Read what a session produced. last_message (best for results) returns the Agent's final answer from its transcript; transcript returns the last N turns; since returns only terminal lines added after cursor (pass back the returned cursor next time); screen/tail return the rendered screen. Transcript modes fall back to the screen tail when a session has no readable transcript (remote, shells, other agents).
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `cursor` | number |  |
+| `lines` | number | Default `50`. |
+| `mode` | `screen`, `tail`, `last_message`, `transcript`, `since` |  |
+| `turns` | number | Default `6`. |
+
+
+## Tracked tasks
+
+### `submit_task`
+
+Assign a tracked task to an authorized Agent. Returns a durable task_id and delivery receipt, and tells the Agent to acknowledge and report that exact task. Reuse request_id on retries. Identical target/text defaults to one task; use a new request_id only for intentional additional work. Unknown delivery never permits a fresh copy. Pass result_schema to require a JSON result of that shape. Await it with wait_any (several tasks) or wait_for_task.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `text` | string | **Required.** |
+| `request_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `result_schema` | object | Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked). |
+
+### `submit_tasks`
+
+Assign several tracked tasks in one call (at most 16). Each entry behaves exactly like submit_task, including request_id deduplication; one failure does not stop the others. Returns one result per entry, in order, and the task_ids to pass to wait_any.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `tasks` | array of objects | **Required.** Each item: `request_id`, `result_schema`, `session_id`, `text`. |
+
+### `get_task`
+
+Read the durable receipt for one task you assigned or received. Provide exactly one of task_id or your original request_id; request_id recovers a lost submission reply even after the target disappears. Delivery, Agent acknowledgement, and task result are separate facts. Status survives Engine restarts; terminal idle is not task completion.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `request_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `task_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+
+### `wait_for_task`
+
+Wait for the explicit completed or failed result of this exact task. Already terminal tasks return immediately. timed_out means no terminal result was observed; completed is true only for a reported successful result. Agent idle/exit/removal cannot fabricate completion.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `task_id` | string | **Required.** Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `timeout_s` | number | Default `600`. |
+
+### `report_task`
+
+Acknowledge or report the exact Diri task assigned to you. Call acknowledged before starting; report completed only after verifying the requested outcome and include result evidence. Use blocked for a blocker and failed for terminal failure. Only the assigned Agent can report; terminal results are immutable and identical retries are safe.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `status` | `acknowledged`, `blocked`, `completed`, `failed` | **Required.** |
+| `task_id` | string | **Required.** Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `result` | string |  |
+
+### `answer_task`
+
+Answer a task you submitted, typically after it reported blocked with a question. The answer is recorded on the task, delivered to the assigned Agent, and a blocked task returns to acknowledged. Only the submitting session may answer.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `task_id` | string | **Required.** Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `text` | string | **Required.** |
+
+### `cancel_task`
+
+Withdraw a task you submitted. It becomes terminal (cancelled) immediately and the assigned Agent is told to stop. Only the submitting session may cancel; finished tasks cannot be cancelled.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `task_id` | string | **Required.** Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `reason` | string |  |
+
+### `list_tasks`
+
+List tasks you submitted (role sent), were assigned (role assigned), or both, newest first. Open tasks only unless include_terminal is true.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `include_terminal` | boolean |  |
+| `limit` | number |  |
+| `role` | `sent`, `assigned`, `all` |  |
+
+
+## Lineage
+
+### `whoami`
+
+Describe this session's identity, parent, ancestors, children, worktree, and cross-session write policy. origin_note, when present, is the note you were started from: read it first with read_note {"note":"origin"}.
+
+No arguments.
+
+### `list_children`
+
+List the sessions spawned by this one, optionally including the whole descendant tree.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `include_exited` | boolean | Default `true`. |
+| `recursive` | boolean |  |
+
+### `wait_for_children`
+
+Wait until ALL selected child sessions settle, finish, or exit (use wait_any to handle each as soon as it is ready). Already matching states return immediately. Removed children are reported separately and cannot settle other working children. Omit session_ids for all direct children; an explicit empty array selects none.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_ids` | string array |  |
+| `since_ms` | number | Unix time in milliseconds, as returned in since_ms by spawn_agent, send_prompt, and submit_task. A session counts as done only after a turn that finished later. |
+| `timeout_s` | number | Default `600`. |
+| `until` | `settled`, `done`, `exited` |  |
+
+### `summarize_children`
+
+Collect compact screen tails, each child's last agent message (when its transcript is readable), status, and artifacts for this session's children without interpreting their output.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `rows` | number | Default `14`. |
+| `session_ids` | string array |  |
+
+### `report_to_parent`
+
+If your parent is a note, the report is added to the note: finish with status done and a one-paragraph result in summary (what you did, what changed, what is left), in plain words. Otherwise: deliver a structured update, result, blocker, or question to the session that delegated this work at most once. If your parent assigned you an open Diri task, the report is recorded on that task instead (update→progress, blocked→blocked, done→completed, failed→failed) and reaches the parent through wait_any/wait_for_task; set deliver:true to also type it into the parent's terminal. Identical reports are deduplicated. Reuse message_id on retries; choose a new one only for an intentional repeat. Inspect unknown outcomes without resending.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `summary` | string | **Required.** |
+| `artifacts` | string array |  |
+| `blockers` | string array |  |
+| `changed_paths` | string array |  |
+| `deliver` | boolean |  |
+| `details` | string |  |
+| `message_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `next_steps` | string array |  |
+| `proof` | string array |  |
+| `questions` | string array |  |
+| `status` | `update`, `done`, `blocked`, `failed` |  |
+| `submit` | boolean |  |
+
+
+## Code and worktrees
+
+### `get_diff`
+
+Summarize a session's code changes: changed files with +/- counts against its base (default branch merge-base, or HEAD for uncommitted work only), whether it is committed, and overlaps: files also changed by its live sibling sessions, which would conflict on integration. Set patch:true to include the unified diff (bounded by max_patch_bytes).
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `base` | `default_branch`, `head` |  |
+| `max_patch_bytes` | number | Default `32768`. |
+| `overlaps` | boolean | Default `true`. |
+| `patch` | boolean |  |
+
+### `integrate`
+
+Bring an authorized child session's committed branch into your own checkout (merge, squash, or cherry_pick). Both checkouts must have no uncommitted tracked changes. Conflicts abort cleanly, change nothing, and are returned as paths. Local sessions in the same project only.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+| `message` | string |  |
+| `strategy` | `merge`, `squash`, `cherry_pick` |  |
+
+### `create_worktree`
+
+Create a git worktree in the calling session's project so parallel work does not collide in one checkout.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `repo` | string | **Required.** |
+| `base` | string |  |
+| `branch` | string |  |
+
+### `list_worktrees`
+
+List a repository's worktrees with their paths and branches.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `repo` | string | **Required.** |
+
+### `remove_worktree`
+
+Remove a git worktree from the calling session's project.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `path` | string | **Required.** |
+| `repo` | string | **Required.** |
+| `force` | boolean |  |
+
+### `get_artifacts`
+
+Return PRs, issues, preview URLs, and listening ports discovered for a session.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `session_id` | string | **Required.** |
+
+### `quick_open_include`
+
+Read or change ~/.diri-include, the gitignore-style extra folders Quick Open (Cmd+P) indexes even when hidden or skipped. action get returns the path, text, and patterns; add appends unique patterns (e.g. **/.worktrees/); set replaces the whole file with text (empty clears it).
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `action` | `get`, `add`, `set` | **Required.** |
+| `patterns` | string array |  |
+| `text` | string |  |
+
+
+## Browser
+
+### `browser`
+
+Drive a real browser isolated to this Diri session. Open a URL, inspect snapshot refs, act on those refs, and request a new snapshot after page changes.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `action` | `open`, `snapshot`, `click`, `fill`, `type`, `press`, `hover`, `select`, `check`, `scroll`, `get`, `wait`, `screenshot`, `console`, `back`, `close`, `list` | **Required.** |
+| `amount` | number |  |
+| `annotate` | boolean |  |
+| `button` | `left`, `right`, `middle` |  |
+| `direction` | `up`, `down`, `left`, `right` |  |
+| `double` | boolean |  |
+| `engine` | `chromium`, `webkit`, `firefox` |  |
+| `full` | boolean |  |
+| `key` | string |  |
+| `ms` | number |  |
+| `profile` | string |  |
+| `ref` | string |  |
+| `selector` | string |  |
+| `state` | string |  |
+| `text` | string |  |
+| `url` | string |  |
+| `value` | string |  |
+| `what` | `url`, `title`, `text`, `html`, `value`, `count` |  |
+
+
+## Notes
+
+### `list_notes`
+
+Find the person's Diri Notes (briefs, plans, to-do lists). Notes are kept by Diri, not in the project folder, so use this rather than searching files. Defaults to notes for your project; project:"all" lists every note, or pass a project folder. mentions:"me" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body. session_id is the note's sidebar Session.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `include_archived` | boolean |  |
+| `limit` | integer |  |
+| `mentions` | string |  |
+| `project` | string |  |
+| `query` | string |  |
+
+### `read_note`
+
+Read one Diri note as Markdown. If you were started from a note, read note "origin" first: it is your brief. markdown is the note's canonical text (title first as a # line, tidy tables, normalised list markers): exactly what edit_note matches, so copy old_string from it. path is the note's .md file, which you may also edit with your own file tools; Diri keeps the change, a version before it, and the note's identity. Returns the text, its to-dos (block index, checked, linked sessions and their live status) and its @-mentions resolved to sessions or notes. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, part of a title, a note Session id, or "origin": the note you were started from (whoami shows it as origin_note).
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `note` | string | **Required.** |
+
+### `write_note`
+
+Add to a Diri note without rewriting it; never deletes the person's text. entry: one short line when something matters (a decision, a finding, a blocker, a result, a link), filed under your to-do (or the one you name) or in the note's Updates; keep entries sparing, no progress chatter. checked: tick a to-do, e.g. your own sub-tasks as you finish them (the to-do you were started from is the person's to tick). link_session: put a session's chip on a to-do. append: longer Markdown at the end, rarely needed. Pick the to-do by todo (its text or part of it) or todo_index (from read_note). Delegated agents may write only to the note they were started from or notes that mention them.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `note` | string | **Required.** |
+| `append` | string |  |
+| `checked` | boolean |  |
+| `entry` | string |  |
+| `link_session` | string |  |
+| `todo` | string |  |
+| `todo_index` | integer |  |
+
+### `edit_note`
+
+Change a Diri note in place, like editing a Markdown file: old_string is exact text from read_note's markdown (title line included), new_string replaces it; an empty new_string deletes it. old_string must appear once unless replace_all. Use it when the person asks for a change, or to keep your own entries current (tick a table row, change "Fix" to "Done"); otherwise prefer write_note. Every version is kept, so the person can restore one. Returns the changed lines and the new version. Diri tidies the text after each change (tables are re-aligned); a table row still matches if only its spacing differs, and the reply says so. For anything else, copy the next old_string from the changed lines or a fresh read_note.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `new_string` | string | **Required.** |
+| `note` | string | **Required.** |
+| `old_string` | string | **Required.** |
+| `replace_all` | boolean |  |
+
+### `replace_section`
+
+Replace everything under one heading of a Diri note, up to the next heading of the same or a higher level; the heading itself stays. heading is its text, optionally with its # marks ("## Status") when two headings share a name. markdown is the new content. Same rules as edit_note: change the person's writing only when asked.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `heading` | string | **Required.** |
+| `markdown` | string | **Required.** |
+| `note` | string | **Required.** |
+
+### `create_note`
+
+Write a new Diri note for the person, e.g. an explanation ("how sign-in works") or a write-up. markdown is rich Markdown: headings, lists, to-dos, links, quotes, code. It appears under you in the sidebar, in your project (or project, a folder); open:true shows it to the person right away. Use this for anything longer than a write_note entry.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `title` | string | **Required.** |
+| `markdown` | string |  |
+| `open` | boolean |  |
+| `project` | string |  |
+
+### `start_from_note`
+
+Start an agent on a Diri note or one of its to-dos. The note becomes the agent's parent in the sidebar, the agent gets the note as its brief (plus the sessions it mentions), and its chip is added to the to-do. kind defaults to your own kind. separate_copy gives it its own copy of the project folder (projects under git only) so its changes stay apart until merged. prompt adds your own instructions. task:true tracks it like submit_task.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `note` | string | **Required.** |
+| `kind` | string |  |
+| `operation_id` | string | Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat. |
+| `prompt` | string |  |
+| `result_schema` | object | Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked). |
+| `separate_copy` | boolean |  |
+| `task` | boolean |  |
+| `todo` | string |  |
+| `todo_index` | integer |  |
+
+### `note_history`
+
+Earlier versions of a Diri note: when, by whom, and what changed, newest first. Pass version to read that version's text. Read-only: only the person restores a version.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `note` | string | **Required.** |
+| `version` | integer |  |

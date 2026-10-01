@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>MCP server · Diri docs</title>
+  <meta name="description" content="diri's built-in MCP server lets agents start other agents, assign tracked tasks, wait for results, review diffs and merge branches. Set it up and use it well.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/mcp/">
+  <link rel="alternate" type="text/markdown" href="/docs/mcp.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="MCP server">
+  <meta property="og:description" content="diri's built-in MCP server lets agents start other agents, assign tracked tasks, wait for results, review diffs and merge branches. Set it up and use it well.">
+  <meta property="og:url" content="https://diri.sh/docs/mcp/">
+  <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"MCP server","description":"diri's built-in MCP server lets agents start other agents, assign tracked tasks, wait for results, review diffs and merge branches. Set it up and use it well.","url":"https://diri.sh/docs/mcp/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Automation<span class="docs-menu-sep">/</span><strong>MCP server</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Recipes</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/" aria-current="page"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/mcp.md">
+        <header class="docs-heading"><span class="eyebrow">Automation</span><h1>MCP server</h1><p>Agents running in diri can start other agents, hand them tasks, wait for the results, review their diffs and merge their branches. They do it through diri's built-in MCP server, named <code>dirijor</code>.</p></header>
+        <article class="docs-content">
+<p>The server ships inside the app. Claude Code, Codex and Cursor get it automatically when diri starts them, so most people never configure anything. This page covers what it can do, how to connect other agents, and the rules it enforces. Every tool and argument is listed in the <a href="/docs/mcp-tools/">MCP tool reference</a>.</p>
+<h2 id="what-agents-can-do"><a class="anchor" href="#what-agents-can-do" aria-hidden="true" tabindex="-1">#</a>What agents can do</h2>
+<div class="table-wrap"><table><thead><tr><th>Area</th><th>Tools</th><th>For example</th></tr></thead><tbody><tr><td>Start agents</td><td><code>spawn_agent</code>, <code>spawn_agents</code>, <code>fork_agent</code></td><td>Start three Codex agents, each in its own worktree, with one prompt each.</td></tr><tr><td>Track work</td><td><code>submit_task</code>, <code>wait_any</code>, <code>report_task</code>, <code>answer_task</code></td><td>Assign a task, get notified the moment it finishes or gets stuck, answer its question.</td></tr><tr><td>Read results</td><td><code>read_output</code>, <code>get_status</code>, <code>summarize_children</code></td><td>Read a helper's final answer from its transcript instead of scraping the screen.</td></tr><tr><td>Review and merge</td><td><code>get_diff</code>, <code>integrate</code>, <code>get_artifacts</code></td><td>See which files a helper changed, spot overlaps, merge its branch, find its PR.</td></tr><tr><td>Manage</td><td><code>manage_agent</code>, <code>release_agent</code>, worktree tools</td><td>Hibernate an idle helper, resume an exited one, close it when done.</td></tr><tr><td>Notes</td><td><code>read_note</code>, <code>write_note</code>, <code>create_note</code>, <code>start_from_note</code></td><td>Read a brief from a note, write findings back, tick its to-dos.</td></tr><tr><td>Browser</td><td><code>browser</code></td><td>Drive a real browser isolated to the session.</td></tr></tbody></table></div>
+<p>You do not need to name tools. Ask in plain words and the agent picks them:</p>
+<blockquote><p>Split this refactor into three parts. Start a Codex agent for each in its own worktree, wait for them, review each diff, and merge the ones that pass the tests.</p></blockquote>
+<h2 id="set-up"><a class="anchor" href="#set-up" aria-hidden="true" tabindex="-1">#</a>Set up</h2>
+<h3 id="agents-started-by-diri"><a class="anchor" href="#agents-started-by-diri" aria-hidden="true" tabindex="-1">#</a>Agents started by diri</h3>
+<p>Nothing to do. When diri starts an agent whose manifest opts in, it passes the server along with the launch:</p>
+<div class="table-wrap"><table><thead><tr><th>Agent</th><th>How diri connects it</th></tr></thead><tbody><tr><td>Claude Code</td><td><code>--mcp-config</code> pointing at a file diri writes at startup</td></tr><tr><td>Codex</td><td><code>-c mcp_servers.dirijor.command=…</code> overrides</td></tr><tr><td>Cursor</td><td>A session-local plugin directory whose <code>mcp.json</code> lists the server</td></tr></tbody></table></div>
+<p>Each agent session also gets three environment variables. The server uses them to know which session is calling.</p>
+<div class="table-wrap"><table><thead><tr><th>Variable</th><th>Meaning</th></tr></thead><tbody><tr><td><code>DIRIJOR_SESSION_ID</code></td><td>The calling session. Required for anything that starts, messages or changes something.</td></tr><tr><td><code>DIRIJOR_SOCKET</code></td><td>The Engine's control socket.</td></tr><tr><td><code>DIRIJOR_CLI</code></td><td>Path to the bundled <a href="/docs/cli/"><code>dirijor</code> CLI</a>.</td></tr></tbody></table></div>
+<p>To check, run <code>/mcp</code> in Claude Code. You should see <code>dirijor</code> with its tools.</p>
+<h3 id="other-agents-inside-diri"><a class="anchor" href="#other-agents-inside-diri" aria-hidden="true" tabindex="-1">#</a>Other agents inside diri</h3>
+<p>Any agent that speaks MCP over stdio can use the same server. Add a server named <code>dirijor</code> to that agent's own MCP settings, with this command and no arguments:</p>
+<div class="code-block" data-lang="text"><div class="code-head"><span>text</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code>/Applications/diri.app/Contents/Resources/bin/dirijor-mcp</code></pre></div>
+<p>Started from diri, the agent inherits <code>DIRIJOR_SESSION_ID</code>, so every tool works with the same permissions as a built-in integration. For an agent that uses the common <code>mcpServers</code> JSON shape (Gemini CLI's <code>settings.json</code>, for example):</p>
+<div class="code-block" data-lang="json"><div class="code-head"><span>JSON</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code>{
+  <span class="tk-key">&quot;mcpServers&quot;</span>: {
+    <span class="tk-key">&quot;dirijor&quot;</span>: {
+      <span class="tk-key">&quot;command&quot;</span>: <span class="tk-str">&quot;/Applications/diri.app/Contents/Resources/bin/dirijor-mcp&quot;</span>
+    }
+  }
+}</code></pre></div>
+<p>If you installed diri somewhere else, use that path. On Linux the binary sits next to the <code>diri</code> executable your package installed.</p>
+<h3 id="agents-outside-diri"><a class="anchor" href="#agents-outside-diri" aria-hidden="true" tabindex="-1">#</a>Agents outside diri</h3>
+<p>You can connect an agent that runs in another terminal, or a desktop MCP client, to the same server. Without a diri session behind it, the caller has no identity, so only reads work: <code>list_agents</code>, <code>get_status</code>, <code>read_output</code>, <code>get_diff</code>, <code>get_artifacts</code>, <code>list_worktrees</code> and the note readers. Tools that start, message or change something fail with an error saying they need <code>DIRIJOR_SESSION_ID</code> and must run inside a live Diri session.</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">claude</span> mcp add dirijor <span class="tk-flag">--</span> /Applications/diri.app/Contents/Resources/bin/dirijor-mcp</code></pre></div>
+<div class="code-block" data-lang="toml"><div class="code-head"><span>~/.codex/config.toml</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code>[mcp_servers.dirijor]
+command = &quot;/Applications/diri.app/Contents/Resources/bin/dirijor-mcp&quot;</code></pre></div>
+<p>diri must be running. The server talks to the Engine over its local socket and fails with <code>daemon socket: …</code> when the Engine is not up.</p>
+<h2 id="permissions"><a class="anchor" href="#permissions" aria-hidden="true" tabindex="-1">#</a>Permissions</h2>
+<p>Reads are open: any agent can list sessions and read their status and output. Writes follow the session tree you see in the sidebar.</p>
+<div class="table-wrap"><table><thead><tr><th>Caller</th><th>May write to</th></tr></thead><tbody><tr><td>A root agent (one you started)</td><td>Sessions in its own project, and its direct children on any host.</td></tr><tr><td>A delegated agent (started by another agent)</td><td>Only its parent and its direct children.</td></tr></tbody></table></div>
+<ul><li>Agents can never target themselves, and the caller and its ancestors are protected from <code>release_agent</code>.</li><li>Messages that cross lineages are delivered with a line saying who sent them.</li><li>Every write is checked against the Engine's latest snapshot, so a stale MCP process fails closed.</li><li>Delegation is capped at 3 levels deep and 16 live children per session. Set <code>DIRIJOR_MAX_SPAWN_DEPTH</code> and <code>DIRIJOR_MAX_LIVE_CHILDREN</code> in the environment diri starts with to change that.</li></ul>
+<p>Ask an agent to run <code>whoami</code> to see its identity, parent, children, worktree and the exact policy that applies to it.</p>
+<aside class="callout warning"><strong>Warning</strong><p>Spawned agents run with your user's permissions, like any process you start. Only let agents you trust coordinate others, and review what they merge. See the <a href="/docs/security/">security model</a>.</p></aside>
+<h2 id="delivery-and-waiting"><a class="anchor" href="#delivery-and-waiting" aria-hidden="true" tabindex="-1">#</a>Delivery and waiting</h2>
+<p>Agents retry. The server is built so a retry never doubles the work.</p>
+<ul><li><strong>Deduplicated.</strong> Spawns, messages and tasks are delivered at most once. Identical arguments from the same caller return the original result. Reuse <code>operation_id</code>, <code>message_id</code> or <code>request_id</code> on a retry; pass a new one only when you really want a second copy.</li><li><strong>Receipts, not guesses.</strong> A spawn or message returns a receipt. <code>sent</code> means the input reached the terminal, not that the agent finished. An <code>unknown</code> outcome should be inspected with <code>get_task</code> or <code>get_status</code>, never resent under a new id.</li><li><strong>Wait without polling.</strong> <code>wait_any</code> blocks until at least one task or session needs attention, then returns everything that is <code>ready</code> and what is still <code>pending</code>. Pass <code>since_ms</code> from the spawn or send result so an agent that was idle before your message does not count as done.</li><li><strong>Tasks have real results.</strong> A tracked task completes only when the assigned agent calls <code>report_task</code> with <code>completed</code>. An agent going idle or exiting cannot fake it.</li></ul>
+<h2 id="patterns"><a class="anchor" href="#patterns" aria-hidden="true" tabindex="-1">#</a>Patterns</h2>
+<h3 id="fan-out-and-merge"><a class="anchor" href="#fan-out-and-merge" aria-hidden="true" tabindex="-1">#</a>Fan out and merge</h3>
+<p>The loop diri's own server instructions teach every agent:</p>
+<ol><li><code>spawn_agents</code> with one entry per subtask: <code>worktree: true</code>, a <code>prompt</code>, and <code>task: true</code>.</li><li><code>wait_any</code> with the returned <code>task_ids</code>.</li><li>For each ready task: <code>read_output</code> with <code>mode: &quot;last_message&quot;</code> for detail, <code>answer_task</code> if it is blocked, <code>get_diff</code> to review, <code>integrate</code> to bring its branch into your checkout.</li><li>Call <code>wait_any</code> again with the pending ids.</li><li><code>release_agent</code> when a helper is done.</li></ol>
+<div class="code-block" data-lang="json"><div class="code-head"><span>spawn_agents</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code>{
+  <span class="tk-key">&quot;agents&quot;</span>: [
+    { <span class="tk-key">&quot;kind&quot;</span>: <span class="tk-str">&quot;codex&quot;</span>, <span class="tk-key">&quot;cwd&quot;</span>: <span class="tk-str">&quot;~/code/app&quot;</span>, <span class="tk-key">&quot;worktree&quot;</span>: <span class="tk-lit">true</span>, <span class="tk-key">&quot;task&quot;</span>: <span class="tk-lit">true</span>, <span class="tk-key">&quot;name&quot;</span>: <span class="tk-str">&quot;API client&quot;</span>, <span class="tk-key">&quot;prompt&quot;</span>: <span class="tk-str">&quot;Generate a typed client for openapi.yaml and add tests.&quot;</span> },
+    { <span class="tk-key">&quot;kind&quot;</span>: <span class="tk-str">&quot;claude&quot;</span>, <span class="tk-key">&quot;cwd&quot;</span>: <span class="tk-str">&quot;~/code/app&quot;</span>, <span class="tk-key">&quot;worktree&quot;</span>: <span class="tk-lit">true</span>, <span class="tk-key">&quot;task&quot;</span>: <span class="tk-lit">true</span>, <span class="tk-key">&quot;name&quot;</span>: <span class="tk-str">&quot;Docs&quot;</span>, <span class="tk-key">&quot;prompt&quot;</span>: <span class="tk-str">&quot;Document every public endpoint in docs/api.md.&quot;</span> }
+  ]
+}</code></pre></div>
+<h3 id="structured-results"><a class="anchor" href="#structured-results" aria-hidden="true" tabindex="-1">#</a>Structured results</h3>
+<p>Pass <code>result_schema</code> with a task and the helper must report JSON of that shape. Use it when a parent agent will act on the answer.</p>
+<div class="code-block" data-lang="json"><div class="code-head"><span>submit_task</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code>{
+  <span class="tk-key">&quot;session_id&quot;</span>: <span class="tk-str">&quot;…&quot;</span>,
+  <span class="tk-key">&quot;text&quot;</span>: <span class="tk-str">&quot;Find every call site of parseConfig and say whether it handles errors.&quot;</span>,
+  <span class="tk-key">&quot;result_schema&quot;</span>: {
+    <span class="tk-key">&quot;type&quot;</span>: <span class="tk-str">&quot;object&quot;</span>,
+    <span class="tk-key">&quot;properties&quot;</span>: {
+      <span class="tk-key">&quot;call_sites&quot;</span>: { <span class="tk-key">&quot;type&quot;</span>: <span class="tk-str">&quot;array&quot;</span>, <span class="tk-key">&quot;items&quot;</span>: { <span class="tk-key">&quot;type&quot;</span>: <span class="tk-str">&quot;string&quot;</span> } },
+      <span class="tk-key">&quot;unhandled&quot;</span>: { <span class="tk-key">&quot;type&quot;</span>: <span class="tk-str">&quot;integer&quot;</span> }
+    },
+    <span class="tk-key">&quot;required&quot;</span>: [<span class="tk-str">&quot;call_sites&quot;</span>, <span class="tk-str">&quot;unhandled&quot;</span>]
+  }
+}</code></pre></div>
+<h3 id="agents-and-plain-terminals"><a class="anchor" href="#agents-and-plain-terminals" aria-hidden="true" tabindex="-1">#</a>Agents and plain terminals</h3>
+<p>To start another agent, use its own kind (<code>claude</code>, <code>codex</code>, <code>gemini</code>…) and pass the task as <code>prompt</code>. A <code>shell</code> child is a raw terminal in the parent's <kbd>⌘</kbd><kbd>J</kbd> pane: its prompt runs as shell commands, so never use it to launch an agent CLI.</p>
+<h3 id="notes-as-briefs"><a class="anchor" href="#notes-as-briefs" aria-hidden="true" tabindex="-1">#</a>Notes as briefs</h3>
+<p>An agent started from a note sees <code>origin_note</code> in <code>whoami</code>. It reads the brief with <code>read_note</code>, adds short findings with <code>write_note</code>, ticks its own sub-tasks, and finishes with <code>report_to_parent</code>, which lands in the note. The person ticks the original to-do after reviewing. More in <a href="/docs/notes/">Notes</a>.</p>
+<h2 id="protocol-details"><a class="anchor" href="#protocol-details" aria-hidden="true" tabindex="-1">#</a>Protocol details</h2>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td>Transport</td><td>stdio, newline-delimited JSON-RPC 2.0</td></tr><tr><td>Protocol versions</td><td><code>2025-06-18</code> (default), <code>2025-03-26</code>, <code>2024-11-05</code></td></tr><tr><td>Capabilities</td><td><code>tools</code>. Results include <code>structuredContent</code> for clients that read it, plus a text block for the rest.</td></tr><tr><td>Server name</td><td><code>dirijor</code></td></tr><tr><td>Instructions</td><td>Sent on <code>initialize</code>: the fan-out loop, delivery rules and the notes contract.</td></tr></tbody></table></div>
+<p>From a terminal, the <a href="/docs/cli/"><code>dirijor</code> CLI</a> exposes the same catalog. <code>dirijor mcp-tools</code> prints every tool definition, and <code>dirijor mcp-call --tool &lt;name&gt;</code> calls one with JSON arguments on stdin:</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">echo</span> <span class="tk-str">'{}'</span> | dirijor mcp-call <span class="tk-flag">--tool</span> list_agents</code></pre></div>
+<h2 id="docs-mcp"><a class="anchor" href="#docs-mcp" aria-hidden="true" tabindex="-1">#</a>Docs MCP</h2>
+<p>These docs have their own small, read-only MCP server, separate from <code>dirijor</code>. It lets an agent search and read diri's documentation while it helps you. It runs at <code>https://diri.sh/mcp</code> over streamable HTTP, needs no account, and has three tools: <code>search_docs</code>, <code>read_doc</code> and <code>list_docs</code>.</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">claude</span> mcp add <span class="tk-flag">--transport</span> http diri-docs https://diri.sh/mcp</code></pre></div>
+<div class="code-block" data-lang="toml"><div class="code-head"><span>~/.codex/config.toml</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code>[mcp_servers.diri-docs]
+url = &quot;https://diri.sh/mcp&quot;</code></pre></div>
+<p>Prefer files? Every page is also plain Markdown: add <code>.md</code> to its path, or point your agent at <a href="/llms.txt">llms.txt</a>.</p>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><a class="prev" href="/docs/accounts/"><span>Previous</span>Accounts and usage</a><a class="next" href="/docs/mcp-tools/"><span>Next</span>MCP tool reference</a></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#what-agents-can-do">What agents can do</a><a href="#set-up">Set up</a><a href="#permissions">Permissions</a><a href="#delivery-and-waiting">Delivery and waiting</a><a href="#patterns">Patterns</a><a href="#protocol-details">Protocol details</a><a href="#docs-mcp">Docs MCP</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/mcp.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Fmcp.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/mcp.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>

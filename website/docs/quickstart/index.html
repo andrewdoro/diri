@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Quickstart · Diri docs</title>
+  <meta name="description" content="Go from a fresh install to a running agent in diri: install an agent, pick a folder, start a session, read its status, and answer when it asks.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/quickstart/">
+  <link rel="alternate" type="text/markdown" href="/docs/quickstart.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Quickstart">
+  <meta property="og:description" content="Go from a fresh install to a running agent in diri: install an agent, pick a folder, start a session, read its status, and answer when it asks.">
+  <meta property="og:url" content="https://diri.sh/docs/quickstart/">
+  <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Quickstart","description":"Go from a fresh install to a running agent in diri: install an agent, pick a folder, start a session, read its status, and answer when it asks.","url":"https://diri.sh/docs/quickstart/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Getting started<span class="docs-menu-sep">/</span><strong>Quickstart</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/" aria-current="page"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Recipes</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/quickstart.md">
+        <header class="docs-heading"><span class="eyebrow">Getting started</span><h1>Quickstart</h1><p>Go from a fresh install to a running agent in diri: install an agent, pick a folder, start a session, read its status, and answer when it asks.</p></header>
+        <article class="docs-content">
+<p>This page takes you from a fresh install to a working agent in a few minutes. If you have never used a coding agent before, the slower walkthrough in <a href="/guides/first-agent/">Your first agent</a> explains each step.</p>
+<h2 id="1-install-diri"><a class="anchor" href="#1-install-diri" aria-hidden="true" tabindex="-1">#</a>1. Install diri</h2>
+<p>Install with Homebrew or the DMG. You need macOS 15 or newer. See <a href="/docs/install/">Install</a> for Linux and details.</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">brew</span> install <span class="tk-flag">--cask</span> cristicretu/diri/diri</code></pre></div>
+<h2 id="2-add-an-agent"><a class="anchor" href="#2-add-an-agent" aria-hidden="true" tabindex="-1">#</a>2. Add an agent</h2>
+<p>diri runs the agent CLIs already on your machine. On first launch it checks which ones are installed.</p>
+<ul><li><strong>If none are found</strong>, the welcome screen says &quot;Install a coding agent to get started.&quot; and lists a few agents with an <strong>Install</strong> button.</li><li><strong>Click Install.</strong> diri shows the agent's official install command in a confirmation sheet. Click <strong>Install</strong> again and it runs in a new terminal tab you can watch.</li><li><strong>Sign in once.</strong> Start the agent and follow its own sign-in steps. diri never handles agent passwords.</li></ul>
+<p>The one-click install covers Claude Code, Codex, Gemini CLI and OpenCode. <strong>More agents…</strong> opens <strong>Settings → Agents</strong>, which lists every supported agent. If you install an agent while diri is open, click <strong>Refresh</strong> there. If one still is not detected, use <strong>Add…</strong> on its row to choose the executable.</p>
+<aside class="callout tip"><strong>Tip</strong><p>Claude Code and Codex have the deepest status and resume support. Every other agent still runs in a real terminal.</p></aside>
+<h2 id="3-pick-a-folder"><a class="anchor" href="#3-pick-a-folder" aria-hidden="true" tabindex="-1">#</a>3. Pick a folder</h2>
+<p>An agent works inside one folder and can change files there.</p>
+<ul><li>On the welcome screen, click <strong>Choose a folder…</strong>.</li><li>Or open <strong>New Agent</strong> at the top of the sidebar, click the folder row at the bottom (the <strong>Where</strong> panel), and choose a recent folder or <strong>Choose Folder…</strong>.</li></ul>
+<p>diri remembers every folder you use, so next time it is one click. A folder that is a git repository can also give each agent its own worktree; see <a href="/docs/worktrees/">Worktrees and review</a>.</p>
+<h2 id="4-start-a-session"><a class="anchor" href="#4-start-a-session" aria-hidden="true" tabindex="-1">#</a>4. Start a session</h2>
+<div class="table-wrap"><table><thead><tr><th>Way to start</th><th>What it does</th></tr></thead><tbody><tr><td><strong>New Agent</strong> in the sidebar</td><td>Pick an agent from the ones installed</td></tr><tr><td><kbd>⌘</kbd><kbd>T</kbd></td><td>Start the default agent right away</td></tr><tr><td><kbd>⌘</kbd><kbd>N</kbd></td><td>Open the launcher: pick project and agent, type the first prompt</td></tr><tr><td><kbd>⌥</kbd><kbd>⌘</kbd><kbd>T</kbd></td><td>Start a plain terminal</td></tr></tbody></table></div>
+<p>Set the agent ⌘T uses in <strong>Settings → General → Default agent</strong>. The new session opens on the right with the agent's own screen, and a row appears in the sidebar. Type your task and press Return.</p>
+<h2 id="5-read-the-sidebar"><a class="anchor" href="#5-read-the-sidebar" aria-hidden="true" tabindex="-1">#</a>5. Read the sidebar</h2>
+<p>The mark on the left of each row shows what the session is doing. The agent's logo is on the right.</p>
+<div class="table-wrap"><table><thead><tr><th>Mark</th><th>Meaning</th></tr></thead><tbody><tr><td>Spinning</td><td>Working. Leave it alone.</td></tr><tr><td>Amber</td><td>Needs you: a question or a permission prompt</td></tr><tr><td>Green</td><td>Done, and you have not looked yet</td></tr><tr><td>Grey</td><td>Idle, or done and already seen</td></tr><tr><td>Moon</td><td>Hibernated to save memory. Open it to wake it.</td></tr></tbody></table></div>
+<p><a href="/docs/sessions/">Sessions</a> covers the full status model.</p>
+<h2 id="6-answer-when-it-asks"><a class="anchor" href="#6-answer-when-it-asks" aria-hidden="true" tabindex="-1">#</a>6. Answer when it asks</h2>
+<p>When an agent needs you, its row turns amber and diri sends a notification.</p>
+<ol><li>Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>J</kbd> to jump to the next session that needs you, or click the row.</li><li>Answer in the agent's screen. Permission prompts usually take the arrow keys and Return.</li><li>For a plain question, you can reply from the macOS notification with <strong>Reply</strong>.</li></ol>
+<p>The bell (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>I</kbd>) collects every &quot;needs you&quot; and &quot;finished&quot; moment.</p>
+<h2 id="7-quit-without-losing-anything"><a class="anchor" href="#7-quit-without-losing-anything" aria-hidden="true" tabindex="-1">#</a>7. Quit without losing anything</h2>
+<p>Each session runs in its own background process, not inside the window. Quit diri (<kbd>⌘</kbd><kbd>Q</kbd>) and reopen it later: agents that were working are still working, with their full screen history. The same holds when diri updates its background Engine.</p>
+<p>A restart of your Mac does stop agents. Their sessions then offer <strong>Resume</strong>, which continues the same conversation for agents that support it. <a href="/guides/never-lose-work/">Never lose your work</a> explains what survives and what does not.</p>
+<h2 id="next-steps"><a class="anchor" href="#next-steps" aria-hidden="true" tabindex="-1">#</a>Next steps</h2>
+<ul><li><a href="/docs/sessions/">Sessions</a>: status, sidebar, history, resume and terminal features.</li><li><a href="/docs/worktrees/">Worktrees and review</a>: parallel agents on separate branches, and reviewing their changes.</li><li><a href="/docs/keyboard-shortcuts/">Keyboard shortcuts</a>: every binding.</li><li><a href="/guides/parallel-agents/">Run several agents at once</a> and <a href="/guides/agent-teams/">Let agents work as a team</a>.</li></ul>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><a class="prev" href="/docs/install/"><span>Previous</span>Install</a><a class="next" href="/docs/keyboard-shortcuts/"><span>Next</span>Keyboard shortcuts</a></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#1-install-diri">1. Install diri</a><a href="#2-add-an-agent">2. Add an agent</a><a href="#3-pick-a-folder">3. Pick a folder</a><a href="#4-start-a-session">4. Start a session</a><a href="#5-read-the-sidebar">5. Read the sidebar</a><a href="#6-answer-when-it-asks">6. Answer when it asks</a><a href="#7-quit-without-losing-anything">7. Quit without losing anything</a><a href="#next-steps">Next steps</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/quickstart.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Fquickstart.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/quickstart.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>
