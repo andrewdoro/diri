@@ -855,6 +855,7 @@ mod tests {
             terminal_cwd: None,
             foreground_ports: None,
             note_id: None,
+            terminal_progress: None,
         }
     }
 

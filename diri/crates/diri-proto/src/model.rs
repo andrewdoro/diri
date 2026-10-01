@@ -712,6 +712,32 @@ pub struct PortInfo {
     pub process_name: String,
 }
 
+/// What a program reported with `OSC 9;4` (ConEmu's progress sequence, which
+/// Windows Terminal, Ghostty and cargo speak), as the Engine last published it.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalProgress {
+    pub state: TerminalProgressState,
+    /// Whole percent, 0–100. Zero for an indeterminate report.
+    pub percent: u8,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalProgressState {
+    /// `9;4;1`: running, `percent` done.
+    Normal,
+    /// `9;4;2`: failed; the percent is where it stopped.
+    Error,
+    /// `9;4;3`: busy with no known end.
+    Indeterminate,
+    /// `9;4;4`: paused, or a warning; the percent is where it stands.
+    Paused,
+    /// A state a newer Engine sends that this client does not know.
+    #[serde(other)]
+    Unknown,
+}
+
 /// Verbs the authoritative Engine has resolved for one concrete session.
 ///
 /// Clients consume this value instead of re-parsing commands or hard-coding
@@ -846,6 +872,10 @@ pub struct SessionRecord {
     /// `listening_ports`, which it keeps current between governor scans.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_ports: Option<Vec<PortInfo>>,
+    /// The progress a terminal's program last reported (`OSC 9;4`), while it
+    /// still stands. Live state: it is cleared on load and when the job ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_progress: Option<TerminalProgress>,
 }
 
 impl SessionRecord {

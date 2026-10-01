@@ -6,6 +6,8 @@ mod held_hint_tests;
 #[path = "root/peek_profile.rs"]
 mod peek_profile;
 #[cfg(all(test, target_os = "macos"))]
+mod progress_frames;
+#[cfg(all(test, target_os = "macos"))]
 mod project_agent_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod row_motion_frames;

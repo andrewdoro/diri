@@ -105,6 +105,13 @@ const LAUNCH_FALLBACK: Duration = Duration::from_millis(400);
 /// width. The Swift daemon's `scheduleDebouncedLaunch` delay.
 const LAUNCH_DEBOUNCE: Duration = Duration::from_millis(120);
 
+/// Quiet time between a submitted prompt's paste and its Enter. Gemini CLI
+/// turns an Enter that lands within 40 ms of an untrusted paste into a
+/// newline (paste protection, re-armed on its next React render), so at the
+/// old 30 ms a follow-up sat unsent in the composer and merged with the next
+/// one. The extra margin covers Node's event loop under load.
+const PASTE_SUBMIT_GAP: Duration = Duration::from_millis(80);
+
 /// Quiet time between holder liveness probes: a holder that died markerless
 /// (SIGKILL, machine issues) must not leave a forever-live session behind.
 /// Elapsed-based so the probe cadence is the same on fast and idle ticks.
@@ -285,6 +292,8 @@ pub struct SessionView {
     pub terminal_cwd: Option<String>,
     /// The TCP ports a local shell's foreground job listens on, lowest first.
     pub foreground_ports: Vec<diri_proto::PortInfo>,
+    /// Progress the terminal's program reported and has not cleared.
+    pub terminal_progress: Option<diri_proto::TerminalProgress>,
     pub tail_offset: u64,
     pub exited: bool,
 }
@@ -423,6 +432,8 @@ struct Shared {
     /// What a local shell is running and where it is. Stays empty for Agent
     /// sessions and for remote shells, whose processes are not on this host.
     foreground: Mutex<ForegroundProgram>,
+    /// The `OSC 9;4` progress this session publishes. See [`observe_progress`].
+    progress: Mutex<ProgressTrack>,
     /// Agents a shell recognises in its foreground, by the program name a
     /// user types to start them. Empty for every session but a shell.
     known_agents: Vec<KnownAgent>,
@@ -474,6 +485,24 @@ const SHELL_CWD_REFRESH: Duration = Duration::from_millis(500);
 /// opens its port some time after it starts (a bundler compiles first), and
 /// says so on screen, so the samples its output triggers find it within this.
 const JOB_PORTS_REFRESH: Duration = Duration::from_secs(1);
+/// How long reported progress stands without another report, when no shell
+/// job is known to own it. A program that dies mid-build never sends the
+/// `9;4;0` that clears it. Ghostty drops a silent report after the same 15 s.
+const PROGRESS_STALE: Duration = Duration::from_secs(15);
+
+/// The progress a session publishes, and what it was last derived from.
+#[derive(Default)]
+struct ProgressTrack {
+    published: Option<diri_proto::TerminalProgress>,
+    /// The screen's report count when last read, so a repeat of the same
+    /// value still counts as the program being alive.
+    reports_seen: u64,
+    reported_at: Option<Instant>,
+    /// A shell's foreground job at the last sample. Progress reported while
+    /// a job runs ends with that job, not with a timeout: a long link step
+    /// can go quiet for a minute and still be the same build.
+    job: Option<i32>,
+}
 
 struct RemoteGridState {
     reset_required: bool,
@@ -2039,6 +2068,13 @@ impl Session {
             foreground_agent,
             terminal_cwd,
             foreground_ports,
+            terminal_progress: self
+                .shared
+                .progress
+                .lock()
+                .expect("progress")
+                .published
+                .filter(|_| !self.shared.exited.load(Ordering::SeqCst)),
             status: self.shared.status.lock().expect("status").clone(),
             status_evidence,
             needs_input: self.shared.needs_input.lock().expect("needs input").clone(),
@@ -2646,7 +2682,7 @@ impl Session {
             return self.write_input(text.as_bytes());
         }
         self.paste_text(text)?;
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(PASTE_SUBMIT_GAP);
         self.submit_input()
     }
 
@@ -3137,6 +3173,7 @@ fn new_shared(
         agent_exit: Mutex::new(None),
         echo_request: Mutex::new(None),
         foreground: Mutex::new(ForegroundProgram::default()),
+        progress: Mutex::new(ProgressTrack::default()),
         known_agents: if spec.manifest_id == "shell" {
             known_agents(engine)
         } else {
@@ -3335,6 +3372,7 @@ fn apply_foreground_sample(
     let Some(running) = crate::status::foreground_job_running(child_pid, foreground_pgid) else {
         return;
     };
+    progress_follows_job(shared, foreground_pgid.filter(|_| running));
     let agent = match host {
         SampleHost::Local => {
             observe_foreground_program(shared, child_pid, foreground_pgid, running)
@@ -3773,6 +3811,7 @@ fn pump_remote_connection(
                 .expect("reducer")
                 .reduce(StatusSignal::Tick, last_tick);
             apply(shared, &outcome);
+            expire_stale_progress(shared);
         }
 
         let pending_fd = match client.pending_write_fd(generation) {
@@ -3820,6 +3859,7 @@ fn pump_remote_connection(
                 .expect("reducer")
                 .reduce(StatusSignal::Tick, now);
             apply(shared, &outcome);
+            expire_stale_progress(shared);
             last_tick = now;
             continue;
         }
@@ -4464,6 +4504,7 @@ fn pump(
                 .expect("reducer")
                 .reduce(StatusSignal::Tick, last_tick);
             apply(&shared, &outcome);
+            expire_stale_progress(&shared);
             // Sample from the PTY owner, not `reader`: `tcgetpgrp` on the
             // live read fd can swallow canonical-mode input.
             if manifest_id == "shell" {
@@ -4701,6 +4742,75 @@ fn release_stalled_sync(shared: &Shared) {
     }
 }
 
+/// Publishes the screen's latest `OSC 9;4` report, if a new one arrived.
+///
+/// A build can report hundreds of times a second; the published value is a
+/// whole percent, so only a change in state or percent bumps the session's
+/// version and reaches the Registry. Repeats only refresh the staleness clock.
+fn observe_progress(shared: &Shared, screen: &HeadlessScreen) {
+    let reports = screen.progress_reports();
+    let mut track = shared.progress.lock().expect("progress");
+    if reports == track.reports_seen {
+        return;
+    }
+    track.reports_seen = reports;
+    track.reported_at = Some(Instant::now());
+    let next = screen
+        .progress()
+        .and_then(|(state, percent)| progress_from(state, percent));
+    if track.published != next {
+        track.published = next;
+        drop(track);
+        shared.bump_state_version();
+    }
+}
+
+/// ConEmu's `state;percent` as the protocol publishes it. State 0 clears.
+fn progress_from(state: i64, percent: i64) -> Option<diri_proto::TerminalProgress> {
+    use diri_proto::TerminalProgressState as State;
+    let state = match state {
+        1 => State::Normal,
+        2 => State::Error,
+        3 => State::Indeterminate,
+        4 => State::Paused,
+        _ => return None,
+    };
+    let percent = if state == State::Indeterminate {
+        0
+    } else {
+        percent.clamp(0, 100) as u8
+    };
+    Some(diri_proto::TerminalProgress { state, percent })
+}
+
+/// Clears progress a shell job owned once that job leaves the foreground.
+/// `job` is the foreground process group while one runs, else `None`.
+fn progress_follows_job(shared: &Shared, job: Option<i32>) {
+    let mut track = shared.progress.lock().expect("progress");
+    let ended = track.job.is_some() && track.job != job;
+    track.job = job;
+    if ended && track.published.take().is_some() {
+        drop(track);
+        shared.bump_state_version();
+    }
+}
+
+/// Drops progress nobody has repeated for [`PROGRESS_STALE`], unless a shell
+/// job that may still finish it is running. Called from each pump's tick.
+fn expire_stale_progress(shared: &Shared) {
+    let mut track = shared.progress.lock().expect("progress");
+    let stale = track.published.is_some()
+        && track.job.is_none()
+        && track
+            .reported_at
+            .is_none_or(|at| at.elapsed() >= PROGRESS_STALE);
+    if stale {
+        track.published = None;
+        drop(track);
+        shared.bump_state_version();
+    }
+}
+
 /// Runs manifest detection only when the visible screen actually changed.
 ///
 /// `feed` is called per PTY chunk, but the reducer discards observations whose
@@ -4715,6 +4825,9 @@ fn evaluate_if_screen_changed(
     manifest_id: &str,
     last_eval_seq: &mut u64,
 ) -> Option<crate::detect::ScreenObservation> {
+    // Progress is not screen content: a report that moves only the percent
+    // leaves `content_seq` where it was.
+    observe_progress(shared, screen);
     let seq = screen.content_seq();
     if seq == *last_eval_seq {
         return None;
@@ -5104,6 +5217,7 @@ fn pump_held(
                 .expect("reducer")
                 .reduce(StatusSignal::Tick, SystemTime::now());
             apply(&shared, &outcome);
+            expire_stale_progress(&shared);
             let interaction = shared.last_interaction.load(Ordering::Relaxed);
             if interaction != last_interaction_seen {
                 last_interaction_seen = interaction;
@@ -6280,6 +6394,150 @@ mod grid_wake_tests {
         wake.notify();
         let background = wake.wait_for_change(trailing.generation, Duration::from_secs(1));
         assert!(!background.interactive);
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use diri_proto::{TerminalProgress, TerminalProgressState as State};
+
+    fn remote_shell(id: &str) -> (tempfile::TempDir, Arc<ManifestEngine>, Arc<Shared>) {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, _) = ManifestEngine::load_dir(&crate::detect::bundled_manifest_dir()).unwrap();
+        let spec = SessionSpec {
+            id: id.into(),
+            pty: PtySpec::new(vec!["/bin/sh".into()], "/tmp"),
+            manifest_id: "shell".into(),
+            authority: Authority::ProcessOnly,
+            logs_dir: temp.path().to_path_buf(),
+            holder: None,
+            remote: None,
+            defer_launch: false,
+        };
+        let log = OutputLog::open(temp.path(), &spec.id, 4096, 1 << 20, false).unwrap();
+        let shared = new_shared(&spec, log, &engine, true);
+        (temp, Arc::new(engine), shared)
+    }
+
+    fn published(shared: &Shared) -> Option<TerminalProgress> {
+        shared.progress.lock().unwrap().published
+    }
+
+    fn progress(state: State, percent: u8) -> Option<TerminalProgress> {
+        Some(TerminalProgress { state, percent })
+    }
+
+    /// Feeds live output through the remote path, the one every transport
+    /// shares from the parsed screen onward.
+    fn feed(engine: &ManifestEngine, shared: &Shared, seq: &mut u64, end: &mut u64, bytes: &[u8]) {
+        *end = apply_remote_output(shared, engine, "shell", seq, *end, bytes, false).unwrap();
+    }
+
+    #[test]
+    fn a_build_storm_bumps_the_session_once_per_percent() {
+        let (_temp, engine, shared) = remote_shell("progress-storm");
+        let (mut seq, mut end) = (0, 0);
+        let before = shared.state_version.load(Ordering::SeqCst);
+        // Cargo repaints its bar far more often than the percent moves.
+        for percent in [10, 10, 10, 10, 11, 11, 11, 12] {
+            let report = format!("\x1b]9;4;1;{percent}\x1b\\\r   Building [==>  ] {percent}%");
+            feed(&engine, &shared, &mut seq, &mut end, report.as_bytes());
+        }
+        assert_eq!(published(&shared), progress(State::Normal, 12));
+        let bumps = shared.state_version.load(Ordering::SeqCst) - before;
+        // Three distinct percents; the reducer may add its own for output
+        // activity, but the repeats add nothing.
+        let silent = {
+            let version = shared.state_version.load(Ordering::SeqCst);
+            feed(&engine, &shared, &mut seq, &mut end, b"\x1b]9;4;1;12\x07");
+            shared.state_version.load(Ordering::SeqCst) == version
+        };
+        assert!(silent, "a repeated percent must not republish");
+        assert!(bumps >= 3);
+    }
+
+    #[test]
+    fn states_map_and_zero_clears() {
+        let (_temp, engine, shared) = remote_shell("progress-states");
+        let (mut seq, mut end) = (0, 0);
+        feed(&engine, &shared, &mut seq, &mut end, b"\x1b]9;4;1;35\x07");
+        assert_eq!(published(&shared), progress(State::Normal, 35));
+        feed(&engine, &shared, &mut seq, &mut end, b"\x1b]9;4;2\x07");
+        assert_eq!(published(&shared), progress(State::Error, 35));
+        feed(&engine, &shared, &mut seq, &mut end, b"\x1b]9;4;4;80\x07");
+        assert_eq!(published(&shared), progress(State::Paused, 80));
+        feed(&engine, &shared, &mut seq, &mut end, b"\x1b]9;4;3;50\x07");
+        assert_eq!(published(&shared), progress(State::Indeterminate, 0));
+        feed(&engine, &shared, &mut seq, &mut end, b"\x1b]9;4;0;0\x07");
+        assert_eq!(published(&shared), None);
+        // Junk neither sets nor clears it.
+        feed(
+            &engine,
+            &shared,
+            &mut seq,
+            &mut end,
+            b"\x1b]9;4;1;60\x07\x1b]9;4;9;1\x07",
+        );
+        assert_eq!(published(&shared), progress(State::Normal, 60));
+        // And a plain OSC 9 notification is not progress.
+        feed(
+            &engine,
+            &shared,
+            &mut seq,
+            &mut end,
+            b"\x1b]9;4 tests passed\x07",
+        );
+        assert_eq!(published(&shared), progress(State::Normal, 60));
+    }
+
+    #[test]
+    fn progress_ends_with_the_shell_job_that_reported_it() {
+        let (_temp, engine, shared) = remote_shell("progress-job");
+        let (mut seq, mut end) = (0, 0);
+        progress_follows_job(&shared, Some(4242));
+        feed(&engine, &shared, &mut seq, &mut end, b"\x1b]9;4;1;40\x07");
+        // Quiet for far longer than the timeout: a long link step.
+        shared.progress.lock().unwrap().reported_at =
+            Instant::now().checked_sub(PROGRESS_STALE * 4);
+        expire_stale_progress(&shared);
+        assert_eq!(published(&shared), progress(State::Normal, 40));
+        // The job returns to the prompt without sending `9;4;0`.
+        let version = shared.state_version.load(Ordering::SeqCst);
+        progress_follows_job(&shared, None);
+        assert_eq!(published(&shared), None);
+        assert!(shared.state_version.load(Ordering::SeqCst) > version);
+        // A job starting does not clear what is reported under it.
+        feed(&engine, &shared, &mut seq, &mut end, b"\x1b]9;4;1;5\x07");
+        progress_follows_job(&shared, Some(4343));
+        assert_eq!(published(&shared), progress(State::Normal, 5));
+    }
+
+    #[test]
+    fn progress_nobody_repeats_goes_stale_without_a_job() {
+        let (_temp, engine, shared) = remote_shell("progress-stale");
+        let (mut seq, mut end) = (0, 0);
+        feed(&engine, &shared, &mut seq, &mut end, b"\x1b]9;4;3\x07");
+        expire_stale_progress(&shared);
+        assert_eq!(published(&shared), progress(State::Indeterminate, 0));
+        shared.progress.lock().unwrap().reported_at =
+            Instant::now().checked_sub(PROGRESS_STALE / 2);
+        // A repeat of the same report keeps it alive.
+        feed(&engine, &shared, &mut seq, &mut end, b"\x1b]9;4;3\x07");
+        expire_stale_progress(&shared);
+        assert_eq!(published(&shared), progress(State::Indeterminate, 0));
+        shared.progress.lock().unwrap().reported_at = Instant::now().checked_sub(PROGRESS_STALE);
+        expire_stale_progress(&shared);
+        assert_eq!(published(&shared), None);
+    }
+
+    #[test]
+    fn replayed_history_is_not_published_until_it_is_live() {
+        let (_temp, engine, shared) = remote_shell("progress-replay");
+        let mut seq = 0;
+        let bytes = b"\x1b]9;4;1;70\x07";
+        apply_remote_output(&shared, &engine, "shell", &mut seq, 0, bytes, true).unwrap();
+        assert_eq!(published(&shared), None);
     }
 }
 

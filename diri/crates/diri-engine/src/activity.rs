@@ -234,6 +234,7 @@ mod tests {
             terminal_cwd: None,
             note_id: None,
             foreground_ports: None,
+            terminal_progress: None,
         }
     }
 

@@ -74,6 +74,7 @@ fn record(id: &str) -> diri_proto::SessionRecord {
         terminal_cwd: None,
         note_id: None,
         foreground_ports: None,
+        terminal_progress: None,
     }
 }
 
