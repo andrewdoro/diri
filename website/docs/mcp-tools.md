@@ -333,6 +333,43 @@ Read or change ~/.diri-include, the gitignore-style extra folders Quick Open (Cm
 | `text` | string |  |
 
 
+## Schedules
+
+### `schedule_agent`
+
+Schedule an agent run owned by Diri, not by this session: it survives this session closing and Diri restarting. Use it whenever the user wants something done later, at a time, or repeatedly, instead of your own cron/loop tools. How runs work: at each due time Diri opens a NEW top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation, so write a self-contained prompt: the goal, the repo and relevant context, what to produce, and where the result goes (open a PR, write a file, post a summary). For code changes pass worktree:true and base "origin/main" so each run starts clean. Give a short `name`. When: exactly one of cron (five fields, the Mac's local time, e.g. "0 9 * * 1-5" weekdays 09:00), in_minutes (relative one-off), or at_ms (epoch ms). Missed runs: if the Mac was asleep or Diri was closed, the newest missed run fires once when it is back, within catch_up_hours (default 12); older ones are recorded as missed. wake_mac:true (use when the user wants it to run even if the Mac is asleep): Diri wakes the Mac 2 minutes early (lid must be open), keeps it awake while the agent works, then puts it back to sleep if nobody used it. It needs the one-time "Allow diri to wake the Mac" approval in Settings > Schedules; if list_schedules reports wakeHelperError, tell the user to turn it on. After creating, confirm in words from the returned nextDue, e.g. "weekdays at 09:00, next run Monday; it will wake the Mac".
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `cwd` | string | **Required.** |
+| `kind` | agent label or `shell` ([list](/docs/agents/)) | **Required.** |
+| `prompt` | string | **Required.** |
+| `at_ms` | number |  |
+| `base` | string | Starting ref for each run's worktree, e.g. origin/main. |
+| `branch` | string |  |
+| `catch_up_hours` | number | A run missed by up to this long still fires late; 0 never catches up. Default 12. |
+| `cron` | string |  |
+| `in_minutes` | number |  |
+| `keep_awake` | boolean | Keep an awake Mac from idle-sleeping shortly before each run and while it works. Cannot wake a sleeping Mac. |
+| `name` | string |  |
+| `wake_mac` | boolean | Wake a sleeping Mac (lid open) 2 minutes before each run, keep it awake while the run works, then let it sleep again. Needs the one-time wake approval in Settings > Schedules; list_schedules reports if it is missing. |
+| `worktree` | boolean | Start each run in a fresh worktree. |
+
+### `list_schedules`
+
+List every Diri schedule with its next due time and recent runs (onTime, late with lateReason asleep/notRunning, missed, failed, manual) and the session each run opened.
+
+No arguments.
+
+### `delete_schedule`
+
+Delete a Diri schedule. Sessions its earlier runs opened are left alone.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `schedule_id` | string | **Required.** |
+
+
 ## Browser
 
 ### `browser`
@@ -464,37 +501,3 @@ Read one of Diri's skills: the detailed rules for a Diri capability, as Markdown
 | Argument | Type | Notes |
 | --- | --- | --- |
 | `name` | `scheduling`, `notes`, `orchestration` | **Required.** |
-
-### `schedule_agent`
-
-Schedule an agent run owned by Diri, not by this session: it survives this session closing and Diri restarting. Use it whenever the user wants something done later, at a time, or repeatedly, instead of your own cron/loop tools. How runs work: at each due time Diri opens a NEW top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation, so write a self-contained prompt: the goal, the repo and relevant context, what to produce, and where the result goes (open a PR, write a file, post a summary). For code changes pass worktree:true and base "origin/main" so each run starts clean. Give a short `name`. When: exactly one of cron (five fields, the Mac's local time, e.g. "0 9 * * 1-5" weekdays 09:00), in_minutes (relative one-off), or at_ms (epoch ms). Missed runs: if the Mac was asleep or Diri was closed, the newest missed run fires once when it is back, within catch_up_hours (default 12); older ones are recorded as missed. wake_mac:true (use when the user wants it to run even if the Mac is asleep): Diri wakes the Mac 2 minutes early (lid must be open), keeps it awake while the agent works, then puts it back to sleep if nobody used it. It needs the one-time "Allow diri to wake the Mac" approval in Settings > Schedules; if list_schedules reports wakeHelperError, tell the user to turn it on. After creating, confirm in words from the returned nextDue, e.g. "weekdays at 09:00, next run Monday; it will wake the Mac".
-
-| Argument | Type | Notes |
-| --- | --- | --- |
-| `cwd` | string | **Required.** |
-| `kind` | agent label or `shell` ([list](/docs/agents/)) | **Required.** |
-| `prompt` | string | **Required.** |
-| `at_ms` | number |  |
-| `base` | string | Starting ref for each run's worktree, e.g. origin/main. |
-| `branch` | string |  |
-| `catch_up_hours` | number | A run missed by up to this long still fires late; 0 never catches up. Default 12. |
-| `cron` | string |  |
-| `in_minutes` | number |  |
-| `keep_awake` | boolean | Keep an awake Mac from idle-sleeping shortly before each run and while it works. Cannot wake a sleeping Mac. |
-| `name` | string |  |
-| `wake_mac` | boolean | Wake a sleeping Mac (lid open) 2 minutes before each run, keep it awake while the run works, then let it sleep again. Needs the one-time wake approval in Settings > Schedules; list_schedules reports if it is missing. |
-| `worktree` | boolean | Start each run in a fresh worktree. |
-
-### `list_schedules`
-
-List every Diri schedule with its next due time and recent runs (onTime, late with lateReason asleep/notRunning, missed, failed, manual) and the session each run opened.
-
-No arguments.
-
-### `delete_schedule`
-
-Delete a Diri schedule. Sessions its earlier runs opened are left alone.
-
-| Argument | Type | Notes |
-| --- | --- | --- |
-| `schedule_id` | string | **Required.** |

@@ -1,0 +1,34 @@
+[
+  {
+    "version": "0.9.0",
+    "date": "October 1, 2026",
+    "headline": "Notes, and to-dos that start agents",
+    "summary": "diri 0.9.0 adds Notes: plans and to-do lists that sit next to your agents, where any to-do can start an agent with the note as its brief.",
+    "items": [
+      {
+        "title": "Notes",
+        "text": "Think next to your agents. Type / for blocks and @ to link a session; every note is plain Markdown on disk.",
+        "clip": "/assets/whats-new/notes.webp",
+        "width": 1440,
+        "height": 900,
+        "alt": "A blank note becomes a launch plan: a title, a to-do from the slash menu, and an @ mention that links a running Claude Code session."
+      },
+      {
+        "title": "To-dos that start agents",
+        "text": "Press ⌃⌘↩ on a to-do to hand it to an agent with the note as context. Its progress shows up right under the to-do.",
+        "clip": "/assets/whats-new/todos.webp",
+        "width": 1440,
+        "height": 900,
+        "alt": "A to-do opens the Start panel, becomes a Claude Code session in the sidebar, asks a question, and finishes ready to review."
+      },
+      {
+        "title": "Search every note",
+        "text": "⇧⌘F finds a note by anything it says, not just its title.",
+        "clip": "/assets/whats-new/search.webp",
+        "width": 1440,
+        "height": 900,
+        "alt": "Typing pricing in Search notes finds three notes by what they say."
+      }
+    ]
+  }
+]

@@ -36,7 +36,7 @@ Agents you start inside diri can reach the Engine too, through the built-in [MCP
 - [Sessions](/docs/sessions/): status, notifications, the sidebar, history, and what survives a restart.
 - [Worktrees and review](/docs/worktrees/): give each task its own checkout, then review and bring the changes back.
 - [Notes](/docs/notes/): plans and to-do lists you can hand to agents.
-- [Recipes](/docs/scheduled-tasks/): save a task and rerun it in one click.
+- [Recipes and schedules](/docs/scheduled-tasks/): start an agent at a set time, or save a task and rerun it in one click.
 - [Accounts and usage](/docs/accounts/): switch accounts and see what you spend.
 
 ## Automate
@@ -393,7 +393,7 @@ Choose **Settings → Color theme** in the palette, or search for **Color theme*
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>A</kbd> | Choose the account (Claude Code and Codex) |
 | <kbd>Esc</kbd> | Close the launcher |
 
-When the agent or project picker is open it takes the arrows first: ↑ ↓ move the highlight, ↵ commits it, and Esc closes the picker without closing the launcher. Recipes are covered in [Recipes and scheduled tasks](/docs/scheduled-tasks/).
+When the agent or project picker is open it takes the arrows first: ↑ ↓ move the highlight, ↵ commits it, and Esc closes the picker without closing the launcher. Recipes are covered in [Recipes and schedules](/docs/scheduled-tasks/).
 
 A handoff opens in the same surface with the generated context editable. Nothing is sent until you activate **Send handoff** or press Return. Esc cancels without sending.
 
@@ -796,13 +796,89 @@ You can edit the files with any editor; diri notices and records a version. Imag
 
 Source: https://diri.sh/docs/scheduled-tasks/
 
-# Recipes and scheduled tasks
+# Recipes and schedules
 
-> Save a prompt, agent, project and worktree choice as a recipe and rerun it in one click. Timed schedules are not available in diri yet.
+> Start an agent at a set time with a schedule that catches up after sleep and can wake the Mac, or save a launch as a recipe and rerun it in one click.
 
-A recipe is a saved task you can run again: the agent, the project or host, the prompt, an optional session title, and whether to use a fresh worktree. Each run starts a brand new session. diri does not run recipes on a timer yet; see [Scheduling](#scheduling) below.
+A schedule starts an agent at a set time and sends it a prompt. A recipe is a saved launch you run by hand. Both start a brand new session each time.
 
-## Save a recipe
+## Schedules
+Open **Settings → Schedules**. Schedules belong to the Engine, not to a window or an agent, so they keep working after the session that created them closes.
+
+### Create a schedule
+1. Click **New schedule**.
+2. Under **Prompt**, write what the agent should do.
+3. Pick the **Agent** and click **Choose…** to pick the **Folder** it works in.
+4. Under **When**, pick **Once**, **Every day**, **Weekdays** or **Every hour**, and enter a time such as `9:00` or `17:30`. For **Every hour** only the minute is used.
+5. Set the options below, then click **Create schedule**.
+
+| Option | What it does |
+| --- | --- |
+| **Catch up if missed** | On by default. If the Mac is asleep or diri isn't open at the due time, the run starts once when it is back, up to 12 hours late. |
+| **Keep the Mac awake** | Prevents idle sleep from 10 minutes before each run until it finishes. Closing the lid still sleeps the Mac. |
+| **Wake the Mac** | Wakes a sleeping Mac 2 minutes before the run. See [Wake the Mac](#wake-the-mac). |
+
+**Once** runs at the next time that clock time comes around: today if it is still ahead, otherwise tomorrow. The schedule's name is the first 60 characters of the prompt.
+
+### The schedule list
+Each schedule shows when it runs, the agent, the folder, and whether it wakes the Mac or keeps it awake. Below that is **Next** with the next run, or **Paused**, and one line about the last run:
+
+| Line | Meaning |
+| --- | --- |
+| Last ran … | The run started on time. |
+| Ran late … because the Mac was asleep | A missed run caught up after the Mac woke. The reason can also be "because diri wasn't running". |
+| Skipped the run due … : too late to catch up | The run was missed by more than the catch-up window, so nothing started. |
+| Couldn't start the run due … | diri tried to start the session and failed. The error follows. |
+| Last run started by hand … | You clicked **Run now**. |
+
+Each row has **Open** to jump to the session the last run started, **Run now**, **Delete**, and a switch to pause or resume the schedule. A **Once** schedule whose time has passed cannot be resumed; create a new one.
+
+### What a run does
+At the due time diri opens a new tab with the chosen agent in the chosen folder and sends the prompt. The run does not see any earlier run or the conversation that created the schedule, so write a prompt that stands on its own.
+
+### Missed runs
+If the Mac was asleep or diri was not running at the due time, diri catches up when it is back:
+- The newest missed run starts once, as long as it is less than the catch-up window late. The default window is 12 hours.
+- Older missed runs do not start. The last-run line counts them, for example "covering 2 earlier missed runs".
+- A run found after the window closed does not start either. The list shows it as skipped, so nothing is dropped silently.
+- A run never starts twice for the same due time.
+
+With **Catch up if missed** off, the window is zero: a missed run is recorded as skipped and does not start.
+
+### Open at login
+Schedules run only while diri is open. Under **When the Mac is asleep or restarts**, turn on **Open diri at login** so a run missed during a restart can catch up. If macOS asks, allow diri in **System Settings → General → Login Items**. This option needs diri installed in Applications.
+
+### Wake the Mac
+To run on a sleeping Mac, turn on **Allow diri to wake the Mac** in the same section, then turn on **Wake the Mac** for the schedule.
+
+The switch installs `diri-wake-helper`, a small helper that can only set wakes for your runs and put the Mac back to sleep after them. macOS asks an administrator to approve it once in **System Settings → General → Login Items**. It needs diri installed in Applications.
+
+For each run, diri:
+1. Wakes the Mac 2 minutes before the due time.
+2. Keeps it awake while the agent works.
+3. Puts it back to sleep only if nobody used the keyboard, mouse or trackpad since the wake and no other session is still working or waiting for you. Otherwise the Mac sleeps on its own idle timer as usual.
+
+> [!WARNING]
+> The lid must be open. A laptop with its lid closed, or a Mac that is off, cannot be woken. Catch-up covers those cases once the Mac is back.
+
+### Scheduled sessions in the sidebar
+A session a schedule opened shows a clock after its title. The clock is grey for an ordinary scheduled run and indigo when diri woke the Mac for it. Hover it to see the schedule's name and when the run was due.
+
+### Schedules from an agent
+You can ask any agent in diri for a schedule in plain words, for example "every weekday at 9, triage new issues". Agents use diri's MCP tools for this instead of their own cron or loop tools, which stop when their session closes:
+- `schedule_agent` creates a schedule. It takes a five-field cron expression in the Mac's local time, a one-off delay in minutes, or an exact time. It can also set the catch-up window (0 to 168 hours), a fresh worktree for each run, keep awake and wake the Mac.
+- `list_schedules` shows each schedule's next run and recent runs.
+- `delete_schedule` removes a schedule. Sessions its runs opened stay.
+
+Schedules an agent creates appear in **Settings → Schedules** with the rest. A cron expression the form cannot show reads as `Cron` followed by the expression. Arguments are in the [MCP tool reference](/docs/mcp-tools/#schedules).
+
+> [!NOTE]
+> diri only starts the agent. If the task needs mail, a calendar or another service, the agent needs its own tools or connectors for that.
+
+## Recipes
+A recipe is a saved task you can run again: the agent, the project or host, the prompt, an optional session title, and whether to use a fresh worktree.
+
+### Save a recipe
 1. Press <kbd>⌘</kbd><kbd>N</kbd> to open the launcher.
 2. Choose the agent and project, and type the prompt.
 3. Click **Save recipe** or press <kbd>⌘</kbd><kbd>S</kbd>.
@@ -811,7 +887,7 @@ diri confirms with "it is now a one-click recipe". Saving works even while agent
 
 If you started from a recipe and changed some fields, the button reads **Update recipe** instead. Changes you make without updating apply to that one run only, and the saved recipe stays as it was.
 
-## Run a recipe
+### Run a recipe
 With an empty prompt, the launcher shows your first three recipes under **Saved tasks · a fresh session each run**, each with a **Run** button.
 
 | Action | How |
@@ -826,7 +902,7 @@ With an empty prompt, the launcher shows your first three recipes under **Saved 
 
 The order of the list decides which recipes get ⌘1, ⌘2 and ⌘3.
 
-## What a run does
+### What a recipe run does
 - **Starts a new session** with the saved prompt, agent, project or host, title and worktree choice. It never resumes or depends on the session from an earlier run.
 - **Creates a fresh branch each time** when the recipe uses a new worktree. The branch prefix is a naming pattern; diri adds a unique suffix per run. Fresh worktrees are local only, so a recipe that targets a remote host cannot use one.
 - **Follows moved projects.** A recipe points at the tracked project, so it uses the project's current folder.
@@ -837,14 +913,12 @@ Prompts keep their exact whitespace. A prompt over 32,768 characters is rejected
 > [!NOTE]
 > Recipes store launch settings only. They do not store credentials, the agent's conversation, or a copy of the agent's own configuration, so your current agent settings apply to every run.
 
-## Scheduling
-diri cannot run a recipe at a set time yet. Nothing in the app installs cron jobs, LaunchAgents or any other background scheduler, and an agent does not need to stay open to act as one.
-
-The design for Engine-owned schedules, including missed runs while the Mac sleeps and overlap rules, is in [SCHEDULED_TASKS.md](https://github.com/cristicretu/diri/blob/main/diri/SCHEDULED_TASKS.md). Until it ships, run a recipe by hand with <kbd>⌘</kbd><kbd>N</kbd> then <kbd>⌘</kbd><kbd>1</kbd>.
+Recipes and schedules are separate. A schedule does not run a recipe; it stores its own prompt, agent and folder.
 
 ## Related
 - [Sessions](/docs/sessions/) covers what happens to a session after it starts.
 - [Worktrees and review](/docs/worktrees/) explains fresh worktrees and how to bring their work back.
+- [MCP server](/docs/mcp/) explains how agents in diri use its tools.
 - [Keyboard shortcuts](/docs/keyboard-shortcuts/) lists every launcher key.
 
 
@@ -1466,6 +1540,43 @@ Read or change ~/.diri-include, the gitignore-style extra folders Quick Open (Cm
 | `text` | string |  |
 
 
+## Schedules
+
+### `schedule_agent`
+
+Schedule an agent run owned by Diri, not by this session: it survives this session closing and Diri restarting. Use it whenever the user wants something done later, at a time, or repeatedly, instead of your own cron/loop tools. How runs work: at each due time Diri opens a NEW top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation, so write a self-contained prompt: the goal, the repo and relevant context, what to produce, and where the result goes (open a PR, write a file, post a summary). For code changes pass worktree:true and base "origin/main" so each run starts clean. Give a short `name`. When: exactly one of cron (five fields, the Mac's local time, e.g. "0 9 * * 1-5" weekdays 09:00), in_minutes (relative one-off), or at_ms (epoch ms). Missed runs: if the Mac was asleep or Diri was closed, the newest missed run fires once when it is back, within catch_up_hours (default 12); older ones are recorded as missed. wake_mac:true (use when the user wants it to run even if the Mac is asleep): Diri wakes the Mac 2 minutes early (lid must be open), keeps it awake while the agent works, then puts it back to sleep if nobody used it. It needs the one-time "Allow diri to wake the Mac" approval in Settings > Schedules; if list_schedules reports wakeHelperError, tell the user to turn it on. After creating, confirm in words from the returned nextDue, e.g. "weekdays at 09:00, next run Monday; it will wake the Mac".
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `cwd` | string | **Required.** |
+| `kind` | agent label or `shell` ([list](/docs/agents/)) | **Required.** |
+| `prompt` | string | **Required.** |
+| `at_ms` | number |  |
+| `base` | string | Starting ref for each run's worktree, e.g. origin/main. |
+| `branch` | string |  |
+| `catch_up_hours` | number | A run missed by up to this long still fires late; 0 never catches up. Default 12. |
+| `cron` | string |  |
+| `in_minutes` | number |  |
+| `keep_awake` | boolean | Keep an awake Mac from idle-sleeping shortly before each run and while it works. Cannot wake a sleeping Mac. |
+| `name` | string |  |
+| `wake_mac` | boolean | Wake a sleeping Mac (lid open) 2 minutes before each run, keep it awake while the run works, then let it sleep again. Needs the one-time wake approval in Settings > Schedules; list_schedules reports if it is missing. |
+| `worktree` | boolean | Start each run in a fresh worktree. |
+
+### `list_schedules`
+
+List every Diri schedule with its next due time and recent runs (onTime, late with lateReason asleep/notRunning, missed, failed, manual) and the session each run opened.
+
+No arguments.
+
+### `delete_schedule`
+
+Delete a Diri schedule. Sessions its earlier runs opened are left alone.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `schedule_id` | string | **Required.** |
+
+
 ## Browser
 
 ### `browser`
@@ -1597,40 +1708,6 @@ Read one of Diri's skills: the detailed rules for a Diri capability, as Markdown
 | Argument | Type | Notes |
 | --- | --- | --- |
 | `name` | `scheduling`, `notes`, `orchestration` | **Required.** |
-
-### `schedule_agent`
-
-Schedule an agent run owned by Diri, not by this session: it survives this session closing and Diri restarting. Use it whenever the user wants something done later, at a time, or repeatedly, instead of your own cron/loop tools. How runs work: at each due time Diri opens a NEW top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation, so write a self-contained prompt: the goal, the repo and relevant context, what to produce, and where the result goes (open a PR, write a file, post a summary). For code changes pass worktree:true and base "origin/main" so each run starts clean. Give a short `name`. When: exactly one of cron (five fields, the Mac's local time, e.g. "0 9 * * 1-5" weekdays 09:00), in_minutes (relative one-off), or at_ms (epoch ms). Missed runs: if the Mac was asleep or Diri was closed, the newest missed run fires once when it is back, within catch_up_hours (default 12); older ones are recorded as missed. wake_mac:true (use when the user wants it to run even if the Mac is asleep): Diri wakes the Mac 2 minutes early (lid must be open), keeps it awake while the agent works, then puts it back to sleep if nobody used it. It needs the one-time "Allow diri to wake the Mac" approval in Settings > Schedules; if list_schedules reports wakeHelperError, tell the user to turn it on. After creating, confirm in words from the returned nextDue, e.g. "weekdays at 09:00, next run Monday; it will wake the Mac".
-
-| Argument | Type | Notes |
-| --- | --- | --- |
-| `cwd` | string | **Required.** |
-| `kind` | agent label or `shell` ([list](/docs/agents/)) | **Required.** |
-| `prompt` | string | **Required.** |
-| `at_ms` | number |  |
-| `base` | string | Starting ref for each run's worktree, e.g. origin/main. |
-| `branch` | string |  |
-| `catch_up_hours` | number | A run missed by up to this long still fires late; 0 never catches up. Default 12. |
-| `cron` | string |  |
-| `in_minutes` | number |  |
-| `keep_awake` | boolean | Keep an awake Mac from idle-sleeping shortly before each run and while it works. Cannot wake a sleeping Mac. |
-| `name` | string |  |
-| `wake_mac` | boolean | Wake a sleeping Mac (lid open) 2 minutes before each run, keep it awake while the run works, then let it sleep again. Needs the one-time wake approval in Settings > Schedules; list_schedules reports if it is missing. |
-| `worktree` | boolean | Start each run in a fresh worktree. |
-
-### `list_schedules`
-
-List every Diri schedule with its next due time and recent runs (onTime, late with lateReason asleep/notRunning, missed, failed, manual) and the session each run opened.
-
-No arguments.
-
-### `delete_schedule`
-
-Delete a Diri schedule. Sessions its earlier runs opened are left alone.
-
-| Argument | Type | Notes |
-| --- | --- | --- |
-| `schedule_id` | string | **Required.** |
 
 
 ---
@@ -1848,6 +1925,8 @@ Source: https://diri.sh/docs/agents/
 diri knows how to launch and read 20 terminal coding agents, plus a plain shell. Each one is described by a JSON manifest that says how to start it, how to resume it, and how to tell from its screen whether it is working, idle or waiting for you.
 
 ## Agent catalog
+
+Each agent also has its own page with setup steps and what diri adds: see [all agents](/agents/), for example [Claude Code](/agents/claude-code/) or [Codex](/agents/codex/).
 
 | Agent | Command | Status from | Resume | Fork | Quick approve | diri MCP | Hooks |
 | --- | --- | --- | --- | --- | --- | --- | --- |

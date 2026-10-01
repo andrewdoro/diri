@@ -34,8 +34,11 @@ fn website_mcp_reference_matches_the_tool_catalog() {
     kinds.dedup();
     kinds.push("shell".into());
 
+    // `test_run` is only offered when DIRIJOR_TEST_RUN_AVAILABLE is set, so it
+    // is left out here to keep the reference identical on every machine.
     let tools: Vec<Value> = dirijor_mcp::tools::tool_definitions_for(&kinds)
         .iter()
+        .filter(|tool| tool.name != "test_run")
         .map(|tool| tool.wire_value())
         .collect();
     let catalog = json!({

@@ -9,7 +9,6 @@
   <url><loc>https://diri.sh/guides/review-changes/</loc><lastmod>2026-10-01</lastmod></url>
   <url><loc>https://diri.sh/guides/remote-sessions/</loc><lastmod>2026-10-01</lastmod></url>
   <url><loc>https://diri.sh/guides/shortcuts/</loc><lastmod>2026-10-01</lastmod></url>
-  <url><loc>https://diri.sh/whats-new/</loc><lastmod>2026-10-01</lastmod></url>
   <url><loc>https://diri.sh/docs/</loc><lastmod>2026-10-01</lastmod></url>
   <url><loc>https://diri.sh/docs/install/</loc><lastmod>2026-10-01</lastmod></url>
   <url><loc>https://diri.sh/docs/quickstart/</loc><lastmod>2026-10-01</lastmod></url>
@@ -26,4 +25,32 @@
   <url><loc>https://diri.sh/docs/remote-hosts/</loc><lastmod>2026-10-01</lastmod></url>
   <url><loc>https://diri.sh/docs/security/</loc><lastmod>2026-10-01</lastmod></url>
   <url><loc>https://diri.sh/docs/troubleshooting/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/claude-code/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/codex/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/antigravity/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/cursor/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/gemini/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/aider/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/amp/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/cline/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/copilot/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/devin/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/droid/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/grok/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/hermes/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/kilo/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/kimi/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/kiro/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/maki/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/opencode/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/pi/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/agents/qoder/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/compare/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/compare/cmux/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/compare/conductor/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/compare/herdr/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/compare/superset/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/whats-new/</loc><lastmod>2026-10-01</lastmod></url>
+  <url><loc>https://diri.sh/whats-new/0.9.0/</loc><lastmod>2026-10-01</lastmod></url>
 </urlset>

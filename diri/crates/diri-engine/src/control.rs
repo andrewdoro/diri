@@ -1518,6 +1518,7 @@ impl ControlServer {
     /// and stays removed. Runs once per Engine start, oldest note first.
     pub fn adopt_orphan_notes(&self) -> Result<usize, ControlError> {
         let store = self.note_store()?;
+        self.relink_notes(&store)?;
         let mut notes = store.list().map_err(io_control_error)?;
         notes.sort_by(|a, b| a.created.cmp(&b.created).then(a.id.cmp(&b.id)));
         let known: std::collections::HashSet<String> = self
@@ -1547,6 +1548,41 @@ impl ControlServer {
             }
         }
         Ok(adopted)
+    }
+
+    /// Gives back a note Session's file link when its record lost it. An
+    /// Engine that predates notes rewrites state.json without `noteId` (it
+    /// does not know the field) and reaps the record as exited; the note then
+    /// opens as "file is gone" although its file is intact. The file names
+    /// its Session in front matter, so the link is recovered from there.
+    /// Returns how many records were repaired.
+    fn relink_notes(&self, store: &diri_notes::store::NoteStore) -> Result<usize, ControlError> {
+        let notes = store.list().map_err(io_control_error)?;
+        let mut repaired = 0;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        for note in notes {
+            let Some(session) = note.session.as_deref() else {
+                continue;
+            };
+            let Some(mut record) = registry.record(session) else {
+                continue;
+            };
+            if !record.is_note() || record.note_id.is_some() {
+                continue;
+            }
+            record.note_id = Some(note.id.clone());
+            if matches!(record.status, diri_proto::SessionStatus::Exited(_)) {
+                record.status = diri_proto::SessionStatus::Idle;
+            }
+            registry.insert_record(record);
+            self.publish_updated(&registry, session);
+            repaired += 1;
+        }
+        if repaired > 0 {
+            registry.persist_for_shutdown().map_err(io_control_error)?;
+            diri_telemetry::event!("notes.relinked", count = repaired);
+        }
+        Ok(repaired)
     }
 
     /// Adopts orphan notes on a one-shot thread, off the accept path.
@@ -3187,6 +3223,21 @@ impl ControlServer {
             .record(&p.session_id.0)
             .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
         let exited = matches!(record.status, diri_proto::SessionStatus::Exited(_));
+        // The previous run's size is the pane's size: the App kept sizing that
+        // PTY. Waiting for the App to propose it again cost the whole launch
+        // fallback (an unchanged pane sends no resize) and started the agent
+        // at the 80x24 default, to be reflowed once the App caught up.
+        if let Some((cols, rows)) = registry
+            .get(&p.session_id.0)
+            .map(crate::session::Session::screen_size)
+            .or_else(|| previous_screen_size(&spec))
+            .and_then(|(cols, rows)| Some((u16::try_from(cols).ok()?, u16::try_from(rows).ok()?)))
+            .filter(|&(cols, rows)| cols >= 2 && rows >= 2)
+        {
+            spec.pty.cols = cols;
+            spec.pty.rows = rows;
+            spec.defer_launch = false;
+        }
         if registry.get(&p.session_id.0).is_some() {
             if !exited {
                 // Already live: resuming is a no-op, not an error.
@@ -4345,6 +4396,19 @@ impl Drop for ControlServer {
 /// `None` leaves the record's id untouched (not Claude, or nothing to check
 /// against), `Some(Some(id))` resumes a conversation whose transcript exists,
 /// and `Some(None)` means the tab's id was never written and must start fresh.
+/// The grid size of this session's last screen checkpoint: the size its
+/// previous run was using when the Engine last saved it.
+fn previous_screen_size(spec: &crate::session::SessionSpec) -> Option<(usize, usize)> {
+    let log = spec.logs_dir.join(format!("{}.bin", spec.id));
+    let checkpoint = crate::checkpoint::ScreenCheckpoint::load(
+        &crate::checkpoint::ScreenCheckpoint::path_for_log(&log),
+    )?;
+    Some((
+        usize::from(checkpoint.grid.cols),
+        usize::from(checkpoint.grid.rows),
+    ))
+}
+
 fn claude_resume_target(record: &diri_proto::SessionRecord) -> Option<Option<String>> {
     claude_resume_target_in(record, Path::new(&std::env::var_os("HOME")?))
 }
@@ -6074,6 +6138,32 @@ mod tests {
         assert_eq!(reopened["id"], record.id.0.as_str());
         assert_eq!(store.load(&note_id).unwrap().doc.title, "Launch plan");
 
+        // An Engine that predates notes drops `noteId` from the record and
+        // reaps it; the next notes-aware start links it back from the file.
+        {
+            let mut registry = registry.lock().expect("registry");
+            let mut broken = registry.record(&record.id.0).expect("listed");
+            broken.note_id = None;
+            broken.status = diri_proto::SessionStatus::Exited(diri_proto::ExitInfo {
+                reason: diri_proto::ExitReason::DaemonRestart,
+                code: None,
+                signal: None,
+            });
+            registry.insert_record(broken);
+        }
+        server.adopt_orphan_notes().expect("relink");
+        let healed = registry
+            .lock()
+            .expect("registry")
+            .record(&record.id.0)
+            .expect("listed");
+        assert_eq!(
+            healed.note_id.as_deref(),
+            Some(note_id.as_str()),
+            "link restored"
+        );
+        assert!(matches!(healed.status, diri_proto::SessionStatus::Idle));
+
         // A daemon restart finds no holder for the note and must not call it lost.
         registry.lock().expect("registry").reap_orphans_for_test();
         let after = registry
@@ -6939,6 +7029,57 @@ mod tests {
     #[test]
     fn revive_archived_session_clears_archive_durably() {
         check_resume_relaunches(true);
+    }
+
+    #[test]
+    fn resume_size_falls_back_to_the_last_screen_checkpoint() {
+        // After an Engine restart a dead session is no longer in the
+        // registry; its last checkpoint still records the size it ran at.
+        let temp = tempfile::tempdir().expect("temp");
+        let logs = temp.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs");
+        let spec = crate::session::SessionSpec {
+            id: "s_gone".into(),
+            pty: crate::pty::PtySpec::new(vec!["/bin/sh".into()], "/tmp"),
+            manifest_id: "shell".into(),
+            authority: crate::Authority::ProcessOnly,
+            logs_dir: logs.clone(),
+            holder: None,
+            remote: None,
+            defer_launch: true,
+        };
+        assert_eq!(previous_screen_size(&spec), None, "no checkpoint, no size");
+
+        let row = vec![diri_proto::grid::GridCell::BLANK; 3];
+        let checkpoint = crate::checkpoint::ScreenCheckpoint {
+            keyboard_snapshot: None,
+            keyboard: None,
+            log_offset: 0,
+            history_metadata: Vec::new(),
+            history: Vec::new(),
+            grid: diri_proto::grid::GridUpdate {
+                cols: 3,
+                rows: 2,
+                cursor_col: 0,
+                cursor_row: 0,
+                cursor_visible: true,
+                is_full_snapshot: true,
+                changed_rows: vec![
+                    diri_proto::grid::ChangedRow::new(0, row.clone()),
+                    diri_proto::grid::ChangedRow::new(1, row),
+                ],
+            },
+            marker_buffer: Vec::new(),
+            alt_screen: false,
+            bracketed_paste: false,
+            mouse: diri_proto::terminal::MouseModes::default(),
+        };
+        checkpoint
+            .write_atomically(&crate::checkpoint::ScreenCheckpoint::path_for_log(
+                &logs.join("s_gone.bin"),
+            ))
+            .expect("write checkpoint");
+        assert_eq!(previous_screen_size(&spec), Some((3, 2)));
     }
 
     #[test]
