@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "id": "cursor",
-  "version": "2026.08.31",
+  "version": "2026.10.01",
   "statusModel": "full",
   "agent": {
     "id": "cursor",
@@ -32,8 +32,7 @@
       "style": "flag",
       "token": "resume"
     },
-    "_resumeNotice": "Verified against cursor-agent CLI help: 'resume  Resume the latest chat session'. Chat ids are minted server-side, so --resume <chatId> is not buildable, but the bare subcommand needs no id.",
-    "_resumeStyleNotice": "Rust's AgentDescriptor::resume_args implements only \"flag\" and \"sessionIDFlag\"; Swift's \"latest\" has no implementation there and would silently resume nothing. Declared as \"flag\": this agent has no sessionIDFlag, so it never carries a caller-minted id and resume_args emits the bare token \u2014 exactly the semantics the token was chosen for.",
+    "_resumeNotice": "Verified with cursor-agent 2026.09.28-64d2043: positional initial prompts are supported, resume selects the latest chat, and --resume <chatId> restores an exact chat. Diri discovers native ids from Cursor transcripts; never append an id to the resume subcommand.",
     "envScrubPrefixes": [
       "DIRI_",
       "DIRIJOR_"
@@ -45,9 +44,85 @@
     "deny": {
       "text": "n",
       "submit": false
+    },
+    "conversation": {
+      "resume": {
+        "exactArgs": [
+          "--resume",
+          "{id}"
+        ],
+        "latestArgs": [
+          "resume"
+        ]
+      },
+      "stripArgs": [
+        {
+          "token": "resume"
+        },
+        {
+          "token": "--resume",
+          "value": "nonoption"
+        },
+        {
+          "token": "--continue"
+        }
+      ]
     }
   },
   "rules": [
+    {
+      "id": "login-dialog",
+      "state": "blockedQuestion",
+      "priority": 1400,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 8,
+      "when": {
+        "any": [
+          {
+            "contains": "press any key to log in..."
+          },
+          {
+            "contains": "if your browser didn't open, click this link to log in:"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 8,
+        "maxChars": 400
+      }
+    },
+    {
+      "id": "workspace-trust-dialog",
+      "state": "blockedQuestion",
+      "priority": 1350,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 8,
+      "when": {
+        "all": [
+          {
+            "contains": "[a] trust this workspace"
+          },
+          {
+            "contains": "[q] quit"
+          },
+          {
+            "contains": "use arrow keys to navigate, enter to select, or press the key shown"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 16,
+        "maxChars": 400
+      }
+    },
     {
       "id": "blocked-osc-confirmation",
       "state": "blockedPermission",
@@ -159,10 +234,11 @@
       "state": "working",
       "priority": 900,
       "region": "bottom_non_empty_lines",
-      "regionLines": 4,
+      "regionLines": 8,
       "when": {
-        "lineRegex": "^\\s*(Generating|Thinking|Responding|Working|Grep|Read |Read file|Edit |Delete |List |Glob |Search |Web search|Fetch |Web fetch|Subagent|Running |Shell command|Codebase search)"
-      }
+        "lineRegex": "^\\s*[⠀-⣿]*\\s*(Composing|Generating|Thinking|Responding|Working|Grep|Read |Read file|Edit |Delete |List |Glob |Search |Web search|Fetch |Web fetch|Subagent|Running |Shell command|Codebase search)"
+      },
+      "_notice": "Default zen UI disables OSC status titles, prefixes Working with braille frames, and can add task rows below the composer."
     },
     {
       "id": "idle-prompt-arrow",

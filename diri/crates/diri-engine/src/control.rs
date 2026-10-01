@@ -4887,6 +4887,13 @@ fn prepare_agent_input(
         if copilot {
             accept_copilot_folder_trust(registry, session_id);
         }
+        let cursor = with_session(registry, session_id, |session| {
+            session.manifest_id() == diri_proto::AgentKind::CURSOR_ID
+        })
+        .unwrap_or(false);
+        if cursor {
+            prepare_cursor_input(registry, session_id)?;
+        }
         inject_initial_prompt(registry, session_id, prompt)?;
     }
     Ok(())
@@ -5292,6 +5299,55 @@ fn is_copilot_folder_trust_screen(lines: &[String]) -> bool {
         && crate::detect::bottom_non_empty(lines, 3)
             .iter()
             .any(|line| line.contains("enter to select") && line.contains("esc to cancel"))
+}
+
+/// Cursor asks for workspace trust before creating its composer. Pasting into
+/// that selector drops the prompt, and the injector's later Enter accepts trust.
+/// Answer that specific selector first, with the same workspace-trust tradeoff
+/// as Claude/Gemini/Pi. Never send an initial prompt to onboarding: any byte there
+/// starts browser login. Wait for the user to finish it, or fail unconfirmed.
+fn prepare_cursor_input(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+) -> Result<(), InitialPromptFailure> {
+    let mut accepted = false;
+    for _ in 0..200 {
+        let (exited, lines) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        })
+        .ok_or(InitialPromptFailure::SessionEnded)?;
+        if exited {
+            return Err(InitialPromptFailure::SessionEnded);
+        }
+        if is_cursor_workspace_trust_screen(&lines) {
+            if !accepted {
+                with_session(registry, session_id, |session| {
+                    session.send_text("a", false)
+                })
+                .ok_or(InitialPromptFailure::SessionEnded)?
+                .map_err(|_| InitialPromptFailure::InputFailed)?;
+                accepted = true;
+            }
+        } else if crate::detect::bottom_non_empty(&lines, 8)
+            .iter()
+            .any(|line| {
+                let line = line.trim();
+                line.starts_with("→ Plan, search, build anything")
+                    || line.starts_with("→ Add a follow-up")
+            })
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(InitialPromptFailure::SubmissionUnconfirmed)
+}
+
+fn is_cursor_workspace_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 8).join("\n");
+    bottom.contains("[a] Trust this workspace")
+        && bottom.contains("[q] Quit")
+        && bottom.contains("Use arrow keys to navigate, Enter to select, or press the key shown")
 }
 
 /// Types and submits an initial prompt at most once. Screen observations can
@@ -8438,6 +8494,20 @@ mod tests {
             include_str!("../tests/fixtures/copilot_screens/idle.txt")
         );
         assert!(!is_copilot_folder_trust_screen(&lines(&stale)));
+    }
+
+    #[test]
+    fn cursor_trust_requires_the_live_selector() {
+        let lines = |screen: &str| screen.lines().map(str::to_owned).collect::<Vec<_>>();
+        assert!(is_cursor_workspace_trust_screen(&lines(include_str!(
+            "../tests/fixtures/cursor_screens/trust.txt"
+        ))));
+        assert!(!is_cursor_workspace_trust_screen(&lines(include_str!(
+            "../tests/fixtures/cursor_screens/idle.txt"
+        ))));
+        assert!(!is_cursor_workspace_trust_screen(&lines(include_str!(
+            "../tests/fixtures/cursor_screens/login.txt"
+        ))));
     }
 
     #[test]
