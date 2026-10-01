@@ -4880,6 +4880,13 @@ fn prepare_agent_input(
         if kimi {
             accept_kimi_workspace_trust(registry, session_id);
         }
+        let copilot = with_session(registry, session_id, |session| {
+            session.manifest_id() == "copilot"
+        })
+        .unwrap_or(false);
+        if copilot {
+            accept_copilot_folder_trust(registry, session_id);
+        }
         inject_initial_prompt(registry, session_id, prompt)?;
     }
     Ok(())
@@ -5232,6 +5239,59 @@ fn is_kimi_workspace_trust_screen(lines: &[String]) -> bool {
         && !crate::detect::bottom_non_empty(lines, 5)
             .iter()
             .any(|line| line.trim_start().starts_with("│ >"))
+}
+
+/// Copilot's folder selector drops pasted text; a blind Enter then accepts
+/// trust with the initial prompt lost. As with Gemini/Pi, explicitly accept
+/// the one-session "Yes" before injecting, only when a prompt was requested.
+/// Do not persist trust or answer any other dialog. Without a prompt the
+/// selector remains visible and the manifest reports needs-input.
+fn accept_copilot_folder_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted = false;
+    let mut composer_since: Option<Instant> = None;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_copilot_folder_trust_screen(&screen) {
+            composer_since = None;
+            if !accepted {
+                diri_telemetry::event!(
+                    "prompt.workspace_trust_accepted",
+                    session = diri_telemetry::id(session_id),
+                );
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted = true;
+            }
+        } else if crate::detect::bottom_non_empty(&screen, 3)
+            .iter()
+            .any(|line| line.contains("/ commands") && line.contains("? help"))
+        {
+            // Folder trust is checked asynchronously after the UI mounts.
+            let since = *composer_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= Duration::from_secs(1) {
+                return;
+            }
+        } else {
+            composer_since = None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn is_copilot_folder_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 20).join("\n");
+    bottom.contains("Confirm folder trust")
+        && bottom.contains("Do you trust the files in this folder?")
+        && bottom.contains("❯ 1. Yes")
+        && crate::detect::bottom_non_empty(lines, 3)
+            .iter()
+            .any(|line| line.contains("enter to select") && line.contains("esc to cancel"))
 }
 
 /// Types and submits an initial prompt at most once. Screen observations can
@@ -8357,6 +8417,27 @@ mod tests {
         );
         assert!(!is_pi_project_trust_screen(&lines(&composer)));
         assert!(is_pi_composer_screen(&lines(&composer)));
+    }
+
+    #[test]
+    fn copilot_trust_acceptance_is_limited_to_the_selected_folder_dialog() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let trust = include_str!("../tests/fixtures/copilot_screens/trust.txt");
+        assert!(is_copilot_folder_trust_screen(&lines(trust)));
+        assert!(!is_copilot_folder_trust_screen(&lines(
+            &trust.replace("❯ 1. Yes", "  1. Yes")
+        )));
+        for other in [
+            include_str!("../tests/fixtures/copilot_screens/permission.txt"),
+            include_str!("../tests/fixtures/copilot_screens/login.txt"),
+        ] {
+            assert!(!is_copilot_folder_trust_screen(&lines(other)));
+        }
+        let stale = format!(
+            "{trust}\n{}",
+            include_str!("../tests/fixtures/copilot_screens/idle.txt")
+        );
+        assert!(!is_copilot_folder_trust_screen(&lines(&stale)));
     }
 
     #[test]

@@ -403,7 +403,7 @@ mod tests {
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 115, "the shipped ruleset lost rules");
+        assert_eq!(rules, 117, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
             let expected_empty = matches!(id, "shell" | "generic");
@@ -1000,6 +1000,71 @@ mod tests {
         assert_eq!(
             engine.evaluate(&permission, "grok").unwrap().state,
             ManifestState::BlockedPermission
+        );
+    }
+
+    /// Unedited visible rows captured by the real Copilot 1.0.90 Engine harness.
+    #[test]
+    fn copilot_rules_match_the_screens_copilot_draws() {
+        let engine = engine();
+        let cases = [
+            (
+                include_str!("../../tests/fixtures/copilot_screens/first-run.txt"),
+                ManifestState::Idle,
+                "idle-footer",
+            ),
+            (
+                include_str!("../../tests/fixtures/copilot_screens/idle.txt"),
+                ManifestState::Idle,
+                "idle-footer",
+            ),
+            (
+                include_str!("../../tests/fixtures/copilot_screens/working-edit.txt"),
+                ManifestState::Working,
+                "working-cancel-hint",
+            ),
+            (
+                include_str!("../../tests/fixtures/copilot_screens/working-stream.txt"),
+                ManifestState::Working,
+                "working-cancel-hint",
+            ),
+            (
+                include_str!("../../tests/fixtures/copilot_screens/permission.txt"),
+                ManifestState::BlockedPermission,
+                "blocked-confirm-dialog",
+            ),
+            (
+                include_str!("../../tests/fixtures/copilot_screens/trust.txt"),
+                ManifestState::BlockedPermission,
+                "blocked-confirm-dialog",
+            ),
+            (
+                include_str!("../../tests/fixtures/copilot_screens/login.txt"),
+                ManifestState::BlockedQuestion,
+                "login-account-picker",
+            ),
+        ];
+        for (screen, state, rule) in cases {
+            let observation = engine
+                .evaluate(&ScreenSnapshot::from_lines(screen.lines()), "copilot")
+                .expect("Copilot screen should match");
+            assert_eq!(
+                (observation.state, observation.matched_rule_id.as_str()),
+                (state, rule)
+            );
+        }
+        // Old permission/working text in a transcript must not override a live footer.
+        let stale = format!(
+            "{}\n{}",
+            include_str!("../../tests/fixtures/copilot_screens/permission.txt"),
+            include_str!("../../tests/fixtures/copilot_screens/idle.txt")
+        );
+        assert_eq!(
+            engine
+                .evaluate(&ScreenSnapshot::from_lines(stale.lines()), "copilot")
+                .unwrap()
+                .state,
+            ManifestState::Idle
         );
     }
 
