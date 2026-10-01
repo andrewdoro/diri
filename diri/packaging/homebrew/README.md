@@ -31,7 +31,7 @@ submitting; they change.
 | Notability: a self-submission by the repository owner needs 90 forks, 90 watchers **or 225 stars** | Met | 338 stars, 25 forks (`gh api repos/cristicretu/diri`) |
 | Repository at least 30 days old | Met | created 2026-08-04 |
 | Public presence and a homepage that explains the project | Met | https://diri.sh (also the repository's homepage field) |
-| Actively maintained | Met | 0.8.9, 0.8.10, 0.8.11 released 2026-09-29 to 2026-09-30 |
+| Actively maintained | Met | 0.8.9, 0.8.10, 0.8.11 and 0.9.0 released 2026-09-29 to 2026-10-01 |
 | Download published by the developer, immutable and versioned | Met | GitHub release asset `diri-<version>-universal.dmg`; release assets are never replaced (`diri/UPDATING.md`) |
 | Works on every declared OS and architecture, including the latest macOS | Met | Universal (arm64 + x86_64) DMG; `LSMinimumSystemVersion` 15.0; built and run on macOS 27 |
 | Passes Gatekeeper | Met | `spctl -a -vv diri.app`: `accepted`, `source=Notarized Developer ID`; ticket stapled |
