@@ -69,7 +69,7 @@ macro_rules! clip {
 /// an earlier version; add an entry when a release has something worth a
 /// clip, and record it with `scripts/whats-new-clips.sh`.
 pub(crate) const RELEASES: &[Release] = &[Release {
-    version: "0.8.12",
+    version: "0.9.0",
     headline: "Notes",
     highlights: &[
         Highlight {
