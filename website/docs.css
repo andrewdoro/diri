@@ -115,8 +115,8 @@
 .docs-content thead:has(th:empty:first-child + th:empty:last-child) { display: none; }
 
 /* Callouts. */
-.callout { margin: 4px 0 20px; padding: 13px 16px 13px 16px; border-radius: 10px; background: #ffffff06; border: 1px solid #ffffff10; border-left: 2px solid var(--tone); font-size: 15px; --tone: #9ccfd8; }
-.callout > strong { display: block; margin-bottom: 3px; font-size: 12.5px; font-weight: 600; letter-spacing: .01em; color: var(--tone); }
+.callout { margin: 4px 0 20px; padding: 14px 18px; border-radius: 12px; background: #ffffff07; font-size: 15px; --tone: #a9a2bc; }
+.callout > strong { display: block; margin-bottom: 3px; font-size: 12.5px; font-weight: 500; color: var(--tone); }
 .callout p:last-child { margin: 0; }
 .callout.tip { --tone: #ebbcba; }
 .callout.warning { --tone: #f6c177; }
