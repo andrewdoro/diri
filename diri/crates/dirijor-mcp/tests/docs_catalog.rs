@@ -42,7 +42,11 @@ fn website_mcp_reference_matches_the_tool_catalog() {
         "{}\n",
         serde_json::to_string_pretty(&json!({
             "server": "dirijor",
-            "notes_contract": dirijor_mcp::tools::NOTES_CONTRACT,
+            "skills": diri_proto::skills::ALL.iter().map(|skill| json!({
+                "name": skill.name,
+                "description": skill.description,
+                "markdown": skill.markdown,
+            })).collect::<Vec<_>>(),
             "tools": tools,
         }))
         .expect("serialize")

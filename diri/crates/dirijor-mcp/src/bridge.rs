@@ -121,6 +121,7 @@ impl Bridge {
             "answer_task" => self.answer_task(arguments),
             "cancel_task" => self.cancel_task(arguments),
             "list_tasks" => self.list_tasks(arguments),
+            "get_skill" => get_skill(arguments),
             "schedule_agent" => self.schedule_agent(arguments),
             "list_schedules" => self.list_schedules(),
             "delete_schedule" => self.delete_schedule(arguments),
@@ -988,6 +989,19 @@ fn render_failure(error: ControlFailure) -> String {
         ControlFailure::Io(error) => format!("daemon socket: {error}"),
         other => other.to_string(),
     }
+}
+
+/// Skills are compiled in, so this needs neither the Engine nor a session.
+fn get_skill(arguments: &Value) -> Result<Value, String> {
+    let name = required_string(arguments, "name")?;
+    let skill = diri_proto::skills::find(&name).ok_or_else(|| {
+        format!("unknown skill {name:?}; use scheduling, notes, or orchestration")
+    })?;
+    Ok(json!({
+        "name": skill.name,
+        "description": skill.description,
+        "markdown": skill.markdown,
+    }))
 }
 
 fn required_string(arguments: &Value, key: &str) -> Result<String, String> {
