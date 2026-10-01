@@ -1227,3 +1227,11 @@ html { overflow-x: clip; }
 @media (max-width: 600px) { .intro-heading h1 { font-size: 32px !important; font-weight: 560 !important; letter-spacing: -.03em !important; } }
 .features-heading h2, .more-section h2, .closing h2 { font-weight: 560; letter-spacing: -.03em; }
 .bento-card dt { font-weight: 540; letter-spacing: -.012em; }
+
+/* Balance: 104px from the nav to the headline, 72px from the buttons to the window. Subtitle as two short sentences, one per line. */
+@media (min-width: 601px) {
+  .intro { padding-top: 87px !important; padding-bottom: 65px !important; }
+  .intro-heading > p { margin-top: 14px !important; line-height: 1.55 !important; }
+  .sub-line { display: block; }
+}
+@media (max-width: 600px) { .sub-line { display: inline; } }
