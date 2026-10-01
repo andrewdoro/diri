@@ -177,6 +177,14 @@ pub struct AgentDescriptor {
     pub binary: Option<String>,
     #[serde(default)]
     pub return_to_login_shell: bool,
+    /// What the agent prints when it exits only to be started again: Codex,
+    /// after updating itself, says "Please restart Codex." and quits. When a
+    /// `returnToLoginShell` wrapper reports a clean exit with this text at
+    /// the bottom of the screen, the Engine relaunches the tab with its full
+    /// launch (injected MCP and notify included) instead of leaving a bare
+    /// shell whose hand-typed `codex` would run without them.
+    #[serde(default)]
+    pub relaunch_notice: Option<String>,
     /// Swift Codable spelling: capital ID, which `rename_all = "camelCase"`
     /// would miss (`sessionIdFlag`) — and a silently-unparsed flag means no
     /// caller-minted conversation UUID and therefore no resume.
@@ -429,8 +437,10 @@ impl AgentDescriptor {
         }
         if self.return_to_login_shell {
             // Keep the shell as the PTY's session leader. When the agent exits
-            // (notably after Codex updates itself), the command re-enters that
-            // shell and leaves a usable prompt instead of ending the session.
+            // the command re-enters that shell and leaves a usable prompt
+            // instead of ending the session. (An exit that only asks to be
+            // started again, Codex's self-update, is relaunched by the Engine:
+            // see `relaunch_notice`.)
             // The agent binary deliberately stays bare: the fresh interactive
             // login shell re-sources nvm/mise/Homebrew config and resolves the
             // version selected *now*, not when the daemon started.
@@ -790,6 +800,13 @@ mod tests {
         // `returnToLoginShell` from the manifests silently reverts that.
         let codex = descriptor("codex");
         assert!(codex.return_to_login_shell);
+        // ...and the line it prints before that exit has the Engine relaunch
+        // the tab, so its MCP server and notify hook come back with it. Codex
+        // prints it from `run_update_action` in codex-rs/cli/src/main.rs.
+        assert_eq!(
+            codex.relaunch_notice.as_deref(),
+            Some("Please restart Codex.")
+        );
         let spec = codex
             .spawn_spec(
                 Path::new("/tmp"),

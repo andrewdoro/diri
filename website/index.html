@@ -18,12 +18,12 @@
   <meta property="og:image:type" content="image/jpeg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Diri’s native workspace with Claude Code, Codex, Cursor, and Gemini sessions, alongside code changes.">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents. A Claude Code session starting three agents, shown in the app window.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Diri — The best way to work with coding agents">
   <meta name="twitter:description" content="Run Claude Code, Codex, Cursor, and Gemini fifty at a time. Agents spawn agents, every task gets a worktree, and every change lands in one review. Free and open source.">
   <meta name="twitter:image" content="https://diri.sh/assets/social-card.jpg">
-  <meta name="twitter:image:alt" content="Diri’s native workspace for parallel AI agents.">
+  <meta name="twitter:image:alt" content="Diri: the best way to work with coding agents.">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any">
   <link rel="icon" href="/favicon-96.png" type="image/png" sizes="96x96">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -115,7 +115,7 @@
       <section class="intro" aria-labelledby="page-title">
         <div class="intro-heading">
           <h1 id="page-title">The best way to work with coding agents</h1>
-          <p>Run Claude Code, Codex, and any terminal agent in parallel. Agents can start other agents, every task gets its own worktree, and you step in only when one needs you.</p>
+          <p>Run Claude Code, Codex, and any other agent in parallel. Step in only when one needs you.</p>
         </div>
         <div class="intro-actions">
           <a id="download-primary" class="button primary" href="https://github.com/cristicretu/diri/releases/latest"><img class="button-mark" src="/assets/brand/apple.svg" width="15" height="15" alt=""><span class="button-label">Download Diri</span></a>
@@ -133,15 +133,8 @@
       </section>
 
       <section class="product" aria-label="Interactive Diri preview" data-nosnippet>
-        <div class="preview-toolbar">
-          <div class="demo-tabs" role="tablist" aria-label="Explore Diri">
-            <button class="demo-tab active" id="tab-workspace" role="tab" aria-selected="true" aria-controls="demo-window" data-view="workspace">Workspace</button>
-            <button class="demo-tab" id="tab-command" role="tab" aria-selected="false" aria-controls="demo-window" tabindex="-1" data-view="command">Commands <kbd>⌘K</kbd></button>
-            <button class="demo-tab" id="tab-links" role="tab" aria-selected="false" aria-controls="demo-window" tabindex="-1" data-view="links">Links</button>
-          </div>
-        </div>
         <div class="desktop-stage">
-        <div class="app-window" id="demo-window" role="tabpanel" aria-labelledby="tab-workspace">
+        <div class="app-window" id="demo-window" role="region" aria-label="Diri workspace preview">
           <aside class="app-sidebar" aria-label="Demo agents">
             <div class="sidebar-top"><span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span><button class="icon-button" data-open="command" aria-label="Open commands"><span class="icon" data-icon="settings"></span></button><button class="icon-button" data-open="command" aria-label="Search conversations"><span class="icon" data-icon="search"></span></button><button class="icon-button" id="toggle-sidebar" aria-label="Collapse sidebar"><span class="icon" data-icon="sidebar"></span></button></div>
             <button class="new-chat" data-open="command"><span class="icon" data-icon="new-agent"></span>New Agent <span class="agent-logo new-chat-agent" data-agent="claude"></span></button>

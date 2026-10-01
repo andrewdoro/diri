@@ -55,10 +55,6 @@ function selectChat(id) {
   newAgent.className = `agent-logo new-chat-agent ${chat.agent}`;
   paintIcons();
 }
-function setTab(view) {
-  $$('.demo-tab').forEach(tab => { const active = tab.dataset.view === view; tab.classList.toggle('active', active); tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1; });
-  $('#demo-window').setAttribute('aria-labelledby', `tab-${view}`);
-}
 function closeOverlay(restoreFocus = true) {
   $$('.floating-panel').forEach(el => { el.hidden = true; });
   $('#demo-shade').hidden = true;
@@ -67,7 +63,6 @@ function closeOverlay(restoreFocus = true) {
   $('.app-sidebar').inert = false;
   $('.app-main').inert = false;
   $('.changes-panel').inert = false;
-  setTab('workspace');
   if (restoreFocus && previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
 }
 function openOverlay(kind) {
@@ -81,7 +76,6 @@ function openOverlay(kind) {
   $('#demo-shade').hidden = false;
   const panel = $(kind === 'command' ? '#palette' : `#${kind}-panel`);
   panel.hidden = false;
-  setTab(kind === 'notifications' ? 'workspace' : kind);
   if (kind === 'command') { goPage('commands'); $('#palette-input').focus({ preventScroll: true }); }
   else $('button, a', panel)?.focus({ preventScroll: true });
 }
@@ -145,7 +139,6 @@ document.addEventListener('click', event => {
   if (target.dataset.open) { openOverlay(target.dataset.open); if (target.classList.contains('new-chat')) goPage('projects'); }
   if (target.hasAttribute('data-close')) closeOverlay();
   if (target.dataset.chat) { selectChat(target.dataset.chat); if (overlay) closeOverlay(); }
-  if (target.dataset.view) target.dataset.view === 'workspace' ? closeOverlay(false) : openOverlay(target.dataset.view);
   if (target.dataset.answer) {
     notesAnswer = target.dataset.answer;
     const state = $('.chat-row[data-chat="notes"] .chat-state');
@@ -156,15 +149,6 @@ document.addEventListener('click', event => {
     $('#terminal-content').tabIndex = -1;
     $('#terminal-content').focus({ preventScroll: true });
   }
-});
-$('.demo-tabs').addEventListener('keydown', event => {
-  const tabs = $$('.demo-tab');
-  const index = tabs.indexOf(document.activeElement);
-  if (index < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-  event.preventDefault();
-  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
-  tabs[next].focus();
-  tabs[next].click();
 });
 document.addEventListener('keydown', event => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); overlay === 'command' ? closeOverlay() : openOverlay('command'); }

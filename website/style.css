@@ -879,3 +879,8 @@ html { overflow-x: clip; }
 .github-link .icon { width: 15px; height: 15px; }
 .nav-download { height: 28px; padding: 0 10px; border-radius: 8px; font-size: 12px; }
 @media (max-width: 600px) { .site-header { padding-inline: 9px 4px; } }
+
+/* The masthead's offset lives in the column's padding, not its margin: a collapsed margin pushed the body (and the sky anchored to it) 12px down, leaving a seam at the top. */
+.site-wrap { padding-top: 12px; }
+.site-header { margin-top: 0; }
+@media (max-width: 600px) { .site-wrap { padding-top: 10px; } .site-header { margin-top: 0; } }

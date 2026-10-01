@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use crate::registry::Registry;
 mod account_handoff;
 mod account_switch;
+mod agent_relaunch;
 mod claude_accounts;
 mod codex_accounts;
 mod hook_queue;
@@ -5505,6 +5506,7 @@ const MAX_PROBE_CHARS: usize = 20;
 mod tests {
     use super::*;
 
+    mod agent_relaunch_tests;
     mod find_capture_tests;
     mod reconnect_tests;
     mod send_key_tests;
