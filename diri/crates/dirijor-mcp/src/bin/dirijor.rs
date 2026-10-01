@@ -1,3 +1,5 @@
+#[path = "dirijor/notes.rs"]
+mod notes;
 #[path = "dirijor/organization.rs"]
 mod organization;
 
@@ -78,6 +80,7 @@ fn run(arguments: &[String]) -> Result<(), CliError> {
         "artifacts" => artifacts(arguments.get(1..).unwrap_or_default()),
         "events" => events(arguments.get(1..).unwrap_or_default()),
         "ports" => ports(arguments.get(1..).unwrap_or_default()),
+        "note" | "notes" => notes::run(arguments.get(1..).unwrap_or_default()),
         "doctor" => doctor(),
         "forward" => Err(CliError::failure(
             "companion TCP forwarding is not part of the Rust Engine",
@@ -105,7 +108,9 @@ fn print_help() {
          Reads the current local terminal OSC title, not the conversation name. Remote titles are unsupported.\n\n\
          dirijor session reset-terminal ID\n  \
          Resets the emulator (screen, history, modes, title) without touching the process.\n\n\
-         Deferred on Linux: companion forwarding (dirijor forward)."
+         Deferred on Linux: companion forwarding (dirijor forward).\n\n\
+         Notes (Markdown files; new notes appear in the sidebar when Diri is running):\n  {}",
+        notes::HELP
     );
 }
 
@@ -133,9 +138,14 @@ fn map_bridge_error(message: String) -> CliError {
     CliError { code, message }
 }
 
+/// Largest hook payload read from the provider. Tool inputs and responses
+/// (file contents, command output) make these the big ones; they are read in
+/// full so identity and recovery facts survive, then left out of delivery.
+const HOOK_PAYLOAD_CAP: usize = 8 << 20;
+
 fn hook(event: Option<&str>) -> Result<(), CliError> {
     let event = event.unwrap_or_default();
-    let payload = stdin_json(1 << 20, Duration::from_millis(500));
+    let payload = stdin_json(HOOK_PAYLOAD_CAP, Duration::from_millis(500));
     persist_hook_activity("claude-hook", Some(event), &payload);
     let result = bridge().request(
         Method::HOOK_REPORT,
@@ -143,7 +153,7 @@ fn hook(event: Option<&str>) -> Result<(), CliError> {
             "kind": "claude-hook",
             "dirijorSessionID": std::env::var("DIRIJOR_SESSION_ID").ok(),
             "event": event,
-            "payload": payload,
+            "payload": forwarded_hook_payload(event, payload),
         }),
         Duration::from_secs(3),
     );
@@ -218,6 +228,19 @@ fn notify(arguments: &[String]) -> Result<(), CliError> {
         Duration::from_secs(3),
     );
     Ok(())
+}
+
+/// The Engine reads `tool_input` only to summarize a permission request and
+/// never reads `tool_response`; every other hook sends neither, so a large
+/// Read/Write/Bash payload is not re-encoded, sent and parsed per callback.
+fn forwarded_hook_payload(event: &str, mut payload: Value) -> Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("tool_response");
+        if event != "PermissionRequest" {
+            object.remove("tool_input");
+        }
+    }
+    payload
 }
 
 /// Records only lifecycle and identity fields before attempting delivery.
@@ -1815,6 +1838,10 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
         }
     }
 

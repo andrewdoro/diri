@@ -112,7 +112,9 @@ fn initialize(params: &Value) -> Value {
              Also: get_artifacts returns PR/preview URLs and ports (PRs include live GitHub \
              status); fork_agent branches a conversation to try an alternative; manage_agent \
              hibernates idle children instead of killing them; quick_open_include edits the \
-             folders Cmd+P indexes (e.g. `**/.worktrees/`).{browser}"
+             folders Cmd+P indexes (e.g. `**/.worktrees/`).{browser}\n\n\
+             Notes: {notes}",
+            notes = dirijor_mcp::tools::NOTES_CONTRACT,
         )
     })
 }
@@ -230,5 +232,27 @@ mod tests {
         assert!(instructions.contains("native kind"));
         assert!(instructions.contains("Never use `shell` to launch an agent CLI"));
         assert!(instructions.contains("Cmd+J"));
+    }
+
+    #[test]
+    fn instructions_teach_the_notes_contract() {
+        let initialized = initialize(&json!({}));
+        let instructions = initialized["instructions"].as_str().expect("instructions");
+        for step in [
+            "read it first with read_note {\"note\":\"origin\"}",
+            "a decision, a finding, a blocker, a result, a link",
+            "no progress chatter",
+            "Prefer adding",
+            "Never silently delete the person's writing",
+            "edit_note",
+            "replace_section",
+            "Tick your own sub-tasks",
+            "the person reviews your work and ticks it",
+            "Finish with a one-paragraph result",
+            "create_note",
+            "open:true",
+        ] {
+            assert!(instructions.contains(step), "missing: {step}");
+        }
     }
 }

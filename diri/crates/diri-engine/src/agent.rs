@@ -177,6 +177,14 @@ pub struct AgentDescriptor {
     pub binary: Option<String>,
     #[serde(default)]
     pub return_to_login_shell: bool,
+    /// What the agent prints when it exits only to be started again: Codex,
+    /// after updating itself, says "Please restart Codex." and quits. When a
+    /// `returnToLoginShell` wrapper reports a clean exit with this text at
+    /// the bottom of the screen, the Engine relaunches the tab with its full
+    /// launch (injected MCP and notify included) instead of leaving a bare
+    /// shell whose hand-typed `codex` would run without them.
+    #[serde(default)]
+    pub relaunch_notice: Option<String>,
     /// Swift Codable spelling: capital ID, which `rename_all = "camelCase"`
     /// would miss (`sessionIdFlag`) — and a silently-unparsed flag means no
     /// caller-minted conversation UUID and therefore no resume.
@@ -429,8 +437,10 @@ impl AgentDescriptor {
         }
         if self.return_to_login_shell {
             // Keep the shell as the PTY's session leader. When the agent exits
-            // (notably after Codex updates itself), the command re-enters that
-            // shell and leaves a usable prompt instead of ending the session.
+            // the command re-enters that shell and leaves a usable prompt
+            // instead of ending the session. (An exit that only asks to be
+            // started again, Codex's self-update, is relaunched by the Engine:
+            // see `relaunch_notice`.)
             // The agent binary deliberately stays bare: the fresh interactive
             // login shell re-sources nvm/mise/Homebrew config and resolves the
             // version selected *now*, not when the daemon started.
@@ -452,6 +462,18 @@ impl AgentDescriptor {
             // then receives mouse reports and escape-coded keys as text:
             // `35;12;38M35;13;38M` at the prompt. Reset them before the shell
             // takes over, as the agent itself should have on a clean exit.
+            //
+            // First, the agent's own exit status goes to the Engine as a
+            // private OSC ([`diri_terminal_state::AGENT_EXIT_OSC`]): once the
+            // shell takes over it is otherwise lost, and an agent that dies at
+            // startup looks exactly like one the user quit. A separate
+            // `printf`, so the reset runs whatever the report does.
+            if let Some(status) = exit_status_parameter(&shell) {
+                command.push_str(&format!(
+                    "; printf '\\033]{}%s\\007' \"{status}\"",
+                    diri_terminal_state::AGENT_EXIT_OSC
+                ));
+            }
             command.push_str(&format!(
                 "; printf '{AGENT_EXIT_TERMINAL_RESET}'; exec {} -i -l",
                 shell_quote(&shell)
@@ -519,6 +541,18 @@ impl AgentDescriptor {
     }
 }
 
+/// How `shell` spells the last command's exit status, or `None` for a shell
+/// whose syntax is unknown, which then runs the wrapper without the report
+/// rather than risk a parse error that would stop the agent launching at all.
+fn exit_status_parameter(shell: &str) -> Option<&'static str> {
+    let name = std::path::Path::new(shell).file_name()?.to_str()?;
+    match name.trim_start_matches('-') {
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash" | "yash" => Some("$?"),
+        "fish" | "csh" | "tcsh" => Some("$status"),
+        _ => None,
+    }
+}
+
 /// Forces a real colour terminal onto a PTY child.
 ///
 /// The local Engine is a GUI daemon: it often has no `TERM` at all. PTY spawn
@@ -538,7 +572,15 @@ pub(crate) fn assert_color_environment(env: &mut Vec<(String, String)>) {
     });
     env.push(("TERM".into(), "xterm-256color".into()));
     env.push(("COLORTERM".into(), "truecolor".into()));
+    // Diri shows `OSC 9;4` progress on the session's tab, but cargo only
+    // sends it to terminals it recognises by name (Windows Terminal, ConEmu,
+    // iTerm2). A value the user chose, `false` included, is kept.
+    if !env.iter().any(|(key, _)| key == CARGO_PROGRESS_ENV) {
+        env.push((CARGO_PROGRESS_ENV.into(), "true".into()));
+    }
 }
+
+const CARGO_PROGRESS_ENV: &str = "CARGO_TERM_PROGRESS_TERM_INTEGRATION";
 
 /// Terminal modes an agent may leave on, turned off after it exits and
 /// before the login shell takes the PTY, written for the shell's `printf`
@@ -758,6 +800,13 @@ mod tests {
         // `returnToLoginShell` from the manifests silently reverts that.
         let codex = descriptor("codex");
         assert!(codex.return_to_login_shell);
+        // ...and the line it prints before that exit has the Engine relaunch
+        // the tab, so its MCP server and notify hook come back with it. Codex
+        // prints it from `run_update_action` in codex-rs/cli/src/main.rs.
+        assert_eq!(
+            codex.relaunch_notice.as_deref(),
+            Some("Please restart Codex.")
+        );
         let spec = codex
             .spawn_spec(
                 Path::new("/tmp"),
@@ -773,7 +822,8 @@ mod tests {
         assert_eq!(
             spec.argv[4],
             format!(
-                "'codex' '--version'; printf '{AGENT_EXIT_TERMINAL_RESET}'; exec '/bin/sh' -i -l"
+                "'codex' '--version'; printf '\\033]6973;agent-exit;%s\\007' \"$?\"; \
+                 printf '{AGENT_EXIT_TERMINAL_RESET}'; exec '/bin/sh' -i -l"
             ),
             "the agent runs first, then the shell takes the PTY over"
         );
@@ -910,6 +960,102 @@ mod tests {
         assert!(stdout.contains("\x1b[>4;0m\x1b[<99u\x1b[=0;1u"));
     }
 
+    /// The status the wrapper's shell saw reaches the Engine's screen as the
+    /// private OSC, in every shell family the wrapper speaks, for a plain
+    /// failure and for a signal death, and the reset still follows it.
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_reports_the_agent_exit_status_in_every_shell() {
+        use std::process::{Command, Stdio};
+
+        let shells = [
+            "/bin/sh",
+            "/bin/bash",
+            "/bin/zsh",
+            "/opt/homebrew/bin/fish",
+            "/usr/bin/fish",
+        ]
+        .into_iter()
+        .filter(|shell| Path::new(shell).exists())
+        .collect::<Vec<_>>();
+        assert!(shells.contains(&"/bin/sh"));
+        for shell in shells {
+            // The agent: `sh -c` either exits 3 or SIGKILLs itself.
+            for (script, expected) in [("exit 3", 3), ("kill -9 $$", 128 + 9)] {
+                let wrapped = AgentDescriptor {
+                    binary: Some("/bin/sh".into()),
+                    return_to_login_shell: true,
+                    ..Default::default()
+                };
+                let spec = wrapped
+                    .spawn_spec(
+                        Path::new("/tmp"),
+                        [("SHELL".to_string(), shell.to_string())],
+                        &["-c".into(), script.into()],
+                    )
+                    .expect("spec");
+                // Run only the agent half: the final `exec` would start an
+                // interactive login shell that reads the user's rc files.
+                let command = spec.argv[4]
+                    .rsplit_once("; exec ")
+                    .expect("wrapper execs the shell")
+                    .0;
+                let output = Command::new(shell)
+                    .args(["-c", command])
+                    .env_clear()
+                    .envs(spec.env.iter().cloned())
+                    .stdin(Stdio::null())
+                    .output()
+                    .expect("run wrapper");
+
+                let mut screen =
+                    diri_terminal_state::HeadlessScreen::new(80, 24).with_notifications();
+                screen.feed(&output.stdout);
+                assert_eq!(
+                    screen.take_agent_exit(),
+                    Some(expected),
+                    "{shell} `{script}`: {:?}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+                let report = output
+                    .stdout
+                    .windows(4)
+                    .position(|window| window == b"6973")
+                    .expect("report");
+                let reset = output
+                    .stdout
+                    .windows(8)
+                    .position(|window| window == b"\x1b[?1003l")
+                    .expect("the reset still runs");
+                assert!(report < reset, "{shell}");
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_shells_run_the_wrapper_without_the_report() {
+        assert_eq!(exit_status_parameter("/usr/bin/zsh"), Some("$?"));
+        assert_eq!(exit_status_parameter("-bash"), Some("$?"));
+        assert_eq!(
+            exit_status_parameter("/opt/homebrew/bin/fish"),
+            Some("$status")
+        );
+        assert_eq!(exit_status_parameter("/usr/local/bin/nu"), None);
+        let spec = AgentDescriptor {
+            binary: Some("codex".into()),
+            return_to_login_shell: true,
+            ..Default::default()
+        }
+        .spawn_spec(
+            Path::new("/tmp"),
+            [("SHELL".to_string(), "/usr/local/bin/nu".to_string())],
+            &[],
+        )
+        .expect("spec");
+        assert!(!spec.argv[4].contains("6973"), "{}", spec.argv[4]);
+        assert!(spec.argv[4].contains("exec '/usr/local/bin/nu' -i -l"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn exit_reset_clears_every_mode_claude_code_leaves_on() {
@@ -998,6 +1144,16 @@ mod tests {
         assert_eq!(get("TERM"), Some("xterm-256color"));
         assert_eq!(get("COLORTERM"), Some("truecolor"));
         assert_eq!(get("NO_COLOR"), None);
+        assert_eq!(get(super::CARGO_PROGRESS_ENV), Some("true"));
+
+        let mut chosen = vec![(super::CARGO_PROGRESS_ENV.to_owned(), "false".to_owned())];
+        super::assert_color_environment(&mut chosen);
+        let values: Vec<_> = chosen
+            .iter()
+            .filter(|(key, _)| key == super::CARGO_PROGRESS_ENV)
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(values, ["false"], "the user's own choice stands");
     }
 
     #[test]

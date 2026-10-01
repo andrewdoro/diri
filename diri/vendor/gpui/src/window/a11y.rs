@@ -217,6 +217,14 @@ impl A11y {
         self.active_this_frame
     }
 
+    /// DIRI PATCH (frame statistics): attach a pretend assistive technology,
+    /// so headless benches can measure frames the way a Mac running an
+    /// accessibility client (window managers, dictation tools) draws them.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_active_for_test(&self, active: bool) {
+        self.active_flag.store(active, Ordering::SeqCst);
+    }
+
     pub(crate) fn set_focusable(&mut self, node_id: NodeId, focus_id: FocusId) {
         self.focus_ids.insert(node_id, focus_id);
     }

@@ -697,3 +697,184 @@ fn a_password_prompt_reaches_the_client_as_a_mode_and_never_as_cells() {
         "echo was off, so the secret never became cells: {painted:?}"
     );
 }
+
+/// A fake agent TUI for keystroke timing: answers every key with a redraw of
+/// its composer the way Ink (Claude Code) and ratatui (Codex) do.
+///
+/// - `sync`: one synchronized update (DECSET 2026) that redraws the composer
+///   and shortens the hint row below it by two cells, so every answer ends
+///   with fewer cells than the screen had (the way the placeholder and
+///   "? for shortcuts" vanish when typing starts, or a menu closes).
+/// - `chunks`: an unsynchronized redraw in three writes `gap_us` apart: erase
+///   the composer, write it back, then update a status row.
+const FAKE_TUI: &str = r#"
+use Time::HiRes qw(usleep);
+my ($mode, $gap) = @ARGV;
+system("stty raw -echo");
+$| = 1;
+syswrite STDOUT, "\e[2J\e[H> \e[2mTry \"refactor the parser\"\e[0m\r\n" . ("x" x 80);
+my $typed = "";
+while (sysread(STDIN, my $key, 1)) {
+    $typed .= $key;
+    my $n = length $typed;
+    if ($mode eq "sync") {
+        syswrite STDOUT, "\e[?2026h\e[H\e[2K> $typed\r\n\e[2K" . ("x" x (80 - 2 * $n)) . "\e[1;" . ($n + 3) . "H\e[?2026l";
+    } else {
+        syswrite STDOUT, "\e[H\e[2K";
+        usleep $gap;
+        syswrite STDOUT, "> $typed";
+        usleep $gap;
+        syswrite STDOUT, "\r\n\e[2Kstatus $n\e[1;" . ($n + 3) . "H";
+    }
+}
+"#;
+
+/// Key → the frame that completes the fake TUI's redraw, per key, for a
+/// Holder-backed session: what `input.echo` sees minus the agent's own
+/// thinking time.
+fn fake_tui_redraw_latencies(mode: &str, gap_us: u64, keys: usize) -> Vec<Duration> {
+    // Short root: Holder sockets live under it and must fit SUN_LEN.
+    let root = std::path::PathBuf::from(format!("/tmp/diri-tui-{}-{mode}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("root");
+    let registry = Arc::new(Mutex::new(Registry::new(engine(), root.join("state.json"))));
+    let server = Arc::new(
+        ControlServer::new(Arc::clone(&registry), root.join("daemon.sock"))
+            .with_logs_dir(root.join("logs"))
+            .with_holder(diri_engine::session::HolderConfig {
+                holders_dir: root.join("holders"),
+                executable: env!("CARGO_BIN_EXE_diri-holder").into(),
+            }),
+    );
+    let listener = server.bind().expect("bind");
+    {
+        let server = Arc::clone(&server);
+        std::thread::spawn(move || {
+            while let Ok((stream, _)) = listener.accept() {
+                let server = Arc::clone(&server);
+                std::thread::spawn(move || {
+                    let _ = server.serve(stream);
+                });
+            }
+        });
+    }
+    let control = UnixStream::connect(server.socket_path()).expect("connect control");
+    let send = |message: &ControlMessage| {
+        let mut bytes = serde_json::to_vec(message).expect("encode");
+        bytes.push(b'\n');
+        (&control).write_all(&bytes).expect("write");
+    };
+    send(&ControlMessage::Request {
+        id: 1,
+        method: "session.spawn".into(),
+        params: Some(json!({
+            "kind": { "shell": {} },
+            "cwd": "/tmp",
+            "argv": ["/usr/bin/perl", "-e", FAKE_TUI, mode, gap_us.to_string()],
+        })),
+    });
+    let id = {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(control.try_clone().expect("clone"));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("spawn reply");
+        match serde_json::from_str(&line).expect("decode") {
+            ControlMessage::Response {
+                result: Ok(result), ..
+            } => result["id"].as_str().expect("id").to_string(),
+            other => panic!("spawn failed: {other:?}"),
+        }
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    let mut data = UnixStream::connect(server.socket_path()).expect("connect data");
+    let mut attach = serde_json::to_vec(&json!({ "attach": id })).expect("encode");
+    attach.push(b'\n');
+    data.write_all(&attach).expect("attach");
+    let mut frames = FrameReader::new(data.try_clone().expect("clone data"));
+    frames.until("the seed grid", |frame| frame.frame_type == FrameType::Grid);
+    std::thread::sleep(Duration::from_millis(200));
+    let mut latencies = Vec::new();
+    let mut typed = String::new();
+    for index in 0..keys {
+        let key = b'a' + (index % 26) as u8;
+        typed.push(char::from(key));
+        let done = match mode {
+            "sync" => format!("> {typed}"),
+            _ => format!("status {}", typed.len()),
+        };
+        let sent = Instant::now();
+        data.write_all(&FrameCodec::encode(&Frame::input(vec![key])).unwrap())
+            .expect("send key");
+        frames.until("the finished redraw", |frame| {
+            frame.frame_type == FrameType::Grid
+                && frame.grid_payload().ok().flatten().is_some_and(|update| {
+                    grid_text(&update)
+                        .lines()
+                        .any(|line| line.trim_end() == done)
+                })
+        });
+        latencies.push(sent.elapsed());
+        // Paced like typing, so each key is its own burst.
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    send(&ControlMessage::Request {
+        id: 2,
+        method: "session.kill".into(),
+        params: Some(json!({ "sessionID": id })),
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = std::fs::remove_dir_all(&root);
+    latencies
+}
+
+fn percentile(samples: &mut [Duration], q: f64) -> Duration {
+    samples.sort_unstable();
+    samples[((samples.len() - 1) as f64 * q).round() as usize]
+}
+
+/// A synchronized redraw is complete by the child's own declaration, so a
+/// keystroke answered by one is published at once even when the answer
+/// removed cells (Claude Code's placeholder and shortcut hint disappearing as
+/// typing starts). Before, such an echo looked like a half-erased repaint and
+/// waited out the 8 ms output batch.
+#[test]
+fn a_synchronized_redraw_that_removes_cells_answers_a_keystroke_at_once() {
+    let mut latencies = fake_tui_redraw_latencies("sync", 0, 21);
+    let median = percentile(&mut latencies, 0.5);
+    let p90 = percentile(&mut latencies, 0.9);
+    eprintln!(
+        "sync redraw: median {}us p90 {}us",
+        median.as_micros(),
+        p90.as_micros()
+    );
+    assert!(
+        median <= Duration::from_millis(5),
+        "a synchronized echo that removed cells took {median:?} (median); it must not wait out the 8 ms batch"
+    );
+}
+
+/// An unsynchronized redraw split into three writes: the last write should
+/// reach the client about when it lands, not a batch later.
+#[test]
+#[ignore = "timing report; run explicitly"]
+fn multi_chunk_redraw_timing() {
+    for gap_us in [0u64, 500, 2_000] {
+        let mut latencies = fake_tui_redraw_latencies("chunks", gap_us, 31);
+        let median = percentile(&mut latencies, 0.5);
+        let p90 = percentile(&mut latencies, 0.9);
+        eprintln!(
+            "chunks gap={gap_us}us: last write at ~{}us; finished redraw median {}us p90 {}us",
+            gap_us * 2,
+            median.as_micros(),
+            p90.as_micros()
+        );
+    }
+    let mut latencies = fake_tui_redraw_latencies("sync", 0, 31);
+    let median = percentile(&mut latencies, 0.5);
+    let p90 = percentile(&mut latencies, 0.9);
+    eprintln!(
+        "sync: finished redraw median {}us p90 {}us",
+        median.as_micros(),
+        p90.as_micros()
+    );
+}

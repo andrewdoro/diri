@@ -58,6 +58,9 @@ impl Method {
     pub const SESSION_ARCHIVE: &'static str = "session.archive";
     pub const SESSION_UNARCHIVE: &'static str = "session.unarchive";
     pub const SESSION_REOPEN_LAST: &'static str = "session.reopen_last";
+    /// Asks the app to select and show a Session (`SessionIdParams`); the
+    /// Engine re-publishes it as the `session.reveal` event.
+    pub const SESSION_REVEAL: &'static str = "session.reveal";
     pub const SESSION_MIGRATE: &'static str = "session.migrate";
     pub const SESSION_REPARENT_WORKTREE: &'static str = "session.reparent_worktree";
     pub const HOST_SYNC_PREFS: &'static str = "host.sync_prefs";
@@ -116,6 +119,10 @@ impl EventName {
     pub const SESSION_RESOURCES: &'static str = "session.resources";
     pub const SESSION_REMOVED: &'static str = "session.removed";
     pub const PROJECT_UPDATED: &'static str = "project.updated";
+    /// A client asked for this Session to be shown (`{"sessionID"}`), e.g.
+    /// an agent that just wrote a note. The app selects it without taking
+    /// focus from another app.
+    pub const SESSION_REVEAL: &'static str = "session.reveal";
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -471,6 +478,17 @@ pub struct SessionSpawnParams {
     /// `cwd` / the host's defaultCwd when the repo isn't cloned there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub same_repo_as: Option<SessionId>,
+    /// Where a local terminal's shell starts, when that is not `cwd`: the
+    /// directory another terminal had `cd`'d to. `cwd` still decides the
+    /// Session's project, so following a terminal into a subdirectory does
+    /// not open a new project. Ignored for Agents and remote hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_directory: Option<String>,
+    /// For kind `note`: adopt this existing notes file instead of creating
+    /// one. Idempotent per note id: the note's live Session is returned when
+    /// it already has one. The file keeps its id and created date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_id: Option<String>,
 }
 
 pub type SessionSpawnResult = SessionRecord;

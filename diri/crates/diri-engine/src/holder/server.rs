@@ -844,7 +844,13 @@ fn handle(shared: &Shared, request: &HolderRequest) -> HolderResult<HolderRespon
             Ok(HolderResponse::success())
         }
 
-        HolderOperation::Stat => Ok(HolderResponse::with_stat(current_stat(shared))),
+        HolderOperation::Stat => {
+            let mut stat = current_stat(shared);
+            if request.line_probe == Some(true) {
+                stat.awaiting_line = Some(shared.pty.lock().expect("pty").job_awaits_line());
+            }
+            Ok(HolderResponse::with_stat(stat))
+        }
     }
 }
 
@@ -1005,6 +1011,7 @@ fn current_stat_without_identity(shared: &Shared) -> HolderStat {
         // Sampled on request, from the owner: the holder itself never polls,
         // and an idle one still costs no wakeups.
         secret_input: Some(pty.secret_input()),
+        awaiting_line: None,
     }
 }
 
@@ -1223,6 +1230,95 @@ mod tests {
         client.kill_tree().expect("kill-tree");
         wait_until("holder finished", || server.is_finished());
         server.join().expect("join").expect("clean holder exit");
+    }
+
+    /// Closing a session must not wait out the SIGKILL grace just because
+    /// its leader is an interactive shell: `$SHELL -l`, and the `-i -l -c`
+    /// wrapper that returns an agent to a prompt. Interactive zsh and bash
+    /// ignore SIGTERM, which made every close take the full half second
+    /// under the Registry lock. A tree that ignores the polite signals still
+    /// dies, just not early.
+    #[test]
+    fn kill_tree_does_not_wait_out_the_grace_for_an_interactive_shell() {
+        let wrapper = |shell: &str| {
+            vec![
+                shell.to_string(),
+                "-i".into(),
+                "-l".into(),
+                "-c".into(),
+                format!("sleep 30; printf x; exec {shell} -i -l"),
+            ]
+        };
+        let cases = [
+            (
+                "zsh",
+                vec!["/bin/zsh".to_string(), "-f".into(), "-i".into()],
+                true,
+            ),
+            ("zsh_agent", wrapper("/bin/zsh"), true),
+            ("bash_agent", wrapper("/bin/bash"), true),
+            (
+                "deaf",
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".into(),
+                    "trap '' TERM HUP; sleep 30 & wait".into(),
+                ],
+                false,
+            ),
+        ];
+        for (name, argv, prompt) in cases {
+            if !Path::new(&argv[0]).exists() {
+                eprintln!("{name}: {} is not installed here, skipped", argv[0]);
+                continue;
+            }
+            let root = tempfile::tempdir().unwrap();
+            let id = format!("s_kill_{name}");
+            let spec = HolderLaunchSpec {
+                session_id: id.clone(),
+                socket_path: root.path().join("h.sock").to_string_lossy().into_owned(),
+                pid_file_path: root.path().join("h.pid").to_string_lossy().into_owned(),
+                log_file_path: root
+                    .path()
+                    .join(format!("{id}.bin"))
+                    .to_string_lossy()
+                    .into_owned(),
+                argv,
+                cwd: "/tmp".into(),
+                environment: Default::default(),
+                cols: 80,
+                rows: 24,
+                disk_capacity: 4096,
+            };
+            let client = HolderClient::new(&spec.socket_path);
+            let server = std::thread::spawn(move || HolderServer::run(spec));
+            wait_until("holder ready", || client.is_alive());
+            // Let the shell finish starting up and install its dispositions.
+            std::thread::sleep(Duration::from_millis(300));
+            let child_pid = running(&id).child_pid;
+            let tree = process_tree::enumerate(child_pid);
+            assert!(!tree.is_empty(), "{name}: the tree is running");
+
+            let started = std::time::Instant::now();
+            client.kill_tree().expect("kill-tree");
+            let took = started.elapsed();
+            eprintln!("{name}: kill_tree took {took:?}");
+            if prompt {
+                assert!(
+                    took < Duration::from_millis(250),
+                    "{name}: kill_tree waited {took:?}, the SIGKILL grace"
+                );
+            }
+            wait_until("holder finished", || server.is_finished());
+            server.join().expect("join").expect("clean holder exit");
+            for sample in &tree {
+                assert!(
+                    !process_tree::is_alive(sample),
+                    "{name}: pid {} survived kill_tree",
+                    sample.pid
+                );
+            }
+        }
     }
 
     #[test]

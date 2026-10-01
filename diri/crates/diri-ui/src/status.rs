@@ -183,6 +183,9 @@ fn static_mark(
             .inset(0.08)
             .visual_scale(visual_scale)
             .into_any_element()
+    } else if kind == AgentKind::Note {
+        crate::Icon::new(crate::IconName::File, size * 0.86 * visual_scale, color)
+            .into_any_element()
     } else {
         shell_caret(size, color, visual_scale)
     }

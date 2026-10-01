@@ -5,6 +5,7 @@ mod prefs;
 mod projection;
 mod residency;
 mod window_navigation;
+mod work_items;
 mod workspace_spawn;
 mod workspaces;
 
@@ -36,12 +37,13 @@ use crate::switcher::{
 };
 
 pub use prefs::{
-    InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
+    FileEditor, InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
     WindowMaterial, WindowMode, WindowPlacement,
 };
 pub use projection::{SidebarProject, SidebarProjection, SidebarRow};
 pub use residency::{ResidencyUpdate, TerminalResidency};
 pub(crate) use window_navigation::{WindowAction, WindowStore, WindowWrite};
+pub use work_items::WorkLink;
 pub use workspace_spawn::{
     SpawnDestination, SpawnOwner, WindowSpawnTarget, WorkspaceSpawnReceipt, WorkspaceSpawnState,
     WorkspaceSpawnTarget,
@@ -168,6 +170,13 @@ pub enum StoreEffect {
         title: String,
     },
     Spawn(SessionSpawnParams),
+    /// An agent started from a note's to-do: spawned without selecting it,
+    /// its id linked back into the to-do (see `work_items`).
+    StartWorkItem {
+        ticket: u64,
+        params: SessionSpawnParams,
+        link: WorkLink,
+    },
     /// Read herdr's saved sessions off the main thread.
     ScanHerdr {
         tracked: HashSet<String>,
@@ -381,11 +390,15 @@ pub struct SessionStore {
     sessions: HashMap<SessionId, Arc<SessionRecord>>,
     auxiliary_slots: HashMap<(SessionId, usize), SessionId>,
     auxiliary_pending: HashSet<(SessionId, usize)>,
+    work_items: work_items::WorkItems,
     projects: HashMap<ProjectId, Project>,
     /// Projects in the order the Engine first saw them. Its list is
     /// append-only, which makes this the one order here that never reshuffles.
     project_seniority: Vec<ProjectId>,
     selected_session_id: Option<SessionId>,
+    /// The local terminal most recently focused, whose directory a new
+    /// terminal can start in.
+    last_terminal: Option<SessionId>,
     sidebar_selection: HashSet<SessionId>,
     pending_close: Option<PendingClose>,
     /// Sessions with a `session.remove` in flight. The daemon terminates the
@@ -505,9 +518,11 @@ impl SessionStore {
                 sessions: HashMap::new(),
                 auxiliary_slots: HashMap::new(),
                 auxiliary_pending: HashSet::new(),
+                work_items: work_items::WorkItems::default(),
                 projects: HashMap::new(),
                 project_seniority: Vec::new(),
                 selected_session_id: selected_session_id.clone(),
+                last_terminal: None,
                 sidebar_selection: HashSet::new(),
                 pending_close: None,
                 closing: HashSet::new(),
@@ -1716,6 +1731,12 @@ impl SessionStore {
                     self.refresh_workspaces();
                 }
             }
+            EventName::SESSION_REVEAL => {
+                if let Ok(p) = serde_json::from_value::<diri_proto::SessionIdParams>(event.params) {
+                    self.select(p.session_id);
+                }
+                return StoreEventChange::Model;
+            }
             EventName::SESSION_CLIPBOARD => {
                 if let Ok(event) =
                     serde_json::from_value::<diri_proto::SessionClipboardEvent>(event.params)
@@ -2682,18 +2703,36 @@ impl SessionStore {
                 host: session.host.clone(),
                 account_profile_id: None,
                 same_repo_as: None,
+                start_directory: None,
+                note_id: None,
             },
         });
         true
     }
 
     pub fn spawn_kind(&mut self, kind: AgentKind, options: SpawnOptions) {
+        self.spawn_kind_adopting(kind, options, None);
+    }
+
+    /// Opens a notes file no Session claims as a note Session. The Engine
+    /// adopts by note id, so a repeat lands on the same Session.
+    pub fn open_note_file(&mut self, note_id: String, options: SpawnOptions) {
+        self.spawn_kind_adopting(AgentKind::NOTE, options, Some(note_id));
+    }
+
+    fn spawn_kind_adopting(
+        &mut self,
+        kind: AgentKind,
+        options: SpawnOptions,
+        note_id: Option<String>,
+    ) {
         let target = options
             .workspace_target
             .clone()
             .map(SpawnDestination::Workspace)
             .or_else(|| options.window_target.clone().map(SpawnDestination::Window));
-        let params = self.spawn_params(kind, options);
+        let mut params = self.spawn_params(kind, options);
+        params.note_id = note_id;
         if let Some(target) = target {
             self.request_workspace_spawn(target, params);
         } else {
@@ -2707,7 +2746,7 @@ impl SessionStore {
         kind: AgentKind,
         options: SpawnOptions,
     ) -> SessionSpawnParams {
-        let local_context = options
+        let source = options
             .workspace_target
             .as_ref()
             .and_then(|target| self.workspace_spawn_source(target))
@@ -2718,14 +2757,22 @@ impl SessionStore {
                     .and_then(|target| target.selected_session.as_ref())
                     .and_then(|id| self.sessions.get(id))
                     .map(Arc::as_ref)
-            })
-            .map(|session| {
-                if session.host.is_none() {
-                    session.cwd.clone()
-                } else {
-                    self.local_fallback_directory_for(Some(session))
-                }
             });
+        let followed = (kind == AgentKind::SHELL
+            && options.host.is_none()
+            && options.cwd.is_none()
+            && options.worktree.is_none()
+            && self.prefs.terminal_follows_last_directory)
+            .then(|| self.terminal_to_follow(source.or_else(|| self.selected_session())))
+            .flatten();
+        let start_directory = followed.and_then(|terminal| terminal.terminal_cwd.clone());
+        let local_context = followed.or(source).map(|session| {
+            if session.host.is_none() {
+                session.cwd.clone()
+            } else {
+                self.local_fallback_directory_for(Some(session))
+            }
+        });
         let host = options.host;
         let cwd = if let Some(host_id) = &host {
             // Remote spawn: local directories are meaningless — use the
@@ -2764,7 +2811,28 @@ impl SessionStore {
             host,
             account_profile_id: options.account_profile_id,
             same_repo_as: options.same_repo_as,
+            start_directory,
+            note_id: None,
         }
+    }
+
+    /// The terminal a new terminal starts beside: the focused one, else the
+    /// last one used in the same project, else, with nothing focused, the
+    /// last one used at all. It opens in that terminal's project and in the
+    /// directory it had `cd`'d to.
+    fn terminal_to_follow<'a>(
+        &'a self,
+        source: Option<&'a SessionRecord>,
+    ) -> Option<&'a SessionRecord> {
+        if let Some(source) = source.filter(|session| is_local_terminal(session)) {
+            return Some(source);
+        }
+        self.last_terminal
+            .as_ref()
+            .and_then(|id| self.sessions.get(id))
+            .map(Arc::as_ref)
+            .filter(|terminal| is_local_terminal(terminal) && !terminal.is_archived())
+            .filter(|terminal| source.is_none_or(|source| source.project_id == terminal.project_id))
     }
 
     pub fn reparent_worktree(&self, params: diri_proto::SessionReparentWorktreeParams) {
@@ -2867,6 +2935,13 @@ impl SessionStore {
     fn focus_session(&mut self, id: SessionId) {
         let selection_changed = self.selected_session_id.as_ref() != Some(&id);
         self.selected_session_id = Some(id.clone());
+        if self
+            .sessions
+            .get(&id)
+            .is_some_and(|session| is_local_terminal(session))
+        {
+            self.last_terminal = Some(id.clone());
+        }
         self.unread_holds.remove(&id);
         if self.window_navigation_enabled {
             self.invalidate_projection();
@@ -3679,6 +3754,20 @@ async fn run_effects(
                 }
                 Err(error) => Err(error),
             },
+            StoreEffect::StartWorkItem {
+                ticket,
+                params,
+                link,
+            } => {
+                tokio::spawn(work_items::run(
+                    Arc::clone(&client),
+                    Arc::clone(&store),
+                    ticket,
+                    params,
+                    link,
+                ));
+                Ok(())
+            }
             StoreEffect::SpawnAuxiliary { params, slot } => {
                 let parent = params.parent.clone().expect("auxiliary parent");
                 let result = client.spawn(params).await;
@@ -3995,7 +4084,9 @@ fn action_context(effect: &StoreEffect) -> Option<ActionContext> {
                 title: title.clone(),
             }),
         ),
-        StoreEffect::Spawn(_) => ("Create session failed", None),
+        StoreEffect::Spawn(_) | StoreEffect::StartWorkItem { .. } => {
+            ("Create session failed", None)
+        }
         StoreEffect::SpawnAuxiliary { .. } => ("Open terminal failed", None),
         StoreEffect::Migrate { .. } => ("Move session failed", None),
         StoreEffect::ReparentWorktree(_) => ("Move session to worktree failed", None),
@@ -4039,3 +4130,8 @@ pub fn prefs_path_in_home(home: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests;
+
+/// A shell on this machine, whose live directory the Engine can read.
+fn is_local_terminal(session: &SessionRecord) -> bool {
+    session.kind == AgentKind::SHELL && session.host.is_none()
+}

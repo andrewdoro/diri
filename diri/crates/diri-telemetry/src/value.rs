@@ -72,6 +72,46 @@ pub fn id(value: impl AsRef<str>) -> Id {
     })
 }
 
+/// A closed classification of agent manifest ids, for metric names that must
+/// be `&'static str` and must not grow with the agent catalog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentClass {
+    Claude,
+    Codex,
+    Cursor,
+    Gemini,
+    /// A login shell or a user command (`shell`, `generic`).
+    Shell,
+    Other,
+}
+
+impl AgentClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Cursor => "cursor",
+            Self::Gemini => "gemini",
+            Self::Shell => "shell",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// The [`AgentClass`] of a manifest id (`claude-code`, `codex`, ...).
+#[must_use]
+pub fn agent_class(manifest_id: &str) -> AgentClass {
+    match manifest_id {
+        "claude-code" => AgentClass::Claude,
+        "codex" => AgentClass::Codex,
+        "cursor" => AgentClass::Cursor,
+        "gemini" => AgentClass::Gemini,
+        "shell" | "generic" => AgentClass::Shell,
+        _ => AgentClass::Other,
+    }
+}
+
 /// Scrubs and bounds free-form text. See [`Text`].
 #[must_use]
 pub fn text(value: impl AsRef<str>) -> Text {

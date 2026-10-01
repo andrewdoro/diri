@@ -837,6 +837,10 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
         }
     }
 
@@ -876,6 +880,7 @@ mod tests {
             rows: Some(3),
             epoch_offset,
             secret_input: None,
+            awaiting_line: None,
         }
     }
 

@@ -38,6 +38,12 @@ pub enum PaletteCommand {
     SyncPrefs {
         host: String,
     },
+    /// Show a note (from the notes ⌘K finds while typing), with the caret
+    /// on the block that matched.
+    OpenNote {
+        note_id: String,
+        block: Option<usize>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -312,6 +318,9 @@ fn append_management_actions(
                     | PaletteCommand::SyncPrefs { .. }
                     | PaletteCommand::Action(
                         CommandId::OpenWorktrees
+                            | CommandId::NewNote
+                            | CommandId::ShowTodos
+                            | CommandId::SearchNotes
                             | CommandId::ToggleSidebar
                             | CommandId::HorizontalTabs
                             | CommandId::VerticalTabs
@@ -456,6 +465,13 @@ pub fn actions_for_default_host(
         }
     }
 
+    // The open note's earlier versions.
+    if let Some(session) = selected
+        && session.is_note()
+    {
+        result.push(registered_action(CommandId::NoteVersionHistory));
+    }
+
     // Session handoff: move the SELECTED Claude session across hosts (v1 is
     // Claude-only — other kinds have no reliable resume, so no entries).
     if let Some(session) = selected
@@ -515,6 +531,9 @@ pub fn actions_for_default_host(
 
     result.extend([
         registered_action(CommandId::OpenWorktrees),
+        registered_action(CommandId::NewNote),
+        registered_action(CommandId::ShowTodos),
+        registered_action(CommandId::SearchNotes),
         registered_action(CommandId::ToggleSidebar),
         registered_action(CommandId::HorizontalTabs),
         registered_action(CommandId::VerticalTabs),
@@ -1101,6 +1120,9 @@ mod tests {
                 "move-pane-down",
                 "new-default-in-/work/diri",
                 "worktrees",
+                "new-note",
+                "todos",
+                "search-notes",
                 "toggle-sidebar",
                 "horizontal-tabs",
                 "vertical-tabs",
@@ -1259,6 +1281,10 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
         }
     }
 

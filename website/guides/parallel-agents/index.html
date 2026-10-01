@@ -4,37 +4,79 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#191724">
-  <title>Run Claude Code and Codex in parallel · Diri</title>
-  <meta name="description" content="Run Claude Code and Codex side by side in Diri. Give each agent its own Git worktree, split the task, and review the changes before merging.">
+  <title>Run several agents at once · Diri</title>
+  <meta name="description" content="Run several AI agents side by side in diri, read their status in the sidebar, jump to whichever needs you, and give each task its own copy of a project.">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://diri.sh/guides/parallel-agents/">
   <meta property="og:type" content="article">
   <meta property="og:site_name" content="Diri">
-  <meta property="og:title" content="Run Claude Code and Codex in parallel">
-  <meta property="og:description" content="Run Claude Code and Codex side by side in Diri. Give each agent its own Git worktree, split the task, and review the changes before merging.">
+  <meta property="og:title" content="Run several agents at once">
+  <meta property="og:description" content="Run several AI agents side by side in diri, read their status in the sidebar, jump to whichever needs you, and give each task its own copy of a project.">
   <meta property="og:url" content="https://diri.sh/guides/parallel-agents/">
   <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
-  <meta property="og:image:alt" content="Diri, a workspace for coding agents.">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/guides.css">
-  <script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Run Claude Code and Codex in parallel", "description": "Run Claude Code and Codex side by side in Diri. Give each agent its own Git worktree, split the task, and review the changes before merging.", "url": "https://diri.sh/guides/parallel-agents/", "inLanguage": "en", "publisher": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}}</script>
+  <script src="/guides.js" defer></script>
+  <script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Run several agents at once", "description": "Run several AI agents side by side in diri, read their status in the sidebar, jump to whichever needs you, and give each task its own copy of a project.", "url": "https://diri.sh/guides/parallel-agents/", "inLanguage": "en", "publisher": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}}</script>
 </head>
 <body class="guide-page">
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="site-wrap">
     <header class="site-header">
-      <a class="wordmark" href="/" aria-label="Diri home"><span class="brand-mark" aria-hidden="true"></span>diri</a>
-      <nav class="guide-nav" aria-label="Main"><a href="/guides/" aria-current="location">Guides</a><a href="https://github.com/cristicretu/diri">GitHub ↗</a></nav>
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/" aria-current="page">Guides</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
     </header>
     <main id="main">
-      <div class="guide-heading"><a class="eyebrow" href="/guides/">Guides / Workflow</a><h1>Run Claude Code and Codex in parallel</h1><p>Two agents. Two branches. One place to follow the work.</p></div>
-      <div class="guide-layout"><nav class="guide-toc" aria-label="On this page"><span>On this page</span><a href="#before-you-start">Before you start</a><a href="#split-the-work">1. Split the work</a><a href="#start-the-agents">2. Start each agent in a worktree</a><a href="#follow-progress">3. Follow progress</a><a href="#review-and-combine">4. Review and combine</a></nav>
-        <article class="guide-content"><section id="before-you-start"><h2>Before you start</h2><p>Install <a href="https://github.com/cristicretu/diri/releases/latest">Diri</a> and the Claude Code and Codex CLIs. Sign in to each agent using its own setup flow, then open a local Git repository with at least one commit.</p><p>Diri uses your existing tools and accounts. If an installed agent is missing, open <strong>Settings → Agents</strong> and refresh discovery.</p></section><section id="split-the-work"><h2>1. Split the work</h2><p>Choose tasks that can be reviewed independently. In a small task-list project, one agent can implement filtering while the other adds a summary function.</p><div class="task-pair"><div><span class="eyebrow">Claude Code</span><p>Add <code>filterTasks(tasks, status)</code> in a new module, with tests for all, open, and done.</p></div><div><span class="eyebrow">Codex</span><p>Add <code>summarizeTasks(tasks)</code> in a new module, with tests for total, open, and done counts.</p></div></div><p>Specify the files each task owns. Agree on shared data shapes first. Two agents changing the same interface will still need coordination.</p></section><section id="start-the-agents"><h2>2. Start each agent in a worktree</h2><ol><li>Open <strong>New Agent</strong> and select your project.</li><li>Choose <strong>Claude Code</strong>. Switch <strong>Current folder</strong> to <strong>New worktree</strong>.</li><li>Give the session a clear title, enter the first task, and launch.</li><li>Repeat for <strong>Codex</strong>, selecting the same project and another <strong>New worktree</strong>.</li></ol><p>Each agent gets a separate checkout and branch. Their edits stay apart while they run. Worktrees share the Git repository; they do not isolate ports, databases, or external services.</p><p class="guide-note">This workflow uses a local repository. For remote work, start with an existing project directory on the host.</p></section><section id="follow-progress"><h2>3. Follow progress</h2><p>Use the sidebar to switch between sessions and see which one is working or needs input. Read each agent’s request before approving a command. If one task discovers a change to the shared interface, pass that decision to the other agent.</p><p>You can close and reopen Diri while local sessions keep running. This does not keep the computer awake or preserve processes across a reboot.</p></section><section id="review-and-combine"><h2>4. Review and combine</h2><p>Open each session’s <strong>Changes</strong> pane. Check the diff, ask the agent to run the relevant tests, and review the result. Keep each task in its own commit or pull request.</p><p>Merge one branch, bring the other up to date, and run the tests again with both changes present. Separate worktrees prevent agents from overwriting each other’s files during the task; the combined result still needs review.</p><p>For setup and shortcuts, see the <a href="https://github.com/cristicretu/diri/blob/main/docs/GETTING_STARTED.md">getting-started guide</a>.</p></section><aside class="guide-next"><span class="eyebrow">Next guide</span><a href="/guides/remote-sessions/">Keep coding-agent sessions running over SSH <span aria-hidden="true">→</span></a></aside></article>
+      <header class="guide-heading"><a class="eyebrow" href="/guides/">Guides · Work with many agents</a><h1>Run several agents at once</h1><p>Start a second agent while the first one works, see every status at a glance, and give each task its own copy of the project.</p>
+        <div class="guide-meta"><span>6 min read</span><span>Everyone</span></div></header>
+      <div class="guide-layout"><nav class="guide-toc" aria-label="On this page"><span>On this page</span><a href="#start-another">1. Start another agent</a><a href="#read-the-sidebar">2. Read the sidebar</a><a href="#jump-to-whoever-needs-you">3. Jump to whoever needs you</a><a href="#separate-copies">4. Keep agents out of each other’s way</a><a href="#bring-it-together">5. Bring it together</a></nav>
+        <article class="guide-content"><div class="learn"><strong>You will learn</strong><ul><li>How to read the sidebar</li><li>How to jump straight to the agent that needs you</li><li>How to stop two agents editing the same files</li></ul></div><section id="start-another" class="step"><h2><span class="step-n">1</span>Start another agent</h2>
+<p>You do not have to wait. While one agent works, open <strong>New Agent</strong> again, or press <kbd>⌘</kbd><kbd>T</kbd>, and start the next. Mix agents freely: Claude Code on one task, Codex on another.</p>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Research the five biggest competitors in our market and save a table of their pricing in competitors.md.</p><button class="prompt-copy" type="button">Copy</button></div>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>While that runs: draft a launch email for our existing customers in email.md.</p><button class="prompt-copy" type="button">Copy</button></div></section><section id="read-the-sidebar" class="step"><h2><span class="step-n">2</span>Read the sidebar</h2>
+<p>Every session is a row, and the row tells you what is happening without opening it:</p>
+<figure class="shot"><img src="/assets/guides/sidebar.webp" width="248" height="370" alt="The diri sidebar: a project with sessions, one needing input, one working with two helper agents nested under it." loading="lazy" decoding="async"><figcaption>Every session is a row. The logo on the right shows which agent it is; the mark on the left shows what it is doing.</figcaption></figure>
+<dl class="defs">
+<div><dt><span class="tone working">Spinning</span></dt><dd>Working. Leave it alone.</dd></div>
+<div><dt><span class="tone amber">Amber</span></dt><dd>Needs you. It asked a question or wants permission.</dd></div>
+<div><dt><span class="tone green">Green</span></dt><dd>Done, and you have not looked yet.</dd></div>
+<div><dt><span class="tone grey">Grey</span></dt><dd>Idle, or finished and already seen.</dd></div>
+<div><dt><span class="tone grey">Moon</span></dt><dd>Hibernated to save memory. Click it to wake it.</dd></div>
+</dl></section><section id="jump-to-whoever-needs-you" class="step"><h2><span class="step-n">3</span>Jump to whoever needs you</h2>
+<ul>
+<li>Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>J</kbd> to go straight to the next session waiting on you.</li>
+<li>Press <kbd>⌘</kbd><kbd>1</kbd> through <kbd>⌘</kbd><kbd>9</kbd> to switch between sessions in sidebar order.</li>
+<li>The bell at the top right (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>I</kbd>) collects every “needs you” and “finished” moment, and the Dock icon shows how many are unread.</li>
+</ul>
+<aside class="note"><strong>Reply without switching</strong><p>When an agent asks a plain question, the macOS notification has a <strong>Reply</strong> button. Type your answer there and keep doing what you were doing.</p></aside></section><section id="separate-copies" class="step"><h2><span class="step-n">4</span>Keep agents out of each other’s way</h2>
+<p>Two agents in the same folder can edit the same file at the same time and overwrite each other. Two simple ways to avoid that:</p>
+<ol>
+<li><strong>Give them different files.</strong> Say it in the task: “only edit pricing.md”, “only work inside the blog folder”.</li>
+<li><strong>Give each its own copy.</strong> If the folder is a Git project, ask for it in the task. The agent makes its own copy of the project on a separate branch, called a <strong>worktree</strong>, and nothing it does touches the others until you merge it.</li>
+</ol>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Use diri to do this in a new worktree so it does not touch my current files: rewrite the onboarding emails in the emails folder.</p><button class="prompt-copy" type="button">Copy</button></div>
+<p>Worktrees separate files only. Agents still share the same accounts, the internet and anything running on your Mac.</p></section><section id="bring-it-together" class="step"><h2><span class="step-n">5</span>Bring it together</h2>
+<p>When the agents finish, read each result in its own session. If they worked in separate copies, review each one in the <a href="/guides/review-changes/">Review panel</a> and merge them one at a time.</p>
+<p>Or let an agent do the coordinating for you. That is the next guide: <a href="/guides/agent-teams/">Let agents work as a team</a>.</p></section><nav class="guide-pager" aria-label="More guides"><a class="prev" href="/guides/never-lose-work/"><span>Previous</span>Never lose your work</a><a class="next" href="/guides/agent-teams/"><span>Next</span>Let agents work as a team</a></nav></article>
       </div>
     </main>
-    <footer class="site-footer guide-footer"><a href="/">diri</a><nav aria-label="Resources"><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a></nav></footer>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
   </div>
 </body>
 </html>

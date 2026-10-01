@@ -256,11 +256,14 @@ struct SyncState<T: Timeout> {
 
     /// Bytes read during the synchronized update.
     buffer: Vec<u8>,
+
+    /// DIRI PATCH: synchronized updates ended by their ESU so far.
+    completed: u64,
 }
 
 impl<T: Timeout> Default for SyncState<T> {
     fn default() -> Self {
-        Self { buffer: Vec::new(), timeout: Default::default() }
+        Self { buffer: Vec::new(), timeout: Default::default(), completed: 0 }
     }
 }
 
@@ -291,6 +294,13 @@ impl<T: Timeout> Processor<T> {
     /// Synchronized update timeout.
     pub fn sync_timeout(&self) -> &T {
         &self.state.sync_state.timeout
+    }
+
+    /// DIRI PATCH: how many synchronized updates the child has closed with
+    /// its ESU so far. Updates ended by the timeout or the buffer limit do
+    /// not count: only an ESU says the frame is complete.
+    pub fn synchronized_updates_completed(&self) -> u64 {
+        self.state.sync_state.completed
     }
 
     /// Process a new byte from the PTY.
@@ -411,6 +421,7 @@ impl<T: Timeout> Processor<T> {
                 self.state.sync_state.timeout.set_timeout(SYNC_UPDATE_TIMEOUT);
                 bsu_offset = Some(offset);
             } else if escape == ESU_CSI {
+                self.state.sync_state.completed = self.state.sync_state.completed.wrapping_add(1);
                 self.stop_sync_internal(handler, bsu_offset);
                 break;
             }
@@ -2418,6 +2429,27 @@ mod tests {
         parser.advance(&mut handler, b"26l");
         assert_eq!(parser.state.sync_state.timeout.is_sync, 0);
         assert!(handler.attr.is_some());
+    }
+
+    #[test]
+    fn completed_synchronized_updates_are_counted() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = MockHandler::default();
+        assert_eq!(parser.synchronized_updates_completed(), 0);
+
+        // Split across writes, then whole in one write.
+        parser.advance(&mut handler, b"\x1b[?2026hhalf");
+        assert_eq!(parser.synchronized_updates_completed(), 0);
+        parser.advance(&mut handler, b" done\x1b[?2026l");
+        assert_eq!(parser.synchronized_updates_completed(), 1);
+        parser.advance(&mut handler, b"\x1b[?2026hwhole\x1b[?2026l");
+        assert_eq!(parser.synchronized_updates_completed(), 2);
+
+        // A stray ESU outside an update and a timed-out update do not count.
+        parser.advance(&mut handler, b"\x1b[?2026l");
+        parser.advance(&mut handler, b"\x1b[?2026hstalled");
+        parser.stop_sync(&mut handler);
+        assert_eq!(parser.synchronized_updates_completed(), 2);
     }
 
     #[test]

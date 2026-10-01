@@ -19,13 +19,14 @@ function paintIcons(root = document) {
   });
 }
 const chats = {
+  release: { title: 'Ship the 0.9 release', agent: 'claude', name: 'Claude Code', view: 'swarm', prompt: 'Ship 0.9. Split the work across agents, verify each part, and report back.' },
   website: { title: 'Build the Diri website', agent: 'codex', name: 'Codex', prompt: 'Make a website for Diri using the app’s design system.' },
   notes: { title: 'Weekly plan', agent: 'claude', name: 'Claude Code', prompt: 'Create a weekly plan from these notes.' },
   details: { title: 'Keyboard navigation', agent: 'cursor', name: 'Cursor', prompt: 'Fix keyboard navigation in the command menu.' },
   weekend: { title: 'Travel map', agent: 'gemini', name: 'Gemini', prompt: 'Build a map of places to visit.' }
 };
 let notesAnswer = null;
-let currentChat = 'website';
+let currentChat = 'release';
 let overlay = null;
 let previousFocus;
 let page = 'commands';
@@ -41,7 +42,7 @@ function selectChat(id) {
   const logo = $('.current-agent .agent-logo');
   logo.dataset.agent = chat.agent;
   logo.className = `agent-logo ${chat.agent}`;
-  const preview = agentPreviews[chat.agent].render(chat, notesAnswer);
+  const preview = agentPreviews[chat.view || chat.agent].render(chat, notesAnswer);
   $('.terminal-body').dataset.cli = chat.agent;
   $('#terminal-content').innerHTML = `<div class="terminal-scene">${preview.html}</div>`;
   $('.terminal-composer').innerHTML = preview.composer;
@@ -49,12 +50,10 @@ function selectChat(id) {
   $('.changes-content').innerHTML = preview.changes;
   $('.diff-count').textContent = `+${$$('.changes-content .added').length}`;
   $$('.agent-switch').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.chat === id)));
-  $('.new-chat small').textContent = chat.name;
+  const newAgent = $('.new-chat-agent');
+  newAgent.dataset.agent = chat.agent;
+  newAgent.className = `agent-logo new-chat-agent ${chat.agent}`;
   paintIcons();
-}
-function setTab(view) {
-  $$('.demo-tab').forEach(tab => { const active = tab.dataset.view === view; tab.classList.toggle('active', active); tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1; });
-  $('#demo-window').setAttribute('aria-labelledby', `tab-${view}`);
 }
 function closeOverlay(restoreFocus = true) {
   $$('.floating-panel').forEach(el => { el.hidden = true; });
@@ -64,7 +63,6 @@ function closeOverlay(restoreFocus = true) {
   $('.app-sidebar').inert = false;
   $('.app-main').inert = false;
   $('.changes-panel').inert = false;
-  setTab('workspace');
   if (restoreFocus && previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
 }
 function openOverlay(kind) {
@@ -78,15 +76,14 @@ function openOverlay(kind) {
   $('#demo-shade').hidden = false;
   const panel = $(kind === 'command' ? '#palette' : `#${kind}-panel`);
   panel.hidden = false;
-  setTab(kind === 'notifications' ? 'workspace' : kind);
   if (kind === 'command') { goPage('commands'); $('#palette-input').focus({ preventScroll: true }); }
   else $('button, a', panel)?.focus({ preventScroll: true });
 }
 const chatItem = (id) => ({ label: chats[id].title, agent: chats[id].agent, action: () => { selectChat(id); closeOverlay(); } });
 function itemsForPage() {
   if (page === 'chats') return Object.keys(chats).map(chatItem);
-  if (page === 'projects') return [{ label: 'Diri', icon: 'folder', action: () => { selectChat('website'); closeOverlay(); } }, { label: 'Experiments', icon: 'folder', action: () => { selectChat('weekend'); closeOverlay(); } }];
-  return [chatItem('website'), chatItem('notes'), { label: 'Search chats', icon: 'search', hint: '⇧⌘H', action: () => goPage('chats') }, { label: 'Open project', icon: 'folder', hint: '⌘P', action: () => goPage('projects') }, { label: 'Notifications', icon: 'bell', action: () => openOverlay('notifications') }];
+  if (page === 'projects') return [{ label: 'Diri', icon: 'folder', action: () => { selectChat('release'); closeOverlay(); } }, { label: 'Experiments', icon: 'folder', action: () => { selectChat('weekend'); closeOverlay(); } }];
+  return [chatItem('release'), chatItem('website'), chatItem('notes'), { label: 'Search chats', icon: 'search', hint: '⇧⌘H', action: () => goPage('chats') }, { label: 'Open project', icon: 'folder', hint: '⌘P', action: () => goPage('projects') }, { label: 'Notifications', icon: 'bell', action: () => openOverlay('notifications') }];
 }
 function goPage(next) {
   page = next;
@@ -142,7 +139,6 @@ document.addEventListener('click', event => {
   if (target.dataset.open) { openOverlay(target.dataset.open); if (target.classList.contains('new-chat')) goPage('projects'); }
   if (target.hasAttribute('data-close')) closeOverlay();
   if (target.dataset.chat) { selectChat(target.dataset.chat); if (overlay) closeOverlay(); }
-  if (target.dataset.view) target.dataset.view === 'workspace' ? closeOverlay(false) : openOverlay(target.dataset.view);
   if (target.dataset.answer) {
     notesAnswer = target.dataset.answer;
     const state = $('.chat-row[data-chat="notes"] .chat-state');
@@ -153,15 +149,6 @@ document.addEventListener('click', event => {
     $('#terminal-content').tabIndex = -1;
     $('#terminal-content').focus({ preventScroll: true });
   }
-});
-$('.demo-tabs').addEventListener('keydown', event => {
-  const tabs = $$('.demo-tab');
-  const index = tabs.indexOf(document.activeElement);
-  if (index < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-  event.preventDefault();
-  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
-  tabs[next].focus();
-  tabs[next].click();
 });
 document.addEventListener('keydown', event => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); overlay === 'command' ? closeOverlay() : openOverlay('command'); }
@@ -183,3 +170,16 @@ $('#toggle-sidebar').addEventListener('click', () => {
   $('#demo-window').classList.toggle('sidebar-collapsed');
   $('#toggle-sidebar').setAttribute('aria-label', $('#demo-window').classList.contains('sidebar-collapsed') ? 'Expand sidebar' : 'Collapse sidebar');
 });
+
+// The download menu closes like a menu: outside click or Escape.
+const downloadMenu = $('.download-options');
+// Capture-phase pointerdown runs before any other handler can swallow the click.
+document.addEventListener('pointerdown', event => { if (downloadMenu.open && !downloadMenu.contains(event.target)) downloadMenu.open = false; }, true);
+downloadMenu.addEventListener('focusout', event => { if (event.relatedTarget && !downloadMenu.contains(event.relatedTarget)) downloadMenu.open = false; });
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && downloadMenu.open) { downloadMenu.open = false; $('summary', downloadMenu).focus(); } });
+
+// The masthead gains a little body once content scrolls beneath it.
+const masthead = $('.site-header');
+const syncMasthead = () => masthead.classList.toggle('scrolled', scrollY > 8);
+addEventListener('scroll', syncMasthead, { passive: true });
+syncMasthead();

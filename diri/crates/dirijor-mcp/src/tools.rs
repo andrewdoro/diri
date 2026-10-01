@@ -27,6 +27,17 @@ impl ToolDefinition {
     }
 }
 
+/// How agents keep a Diri note current. It is part of the MCP server's
+/// instructions and the note tools point at it, so every agent learns the
+/// same short contract. People who are not developers read these notes.
+pub const NOTES_CONTRACT: &str = "Diri Notes are the person's plans, briefs, and to-do lists. People who are not developers read them, so write plainly.\n\
+- If whoami shows origin_note, you were started from a note: read it first with read_note {\"note\":\"origin\"}. It is your brief.\n\
+- As you find important things (a decision, a finding, a blocker, a result, a link), add one short entry with write_note {\"note\":\"origin\",\"entry\":\"...\"}: one or two plain sentences, no progress chatter, no logs or code dumps. It is filed under your to-do, or in the note's Updates.\n\
+- Prefer adding. Change or remove existing text only when the person asks for it, or to keep your own entries current (tick a row, change \"Fix\" to \"Done\"): use edit_note, which works like editing a file (exact old text, new text), or replace_section for everything under a heading. Never silently delete the person's writing; every version is kept and the person can restore one.\n\
+- Tick your own sub-tasks as you finish them (write_note with todo and checked:true). Leave the to-do you were started from unticked: the person reviews your work and ticks it.\n\
+- Finish with a one-paragraph result: report_to_parent {\"status\":\"done\",\"summary\":\"...\"} is added to the note.\n\
+- To explain something or hand over a longer write-up, use create_note: it makes a new note under you in the sidebar, and open:true shows it to the person.";
+
 pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
     let kind_enum: Vec<Value> = kinds.iter().map(|kind| json!(kind)).collect();
     let mut tools = vec![
@@ -298,8 +309,48 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "whoami",
-            "Describe this session's identity, parent, ancestors, children, worktree, and cross-session write policy.",
+            "Describe this session's identity, parent, ancestors, children, worktree, and cross-session write policy. origin_note, when present, is the note you were started from: read it first with read_note {\"note\":\"origin\"}.",
             json!({"type": "object", "properties": {}}),
+        ),
+        ToolDefinition::new(
+            "list_notes",
+            "Find the person's Diri Notes (briefs, plans, to-do lists). Notes are kept by Diri, not in the project folder, so use this rather than searching files. Defaults to notes for your project; project:\"all\" lists every note, or pass a project folder. mentions:\"me\" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body. session_id is the note's sidebar Session.",
+            json!({"type":"object","properties":{"project":{"type":"string","minLength":1},"mentions":{"type":"string","minLength":1},"query":{"type":"string","minLength":1},"include_archived":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200}}}),
+        ),
+        ToolDefinition::new(
+            "read_note",
+            "Read one Diri note as Markdown. If you were started from a note, read note \"origin\" first: it is your brief. markdown is the note's canonical text (title first as a # line, tidy tables, normalised list markers): exactly what edit_note matches, so copy old_string from it. path is the note's .md file, which you may also edit with your own file tools; Diri keeps the change, a version before it, and the note's identity. Returns the text, its to-dos (block index, checked, linked sessions and their live status) and its @-mentions resolved to sessions or notes. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, part of a title, a note Session id, or \"origin\": the note you were started from (whoami shows it as origin_note).",
+            json!({"type":"object","properties":{"note":{"type":"string","minLength":1}},"required":["note"]}),
+        ),
+        ToolDefinition::new(
+            "write_note",
+            "Add to a Diri note without rewriting it; never deletes the person's text. entry: one short line when something matters (a decision, a finding, a blocker, a result, a link), filed under your to-do (or the one you name) or in the note's Updates; keep entries sparing, no progress chatter. checked: tick a to-do, e.g. your own sub-tasks as you finish them (the to-do you were started from is the person's to tick). link_session: put a session's chip on a to-do. append: longer Markdown at the end, rarely needed. Pick the to-do by todo (its text or part of it) or todo_index (from read_note). Delegated agents may write only to the note they were started from or notes that mention them.",
+            json!({"type":"object","properties":{"note":{"type":"string","minLength":1},"entry":{"type":"string","minLength":1},"append":{"type":"string","minLength":1,"maxLength":65536},"todo":{"type":"string","minLength":1},"todo_index":{"type":"integer","minimum":0},"checked":{"type":"boolean"},"link_session":{"type":"string","minLength":1}},"required":["note"]}),
+        ),
+        ToolDefinition::new(
+            "edit_note",
+            "Change a Diri note in place, like editing a Markdown file: old_string is exact text from read_note's markdown (title line included), new_string replaces it; an empty new_string deletes it. old_string must appear once unless replace_all. Use it when the person asks for a change, or to keep your own entries current (tick a table row, change \"Fix\" to \"Done\"); otherwise prefer write_note. Every version is kept, so the person can restore one. Returns the changed lines and the new version. Diri tidies the text after each change (tables are re-aligned); a table row still matches if only its spacing differs, and the reply says so. For anything else, copy the next old_string from the changed lines or a fresh read_note.",
+            json!({"type":"object","properties":{"note":{"type":"string","minLength":1},"old_string":{"type":"string","minLength":1},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["note","old_string","new_string"]}),
+        ),
+        ToolDefinition::new(
+            "replace_section",
+            "Replace everything under one heading of a Diri note, up to the next heading of the same or a higher level; the heading itself stays. heading is its text, optionally with its # marks (\"## Status\") when two headings share a name. markdown is the new content. Same rules as edit_note: change the person's writing only when asked.",
+            json!({"type":"object","properties":{"note":{"type":"string","minLength":1},"heading":{"type":"string","minLength":1},"markdown":{"type":"string","maxLength":65536}},"required":["note","heading","markdown"]}),
+        ),
+        ToolDefinition::new(
+            "create_note",
+            "Write a new Diri note for the person, e.g. an explanation (\"how sign-in works\") or a write-up. markdown is rich Markdown: headings, lists, to-dos, links, quotes, code. It appears under you in the sidebar, in your project (or project, a folder); open:true shows it to the person right away. Use this for anything longer than a write_note entry.",
+            json!({"type":"object","properties":{"title":{"type":"string","minLength":1,"maxLength":200},"markdown":{"type":"string","maxLength":65536},"project":{"type":"string","minLength":1},"open":{"type":"boolean"}},"required":["title"]}),
+        ),
+        ToolDefinition::new(
+            "start_from_note",
+            "Start an agent on a Diri note or one of its to-dos. The note becomes the agent's parent in the sidebar, the agent gets the note as its brief (plus the sessions it mentions), and its chip is added to the to-do. kind defaults to your own kind. separate_copy gives it its own copy of the project folder (projects under git only) so its changes stay apart until merged. prompt adds your own instructions. task:true tracks it like submit_task.",
+            json!({"type":"object","properties":{"note":{"type":"string","minLength":1},"todo":{"type":"string","minLength":1},"todo_index":{"type":"integer","minimum":0},"kind":{"type":"string","minLength":1},"separate_copy":{"type":"boolean"},"prompt":{"type":"string","minLength":1,"maxLength":65536},"task":{"type":"boolean"},"result_schema":result_schema(),"operation_id":message_id_schema()},"required":["note"]}),
+        ),
+        ToolDefinition::new(
+            "note_history",
+            "Earlier versions of a Diri note: when, by whom, and what changed, newest first. Pass version to read that version's text. Read-only: only the person restores a version.",
+            json!({"type":"object","properties":{"note":{"type":"string","minLength":1},"version":{"type":"integer","minimum":0}},"required":["note"]}),
         ),
         ToolDefinition::new(
             "list_children",
@@ -338,7 +389,7 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "report_to_parent",
-            "Deliver a structured update, result, blocker, or question to the session that delegated this work at most once. If your parent assigned you an open Diri task, the report is recorded on that task instead (update→progress, blocked→blocked, done→completed, failed→failed) and reaches the parent through wait_any/wait_for_task; set deliver:true to also type it into the parent's terminal. Identical reports are deduplicated. Reuse message_id on retries; choose a new one only for an intentional repeat. Inspect unknown outcomes without resending.",
+            "If your parent is a note, the report is added to the note: finish with status done and a one-paragraph result in summary (what you did, what changed, what is left), in plain words. Otherwise: deliver a structured update, result, blocker, or question to the session that delegated this work at most once. If your parent assigned you an open Diri task, the report is recorded on that task instead (update→progress, blocked→blocked, done→completed, failed→failed) and reaches the parent through wait_any/wait_for_task; set deliver:true to also type it into the parent's terminal. Identical reports are deduplicated. Reuse message_id on retries; choose a new one only for an intentional repeat. Inspect unknown outcomes without resending.",
             json!({
                 "type": "object",
                 "properties": {
@@ -645,5 +696,46 @@ mod tests {
             spawn.input_schema["properties"]["kind"]["enum"],
             json!(["opencode", "shell"])
         );
+    }
+
+    #[test]
+    fn note_tools_teach_agents_to_keep_their_note_current() {
+        let tools = tool_definitions_for(&[]);
+        let describe = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .map(|tool| tool.description.to_owned())
+                .unwrap_or_else(|| panic!("no tool {name}"))
+        };
+        assert!(describe("whoami").contains("read_note {\"note\":\"origin\"}"));
+        assert!(describe("read_note").contains("read note \"origin\" first"));
+        let write = describe("write_note");
+        for phrase in [
+            "a decision, a finding, a blocker, a result, a link",
+            "no progress chatter",
+            "your own sub-tasks",
+            "never deletes the person's text",
+        ] {
+            assert!(write.contains(phrase), "write_note: {phrase}");
+        }
+        assert!(describe("report_to_parent").contains("one-paragraph result"));
+        assert!(describe("create_note").contains("open:true"));
+        assert!(describe("note_history").contains("only the person restores"));
+        // Plain language for people who are not developers.
+        for name in [
+            "list_notes",
+            "read_note",
+            "write_note",
+            "create_note",
+            "note_history",
+            "edit_note",
+            "replace_section",
+        ] {
+            let text = describe(name).to_lowercase();
+            for jargon in ["repo", "worktree", "branch", "commit"] {
+                assert!(!text.contains(jargon), "{name} says {jargon}");
+            }
+        }
     }
 }

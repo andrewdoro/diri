@@ -33,6 +33,23 @@ pub enum WindowMaterial {
     Opaque,
 }
 
+/// Where a terminal `file:line` link opens. Stored by name; a name this
+/// build does not know reads as `Automatic` rather than failing the file.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FileEditor {
+    Cursor,
+    VsCode,
+    Zed,
+    /// The app macOS opens the file with; it receives no line number.
+    DefaultApp,
+    /// The first of Cursor, VS Code and Zed that is installed, otherwise the
+    /// file's default app. Last because serde's catch-all must be.
+    #[default]
+    #[serde(other)]
+    Automatic,
+}
+
 impl WindowMaterial {
     pub const fn to_ui(self) -> diri_ui::Material {
         match self {
@@ -174,6 +191,10 @@ fn sidebar_lineage_highlights_default() -> bool {
     true
 }
 
+fn terminal_follows_last_directory_default() -> bool {
+    true
+}
+
 const fn window_transparency_default() -> f32 {
     1.0
 }
@@ -222,6 +243,13 @@ pub struct Prefs {
     /// Command- or Control-click.
     pub terminal_open_links_on_click: bool,
     pub terminal_hide_pointer: bool,
+    /// Where a clicked `file:line` reference in terminal output opens.
+    #[serde(default)]
+    pub terminal_file_editor: FileEditor,
+    /// Start a new terminal in the directory the last terminal was in,
+    /// instead of its project's root. Missing files pick this up as on.
+    #[serde(default = "terminal_follows_last_directory_default")]
+    pub terminal_follows_last_directory: bool,
     pub terminal_paste_protection: bool,
     /// Whether the window blurs the desktop behind it. Field-level default so
     /// files written before it existed pick up glass.
@@ -312,6 +340,8 @@ impl Default for Prefs {
             terminal_copy_on_select: false,
             terminal_open_links_on_click: true,
             terminal_hide_pointer: true,
+            terminal_file_editor: FileEditor::Automatic,
+            terminal_follows_last_directory: true,
             terminal_paste_protection: false,
             window_material: WindowMaterial::Glass,
             window_transparency: window_transparency_default(),
@@ -559,6 +589,22 @@ mod tests {
         let rechosen = prefs_with_hibernation(15, 6, Some(1));
         assert_eq!(rechosen.hibernate_after_minutes, 15);
         assert_eq!(rechosen.memory_hard_limit_gb, 6);
+    }
+
+    #[test]
+    fn file_editor_choice_round_trips_and_unknown_names_fall_back() {
+        let fresh: Prefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(fresh.terminal_file_editor, FileEditor::Automatic);
+        let saved: Prefs = serde_json::from_str(r#"{"terminalFileEditor":"zed"}"#).unwrap();
+        assert_eq!(saved.terminal_file_editor, FileEditor::Zed);
+        let future: Prefs =
+            serde_json::from_str(r#"{"terminalFileEditor":"sublime","terminalCopyOnSelect":true}"#)
+                .unwrap();
+        assert_eq!(future.terminal_file_editor, FileEditor::Automatic);
+        assert!(
+            future.terminal_copy_on_select,
+            "the rest of the file survives"
+        );
     }
 
     #[test]

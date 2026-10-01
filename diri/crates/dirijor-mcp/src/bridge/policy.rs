@@ -50,6 +50,18 @@ pub(super) enum WriteAction<'a> {
     ReportToParent {
         target: &'a str,
     },
+    /// A new note under the caller (it runs nothing, so nothing is capped).
+    CreateNote,
+    /// Start an agent whose parent is this note Session.
+    StartFromNote {
+        note_session: &'a str,
+    },
+    /// An additive edit to a Diri note that mentions these session ids.
+    WriteNote {
+        mentions: &'a [String],
+        /// The note's own Session, when it has one.
+        note_session: Option<&'a str>,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -117,7 +129,7 @@ impl<'a> McpPolicy<'a> {
                 Relation::Unrelated
             }
             WriteAction::Manage { target } => {
-                let (target_record, relation) = self.target(target)?;
+                let (target_record, relation) = self.agent_target(target)?;
                 if relation == Relation::Caller {
                     return Err("an agent cannot manage its own session".into());
                 }
@@ -152,7 +164,7 @@ impl<'a> McpPolicy<'a> {
                 Relation::Unrelated
             }
             WriteAction::SendPrompt { target } => {
-                let (target_record, relation) = self.target(target)?;
+                let (target_record, relation) = self.agent_target(target)?;
                 if relation == Relation::Caller {
                     return Err(format!(
                         "send_prompt cannot target the calling session ({target}); answer normally instead"
@@ -174,7 +186,7 @@ impl<'a> McpPolicy<'a> {
                 relation
             }
             WriteAction::Release { target } => {
-                let (target_record, relation) = self.target(target)?;
+                let (target_record, relation) = self.agent_target(target)?;
                 if relation == Relation::Caller {
                     return Err("release_agent cannot terminate its caller".into());
                 }
@@ -187,6 +199,49 @@ impl<'a> McpPolicy<'a> {
                     return Err(format!("release_agent cannot terminate {reason}"));
                 }
                 relation
+            }
+            WriteAction::WriteNote {
+                mentions,
+                note_session,
+            } => {
+                // Notes are the user's. Root agents act for the user; a
+                // delegated agent may add only to notes about its own line:
+                // the note it descends from, or one that mentions it or an
+                // ancestor.
+                let line: Vec<&SessionRecord> = std::iter::once(self.caller)
+                    .chain(self.lineage.ancestors(&self.caller.id.0))
+                    .collect();
+                let reachable = line.iter().any(|record| {
+                    mentions.contains(&record.id.0) || note_session == Some(record.id.0.as_str())
+                });
+                if !self.is_root() && !reachable {
+                    return Err(
+                        "write_note denied: delegated sessions may write only to the note they were started from or notes that mention them or one of their ancestors"
+                            .into(),
+                    );
+                }
+                Relation::Unrelated
+            }
+            WriteAction::CreateNote => Relation::Unrelated,
+            WriteAction::StartFromNote { note_session } => {
+                let (note, _) = self.target(note_session)?;
+                if !note.is_note() {
+                    return Err(format!("{note_session} is not a note"));
+                }
+                let from_own_line = self
+                    .lineage
+                    .ancestors(&self.caller.id.0)
+                    .iter()
+                    .any(|record| record.id.0 == note_session);
+                if !self.is_root() && !from_own_line {
+                    return Err(
+                        "start_from_note denied: a delegated session may start work only from the note it was started from"
+                            .into(),
+                    );
+                }
+                self.check_depth()?;
+                self.check_live_children(note_session, 1)?;
+                Relation::Unrelated
             }
             WriteAction::ReportToParent { target } => {
                 let (_, relation) = self.target(target)?;
@@ -208,19 +263,37 @@ impl<'a> McpPolicy<'a> {
     /// Recursive delegation must terminate and a single orchestrator must not
     /// flood the machine. Both limits count live (unexited, unarchived) state.
     fn check_fan_out(&self, count: usize) -> Result<(), String> {
-        let depth = self.lineage.ancestors(&self.caller.id.0).len();
+        self.check_depth()?;
+        self.check_live_children(&self.caller.id.0, count)
+    }
+
+    fn check_depth(&self) -> Result<(), String> {
+        // Notes are where the user starts work, not delegation levels.
+        let depth = self
+            .lineage
+            .ancestors(&self.caller.id.0)
+            .into_iter()
+            .filter(|record| !record.is_note())
+            .count();
         let max_depth = limit("DIRIJOR_MAX_SPAWN_DEPTH", DEFAULT_MAX_SPAWN_DEPTH);
         if depth >= max_depth {
             return Err(format!(
                 "spawn denied: this session is at delegation depth {depth} (limit {max_depth}); do the work here or report back to your parent"
             ));
         }
+        Ok(())
+    }
+
+    /// Notes run nothing, so they never count against the limit.
+    fn check_live_children(&self, parent: &str, count: usize) -> Result<(), String> {
         let live = self
             .lineage
-            .children(&self.caller.id.0)
+            .children(parent)
             .into_iter()
             .filter(|child| {
-                !child.is_archived() && !matches!(child.status, SessionStatus::Exited(_))
+                !child.is_note()
+                    && !child.is_archived()
+                    && !matches!(child.status, SessionStatus::Exited(_))
             })
             .count();
         let max_live = limit("DIRIJOR_MAX_LIVE_CHILDREN", DEFAULT_MAX_LIVE_CHILDREN);
@@ -240,8 +313,27 @@ impl<'a> McpPolicy<'a> {
         Ok((record, self.lineage.relation(target)))
     }
 
+    /// A note has no terminal: nothing can be typed into, managed, or
+    /// released there. Reports to a parent note are handled by the caller.
+    fn agent_target(&self, target: &str) -> Result<(&'a SessionRecord, Relation), String> {
+        let (record, relation) = self.target(target)?;
+        if record.is_note() {
+            return Err(format!(
+                "{target} is a note, not an agent: read it with read_note and add to it with write_note"
+            ));
+        }
+        Ok((record, relation))
+    }
+
+    /// Started by the user: no parent, or a note the user started it from.
     fn is_root(&self) -> bool {
-        self.caller.parent.is_none()
+        match &self.caller.parent {
+            None => true,
+            Some(parent) => self
+                .lineage
+                .record(&parent.0)
+                .is_some_and(SessionRecord::is_note),
+        }
     }
 
     fn same_project(&self, target: &SessionRecord) -> bool {
@@ -265,7 +357,7 @@ impl<'a> McpPolicy<'a> {
     }
 }
 
-fn same_path(left: &str, right: &str) -> bool {
+pub(super) fn same_path(left: &str, right: &str) -> bool {
     let left = Path::new(left);
     let right = Path::new(right);
     left == right
@@ -320,6 +412,10 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
         }
     }
 

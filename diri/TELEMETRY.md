@@ -92,10 +92,24 @@ held, remote, hibernated, working, needs_input`), `clients` (open control
 and data connections) and `attached` (terminal attachments, previews
 excluded). `metrics` carries counters `rpc.calls, rpc.errors,
 engine.connections, engine.accept_errors, attach.reseeds, remote.delta_gaps,
-ssh.commands, ssh.channels` and timings `rpc, attach.seed, ssh.command`.
+ssh.commands, ssh.channels, hook.queued` (hook reports answered before a busy
+Registry was free, applied in order by the hook applier) and timings `rpc,
+rpc.hook_report` (the `hook.report` reply an Agent's synchronous hook waits
+on), `hook.apply_wait` (queue-to-Registry wait of a queued hook report, i.e.
+how stale its status was when it landed), `attach.seed, ssh.command`,
+plus the Engine's share of a keystroke's echo (first input of a burst, local
+sessions, ≤ 2 s): `input.echo.engine` (input written to the PTY or Holder →
+the first output the child produced after it: the Holder hop and the agent's
+own reaction time), the same per agent class as
+`input.echo.engine.<class>` (`claude`, `codex`, `cursor`, `gemini`, `shell`,
+`other`; never the raw agent id) and `input.echo.publish` (that output → the
+first grid frame queued to attached clients after it: the Engine's batching
+and coalescing).
 
 `modes` fields are `{mouse: "off"|"1000"|"1002"|"1003"|"unknown", sgr,
-alt_screen, bracketed_paste, app_cursor}` from the Engine's own emulator. The
+alt_screen, bracketed_paste, app_cursor, keyboard, focus}` from the Engine's
+own emulator (`keyboard`: kitty keyboard enhancements pushed; `focus`: DEC 1004
+focus reporting). The
 local Holder is a byte pipe with no parser, so terminal-mode facts are
 recorded by the Engine, not the Holder.
 
@@ -141,8 +155,10 @@ recorded by the Engine, not the Holder.
 | `session.exec` | debug | `session, defer_ms, ms, cols, rows` | a deferred launch waiting on the first client size |
 | `session.status` | debug | `session, from, to` | status transitions (`starting, idle, working, needs_input, exited, unknown`) |
 | `session.exit` | info | `session, agent, code, signal, requested, runtime_s, adopted, modes` | how every PTY child ended; `requested` distinguishes kills from crashes |
-| `session.early_exit` | incident | `session, agent, kind: exit\|returned_to_shell, code, signal, ms, modes` | an unrequested nonzero exit within 10 s of launch; or, for `returnToLoginShell` agents, the agent already gone 10 s after launch (its login shell is the foreground group *and* has no child left: under `fish -c` the agent shares the shell's group, so the group alone is not evidence) (a resume of a missing conversation: "No conversation found" → zsh) |
-| `session.agent_exited` | info | `session, agent, source: session_end_hook, runtime_s, modes` | a wrapped agent that ended later and left its login shell (checked 2 s after Claude's `SessionEnd`) |
+| `session.early_exit` | incident | `session, agent, kind: exit\|returned_to_shell, code, signal, ms, modes` | an unrequested nonzero exit within 10 s of launch; or, for `returnToLoginShell` agents, the agent already gone 10 s after launch, with the `code`/`signal` its wrapper reported (see `agent_exited`; absent when the login shell is not sh/bash/zsh/ksh/fish/csh) (its login shell is the foreground group *and* has no child left: under `fish -c` the agent shares the shell's group, so the group alone is not evidence) (a resume of a missing conversation: "No conversation found" → zsh) |
+| `session.agent_exited` | info/warn | `session, agent, source: session_end_hook\|wrapper, code, signal, runtime_s, modes` | `session_end_hook`: a wrapped agent that ended later and left its login shell (checked 2 s after Claude's `SessionEnd`). `wrapper`: the `returnToLoginShell` wrapper reported the agent's exit status (`OSC 6973;agent-exit;<$?>`, live output only; 128+N is split into `signal` N); warn when nonzero. Only the integer is sent |
+| `session.agent_relaunch_requested` | info | `session, agent` | a `returnToLoginShell` agent exited 0 with its manifest's `relaunchNotice` in the bottom screen lines (Codex after its startup self-update: "Please restart Codex.") |
+| `session.agent_relaunched` / `session.agent_relaunch_failed` | info / warn | `session`; failed adds `code` (hashed control error code) | the Engine replaced that tab's login shell with a fresh launch of the agent (resume of a known conversation, otherwise fresh), injection included |
 | `session.modes_left_on_exit` | warn | `session, agent, kind: pty_exit\|returned_to_shell, modes` | mouse tracking or bracketed paste still on after the program that enabled it exited: `^[[<35;14;25M` typed into the shell |
 | `session.conversation` | info | `session, agent, conv, previous, source: hook\|cursor_store\|codex_repair` | conversation ids assigned, discovered or changed |
 | `session.transcript` | debug | `session, path (hash), moved` | the transcript moving (worktree entry) |
@@ -181,7 +197,7 @@ recorded by the Engine, not the Holder.
 | `remote.helper_error` | error | `session, code, fatal` | structured Helper errors (stale epoch, wrong incarnation, ...) |
 | `remote.connection_fatal` | error | `session, reconnects` | protocol violations that fail the transport closed |
 | `remote.uncertain_input` | error | `session` | input whose delivery could not be proven; the session fails closed |
-| `remote.helper_ready` | info | `host, path: cached\|bootstrap\|reinstall, target, protocol, ms` | bootstrap and probe latency, artifact selection |
+| `remote.helper_ready` | info | `host, path: cached\|fused\|bootstrap\|reinstall, target, protocol, ms` | bootstrap and probe latency, artifact selection |
 | `remote.helper_failed` | incident | `host, forced, io, ms` | bootstrap failures (only structured I/O facts; never remote output) |
 | `remote.helper_upload` | info | `host, target, bytes, ok, ms` | Helper uploads |
 | `remote.persistence` | info | `host, capability: native-detach\|user-supervisor\|non-persistent` | persistence probe outcome |
@@ -234,6 +250,30 @@ of a main window), `term.paint` (one terminal element's prepaint + paint),
 `rpc.disconnected`, `pane.reseed`, `pane.attach_retries`,
 `pane.input_rejected`.
 
+Frame breakdown, one set per `ui.frame` sample: timings `ui.frame.cpu` (the
+main thread's CPU time over the same span; far below `ui.frame` means the
+frame waited on a busy Mac rather than computed), `ui.frame.layout` (GPUI:
+root and uncached renders plus layout requests), `ui.frame.prepaint` (Taffy
+layout, cached views that missed, element prepaint), `ui.frame.paint` (scene
+building up to the probe), `ui.frame.terminals` (terminal paints within the
+frame) and, on frames with assistive technology attached, `ui.frame.a11y`
+(the previous frame's accessibility-tree update); counters
+`ui.frame.views_rendered`, `ui.frame.views_reused` (cached views replayed),
+`ui.frame.terminal_paints`, `ui.frame.shape_misses` (terminal text-shaping
+cache misses) and `ui.frame.a11y_frames`. Divide a counter by `ui.frame.n`
+for a per-frame mean. With assistive technology attached (VoiceOver, and
+utilities that read other apps' windows: window managers, dictation, text
+expanders), GPUI re-renders every cached view nested in one that
+re-renders, so `views_rendered` per frame rises.
+
+Keystroke hops, same keystrokes as `input.echo`: `input.echo.transport`
+(input queued → the first grid frame after it reached the pane's transport
+task: socket, Engine, Holder, PTY and the agent), `input.echo.apply` (that
+frame → applied on the main thread), `input.echo.paint` (applied → the
+terminal painted it) and `input.echo.<class>` (input queued → painted, per
+agent class as above). `transport` minus the Engine's
+`input.echo.engine` + `input.echo.publish` is the sockets and the Holder.
+
 **Stall watchdog:** a background thread posts a ping to the main thread once
 a second (every 5 s while diri is not frontmost); the answer's latency is the
 stall. Idle cost is one wakeup per interval per side and no main-thread timer.
@@ -248,8 +288,8 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `app.sleep` / `app.wake` | info | | gaps that are sleep, not hangs; reconnect storms after wake |
 | `app.quit` | info | `uptime_s, windows_main, windows_opened` | clean exit vs crash (a timeline that just stops) |
 | `window.open` / `window.close` | info (main), debug (floating) | `kind` (`main`\|`floating`), `window`, `lived_s`, `open` | window churn vs RSS growth (closed-window leaks) |
-| `ui.frame` → `ui.slow_frame` | warn | `ms, window, surface` (`workbench`\|`settings`\|`palette`\|`launcher`), `workspace` | "diri is slow/janky"; frame ≥ 50 ms |
-| `ui.stall` | warn (1–3 s), incident (≥ 3 s) | `ms, ongoing, active` | beachballs, hangs; `ongoing=true` is written at 5 s while still stuck |
+| `ui.frame` → `ui.slow_frame` | warn (≥ 50 ms); debug (≥ 8.3 ms, at most one per 30 s) | `ms, window, surface` (`workbench`\|`settings`\|`palette`\|`launcher`), `workspace, active` (window key), `app_active`, `cpu_ms` (main-thread CPU in the frame), `faults` (process page faults in the frame), `idle_ms` (since the window's previous frame), `layout_ms, prepaint_ms, paint_ms, views, reused, terminals, terminal_ms, shape_misses, windows, a11y` | "diri is slow/janky"; which phase, how many views and terminals, whether assistive technology was attached. `cpu_ms` ≪ `ms` means the thread was starved or paging, not working; many `faults` after a long `idle_ms` means memory the system compressed being paged back in |
+| `ui.stall` | warn (1–3 s), incident (≥ 3 s) | `ms, ongoing, active, was_active` (frontmost when it began), `cpu_ms` (main-thread CPU during it), `faults`, `action` (static action name that finished inside it) | beachballs, hangs; `ongoing=true` is written at 5 s while still stuck. `cpu_ms` ≈ `ms`: busy on the main thread; ≈ 0: blocked (lock, synchronous call, AppKit) or not scheduled |
 | `ui.action` | debug | `action` (GPUI action name), `source` (`shortcut`\|`palette`) | what the user did just before a failure |
 | `ui.toast` | info | `title` (static toast title) | errors the user was shown ("Terminal", "Target unavailable", …) |
 | `privacy.notice_shown` / `privacy.upload_changed` | info | `upload` | consent history |
@@ -266,13 +306,13 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `pane.attached` | info | `session, reconnect, attempts, connect_ms, since_mount_ms` | attach latency, reattach loops |
 | `pane.attach_failing` | error | `session, attempts, reason, since_mount_ms` | a session that cannot be attached (3 failures) |
 | `pane.first_grid` | debug; warn if not a snapshot | `session, ms, snapshot` | first frame missing or a diff before a seed |
-| `pane.first_paint` | debug | `session, ms, grid_ms, parked` | attach → first painted content |
-| `pane.blank` | incident; warn if live with a (blank) grid | `session, agent, state, got_grid, frames, ms` | "session doesn't render": visible, running, nothing painted 10 s after mount |
+| `pane.first_paint` | debug | `session, ms, grid_ms, shown_ms, parked` | mount (or, for a pane nobody drew at mount, the first frame that showed it: `shown_ms` after mount) → the first frame that drew content, taken inside the terminal element's paint; `grid_ms` stays relative to mount. Once per mount of a resident per view. A pane that is never drawn (the selection pane under a workspace workbench, a warm pane of another tab, a window the system stopped drawing) records none; before 2026-09-30 the blank watchdog recorded those as a ~10 s "first paint" |
+| `pane.blank` | incident; warn if live with a blank grid | `session, agent, state, got_grid, content, frames, ms` | "session doesn't render": drawn at least once since mount, running, and no content painted 10 s after mount. `content=true` means the grid holds content that was never painted (a missed repaint: always an incident). A pane never drawn since mount is not reported |
 | `pane.detached` | warn | `session, live_ms, grids, reseeds` | "Terminal connection interrupted" toast |
 | `pane.drain_interrupted` | warn | `session` | input possibly lost on detach |
 | `pane.input_rejected` | warn (≤ 1 per 5 s per session) | `session, input` (`input`\|`mouse`\|`mouse_motion`\|`scroll`), `reason` (`passive_view`\|`disconnected`\|`overloaded`) | typing that goes nowhere; lost lease |
 | `pane.resize_storm` | warn (≤ 1/min) | `session, flips, cols, rows` | layouts fighting over the PTY size |
-| `pane.modes` | debug | `session, mouse, mouse_bits, alt_screen, bracketed_paste` | mouse tracking left on after an agent exits (`^[[<35;…M` in zsh) |
+| `pane.modes` | debug | `session, mouse, mouse_bits, alt_screen, bracketed_paste` | mouse tracking left on after an agent exits (`^[[<35;…M` in zsh). Once per session per change: every view attached to the session sees the same Modes chunk, and before 2026-09-30 each of them recorded it |
 | `pane.drop` | info | `session, files, outcome` (`paste`\|`upload`\|`refused`), `partial, remote` | Finder drops that did nothing |
 | `pane.drop_upload_failed` | error | `session` | remote drop copy failed |
 | `clipboard.copy` | info | `source` (`selection`\|`osc52`), `outcome` (`ok`\|`not_on_pasteboard`\|`empty_selection`\|`relayed`\|`stale`\|`app_inactive`\|`unknown_session`\|`no_listener`), `size`, `ms`/`age_ms`, `mouse_captured`, `session` | "copy doesn't work" (incl. agent-captured mouse) |
@@ -285,6 +325,31 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 Sizes are buckets (`0`, `<64`, `<1k`, `<16k`, `<256k`, `<1m`, `>=1m`); no
 clipboard, paste, keystroke or terminal content is ever recorded.
 
+
+
+### Notes
+
+Counts only, through `telemetry::notes_event(name, kind)`: a fixed event name
+and, where it helps, a fixed family. Never note text, titles, URLs, session or
+note ids.
+
+| kind | sev | fields | catches |
+|---|---|---|---|
+| `notes.link_editor.opened` | info | | ⌘K panel use |
+| `notes.link.pasted` | info | `kind` (as `notes.link.set`) | bare links pasted, by tool family |
+| `notes.mention.inserted` | info | `kind` (`session`\|`note`) | `@` use |
+| `notes.fold.toggled` | info | `kind` (`chevron`\|`keyboard`) | folding by hand (not the to-do handoff's programmatic folds) |
+| `notes.link.set` | info | `kind` (`notion`\|`google`\|`linear`\|`hubspot`\|`figma`\|`slack`\|`github`\|`dashboard`\|`mention`\|`web`) | which tools people link, to decide which chips matter |
+| `notes.link.removed` | info | | links taken back out |
+| `notes.image.added` | info | `kind` (`paste`\|`drop`\|`picker`) | how pictures get into notes |
+| `notes.image.failed` | info | `kind` (as above) | pictures refused (format, size, write) |
+| `notes.callout.added` | info | | callout use |
+| `notes.table.inserted` | info | `kind` (`slash`) | tables made from `/table` |
+| `notes.table.pasted` | info | `kind` (`markdown`\|`tsv`\|`csv`) | tables pasted, and from where (Sheets/Excel/Numbers arrive as TSV) |
+| `notes.table.row_added` | info | | rows added (menu, ⌃⇧↑/↓, Tab in the last cell, Return in a cell) |
+| `notes.table.col_added` | info | | columns added (menu, ⌃⇧←/→, a wider paste) |
+| `notes.search.opened` | info | | Search notes page opened (⇧⌘F, ⌘K, To-dos header) |
+| `notes.search.result_opened` | info | `kind` (`live`\|`archived`\|`orphan`) | which notes people go back to, and whether archived and Session-less files matter |
 
 ## Upload
 

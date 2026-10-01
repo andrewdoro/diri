@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Review what changed · Diri</title>
+  <meta name="description" content="Review every change an AI agent made in diri: see the differences file by file, keep or discard them, commit, follow pull request checks, and ask the agent to review itself.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/guides/review-changes/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Review what changed">
+  <meta property="og:description" content="Review every change an AI agent made in diri: see the differences file by file, keep or discard them, commit, follow pull request checks, and ask the agent to review itself.">
+  <meta property="og:url" content="https://diri.sh/guides/review-changes/">
+  <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <script src="/guides.js" defer></script>
+  <script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Review what changed", "description": "Review every change an AI agent made in diri: see the differences file by file, keep or discard them, commit, follow pull request checks, and ask the agent to review itself.", "url": "https://diri.sh/guides/review-changes/", "inLanguage": "en", "publisher": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}}</script>
+</head>
+<body class="guide-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/" aria-current="page">Guides</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <main id="main">
+      <header class="guide-heading"><a class="eyebrow" href="/guides/">Guides · Work with many agents</a><h1>Review what changed</h1><p>See every change an agent made before you keep it. Accept what you like, throw away what you do not, and ask the agent to check its own work.</p>
+        <div class="guide-meta"><span>6 min read</span><span>Everyone · Git projects</span></div></header>
+      <div class="guide-layout"><nav class="guide-toc" aria-label="On this page"><span>On this page</span><a href="#open-review">1. Open the Review panel</a><a href="#compare">2. Choose what to compare</a><a href="#keep-or-discard">3. Keep or throw away</a><a href="#ask-for-a-review">4. Ask the agent to check itself</a><a href="#pull-requests">5. Pull requests and checks</a></nav>
+        <article class="guide-content"><div class="learn"><strong>You will learn</strong><ul><li>How to see exactly what an agent changed</li><li>How to keep or throw away changes</li><li>How to ask the agent to check its own work</li></ul></div><section id="open-review" class="step"><h2><span class="step-n">1</span>Open the Review panel</h2>
+<p>Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>D</kbd> to open the right panel and choose <strong>Review</strong>. It lists every file the agent changed in its folder, with the lines it added and removed.</p>
+<p>This needs a Git project, the kind most software lives in. For any other folder the panel says <strong>Not a Git repository</strong>. You can still ask the agent directly:</p>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>List every file you created or changed in this session, with one line on what changed in each.</p><button class="prompt-copy" type="button">Copy</button></div></section><section id="compare" class="step"><h2><span class="step-n">2</span>Choose what to compare</h2>
+<p>At the top of the panel, choose what you are looking at:</p>
+<dl class="defs">
+<div><dt>Default branch</dt><dd>Everything this session changed, committed or not. The best view of the whole piece of work.</dd></div>
+<div><dt>HEAD</dt><dd>Only changes that are not committed yet.</dd></div>
+</dl></section><section id="keep-or-discard" class="step"><h2><span class="step-n">3</span>Keep or throw away</h2>
+<ul>
+<li><strong>Stage all</strong> marks the current changes as the ones you want to keep.</li>
+<li>Write a short message and click <strong>Commit</strong> to save them as one step in the project history.</li>
+<li><strong>Discard</strong> throws changes away. It asks once more before it does, because this cannot be undone.</li>
+</ul></section><section id="ask-for-a-review" class="step"><h2><span class="step-n">4</span>Ask the agent to check itself</h2>
+<p>In the Review panel, <strong>Ask active agent</strong> sends a ready-made request to the session's agent: <strong>Review</strong>, <strong>Find risks</strong>, or <strong>Suggest tests</strong>. You can also type your own follow-up.</p></section><section id="pull-requests" class="step"><h2><span class="step-n">5</span>Pull requests and checks</h2>
+<p>If the agent opened a pull request, the link icon in the session header shows it with its checks: <strong>Passed</strong>, <strong>Failed</strong> or <strong>Running</strong>. Open it for the checks and discussion, or go straight to GitHub.</p>
+<p>Prefer your own editor? In <strong>Settings → Appearance</strong>, set <strong>Open file links in</strong> to Cursor, VS Code, Zed or your default app.</p></section><nav class="guide-pager" aria-label="More guides"><a class="prev" href="/guides/agent-teams/"><span>Previous</span>Let agents work as a team</a><a class="next" href="/guides/remote-sessions/"><span>Next</span>Run agents on your own server</a></nav></article>
+      </div>
+    </main>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

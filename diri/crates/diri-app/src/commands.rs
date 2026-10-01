@@ -61,6 +61,10 @@ actions!(
         MovePaneUp,
         MovePaneDown,
         OpenWorktrees,
+        NewNote,
+        ShowTodos,
+        SearchNotes,
+        NoteVersionHistory,
         OpenSettings,
         // Palette destination: open Settings even when it is already visible.
         // OpenSettings retains the Cmd+, toggle behavior.
@@ -162,6 +166,10 @@ pub enum CommandId {
     MovePaneUp,
     MovePaneDown,
     OpenWorktrees,
+    NewNote,
+    ShowTodos,
+    SearchNotes,
+    NoteVersionHistory,
     OpenSettings,
     ToggleSidebar,
     ToggleTabOrientation,
@@ -629,6 +637,46 @@ pub const COMMANDS: &[CommandSpec] = &[
         "workspace move pane down dock"
     ),
     spec!(
+        NewNote,
+        "new-note",
+        Some("cmd-alt-n"),
+        Some("⌥⌘N"),
+        Some(APP_CONTEXT),
+        "New Note",
+        "doc.text",
+        "note notes markdown todo todos write memo prd plan doc"
+    ),
+    spec!(
+        ShowTodos,
+        "todos",
+        Some("cmd-ctrl-t"),
+        Some("⌃⌘T"),
+        Some(APP_CONTEXT),
+        "To-dos",
+        "checklist",
+        "todos to-dos tasks checklist open review notes"
+    ),
+    spec!(
+        SearchNotes,
+        "search-notes",
+        Some("cmd-shift-f"),
+        Some("⇧⌘F"),
+        Some(APP_CONTEXT),
+        "Search notes",
+        "magnifyingglass",
+        "notes find search open archived memo doc"
+    ),
+    spec!(
+        NoteVersionHistory,
+        "note-version-history",
+        None,
+        None,
+        Some(APP_CONTEXT),
+        "Version History…",
+        "arrow.counterclockwise",
+        "note history versions earlier restore undo changes"
+    ),
+    spec!(
         OpenWorktrees,
         "worktrees",
         Some("cmd-alt-w"),
@@ -960,7 +1008,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("⌘E"),
         Some(TERMINAL_CONTEXT),
         "Insert path",
-        "doc.text.magnifyingglass",
+        "magnifyingglass",
         "insert path file picker fuzzy terminal"
     ),
     spec!(
@@ -1041,6 +1089,9 @@ fn bind_active_keys(cx: &mut App, overrides: &ShortcutOverrides) {
             .iter()
             .flat_map(|command| command.key_bindings(overrides)),
     );
+    // The Notes window's editing keys live in their own key contexts, so
+    // they never shadow terminal or app shortcuts in the main window.
+    cx.bind_keys(crate::notes::key_bindings());
 }
 
 fn active_shortcut_overrides() -> &'static RwLock<ShortcutOverrides> {
@@ -1187,6 +1238,10 @@ impl CommandSpec {
             CommandId::MovePaneDown => KeyBinding::new(key, MovePaneDown, context),
 
             CommandId::OpenWorktrees => KeyBinding::new(key, OpenWorktrees, context),
+            CommandId::NewNote => KeyBinding::new(key, NewNote, context),
+            CommandId::ShowTodos => KeyBinding::new(key, ShowTodos, context),
+            CommandId::SearchNotes => KeyBinding::new(key, SearchNotes, context),
+            CommandId::NoteVersionHistory => KeyBinding::new(key, NoteVersionHistory, context),
             CommandId::OpenSettings => KeyBinding::new(key, OpenSettings, context),
             CommandId::ToggleSidebar => KeyBinding::new(key, ToggleSidebar, context),
             CommandId::ToggleTabOrientation => KeyBinding::new(key, ToggleTabOrientation, context),
@@ -1271,6 +1326,10 @@ fn linux_keystroke(id: CommandId, key: &str) -> Option<String> {
     if id == CommandId::DelegateSelectedSession {
         return Some("ctrl-alt-d".to_owned());
     }
+    // Cmd-Ctrl-T would land on New Tab's Ctrl-Shift-T.
+    if id == CommandId::ShowTodos {
+        return Some("ctrl-alt-shift-t".to_owned());
+    }
     let pane_focus = match id {
         CommandId::FocusPaneLeft => Some("ctrl-alt-h"),
         CommandId::FocusPaneRight => Some("ctrl-alt-l"),
@@ -1320,6 +1379,12 @@ fn platform_shortcut_label(label: &str) -> String {
     let key = label.replace(['⌘', '⌥', '⇧', '⌃'], "").replace('−', "-");
     modifiers.push(&key);
     modifiers.join("+")
+}
+
+/// How a native menu prints a keymap source such as `"cmd-alt-1"`: `⌥⌘1`.
+pub(crate) fn keystroke_label(source: &str) -> String {
+    Keystroke::parse(source)
+        .map_or_else(|_| source.to_owned(), |k| shortcut_label_for_keystroke(&k))
 }
 
 #[cfg(target_os = "macos")]
@@ -1607,6 +1672,26 @@ impl CommandId {
                 description: "Preview sessions across projects without changing work",
                 category: Navigation,
             },
+            Self::ShowTodos => ShortcutMetadata {
+                title: "To-dos",
+                description: "Every open to-do across your notes",
+                category: Navigation,
+            },
+            Self::SearchNotes => ShortcutMetadata {
+                title: "Search notes",
+                description: "Find any note, live or archived",
+                category: Navigation,
+            },
+            Self::NewNote => ShortcutMetadata {
+                title: "New note",
+                description: "Start a note in the current project, beside its agents",
+                category: Navigation,
+            },
+            Self::NoteVersionHistory => ShortcutMetadata {
+                title: "Version history",
+                description: "See and restore earlier versions of the open note",
+                category: Navigation,
+            },
             Self::OpenWorktrees => ShortcutMetadata {
                 title: "Worktrees overview",
                 description: "Open the Git worktrees overview",
@@ -1850,6 +1935,10 @@ impl CommandId {
             Self::MovePaneDown => Box::new(MovePaneDown),
 
             Self::OpenWorktrees => Box::new(OpenWorktrees),
+            Self::NewNote => Box::new(NewNote),
+            Self::ShowTodos => Box::new(ShowTodos),
+            Self::SearchNotes => Box::new(SearchNotes),
+            Self::NoteVersionHistory => Box::new(NoteVersionHistory),
             Self::OpenSettings => Box::new(OpenSettings),
             Self::ToggleSidebar => Box::new(ToggleSidebar),
             Self::ToggleTabOrientation => Box::new(ToggleTabOrientation),

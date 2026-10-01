@@ -94,6 +94,448 @@ outlive a detach. The Engine's `session.kill`/`session.remove` path
 (`Session::terminate`) stops it explicitly, including when the Agent already
 exited. The user's run had no remote sessions (`sessions.remote` = 0
 throughout).
+## Real-use frames and keystroke echo, from telemetry (2026-09-30)
+
+**What the telemetry says.** 4.7 hours of the author's installed 0.8.10
+(local spool, aggregates only):
+
+- `ui.frame`: 264,441 frames, mean 4.3 ms weighted by frames. In busy
+  minutes p50 is in the ≤ 4 ms bucket and p90 in ≤ 8–12 ms. About 2,000
+  frames a minute arrive steadily, GPUI's 30 fps cap for a window that is not
+  key, fed by busy terminals (`term.paint` 0.8 per frame, 0.9 ms mean). The
+  worst per-minute p90, 22 ms, was a minute with 3 frames. Two frames
+  reached 50 ms (70 and 229 ms). The mean is the same frontmost (4.15 ms) and
+  not (4.26 ms).
+- `input.echo`: 2,419 keys, mean 7.2 ms weighted by keys. Minutes with 20 or
+  more keys have means of 4.7–12.5 ms and p90 ≤ 8–16 ms. The minutes with
+  p90 of 45–123 ms had 1–8 keys each: an agent answering after a pause, not
+  typing. (17 ms is the unweighted mean of per-minute means.)
+
+Neither metric could say how much was Diri: `input.echo` ran from input to
+grid applied, through the agent, and `ui.frame` was one number.
+
+**Where the installed app's frame time goes.** A 10 s, 1 ms `sample` of the
+installed app (read-only, drawing about 33 fps with 8 panes mounted): the
+main thread spent 1.29 s in GPUI's `Window::draw`, plus 0.37 s presenting,
+0.28 s of it waiting in `-[CAMetalLayer nextDrawable]` (outside `ui.frame`).
+Within `Window::draw`:
+
+| | share |
+| --- | ---: |
+| terminal element prepaint + paint | 20% |
+| Taffy layout of the root tree | 14% |
+| `Scene::finish` sorting glyph sprites | 11% |
+| `SidebarRow::eq`, walking pull requests field by field | 8% |
+| accessibility tree (AccessKit) | < 1% |
+
+AccessKit frames in the sample mean assistive technology is attached: any
+app that reads other windows (window managers, dictation tools) turns it on.
+Then GPUI re-renders every cached view nested in one that re-renders, so
+each sidebar tick rebuilds all 51 rows, not just the working ones.
+
+**A fixture that looks like that.** `real_use_frame_distribution` (root.rs,
+ignored, macOS) mounts the real RootView under headless Metal at 1728×1080
+(2×). It has 51 sessions, four working, every third with one to three pull
+requests (description, 10 checks, 40 comments). A workspace tab is split into
+three busy agent panes: one streaming a scrolling screen at 30 Hz, two
+spinners at 10 and 8 Hz. The sidebar ticks its 125 ms activity mark, and the
+store publishes every 200 ms. Everything is due on a 120 Hz tick, and each
+tick with work draws one frame. `DIRI_BENCH_A11Y=1` attaches pretend
+assistive technology through a new vendored-GPUI test hook;
+`DIRI_BENCH_TABS=horizontal` uses the strip. GPUI's new `FrameStats` splits
+each frame by phase.
+
+The fixture's frames cost what the live frames cost in composition, but not
+in time. On the performance cores it draws in about 1 ms. Under
+`taskpolicy -c background`, which confines it to the efficiency cores, it
+reproduces the live distribution's shape: p50 6.6–8.4 ms, p90 17–19 ms, p99
+27–39 ms, max 50–104 ms. The author's Mac runs at load average 30–120 from
+agents and builds. So the likely explanation for the rest of the gap is
+where and when the main thread runs, not a structure the fixture lacks. This
+is a hypothesis. The new `ui.frame.cpu` tests it (below).
+
+With pretend assistive technology, views rendered per frame rise from 6.8 to
+39.0, CPU per frame by 16–22% and p90 by 29–43% (base binary).
+
+**Frame changes.** Both leave every comparison result and draw order as they
+were.
+
+- `SidebarRow` equality tests the record's `Arc` pointer first. Every
+  sidebar render compares each row's props with the last ones, and an
+  unchanged session keeps its `Arc`. Before, each comparison walked the
+  record, including every pull request's description, checks and review
+  threads.
+- `Scene::finish` sorts `(key, index)` pairs and moves each sprite once
+  along the permutation's cycles, instead of stable-sorting the 100+ byte
+  sprites themselves. Ties keep their paint order, as the stable sort did. A
+  frame already in order moves nothing.
+
+Base is this branch's instrumentation commit, so the benches are identical.
+Base and branch alternated three times each. Release builds, load average
+78–120 (unrelated builds). Draw time is GPUI's whole `Window::draw` per
+frame, 1,440 frames per run:
+
+| Real-use fixture | Base | Branch |
+| --- | ---: | ---: |
+| Sidebar, draw p50 / p90 | 1.11–1.39 / 1.82–2.53 ms | 0.98–1.42 / 1.65–2.80 ms |
+| Sidebar, CPU per frame | 1.27–1.53 ms | 1.13–1.57 ms |
+| Sidebar + a11y, draw p50 / p90 / p99 | 1.16–1.40 / 2.57–3.26 / 3.19–7.25 ms | 1.01–1.12 / 2.38–2.62 / 2.83–3.41 ms |
+| Sidebar + a11y, CPU per frame | 1.56–1.87 ms | 1.40–1.52 ms |
+| Horizontal strip, CPU per frame | 0.94–1.02 ms | 0.86–1.01 ms |
+| `finish` phase (scene sort) per frame, all three | 0.24–0.40 ms | 0.15–0.29 ms |
+| Efficiency cores + a11y, draw p90 / p99 (720 frames) | 17.0–19.3 / 26.5–39.1 ms | 15.7–16.5 / 25.1–36.2 ms |
+| Whole-process user CPU, sidebar + a11y run | 2.49–3.05 s | 2.26–2.46 s |
+
+In stack samples of the fixture, `Scene::finish` fell from 13.6% to 8.3% of
+the draw. The fixture's pull requests are illustrative: there, row comparison
+was 0.6% of the draw, where the live sample put it at 8%.
+
+Final frames of all three modes are pixel-identical between base and branch
+(3456×2160). `the_sprite_sort_matches_a_stable_sort_by_key` checks the sort
+against the standard library's stable sort over 36 size and key mixes.
+`a_row_holding_the_same_record_is_equal_without_walking_it` uses a record
+that is not equal to itself field by field (a NaN timestamp) to show the
+walk is skipped.
+
+**Keystroke echo: a TUI answers in parts.** Claude Code and Codex both wrap
+each redraw in a synchronized update (DECSET 2026). Both binaries contain
+`\e[?2026h`. The held Session pump published only output that answered a
+keystroke without losing cells, and only its first write. So:
+
+- A synchronized redraw that removed cells (the placeholder and "? for
+  shortcuts" vanish as typing starts, a completion menu closes) looked like
+  a half-erased repaint and waited out the 8 ms output batch.
+- A redraw in several writes (erase, redraw, status row) published its first
+  answering write at once. The rest waited out the batch, and then the
+  attach pump's two-publication interactive budget.
+
+Now output that closes a synchronized update, and leaves none open, answers
+the keystroke whatever it erased. (The vendored vte counts updates ended by
+their ESU; see `vendor/vte/DIRI-PATCH.md`.) The direct-PTY batch stops
+settling on such output too. A keystroke buys up to four immediate
+publications within its 100 ms window instead of one, and the attach pump's
+interactive budget grows to five. Streaming output after those is batched as
+before.
+
+`multi_chunk_redraw_timing` (tests/attach.rs, ignored) types into a fake
+TUI in a real Holder, from key to the frame that completes the redraw.
+Release, base and branch alternated six times each, load 24–80:
+
+| Fake TUI answer | Base median | Branch median |
+| --- | ---: | ---: |
+| One synchronized redraw that removes 1 cell net | 9.15–9.30 ms | 0.17–0.30 ms |
+| Three writes 0.5 ms apart (last lands ≈ 1.0 ms) | 10.31–10.50 ms | 1.36–1.58 ms |
+| Three writes 2 ms apart (last lands ≈ 4.1 ms) | 14.01–14.25 ms | 5.13–6.12 ms |
+| Three writes back to back | 0.19–0.33 ms | 0.21–0.64 ms |
+
+The "last lands" times include Perl's `usleep` overshoot.
+`a_synchronized_redraw_that_removes_cells_answers_a_keystroke_at_once`
+asserts a median of 5 ms or less (base: 9.2 ms).
+
+**New telemetry** (details in `TELEMETRY.md`). App: `input.echo.transport`,
+`.apply`, `.paint` and `input.echo.<agent class>`; `ui.frame.cpu`,
+`.layout`, `.prepaint`, `.paint`, `.terminals`, `.a11y`; counters
+`ui.frame.views_rendered`, `.views_reused`, `.terminal_paints`,
+`.shape_misses`, `.a11y_frames`. `ui.slow_frame` carries the breakdown, and
+one over-budget frame (≥ 8.3 ms) is recorded every 30 s at debug severity.
+Engine: `input.echo.engine`, `input.echo.engine.<agent class>`,
+`input.echo.publish`.
+
+**How to confirm after upgrading.** Read the `metrics` events in
+`~/Library/Application Support/Dirijor/telemetry/spool` (`app-*` and
+`engine-*`), or run `diri-debug local --since 1h`:
+
+- The agent's share: `input.echo.engine.claude` / `.codex` (Engine wrote
+  the key → the agent answered). Diri's share: `input.echo.publish` (expect
+  a p50 in the ≤ 1 ms bucket), plus `input.echo.apply` and
+  `input.echo.paint`, plus the sockets and the Holder
+  (`input.echo.transport` minus `input.echo.engine` minus
+  `input.echo.publish`).
+- `ui.frame.cpu` against `ui.frame`. If they are close at about 4 ms, the
+  main thread is doing the work on slower cores. If CPU is well below wall
+  time, it is waiting behind other work.
+- `ui.frame.a11y_frames / ui.frame.n` is the share of frames drawn with
+  assistive technology attached. `ui.frame.views_rendered / ui.frame.n`
+  shows what that costs.
+- `ui.slow_frame` events name the phase (`layout_ms`, `prepaint_ms`,
+  `paint_ms`), `terminals`, `views` and `a11y` of any frame over 50 ms.
+
+**Not claimed:**
+
+- any change measured on the installed app;
+- GPU or present time, including the `nextDrawable` waits;
+- the efficiency-core explanation (it is a hypothesis for `ui.frame.cpu` to
+  test);
+- a fix for assistive-technology frames. Keeping nested views cached then
+  needs GPUI to replay their accessibility nodes; forcing the re-render
+  (upstream's rule) is what keeps rows in the accessibility tree;
+- Taffy layout and terminal paint, the two largest shares, which are
+  unchanged;
+- Engine echo timing for remote sessions (their grid path records none).
+
+Reproduce from `diri/`:
+
+```sh
+cargo test --release -p diri-app --bin diri real_use_frame_distribution -- --ignored --nocapture
+DIRI_BENCH_A11Y=1 cargo test --release -p diri-app --bin diri real_use_frame_distribution -- --ignored --nocapture
+DIRI_BENCH_TABS=horizontal cargo test --release -p diri-app --bin diri real_use_frame_distribution -- --ignored --nocapture
+cargo test --release -p diri-engine --test attach multi_chunk_redraw_timing -- --ignored --nocapture
+```
+
+`DIRI_BENCH_TICKS`, `DIRI_BENCH_PRS=0` and `DIRI_BENCH_SCREENSHOT=<png>`
+tune the fixture.
+## Remote usage polls only while the Usage page is open (2026-09-30)
+
+`rpc.slow method=host.usage` was the author's most frequent slow RPC: 161 in
+3 days (0.8.10, one host), p50 966 ms, p90 1.8 s, p99 4.7 s, max 11.9 s (a
+one-off Helper upload after an app update). It is not a stall: `host.usage`
+already runs on a background request thread, holds no lock across SSH, and
+the client multiplexes requests, so nothing else waited on it. It was waste:
+the App polled every host every five minutes for as long as it ran, while
+remote usage is shown only on Settings > Usage (the sidebar's cost is local
+only). Each poll paid a cold SSH connection, since the 60 s ControlPersist
+expires between five-minute polls.
+
+Measured from the author's Mac against the real host over Tailscale:
+
+| | wall |
+|---|---|
+| cold `ssh true` | 410–630 ms (p50 430) |
+| multiplexed `ssh true` | 130–150 ms |
+| one fused probe + `usage` poll (after #577), cold | 516–564 ms |
+| pre-#577 poll: cached probe, then `usage` (telemetry) | p50 670 + 285 ms |
+
+The fused poll is still above the Engine's 250 ms `rpc.slow` threshold on
+every call, and ~80% of it is the SSH handshake, which only a permanent
+ControlMaster could remove (not permitted: masters are finite-lived).
+
+Change: a view holds a `RemoteUsageViewer` while it renders the Usage tab
+(released on tab change, close or drop). The poller waits for a viewer,
+refreshes at once when the previous refresh is at least five minutes old,
+and repeats every five minutes only while a viewer remains.
+
+| App running, Usage page closed | before | after |
+|---|---|---|
+| SSH commands per host per day | 288 (576 before #577) | 0 |
+| `host.usage` calls / `rpc.slow` per day | 288 | 0 |
+| Data age when the page opens | ≤ 5 min (always polled) | shown from cache; refreshed at once if ≥ 5 min |
+| Refresh cadence while the page is open | 5 min | 5 min |
+
+Verified with paused-time pacer tests (`usage::remote::tests`) and the
+Usage settings UI test (viewer held on the tab, released on leaving it).
+
+## Agent hooks and remote usage polls (2026-09-30)
+
+Real telemetry (4.7 h of the author's 0.8.10 use, aggregates only): 1,928
+`hook.report`s and 2,844 `client.hello`s (one `dirijor hook` process and
+Engine connection per Claude callback, 87% of them Pre/PostToolUse); six slow
+`hook.report`s at 263–461 ms, **each** coinciding with a 530–556 ms
+`session.remove`; `host.usage` 57 calls (the App's five-minute poll, one host)
+at avg 1.15 s / max 2.6 s, and 119 `ssh.command`s at p50 500 ms — two per poll:
+the exact-build Helper probe (`remote.helper_ready path=cached`, p50 733 ms)
+and then the `usage` RPC.
+
+Findings:
+
+- `session.remove` holds the Registry through `terminate`, where the Holder
+  sends TERM and waits up to 500 ms for the whole tree before KILL. The
+  wrapper's exec'd interactive shell survives TERM, so every close takes
+  ~550 ms. Claude runs its SessionEnd hook on TERM; `hook.report` waited on the
+  Registry lock, so the hook never finished before the KILL (its SessionEnd was
+  lost), and any other Agent's hook in that window stalled that Agent too.
+- Uncontended, the Engine answers Hello in ~0.02 ms and `hook.report` in
+  0.3–0.5 ms p50 (p95 5–10 ms when the debounced persist ran inline under the
+  lock). The rest of a ~9 ms hook is `dirijor` process spawn/exec: `dirijor`
+  retires ~20 M instructions, a trivial Rust `main` ~15 M, `/usr/bin/true`
+  ~8 M. Dropping Hello would save ~0.02 ms and break the identity check, so it
+  stays.
+- The CLI read at most 1 MiB of hook stdin; a larger PostToolUse (a Read of a
+  big file) became `{"raw": ...}`, so the report was dropped and the recovery
+  seed lost its conversation id. Every Pre/PostToolUse also re-encoded
+  `tool_input`/`tool_response` to the Engine, which never reads them there.
+- A usage poll ran two login shells on the host (account layer + `~` layer)
+  for three variables (`HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`).
+
+Changes:
+
+- `hook.report` applies inline only when the Registry is free and nothing is
+  queued; otherwise it queues to one `diri-hook-applier` thread (bounded
+  1,024, blocking backpressure, never a drop) and answers at once. Order per
+  Agent is preserved (the inline path cannot overtake a queued report). The
+  Registry write moves from `persist()` (inline fsync once 500 ms have passed)
+  to `persist_deferred()` (the flusher, within the same 500 ms bound); the
+  CLI still writes the lifecycle seed to the recovery store before delivery.
+  New counter `hook.queued`.
+- `dirijor hook` reads up to 8 MiB and forwards neither `tool_response` nor,
+  except for PermissionRequest (the one event whose input the Engine
+  summarizes), `tool_input`.
+- A warm `host.usage` is one SSH command: `probe` (stdin closed) and, only if
+  it exits 0, `exec usage` in the same `ssh -T` channel; the probe line is
+  verified exactly like the separate probe before the response is accepted,
+  and anything unverifiable takes the full bootstrap path (`path=fused` in
+  `remote.helper_ready`).
+- The Helper caches those three login-environment values in owner-only
+  `usage-v1/login-environment.json`, valid while the account shell, HOME, the
+  stat stamps of 27 standard shell startup files and a one-hour age match.
+
+### Measurements
+
+Apple M4 Max, macOS 27.0, release builds, load average 6–17. Base is
+`ab2b715e` (origin/main).
+
+`scripts/hook-bench.py <bin-dir> --pad 800` (private Engine, 40 Claude
+sessions, 1.1 MB state.json, 400 `dirijor hook` processes, wall = fork to
+exit; base and branch alternated 3× each, ranges):
+
+| | Base | Branch |
+| --- | ---: | ---: |
+| Hook wall p50 / p95 | 8.8–9.2 / 13.9–14.8 ms | 9.2–9.6 / 14.8–15.5 ms |
+| Hook wall p99 | 17.2–22.8 ms | 17.4–23.4 ms |
+| Engine `hook.report` reply p50 / p95 (`--phases`, 2×) | 0.33–0.50 / 5.5–9.8 ms | 0.013–0.017 / 0.027–0.034 ms |
+| Engine Hello p50 | 0.020–0.024 ms | 0.018–0.023 ms |
+
+Same, with 8 sessions closed during the run (`--bg-remove 8`, 600 hooks, 2×
+each):
+
+| | Base | Branch |
+| --- | ---: | ---: |
+| Hook wall p99 / max | 549–558 / 566–573 ms | 16.2–16.4 / 23–27 ms |
+| Closing Agent's SessionEnd hook completed | 0 of 6 (killed) | 6 of 6 (8–114 ms) |
+| `session.remove` | 543–569 ms | 550–593 ms (unchanged: TERM escalation) |
+
+A re-run of `scripts/hook-bench.py` at load average 300–400 reproduced it:
+hook wall p99 564 ms (base) vs 27 ms (branch).
+
+`cargo test --release -p diri-remote --test usage_bench -- --ignored
+--nocapture` (fake `ssh`, 400 Claude + 100 Codex transcripts × 200 lines,
+Helper preinstalled; remote CPU is every child's user+sys; five unchanged
+polls, then one append; `USAGE_BENCH_RC_SLEEP=0.15` puts `sleep 0.15` in the
+shell startup files):
+
+| | Base | Branch |
+| --- | ---: | ---: |
+| SSH commands per poll | 2 | 1 |
+| Warm poll, bare shell: wall / remote CPU | 85–106 / 48–58 ms | 38–40 / 25–26 ms |
+| Warm poll, 150 ms startup files: wall / remote CPU | 390–402 / 48–53 ms | 53–65 / 29–38 ms |
+| Poll after an append | 90–391 ms | 49–64 ms |
+| Cold poll (first scan) | 277–597 ms | 291–624 ms |
+
+Totals are identical between base and branch and between cold and warm polls
+(the bench asserts warm = cold and append = cold + 7 tokens).
+
+Not claimed: SSH round-trip time. The fixture has none; on the real host each
+`ssh.command` was ~0.5 s (a new master connection per poll, since the
+five-minute poll outlives `ControlPersist=60`), so the removed round trip is
+the larger real saving. Not changed: the five-minute App poll itself (the App
+polls even with the Usage page closed; left to the App), `session.remove`
+holding the Registry through the 500 ms TERM escalation (hooks no longer wait
+on it; other Registry users still do), and process spawn cost per hook.
+
+### Fleet follow-up: every slow `hook.report` is a Registry wait
+
+Three days of uploaded telemetry from three installs (0.8.9 and 0.8.10, both
+before the change above) hold 52 `rpc.slow method=hook.report`, 260–688 ms,
+median ~450 ms. Each one lines up with something else holding the Registry:
+50 finish within one `session.remove` (43), `session.kill` (5) or
+`session.archive` (2), the TERM escalation above, which archive and kill also
+go through. The remaining two (giga,
+496 ms and 688 ms) overlap no RPC: one is the UserPromptSubmit of a session
+whose tracked spawn was still delivering its prompt, the other a lone
+PreToolUse. The pre-change handler waited on the Registry mutex whoever held
+it, and then ran `persist()` under it. The change above never waits for any
+holder, so it covers these two as well. No other cost showed up: on this Mac
+`fdatasync` on the state volume is ~0.02 ms p50 / 0.1 ms max over 300 appends
+(so the activity log's per-transition `sync_data` is noise). Hello is
+~0.02 ms, and Hello plus `hook.report` measured from a raw client *during*
+the background removes stays at or under 17 ms at the maximum.
+
+A/B with `scripts/hook-bench.py --pad 800 --sessions 30 --bg-remove 8 --hooks
+300` on a loaded machine (other agents compiling), `f47c8203^` vs `f47c8203`,
+three runs each:
+
+| | Before | After |
+| --- | ---: | ---: |
+| Hook wall p99 | 567–653 ms | 65–118 ms |
+| Hook wall max | 589–902 ms | 127–271 ms |
+| Engine `rpc.slow method=hook.report` in the fixture spool | present | none |
+
+The remaining wall tail after the change is process spawn on a loaded machine
+(the same run's raw-client Hello + `hook.report` p99 was 14 ms). Quiet runs
+(no removes) are equal: p99 24 vs 27 ms.
+
+Uploaded metrics had only the all-methods `rpc` timing, so the full
+hook distribution was invisible below the 250 ms `rpc.slow` bar. The Engine
+now also records `rpc.hook_report` (the reply the Agent waits on) and
+`hook.apply_wait` (how long a queued report waited for the Registry, which is
+now status staleness rather than Agent latency).
+
+In a deliberately extreme run of the same bench (`--hooks 3500 --bg-remove
+60`, so the Registry is held about two thirds of the time), one 60 s metrics
+window read `rpc.hook_report` n 3,896, p99 8 ms, max 54 ms, with no
+`rpc.slow` for it. It also read `hook.apply_wait` n 3,430, avg 421 ms, max
+4.0 s. Once one report is queued, every later one queues behind it until the
+applier catches up. The Agent no longer waits, but status can lag by the
+length of a close. This goes away only when `session.remove` stops holding
+the Registry through the TERM escalation.
+
+## Telemetry truth: `pane.first_paint` tail and `workspace.mutate` errors (2026-09-30)
+
+Read from 4.7 h of the owner's local telemetry spool (0.8.10), aggregates only.
+
+**`pane.first_paint` at ~10 s (14 of 57) was a measurement artifact.** The
+pane recorded first paint from its own `render` and from the 10 s blank
+watchdog (`check_blank` called `trace_first_paint`). A resident can be
+mounted by a pane that is never drawn: the selection-following pane stays
+alive and attached while a workspace workbench is shown in its place, warm
+workbench panes of other tabs, a window the system stopped drawing. Such a
+pane never renders, so at 10 s the watchdog found content in the shared grid
+and recorded a "first paint" nobody saw. Evidence in the data: in 4 of the
+14, the same session had already recorded a first paint 0.4–0.6 ms after its
+mount in another pane, with `grid_ms` of 8–32 ms in the undrawn one; the other
+10 were remounts onto parked grids (`parked=true`) with no render for 10 s.
+Headless repro on origin/main: a `TerminalPane` held by a view that does not
+draw it, with content in its grid, reports `painted=true` after the watchdog
+while its element has 0 painted frames and the pane 0 renders.
+
+Now first paint is taken inside `TerminalElement::paint` (a one-shot callback
+armed per mount, fired by the first frame that draws a non-blank grid), and
+the watchdog never records a paint. `pane.blank` is only reported for a pane
+drawn at least once since its mount, and with `content=true` when the grid
+holds content that was never painted, which is the signature of a real
+missed repaint (the class of the old "blank until resize" bug). Cost per
+paint: one relaxed atomic add and one uncontended mutex lock; the grid is only
+scanned while a callback is armed, once per mount, and the scan stops at the
+first non-blank cell. Not claimed: that no real stall happened in that data;
+only that none of the 14 samples shows one, and that one would now be
+reported as `pane.blank content=true`.
+
+**Follow-up (the one `pane.blank frames=0` incident, 0.8.9).** A reopened
+Codex session was mounted by two panes sharing one grid 19 ms apart: one
+painted it 2.4 ms after its mount, the other received the grid and was never
+drawn with it (`frames=0`), and 0.8.9's watchdog reported that one. The #576
+"drawn since mount" test covers a pane never drawn, but not one drawn once
+while its grid was still blank and covered since: headless, that pane was
+reported as `content=true`, a false missed-repaint incident. The watchdog now
+asks for a frame at 10 s and reports only if that frame draws the pane within
+500 ms; a real missed repaint is still reported, with `redrawn=true` when the
+requested frame put the waiting content on screen.
+
+**`workspace.mutate` → `invalid_workspace` (19 of 57 mutations in the current
+spool files) was the 256-tab limit, already fixed on main by #575.** Every failure
+coincided with attaching one of 5 sessions, each failing on nearly every
+activation (9 of 10, 6 of 6, 3 of 3, …); the 8 sessions that never failed
+were ones the layout already held. Activation sends `openProjectAgent`,
+which only adds a tab for a session without one, and in 0.8.10 a tab count
+over `MAX_WORKSPACE_TABS` was reported as `invalid_workspace`. Tabs of deleted
+sessions were never reclaimed, so new agents could not be placed. #575
+reclaims them at the limit and reports a real limit as
+`workspace_limit_reached`. A randomized sequence of app-shaped mutations
+(openProjectAgent with preferred layouts, create/split/move/swap/zoom/focus/
+remove; 400 seeds × 60 edits) against the current Engine found no other
+`invalid_workspace` besides a self-dock the app already refuses to send. One
+more app-side sender was found by reading: dropping a tab on its own
+workspace's header sent `index = tabs.len()`, which is out of range once the
+Engine takes the tab out; it now sends the last slot.
 
 ## Cheap column changes: deferred history reflow (2026-09-29)
 

@@ -242,7 +242,7 @@ pub fn dump(stdout: &mut dyn Write) -> io::Result<()> {
     stdout.flush()
 }
 
-fn account_shell() -> io::Result<PathBuf> {
+pub(crate) fn account_shell() -> io::Result<PathBuf> {
     const INITIAL_BUFFER_BYTES: usize = 16 * 1024;
     const MAX_BUFFER_BYTES: usize = 1024 * 1024;
 
