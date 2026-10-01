@@ -96,6 +96,9 @@ pub struct TerminalElement {
     background_opacity: f32,
     font: Font,
     font_size: Pixels,
+    /// Multiple of the font's natural line height; 1.0 paints rows exactly
+    /// as tall as the font asks for.
+    line_height_scale: f32,
     focus_handle: Option<FocusHandle>,
     text_input: Option<TextInputCallback>,
     ime_state: Arc<Mutex<TerminalImeState>>,
@@ -363,7 +366,7 @@ struct ElementSharedState {
     modes: Mutex<TerminalModes>,
     scroll_router: Mutex<ScrollRouter>,
     history_lines: Mutex<HistoryLineCache>,
-    metrics: Mutex<Option<(Font, u32, CellMetrics)>>,
+    metrics: Mutex<Option<(Font, u32, u32, CellMetrics)>>,
     /// Behind its own `Arc` so the input handler and the blink wake can hold
     /// it without holding the rest of the view's state.
     cursor: Arc<Mutex<CursorDriver>>,
@@ -741,6 +744,7 @@ impl TerminalElement {
             background_opacity: 1.0,
             font: terminal_font,
             font_size: px(13.0),
+            line_height_scale: 1.0,
             focus_handle: None,
             text_input: None,
             ime_state: Arc::new(Mutex::new(TerminalImeState::default())),
@@ -812,6 +816,12 @@ impl TerminalElement {
 
     pub fn font_size(mut self, font_size: Pixels) -> Self {
         self.font_size = font_size;
+        self
+    }
+
+    #[must_use]
+    pub fn line_height_scale(mut self, scale: f32) -> Self {
+        self.line_height_scale = scale;
         self
     }
 
@@ -2040,18 +2050,21 @@ impl Element for TerminalElement {
 
         let started_at = Instant::now();
         let font_size_bits = f32::from(self.font_size).to_bits();
+        let scale_bits = self.line_height_scale.to_bits();
         let metrics = {
             let mut cached = mutex_lock(&self.shared.metrics);
-            if let Some((cached_font, cached_size, metrics)) = cached.as_ref()
+            if let Some((cached_font, cached_size, cached_scale, metrics)) = cached.as_ref()
                 && cached_font == &self.font
                 && *cached_size == font_size_bits
+                && *cached_scale == scale_bits
             {
                 *metrics
             } else {
                 let font_id = window.text_system().resolve_font(&self.font);
                 let metrics =
-                    CellMetrics::measure_font(window.text_system(), font_id, self.font_size);
-                *cached = Some((self.font.clone(), font_size_bits, metrics));
+                    CellMetrics::measure_font(window.text_system(), font_id, self.font_size)
+                        .with_line_height_scale(self.line_height_scale);
+                *cached = Some((self.font.clone(), font_size_bits, scale_bits, metrics));
                 metrics
             }
         };

@@ -44,6 +44,66 @@ if needed), or takes `DIRI_LINUX_DIST` pointing at a downloaded artifact
 directory; the release is then created once with both platforms' immutable
 assets.
 
+### Linux signatures
+
+The Nightly `linux-package` job signs the AppImage, the Debian package,
+`SHA256SUMS`, and `linux-release.json` with Sigstore keyless signing
+(`scripts/linux-signatures.sh sign`), then verifies them before uploading.
+cosign exchanges the job's GitHub OIDC token for a short-lived certificate
+whose identity is
+`https://github.com/cristicretu/diri/.github/workflows/nightly.yml@refs/heads/main`,
+and records the signature in the public Rekor transparency log. Each file gets
+a `<file>.sigstore.json` bundle. Only `main` runs sign; pull-request runs do
+not. The Ubuntu 24.04 smoke job verifies the bundles again on a machine that
+did not sign them, and `release.sh` verifies them with the pinned identity
+before publishing, so an unsigned or wrongly signed Linux artifact cannot ship.
+The release carries CI's signed Linux checksum list as `SHA256SUMS-linux`
+beside the release-wide `SHA256SUMS`, which `release.sh` writes on the Mac and
+therefore cannot carry a CI signature. User commands are in
+[`LINUX.md`](LINUX.md#install).
+
+Why Sigstore rather than a long-lived GPG or minisign key:
+
+- **No key to keep.** The packages are built in CI, so the strongest statement
+  available is "this workflow on `main` built these bytes", and keyless
+  signing states exactly that. A GPG or minisign key would have to live in a
+  GitHub secret, where anyone able to exfiltrate it could sign anything until
+  it is revoked, and losing it strands every user who pinned its fingerprint.
+- **Tamper evidence.** Every signature is in a public, append-only log, so a
+  signature made outside this workflow would be visible.
+- **Cost to users.** Verification needs `cosign`, which Ubuntu does not
+  preinstall, whereas it does ship `gpg`. That is the main tradeoff, and the
+  reason plain `SHA256SUMS` stays the first instruction.
+- **Debian.** `dpkg-sig` is unmaintained and dpkg does not check embedded
+  `.deb` signatures by default (`debsig-verify` is opt-in policy), so signing
+  inside the package would protect almost nobody. The Debian-native trust path
+  is a signed APT repository `InRelease` file whose key is installed with
+  `signed-by`; that needs repository hosting and a long-lived GPG key, and is a
+  separate decision (see "Not yet" below).
+- **AppImage.** appimagetool can embed a GPG signature, but cargo-packager
+  does not produce one, it again needs a long-lived key, and few tools check
+  it. A detached bundle covers the same bytes.
+
+Rehearse the path locally with a throwaway key, never a release key:
+
+```sh
+export COSIGN_PASSWORD=
+cosign generate-key-pair --output-key-prefix "$TMPDIR/rehearsal"
+DIRI_COSIGN_KEY="$TMPDIR/rehearsal.key" scripts/linux-signatures.sh sign <dist>
+DIRI_COSIGN_PUBLIC_KEY="$TMPDIR/rehearsal.pub" scripts/linux-signatures.sh verify <dist>
+```
+
+Key mode stays offline and never uploads to the transparency log. `release.sh`
+clears both variables before its own verification, and needs `cosign` on the
+release Mac (`brew install cosign`).
+
+Not yet: an APT repository with a signed `InRelease` (so `apt upgrade`
+verifies updates), GitHub build-provenance attestations, and aarch64 packages.
+The in-app updater does not download Linux artifacts (it tells Linux users to
+update through APT or a newer download), so it has nothing to verify. If a
+Linux self-updater is ever added, it must verify these bundles against the same
+pinned identity.
+
 ## macOS
 
 `scripts/package.sh` builds `diri` for Apple silicon and Intel, combines the two slices with `lipo`, asks cargo-packager to assemble `dist/diri.app`, and signs the result. The bundle identifier is `com.dirijor.diri`, the deployment target is macOS 15.0, and the app does not use App Sandbox.

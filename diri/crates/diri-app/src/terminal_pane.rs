@@ -53,7 +53,7 @@ use gpui::{
     AnyElement, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter, ExternalPaths,
     FocusHandle, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, Role,
     ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, Window, div,
-    font, prelude::*, px,
+    prelude::*, px,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -316,10 +316,56 @@ enum PaneEvent {
     HistoryExtent(SessionId, AttachmentGeneration, Option<i64>),
     /// The scroller knob moved the viewport; fetch whatever it now shows.
     ScrollbackPump(SessionId, usize),
-    ClipboardUploadFinished(SessionId, Result<String, String>),
+    ClipboardUploadFinished(UploadTarget, Result<String, String>),
     /// Files dropped on a remote session finished copying; on success the
     /// remote paths are ready to paste in drop order.
-    DroppedFilesUploaded(SessionId, Result<Vec<String>, String>),
+    DroppedFilesUploaded(UploadTarget, Result<Vec<String>, String>),
+}
+
+/// The session an upload was started for. An id outlives a restart and a
+/// migration, so the run and the host it copied to travel with it: a path on
+/// one host is no use to a session that has since moved or started over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UploadTarget {
+    id: SessionId,
+    /// `created_at` bits, the app's session incarnation.
+    incarnation: u64,
+    host: String,
+}
+
+impl UploadTarget {
+    fn of(session: &SessionRecord) -> Option<Self> {
+        Some(Self {
+            id: session.id.clone(),
+            incarnation: session.created_at.0.to_bits(),
+            host: session.host.clone()?,
+        })
+    }
+}
+
+/// What a finished upload pastes. Kept unencoded: the framing depends on the
+/// modes of whichever attachment finally takes it.
+#[derive(Debug)]
+enum UploadedPaste {
+    ClipboardImage(String),
+    DroppedFiles(String),
+}
+
+const UPLOAD_HELD_FOR_RETURN: &str =
+    "Upload finished. It will be pasted when you return to its session";
+const UPLOAD_HELD_FOR_RECONNECT: &str =
+    "Upload finished. It will be pasted when the terminal reconnects";
+const UPLOAD_TARGET_CHANGED: &str =
+    "The session changed or ended while a file was uploading, so nothing was pasted";
+
+/// The id still names the run the upload was started for, on the host the
+/// files were copied to. A resume keeps the id and `created_at`, so having
+/// seen the run exit is the only evidence of that restart.
+fn upload_target_is_current(store: &crate::store::SessionStore, target: &UploadTarget) -> bool {
+    store.sessions().get(&target.id).is_some_and(|session| {
+        !matches!(session.status, SessionStatus::Exited(_))
+            && UploadTarget::of(session).as_ref() == Some(target)
+    })
 }
 
 /// Identifies one view residency, not the durable session or shared transport.
@@ -843,6 +889,10 @@ pub struct TerminalPane {
     navigation: Option<Entity<NavigationOverlay>>,
     utility_surfaces: Option<Entity<UtilitySurfaces>>,
     local_clipboard_images: Vec<StagedClipboardImage>,
+    /// Uploads that finished while their session had no live terminal here
+    /// (a residency of one evicts it on every switch). Each waits for that
+    /// session's next live attachment; see [`Self::deliver_held_uploads`].
+    held_uploads: Vec<(UploadTarget, UploadedPaste)>,
     /// Secure Keyboard Entry, held only while this pane is where a password
     /// is being typed. See [`Self::reconcile_secure_input`].
     secure_input: crate::secure_input::SecureInputLease,
@@ -1095,6 +1145,7 @@ impl TerminalPane {
             navigation: None,
             utility_surfaces: None,
             local_clipboard_images: Vec::new(),
+            held_uploads: Vec::new(),
             secure_input: crate::secure_input::SecureInputLease::system(),
             external_drag: haptics::Crossing::default(),
             _secure_input_quit: secure_input_quit,
@@ -1175,7 +1226,15 @@ impl TerminalPane {
             if self.residents.contains_key(&id) {
                 continue;
             }
-            let mono = crate::fonts::terminal_font();
+            let mono = crate::fonts::terminal_font(
+                &self
+                    .runtime
+                    .store
+                    .read()
+                    .expect("session store lock poisoned")
+                    .preferences()
+                    .terminal_font_family,
+            );
             let generation = self.next_attachment_generation;
             self.next_attachment_generation = self.next_attachment_generation.wrapping_add(1);
             let parked = self
@@ -1287,6 +1346,7 @@ impl TerminalPane {
                 resident.mouse_motion.reset();
             }
         }
+        self.discard_stale_held_uploads(window, cx);
         self.sync_status_glyphs(self.current_colors(), window, cx);
 
         // Explicit sidebar clicks already focus through SessionActivated, but
@@ -1740,6 +1800,7 @@ impl TerminalPane {
                 if !self.attachment_is_current(&id, generation) {
                     return;
                 }
+                let mut live = false;
                 if let Some(resident) = self.residents.get_mut(&id) {
                     if (resident.element.mouse_modes() != mouse
                         || resident.element.alt_screen() != alt_screen)
@@ -1765,6 +1826,10 @@ impl TerminalPane {
                     resident.bracketed_paste = bracketed_paste;
                     resident.secret_input = secret_input;
                     resident.element.set_modes(alt_screen, mouse);
+                    live = resident.attachment_state == AttachmentState::Live;
+                }
+                if live {
+                    self.deliver_held_uploads(&id, window, cx);
                 }
                 self.reconcile_secure_input(window);
                 if self.selected_id().as_ref() == Some(&id) {
@@ -1889,14 +1954,14 @@ impl TerminalPane {
                     cx.notify();
                 }
             }
-            PaneEvent::ClipboardUploadFinished(id, result) => match result {
+            PaneEvent::ClipboardUploadFinished(target, result) => match result {
                 Ok(remote_path) => {
-                    if let Some(resident) = self.residents.get(&id)
-                        && resident
-                            .send_user_input(terminal_paste(&remote_path, resident.bracketed_paste))
-                    {
-                        cx.notify();
-                    }
+                    self.finish_upload(
+                        target,
+                        UploadedPaste::ClipboardImage(remote_path),
+                        window,
+                        cx,
+                    );
                 }
                 Err(error) => {
                     // scp's stderr can name hosts, users and key paths; it
@@ -1904,7 +1969,7 @@ impl TerminalPane {
                     eprintln!("diri: clipboard image upload failed: {error}");
                     diri_telemetry::error_event!(
                         "clipboard.image_upload_failed",
-                        session = diri_telemetry::id(&id.0)
+                        session = diri_telemetry::id(&target.id.0)
                     );
                     self.show_terminal_feedback(
                         "Couldn't copy the clipboard image to the session's host",
@@ -1913,18 +1978,16 @@ impl TerminalPane {
                     );
                 }
             },
-            PaneEvent::DroppedFilesUploaded(id, result) => match result {
+            PaneEvent::DroppedFilesUploaded(target, result) => match result {
                 Ok(remote_paths) => {
                     let text = terminal_drop_text(remote_paths.iter().map(String::as_str));
-                    if self.paste_into_session(&id, &text) {
-                        cx.notify();
-                    }
+                    self.finish_upload(target, UploadedPaste::DroppedFiles(text), window, cx);
                 }
                 Err(error) => {
                     eprintln!("diri: dropped file upload failed: {error}");
                     diri_telemetry::error_event!(
                         "pane.drop_upload_failed",
-                        session = diri_telemetry::id(&id.0)
+                        session = diri_telemetry::id(&target.id.0)
                     );
                     cx.emit(TerminalPaneEvent::ExternalDropFeedback {
                         message: format!(
@@ -1933,6 +1996,106 @@ impl TerminalPane {
                     });
                 }
             },
+        }
+    }
+
+    /// A remote upload finished. The upload outlives the terminal that started
+    /// it, so the path goes out only to a live terminal of the same run on the
+    /// same host; with none here it is held, and said to be, rather than lost.
+    fn finish_upload(
+        &mut self,
+        target: UploadTarget,
+        paste: UploadedPaste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.upload_target_is_current(&target) {
+            self.show_terminal_feedback(UPLOAD_TARGET_CHANGED, window, cx);
+            return;
+        }
+        match self.residents.get(&target.id) {
+            Some(resident) if resident.attachment_state == AttachmentState::Live => {
+                if self.paste_upload(&target.id, &paste) {
+                    cx.notify();
+                }
+            }
+            resident => {
+                let held = if resident.is_some() {
+                    UPLOAD_HELD_FOR_RECONNECT
+                } else {
+                    UPLOAD_HELD_FOR_RETURN
+                };
+                self.held_uploads.push((target, paste));
+                self.show_terminal_feedback(held, window, cx);
+            }
+        }
+    }
+
+    /// Called once a resident's live attachment has reported the child's
+    /// modes, the first point at which a paste can be framed correctly.
+    fn deliver_held_uploads(
+        &mut self,
+        id: &SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.held_uploads.iter().any(|(target, _)| &target.id == id) {
+            return;
+        }
+        let (due, held) = std::mem::take(&mut self.held_uploads)
+            .into_iter()
+            .partition(|(target, _)| &target.id == id);
+        self.held_uploads = held;
+        let due: Vec<(UploadTarget, UploadedPaste)> = due;
+        for (target, paste) in due {
+            if !self.upload_target_is_current(&target) {
+                self.show_terminal_feedback(UPLOAD_TARGET_CHANGED, window, cx);
+            } else if self.paste_upload(id, &paste) {
+                cx.notify();
+            }
+        }
+    }
+
+    fn upload_target_is_current(&self, target: &UploadTarget) -> bool {
+        let store = self
+            .runtime
+            .store
+            .read()
+            .expect("session store lock poisoned");
+        upload_target_is_current(&store, target)
+    }
+
+    /// A held upload does not outlive the run it was aimed at, and says so
+    /// unless the session itself is gone and there is no one left to tell.
+    fn discard_stale_held_uploads(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.held_uploads.is_empty() {
+            return;
+        }
+        let changed = {
+            let store = self
+                .runtime
+                .store
+                .read()
+                .expect("session store lock poisoned");
+            let mut changed = false;
+            self.held_uploads.retain(|(target, _)| {
+                let current = upload_target_is_current(&store, target);
+                changed |= !current && store.sessions().contains_key(&target.id);
+                current
+            });
+            changed
+        };
+        if changed {
+            self.show_terminal_feedback(UPLOAD_TARGET_CHANGED, window, cx);
+        }
+    }
+
+    fn paste_upload(&self, id: &SessionId, paste: &UploadedPaste) -> bool {
+        match paste {
+            UploadedPaste::ClipboardImage(path) => self.residents.get(id).is_some_and(|resident| {
+                resident.send_user_input(terminal_paste(path, resident.bracketed_paste))
+            }),
+            UploadedPaste::DroppedFiles(text) => self.paste_into_session(id, text),
         }
     }
 
@@ -1953,6 +2116,19 @@ impl TerminalPane {
         resident.send_user_input(terminal_file_paste(text, resident.bracketed_paste, kind))
     }
 
+    /// For a session on another host: where its uploads are copied, and the
+    /// identity a finished upload is checked against before anything is pasted.
+    fn upload_destination(&self, id: &SessionId) -> Option<(UploadTarget, String)> {
+        let store = self
+            .runtime
+            .store
+            .read()
+            .expect("session store lock poisoned");
+        let target = UploadTarget::of(store.sessions().get(id)?)?;
+        let ssh = store.host(&target.host)?.ssh.clone();
+        Some((target, ssh))
+    }
+
     /// Finder released files over the grid. Behaves like a desktop terminal:
     /// the paths are pasted into the foreground program, which is how Claude
     /// Code, Codex and Cursor attach dropped images. Sessions on another host
@@ -1969,9 +2145,9 @@ impl TerminalPane {
         if !self.residents.contains_key(&id) {
             return;
         }
-        let ssh = self.drop_destination(&id);
+        let destination = self.upload_destination(&id);
 
-        let plan = plan_terminal_drop(paths.paths(), ssh.is_some());
+        let plan = plan_terminal_drop(paths.paths(), destination.is_some());
         diri_telemetry::event!(
             "pane.drop",
             session = diri_telemetry::id(&id.0),
@@ -1982,7 +2158,7 @@ impl TerminalPane {
                 Some(TerminalDropAction::Upload(_)) => "upload",
             },
             partial = plan.action.is_some() && plan.feedback().is_some(),
-            remote = ssh.is_some()
+            remote = destination.is_some()
         );
         if let Some(message) = plan.feedback() {
             cx.emit(TerminalPaneEvent::ExternalDropFeedback { message });
@@ -2006,11 +2182,10 @@ impl TerminalPane {
                 self.paste_into_session(&id, &text);
             }
             Some(TerminalDropAction::Upload(files)) => {
-                let Some(ssh) = ssh else {
+                let Some((target, ssh)) = destination else {
                     return;
                 };
                 let pane_tx = self.pane_tx.clone();
-                let upload_id = id.clone();
                 self.tokio.spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
                         files
@@ -2020,27 +2195,11 @@ impl TerminalPane {
                     })
                     .await
                     .unwrap_or_else(|error| Err(format!("upload task failed: {error}")));
-                    let _ = pane_tx.send(PaneEvent::DroppedFilesUploaded(upload_id, result));
+                    let _ = pane_tx.send(PaneEvent::DroppedFilesUploaded(target, result));
                 });
             }
         }
         cx.notify();
-    }
-
-    /// Where a drop on `id` has to be copied to first, for a session on
-    /// another host.
-    fn drop_destination(&self, id: &SessionId) -> Option<String> {
-        let store = self
-            .runtime
-            .store
-            .read()
-            .expect("session store lock poisoned");
-        store
-            .sessions()
-            .get(id)
-            .and_then(|session| session.host.as_deref())
-            .and_then(|host_id| store.host(host_id))
-            .map(|host| host.ssh.clone())
     }
 
     /// One tick as dragged files arrive over this pane, if releasing them
@@ -2058,7 +2217,7 @@ impl TerminalPane {
             .filter(|id| {
                 // Staging stats every path, so decide once, on the way in.
                 self.external_drag.is_over_target()
-                    || plan_terminal_drop(paths.paths(), self.drop_destination(id).is_some())
+                    || plan_terminal_drop(paths.paths(), self.upload_destination(id).is_some())
                         .action
                         .is_some()
             })
@@ -2881,13 +3040,9 @@ impl TerminalPane {
             .store
             .read()
             .expect("session store lock poisoned");
-        let font_size = store.preferences().terminal_font_size;
+        let typeface = TerminalType::from_prefs(store.preferences());
         drop(store);
-        let metrics = CellMetrics::measure(
-            window.text_system(),
-            &font(crate::fonts::mono_family()),
-            px(font_size),
-        );
+        let metrics = typeface.metrics(window);
         let viewport = self.viewport.unwrap_or_default();
         let grid_x = viewport.x + GRID_HORIZONTAL_PADDING / 2.0;
         // An overflowing grid is bottom-anchored (see render_grid_and_overlays),
@@ -2898,7 +3053,7 @@ impl TerminalPane {
             .and_then(|id| self.residents.get(&id))
             .map_or(0, |resident| resident.element.grid_rows());
         let anchor = self
-            .grid_row_overflow(grid_rows, font_size, window)
+            .grid_row_overflow(grid_rows, &typeface, window)
             .map_or(0.0, |grid_height| self.grid_inner_height() - grid_height);
         let grid_y = viewport.y + self.header_height() + 2.0 + anchor;
         let col = ((f32::from(position.x) - grid_x) / f32::from(metrics.cell_width))
@@ -3258,17 +3413,13 @@ impl TerminalPane {
     fn grid_row_overflow(
         &self,
         grid_rows: u16,
-        font_size: f32,
+        typeface: &TerminalType,
         window: &mut Window,
     ) -> Option<f32> {
         if grid_rows == 0 || self.viewport.is_none() {
             return None;
         }
-        let metrics = CellMetrics::measure(
-            window.text_system(),
-            &font(crate::fonts::mono_family()),
-            px(font_size),
-        );
+        let metrics = typeface.metrics(window);
         // A pixel of slack on top of the exact row height: the element derives
         // its row count back out with `floor(height / line_height)`, and an
         // exactly-sized box loses its last row to float error or to layout
@@ -3355,28 +3506,13 @@ impl TerminalPane {
                 return;
             }
         };
-        let ssh = {
-            let store = self
-                .runtime
-                .store
-                .read()
-                .expect("session store lock poisoned");
-            store
-                .sessions()
-                .get(id)
-                .and_then(|session| session.host.as_deref())
-                .and_then(|host_id| store.host(host_id))
-                .map(|host| host.ssh.clone())
-        };
-
-        if let Some(ssh) = ssh {
+        if let Some((target, ssh)) = self.upload_destination(id) {
             let pane_tx = self.pane_tx.clone();
-            let upload_id = id.clone();
             self.tokio.spawn(async move {
                 let result = tokio::task::spawn_blocking(move || staged.upload(&ssh))
                     .await
                     .unwrap_or_else(|error| Err(format!("upload task failed: {error}")));
-                let _ = pane_tx.send(PaneEvent::ClipboardUploadFinished(upload_id, result));
+                let _ = pane_tx.send(PaneEvent::ClipboardUploadFinished(target, result));
             });
         } else {
             let local_path = staged.path().to_string_lossy().into_owned();
@@ -3817,15 +3953,14 @@ impl TerminalPane {
         let Some(id) = self.selected_id() else {
             return;
         };
-        let font_size = self
-            .runtime
-            .store
-            .read()
-            .expect("session store lock poisoned")
-            .preferences()
-            .terminal_font_size;
-        let font = font(crate::fonts::mono_family());
-        let metrics = CellMetrics::measure(window.text_system(), &font, px(font_size));
+        let typeface = TerminalType::from_prefs(
+            self.runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .preferences(),
+        );
+        let metrics = typeface.metrics(window);
         let viewport = self.viewport.unwrap_or_default();
         let grid_x = viewport.x + GRID_HORIZONTAL_PADDING / 2.0;
         let grid_y = viewport.y + self.header_height() + 2.0;
@@ -3870,13 +4005,13 @@ impl TerminalPane {
         let Some(session) = self.selected_session() else {
             return;
         };
-        let font_size = self
-            .runtime
-            .store
-            .read()
-            .expect("session store lock poisoned")
-            .preferences()
-            .terminal_font_size;
+        let typeface = TerminalType::from_prefs(
+            self.runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .preferences(),
+        );
         let already_sized = self
             .residents
             .get(&session.id)
@@ -3898,11 +4033,7 @@ impl TerminalPane {
         }) else {
             return;
         };
-        let metrics = CellMetrics::measure(
-            window.text_system(),
-            &font(crate::fonts::mono_family()),
-            px(font_size),
-        );
+        let metrics = typeface.metrics(window);
         let size = estimated_grid_size(
             viewport.width,
             viewport.height,
@@ -4322,7 +4453,7 @@ impl TerminalPane {
         session: &SessionRecord,
         theme: TermTheme,
         colors: SemanticColors,
-        font_size: f32,
+        typeface: &TerminalType,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -4366,7 +4497,9 @@ impl TerminalPane {
                 diri_ui::Material::Opaque => 1.0,
                 diri_ui::Material::Glass => 0.0,
             })
-            .font_size(px(font_size))
+            .font(typeface.font.clone())
+            .font_size(px(typeface.size))
+            .line_height_scale(typeface.line_height)
             .focus_handle(self.focus.clone())
             .reduce_motion(cx.reduce_motion())
             .hovered_reference(self.qol.hit.clone());
@@ -4383,18 +4516,11 @@ impl TerminalPane {
         let show_attaching =
             attachment_state == AttachmentState::Attaching && !resident.element.has_content();
         let secret_input = resident.secret_input && attachment_state == AttachmentState::Live;
-        let overflow = self.grid_row_overflow(resident.element.grid_rows(), font_size, window);
+        let overflow = self.grid_row_overflow(resident.element.grid_rows(), typeface, window);
         let scroll_target = TerminalScrollTarget {
             element: resident.element.clone(),
             visible_rows: usize::from(resident.last_size.1.max(1)),
-            line_height: f32::from(
-                CellMetrics::measure(
-                    window.text_system(),
-                    &font(crate::fonts::mono_family()),
-                    px(font_size),
-                )
-                .line_height,
-            ),
+            line_height: f32::from(typeface.metrics(window).line_height),
             session: session.id.clone(),
             pane_tx: self.pane_tx.clone(),
         };
@@ -5003,7 +5129,7 @@ impl TerminalPane {
         if crate::alerts::enabled(cx) {
             self.sync_paste_prompt(window, cx);
         }
-        let (theme, colors, sidebar_colors, font_size) = {
+        let (theme, colors, sidebar_colors, typeface) = {
             let store = self
                 .runtime
                 .store
@@ -5013,7 +5139,7 @@ impl TerminalPane {
                 crate::app_theme::terminal_theme_in(&store),
                 crate::app_theme::colors_in(&store),
                 crate::app_theme::sidebar_colors_in(&store),
-                store.preferences().terminal_font_size,
+                TerminalType::from_prefs(store.preferences()),
             )
         };
         self.sync_status_glyphs(colors, window, cx);
@@ -5051,7 +5177,7 @@ impl TerminalPane {
                 .overflow_hidden()
                 .bg(colors.work_surface_nested())
                 .child(
-                    self.render_grid_and_overlays(&session, theme, colors, font_size, window, cx),
+                    self.render_grid_and_overlays(&session, theme, colors, &typeface, window, cx),
                 );
             if let Some(find) = self.render_find_bar(&session, colors, cx) {
                 terminal_surface = terminal_surface.child(find);
@@ -5601,6 +5727,29 @@ fn exit_description(session: &SessionRecord) -> String {
         ExitReason::External => "Imported session — not started yet".to_owned(),
         ExitReason::Archived => "Archived".to_owned(),
         ExitReason::Unknown => "Session ended".to_owned(),
+    }
+}
+
+/// The terminal typography preferences, resolved once per use so sizing,
+/// painting and hit-testing measure the same cell.
+struct TerminalType {
+    font: gpui::Font,
+    size: f32,
+    line_height: f32,
+}
+
+impl TerminalType {
+    fn from_prefs(prefs: &crate::store::Prefs) -> Self {
+        Self {
+            font: crate::fonts::terminal_font(&prefs.terminal_font_family),
+            size: prefs.terminal_font_size,
+            line_height: prefs.terminal_line_height,
+        }
+    }
+
+    fn metrics(&self, window: &Window) -> CellMetrics {
+        CellMetrics::measure(window.text_system(), &self.font, px(self.size))
+            .with_line_height_scale(self.line_height)
     }
 }
 
@@ -6929,6 +7078,15 @@ mod tests {
                         prefs.terminal_theme = theme;
                     }
                     prefs.terminal_file_editor = crate::store::FileEditor::Cursor;
+                    if let Ok(family) = std::env::var("DIRI_QOL_FONT") {
+                        prefs.terminal_font_family = family;
+                    }
+                    if let Some(scale) = std::env::var("DIRI_QOL_LINE_HEIGHT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                    {
+                        prefs.terminal_line_height = scale;
+                    }
                 })
                 .unwrap();
             store.upsert_session(session);
@@ -6998,6 +7156,32 @@ mod tests {
                         }
                         grid.cursor_row = 11;
                         grid.cursor_col = 2;
+                    }
+                    if scene == "typography" {
+                        // An agent transcript with box drawing, shades and
+                        // colour: what a font or line-height change touches.
+                        let mut screen = diri_engine::HeadlessScreen::new(80, 18);
+                        screen.feed(concat!(
+                            "\x1b[38;5;173m╭────────────────────────────────────────────╮\x1b[0m\r\n",
+                            "\x1b[38;5;173m│\x1b[0m \x1b[38;5;173m✻\x1b[0m Welcome to \x1b[1mClaude Code\x1b[0m                   \x1b[38;5;173m│\x1b[0m\r\n",
+                            "\x1b[38;5;173m│\x1b[0m   \x1b[2mcwd: ~/work/diri\x1b[0m                         \x1b[38;5;173m│\x1b[0m\r\n",
+                            "\x1b[38;5;173m╰────────────────────────────────────────────╯\x1b[0m\r\n",
+                            "\r\n",
+                            "\x1b[2m>\x1b[0m Let me pick the terminal font in Settings\r\n",
+                            "\r\n",
+                            "\x1b[32m●\x1b[0m \x1b[1mRead\x1b[0m(crates/diri-app/src/fonts.rs)\r\n",
+                            "  ⎿  Read 196 lines\r\n",
+                            "\x1b[32m●\x1b[0m \x1b[1mUpdate\x1b[0m(crates/diri-term/src/metrics.rs)\r\n",
+                            "  ⎿  \x1b[32m+ pub fn with_line_height_scale(self, scale: f32)\x1b[0m\r\n",
+                            "     \x1b[31m- line_height: px(raw_height.round())\x1b[0m\r\n",
+                            "\r\n",
+                            "┌──────┬──────────┬────────┐  \x1b[36m█▓▒░\x1b[0m 0O 1lI {}[]() => != ->\r\n",
+                            "│ size │ 13 pt    │ \x1b[33mok\x1b[0m     │  \x1b[7m inverse \x1b[0m \x1b[4munderline\x1b[0m \x1b[3mitalic\x1b[0m\r\n",
+                            "└──────┴──────────┴────────┘\r\n",
+                            "\x1b[32m$\x1b[0m cargo test -p diri-term\r\n",
+                            "test result: \x1b[32mok\x1b[0m. 278 passed; 0 failed",
+                        ).as_bytes());
+                        grid = screen.full_snapshot();
                     }
                     let find_fixture = if scene == "find-unicode" {
                         let mut screen = diri_engine::HeadlessScreen::new(80, 28);
@@ -8302,8 +8486,10 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let session = fixture_session();
+        let mut session = fixture_session();
+        session.host = Some("forge".into());
         let id = session.id.clone();
+        let target = UploadTarget::of(&session).unwrap();
         {
             let mut store = runtime.store.write().unwrap();
             store.upsert_session(session);
@@ -8343,7 +8529,7 @@ mod tests {
             // The uploader fails with whatever scp wrote to stderr.
             pane.handle_pane_event(
                 PaneEvent::ClipboardUploadFinished(
-                    id.clone(),
+                    target.clone(),
                     Err("scp failed: deploy@forge.internal: Permission denied (publickey)".into()),
                 ),
                 window,
@@ -8362,6 +8548,7 @@ mod tests {
         );
 
         pane.update_in(cx, |pane, window, cx| {
+            pane.residents.get_mut(&id).unwrap().attachment_state = AttachmentState::Live;
             let staged = StagedClipboardImage::stage(b"png bytes", "png").unwrap();
             let local_path = staged.path().to_string_lossy().into_owned();
             pane.paste_staged_clipboard_image(&id, Ok(staged), window, cx);
@@ -8373,7 +8560,7 @@ mod tests {
 
             pane.handle_pane_event(
                 PaneEvent::ClipboardUploadFinished(
-                    id.clone(),
+                    target.clone(),
                     Ok("/tmp/dirijor-clipboard-x.png".into()),
                 ),
                 window,
@@ -8386,6 +8573,223 @@ mod tests {
             assert!(input.try_recv().is_err(), "the remote path was pasted once");
         });
         assert_eq!(shown.lock().unwrap().len(), 2, "success shows no failure");
+    }
+
+    /// The attach seed of a session that just became resident again: live,
+    /// then the child's modes.
+    fn seed_returned_resident(
+        pane: &mut TerminalPane,
+        id: &SessionId,
+        window: &mut Window,
+        cx: &mut Context<TerminalPane>,
+    ) {
+        let resident = pane.residents.get(id).unwrap();
+        resident.attachment.claim();
+        let generation = resident.attachment_generation;
+        pane.handle_pane_event(
+            PaneEvent::AttachmentState(id.clone(), generation, AttachmentState::Live),
+            window,
+            cx,
+        );
+        pane.handle_pane_event(
+            PaneEvent::Chunk(
+                id.clone(),
+                generation,
+                TerminalChunk::Modes {
+                    keyboard: None,
+                    alt_screen: false,
+                    bracketed_paste: true,
+                    mouse: Default::default(),
+                    secret_input: false,
+                },
+            ),
+            window,
+            cx,
+        );
+    }
+
+    #[gpui::test]
+    fn an_upload_that_finishes_while_its_session_is_away_is_pasted_on_return(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let mut uploading = fixture_session();
+        uploading.host = Some("forge".into());
+        let mut other = fixture_session();
+        other.id = SessionId::new("other");
+        let (id, other_id) = (uploading.id.clone(), other.id.clone());
+        let target = UploadTarget::of(&uploading).unwrap();
+        {
+            let mut store = runtime.store.write().unwrap();
+            store.upsert_session(uploading.clone());
+            store.upsert_session(other);
+            store.select(id.clone());
+        }
+        let store_runtime = Arc::clone(&runtime);
+        let (pane, cx) =
+            cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
+        let shown = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = Arc::clone(&shown);
+        cx.update(|_, cx| {
+            cx.subscribe(&pane, move |_, event: &TerminalPaneEvent, _| {
+                if let TerminalPaneEvent::Feedback { message } = event {
+                    sink.lock().unwrap().push(message.clone());
+                }
+            })
+            .detach();
+        });
+        let select = |id: &SessionId| store_runtime.store.write().unwrap().select(id.clone());
+        let (tx, mut input) = mpsc::unbounded_channel();
+
+        // Both uploads start on the session, then the user looks elsewhere:
+        // with a residency of one, its terminal is gone when they finish.
+        select(&other_id);
+        pane.update_in(cx, |pane, window, cx| {
+            pane.input_observer = Some(tx);
+            pane.reconcile_store_change(window, cx);
+            assert!(!pane.residents.contains_key(&id));
+            pane.residents[&other_id].attachment.claim();
+            pane.handle_pane_event(
+                PaneEvent::ClipboardUploadFinished(target.clone(), Ok("/tmp/image.png".into())),
+                window,
+                cx,
+            );
+            pane.handle_pane_event(
+                PaneEvent::DroppedFilesUploaded(target.clone(), Ok(vec!["/tmp/notes.txt".into()])),
+                window,
+                cx,
+            );
+            assert!(
+                input.try_recv().is_err(),
+                "an upload for one session was pasted into another"
+            );
+        });
+        assert_eq!(
+            &*shown.lock().unwrap(),
+            &[UPLOAD_HELD_FOR_RETURN],
+            "a held paste is announced rather than lost"
+        );
+
+        select(&id);
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            assert!(
+                input.try_recv().is_err(),
+                "a paste went out before the returned terminal was live"
+            );
+            seed_returned_resident(pane, &id, window, cx);
+            assert_eq!(
+                input.try_recv().unwrap(),
+                (id.clone(), b"\x1b[200~/tmp/image.png\x1b[201~".to_vec())
+            );
+            assert_eq!(
+                input.try_recv().unwrap(),
+                (id.clone(), b"\x1b[200~/tmp/notes.txt \x1b[201~".to_vec())
+            );
+            seed_returned_resident(pane, &id, window, cx);
+            assert!(
+                input.try_recv().is_err(),
+                "a held paste was delivered twice"
+            );
+        });
+
+        // The run ends while its upload is held. A resume keeps the id and
+        // `created_at`, so the exit is all that tells the two runs apart.
+        select(&other_id);
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            pane.handle_pane_event(
+                PaneEvent::ClipboardUploadFinished(target.clone(), Ok("/tmp/image.png".into())),
+                window,
+                cx,
+            );
+        });
+        let mut exited = uploading.clone();
+        exited.status = SessionStatus::Exited(ExitInfo {
+            reason: ExitReason::Exited,
+            code: Some(0),
+            signal: None,
+        });
+        store_runtime.store.write().unwrap().upsert_session(exited);
+        shown.lock().unwrap().clear();
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx)
+        });
+        assert_eq!(&*shown.lock().unwrap(), &[UPLOAD_TARGET_CHANGED]);
+        store_runtime
+            .store
+            .write()
+            .unwrap()
+            .upsert_session(uploading.clone());
+        select(&id);
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            seed_returned_resident(pane, &id, window, cx);
+            assert!(
+                input.try_recv().is_err(),
+                "an upload was replayed into a resumed session"
+            );
+        });
+
+        // The same id started over, and then moved host, while an upload for
+        // the old run was held: the path belongs to neither.
+        select(&other_id);
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            pane.handle_pane_event(
+                PaneEvent::ClipboardUploadFinished(target.clone(), Ok("/tmp/image.png".into())),
+                window,
+                cx,
+            );
+        });
+        let mut restarted = uploading.clone();
+        restarted.created_at = diri_proto::DateMillis(uploading.created_at.0 + 1.0);
+        store_runtime
+            .store
+            .write()
+            .unwrap()
+            .upsert_session(restarted);
+        select(&id);
+        shown.lock().unwrap().clear();
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            seed_returned_resident(pane, &id, window, cx);
+            assert!(
+                input.try_recv().is_err(),
+                "an upload was replayed into a restarted session"
+            );
+        });
+        assert_eq!(&*shown.lock().unwrap(), &[UPLOAD_TARGET_CHANGED],);
+
+        let mut migrated = uploading.clone();
+        migrated.host = Some("anvil".into());
+        store_runtime
+            .store
+            .write()
+            .unwrap()
+            .upsert_session(migrated);
+        shown.lock().unwrap().clear();
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            pane.qol.clear_feedback();
+            pane.residents.get_mut(&id).unwrap().attachment_state = AttachmentState::Live;
+            pane.handle_pane_event(
+                PaneEvent::DroppedFilesUploaded(target.clone(), Ok(vec!["/tmp/notes.txt".into()])),
+                window,
+                cx,
+            );
+            assert!(
+                input.try_recv().is_err(),
+                "an upload was pasted into a migrated session"
+            );
+        });
+        assert_eq!(&*shown.lock().unwrap(), &[UPLOAD_TARGET_CHANGED],);
     }
 
     #[gpui::test]

@@ -19,6 +19,7 @@ mod notes;
 pub use notes::NoteSpawn;
 mod orchestration;
 mod policy;
+mod schedules;
 mod tasks;
 
 use policy::{McpPolicy, WRITE_POLICY, WriteAction};
@@ -120,6 +121,10 @@ impl Bridge {
             "answer_task" => self.answer_task(arguments),
             "cancel_task" => self.cancel_task(arguments),
             "list_tasks" => self.list_tasks(arguments),
+            "get_skill" => get_skill(arguments),
+            "schedule_agent" => self.schedule_agent(arguments),
+            "list_schedules" => self.list_schedules(),
+            "delete_schedule" => self.delete_schedule(arguments),
             "wait_any" => self.wait_any(arguments),
             "get_diff" => self.get_diff(arguments),
             "integrate" => self.integrate(arguments),
@@ -986,6 +991,19 @@ fn render_failure(error: ControlFailure) -> String {
     }
 }
 
+/// Skills are compiled in, so this needs neither the Engine nor a session.
+fn get_skill(arguments: &Value) -> Result<Value, String> {
+    let name = required_string(arguments, "name")?;
+    let skill = diri_proto::skills::find(&name).ok_or_else(|| {
+        format!("unknown skill {name:?}; use scheduling, notes, or orchestration")
+    })?;
+    Ok(json!({
+        "name": skill.name,
+        "description": skill.description,
+        "markdown": skill.markdown,
+    }))
+}
+
 fn required_string(arguments: &Value, key: &str) -> Result<String, String> {
     arguments
         .get(key)
@@ -1386,6 +1404,7 @@ mod tests {
             note_id: None,
             foreground_ports: None,
             terminal_progress: None,
+            scheduled_run: None,
         }
     }
 

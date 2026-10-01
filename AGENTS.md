@@ -68,6 +68,7 @@ The Rust toolchain is pinned by `diri/rust-toolchain.toml` to Rust 1.95.0, editi
 - Keep SSH protocol stdin exclusively for Helper frames. On macOS, route OpenSSH prompts through the packaged Rust `diri-ssh-askpass`; do not parse passwords or host-key answers in the Engine.
 - A failed upload/install may clean up only its own nonce temp file. It must not delete validated binaries or session state.
 - Never request elevation or host-wide configuration: no `sudo`, package installation, PAM/sshd changes, system services, persistent user units/LaunchAgents, or `loginctl enable-linger`.
+- One local, opt-in exception: the macOS wake helper (`diri-wake-helper`, `crates/diri-engine/src/wake.rs`) is a bundled `SMAppService` daemon the user approves in System Settings. It may only schedule and cancel the calling user's diri wake events and sleep an idle Mac the caller owns the console of. Never widen its requests, never register it without the user switching it on, and never use it on remote hosts.
 - Detect persistence rather than assuming `setsid()` survives logout. Surface `native-detach`, `user-supervisor`, and `non-persistent` distinctly. Use only an already-available, no-configuration transient user supervisor; otherwise report non-persistent. Never fall back to `tmux`.
 
 ## Build and verification

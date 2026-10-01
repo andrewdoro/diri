@@ -13,6 +13,7 @@
 #   DIRI_LOCAL_GATES=1  run cargo clippy/test here instead of trusting CI's run
 #   SKIP_PERF_GATE=1   skip packaged app memory/idle-CPU probe
 #   DIRI_LINUX_DIST     use this Linux CI artifact directory instead of fetching
+#                       (it must carry CI's .sigstore.json signature bundles)
 #   DIRI_RELEASE_TARGET_DIR  build cache (default: diri/target/release-pipeline)
 #
 # Speed: the macOS build runs locally while two things wait on GitHub Actions in
@@ -25,6 +26,8 @@
 #   diri-<version>-universal.dmg  what people download by hand
 #   diri-<version>-universal.zip  what the in-app updater fetches
 # plus appcast.json, SHA256SUMS, and the reviewed dependency-license inventory.
+# The Linux files carry the Sigstore bundles CI signed them with
+# (<file>.sigstore.json); they are verified here before anything is published.
 # All are attached to a GitHub Release, so the updater feed has a stable URL.
 # See diri/UPDATING.md for the trust model and one-time setup.
 set -euo pipefail
@@ -106,6 +109,12 @@ echo "    Publishing to : $GH_REPO"
 
 if ! command -v gh >/dev/null 2>&1; then
     echo "error: the GitHub CLI (gh) is required to publish" >&2
+    exit 1
+fi
+# Checked now rather than after a 40-minute build: the Linux signatures are
+# verified before publishing, and an unverifiable release must not ship.
+if ! command -v cosign >/dev/null 2>&1; then
+    echo "error: cosign is required to verify the Linux signatures (brew install cosign)" >&2
     exit 1
 fi
 if [ "${SKIP_CASK:-0}" != "1" ] && [ ! -f "$TAP_DIR/Casks/diri.rb" ]; then
@@ -302,19 +311,41 @@ for name in artifact_names:
         raise SystemExit(f"Linux artifact digest mismatch: {path.name}")
 PYLINUX
 
+# The packages must carry signatures from main's Nightly workflow. Overrides a
+# maintainer may have exported for a rehearsal are dropped so the pinned
+# identity, not the environment, decides what is accepted.
+echo "==> Verifying Linux Sigstore signatures"
+env -u DIRI_COSIGN_PUBLIC_KEY -u DIRI_SIGNING_IDENTITY -u DIRI_SIGNING_OIDC_ISSUER \
+    GH_REPO="$GH_REPO" "$WORKSPACE/scripts/linux-signatures.sh" verify "$DIRI_LINUX_DIST"
+
 LINUX_APPIMAGE="$DIST/$(basename "$LINUX_APPIMAGE_SOURCE")"
 LINUX_DEB="$DIST/$(basename "$LINUX_DEB_SOURCE")"
 LINUX_MANIFEST="$DIST/linux-release.json"
+# The release-wide SHA256SUMS below covers every platform and is written here,
+# so it cannot carry CI's signature. CI's signed Linux-only list ships beside it
+# under its own name; the bundle signs bytes, not a filename.
+LINUX_CHECKSUMS="$DIST/SHA256SUMS-linux"
 mkdir -p "$DIST"
-if [ "$LINUX_APPIMAGE_SOURCE" != "$LINUX_APPIMAGE" ]; then
-    cp "$LINUX_APPIMAGE_SOURCE" "$LINUX_APPIMAGE"
-fi
-if [ "$LINUX_DEB_SOURCE" != "$LINUX_DEB" ]; then
-    cp "$LINUX_DEB_SOURCE" "$LINUX_DEB"
-fi
-if [ "$LINUX_MANIFEST_SOURCE" != "$LINUX_MANIFEST" ]; then
-    cp "$LINUX_MANIFEST_SOURCE" "$LINUX_MANIFEST"
-fi
+copy_linux_asset() {
+    if [ "$1" != "$2" ]; then
+        cp "$1" "$2"
+    fi
+}
+copy_linux_asset "$LINUX_APPIMAGE_SOURCE" "$LINUX_APPIMAGE"
+copy_linux_asset "$LINUX_DEB_SOURCE" "$LINUX_DEB"
+copy_linux_asset "$LINUX_MANIFEST_SOURCE" "$LINUX_MANIFEST"
+copy_linux_asset "$DIRI_LINUX_DIST/SHA256SUMS" "$LINUX_CHECKSUMS"
+copy_linux_asset "$LINUX_APPIMAGE_SOURCE.sigstore.json" "$LINUX_APPIMAGE.sigstore.json"
+copy_linux_asset "$LINUX_DEB_SOURCE.sigstore.json" "$LINUX_DEB.sigstore.json"
+copy_linux_asset "$LINUX_MANIFEST_SOURCE.sigstore.json" "$LINUX_MANIFEST.sigstore.json"
+copy_linux_asset "$DIRI_LINUX_DIST/SHA256SUMS.sigstore.json" "$LINUX_CHECKSUMS.sigstore.json"
+LINUX_SIGNATURES=(
+    "$LINUX_CHECKSUMS"
+    "$LINUX_APPIMAGE.sigstore.json"
+    "$LINUX_DEB.sigstore.json"
+    "$LINUX_MANIFEST.sigstore.json"
+    "$LINUX_CHECKSUMS.sigstore.json"
+)
 
 # ----------------------------------------------------------------------------
 # 4. Build the update feed
@@ -420,7 +451,9 @@ a Gatekeeper prompt.
 and 24.04 are supported under X11 and Wayland. Linux updates use a newer
 package/download rather than the in-app macOS updater.
 
-See \`SHA256SUMS\` and \`linux-release.json\` for artifact metadata. The macOS
+See \`SHA256SUMS\` and \`linux-release.json\` for artifact metadata. Each Linux
+file has a Sigstore \`.sigstore.json\` signature from this repository's CI;
+\`diri/LINUX.md\` shows how to verify it. The macOS
 app updates itself from the \`appcast.json\` feed attached here.
 NOTES
     echo "==> Wrote default notes to $NOTES_FILE (edit and re-run to customize)"
@@ -430,7 +463,7 @@ echo "==> Publishing $TAG to $GH_REPO"
 GH_REPO="$GH_REPO" SOURCE_COMMIT="$SOURCE_COMMIT" \
     "$WORKSPACE/scripts/publish-github-release.sh" \
     "$VERSION" "$NOTES_FILE" "$DMG" "$ZIP" \
-    "$LINUX_APPIMAGE" "$LINUX_DEB" "$LINUX_MANIFEST" \
+    "$LINUX_APPIMAGE" "$LINUX_DEB" "$LINUX_MANIFEST" "${LINUX_SIGNATURES[@]}" \
     "$FEED" "$CHECKSUMS" "$INVENTORY"
 
 # ----------------------------------------------------------------------------

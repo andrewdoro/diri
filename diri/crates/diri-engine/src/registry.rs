@@ -1601,6 +1601,27 @@ impl Registry {
         meta: &crate::hooks::HookMetadata,
         home: Option<&Path>,
     ) -> Option<bool> {
+        let stripped;
+        let meta = if let Some((reason, holder)) = self.refused_conversation(id, meta) {
+            diri_telemetry::event!(
+                "session.conversation_refused",
+                session = diri_telemetry::id(id),
+                conv = meta.agent_session_id.as_deref().map(diri_telemetry::id),
+                reason = reason,
+                holder = holder.as_deref().map(diri_telemetry::id),
+            );
+            // The status signal still belongs to this PTY; only the foreign
+            // identity, transcript and prompt title are dropped.
+            stripped = crate::hooks::HookMetadata {
+                agent_session_id: None,
+                transcript_path: None,
+                first_prompt_title: None,
+                ..meta.clone()
+            };
+            &stripped
+        } else {
+            meta
+        };
         let claimed = self.claimed_agent_ids(Some(id));
         let mut transcript = self.records.get(id).and_then(|record| {
             if record.host.is_some() {
@@ -2117,6 +2138,34 @@ impl Registry {
             .values()
             .map(|record| (record.id.clone(), record.project_id.clone()))
             .collect()
+    }
+
+    /// Why a hook may not move `id` to the conversation it names. A tab must
+    /// never flip between conversations: its title, transcript and resume
+    /// target all follow `agent_session_id`.
+    fn refused_conversation(
+        &self,
+        id: &str,
+        meta: &crate::hooks::HookMetadata,
+    ) -> Option<(&'static str, Option<String>)> {
+        let incoming = meta.agent_session_id.as_deref()?;
+        let record = self.records.get(id)?;
+        let current = record.agent_session_id.as_deref();
+        if current == Some(incoming) {
+            return None;
+        }
+        if current.is_some() && !meta.binds_conversation {
+            return Some(("not_session_start", None));
+        }
+        self.records
+            .iter()
+            .find(|(other, other_record)| {
+                other.as_str() != id
+                    && self.sessions.contains_key(other.as_str())
+                    && other_record.host == record.host
+                    && other_record.agent_session_id.as_deref() == Some(incoming)
+            })
+            .map(|(other, _)| ("held_by_other_session", Some(other.clone())))
     }
 
     fn claimed_agent_ids(&self, except: Option<&str>) -> HashSet<String> {
@@ -2792,6 +2841,7 @@ fn recovered_record(capsule: diri_proto::recovery::SessionRecoveryCapsule) -> Se
         note_id: None,
         foreground_ports: None,
         terminal_progress: None,
+        scheduled_run: None,
     }
 }
 
@@ -3021,6 +3071,7 @@ mod tests {
             note_id: None,
             foreground_ports: None,
             terminal_progress: None,
+            scheduled_run: None,
         }
     }
 
@@ -3795,6 +3846,128 @@ mod tests {
         let updated = registry.record("claude").expect("record");
         assert_eq!(updated.title, "Repair remote session recovery");
         assert_eq!(updated.title_source, TitleSource::AgentProvided);
+    }
+
+    fn claude_transcript(home: &Path, agent_id: &str, title: &str) -> String {
+        let transcript = home
+            .join(".claude/projects/-tmp")
+            .join(format!("{agent_id}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &transcript,
+            format!("{{\"type\":\"ai-title\",\"aiTitle\":\"{title}\"}}\n"),
+        )
+        .expect("write transcript");
+        transcript.to_string_lossy().into_owned()
+    }
+
+    fn claude_hook(event: &str, agent_id: &str, transcript: &str) -> crate::hooks::HookMetadata {
+        crate::hooks::parse_claude_hook(
+            event,
+            &serde_json::json!({
+                "session_id": agent_id,
+                "transcript_path": transcript,
+                "prompt": "unrelated prompt",
+            }),
+            std::time::SystemTime::now(),
+        )
+        .expect("parsed")
+        .1
+    }
+
+    /// Two Claude conversations reporting through one tab's environment made
+    /// the tab flip between them on every hook, swapping its title with the
+    /// other tab's.
+    #[test]
+    fn only_session_start_moves_a_claude_tab_to_another_conversation() {
+        let temp = tempfile::tempdir().expect("temp");
+        let vanta = "0199f2c4-1a2b-4c3d-8e9f-0000000000a1";
+        let perf = "0199f2c4-1a2b-4c3d-8e9f-0000000000b2";
+        let vanta_path = claude_transcript(temp.path(), vanta, "Vanta audit");
+        let perf_path = claude_transcript(temp.path(), perf, "Performance pass");
+        let mut registry = Registry::new(engine(), temp.path().join("state.json"));
+        let mut session = record("claude");
+        session.kind = AgentKind::CLAUDE_CODE;
+        session.agent_session_id = Some(vanta.to_owned());
+        session.transcript_path = Some(vanta_path.clone());
+        registry.insert_record(session);
+        let home = Some(temp.path());
+
+        assert!(registry.apply_hook_metadata_with_home(
+            "claude",
+            &claude_hook("Stop", vanta, &vanta_path),
+            home,
+        ));
+        assert_eq!(registry.record("claude").unwrap().title, "Vanta audit");
+
+        for event in ["UserPromptSubmit", "Stop", "SubagentStop", "PreToolUse"] {
+            registry.apply_hook_metadata_with_home(
+                "claude",
+                &claude_hook(event, perf, &perf_path),
+                home,
+            );
+            let record = registry.record("claude").unwrap();
+            assert_eq!(record.agent_session_id.as_deref(), Some(vanta), "{event}");
+            assert_eq!(record.transcript_path.as_deref(), Some(&*vanta_path));
+            assert_eq!(record.title, "Vanta audit", "{event}");
+        }
+
+        // `/resume` and `/clear` announce the switch with SessionStart.
+        assert!(registry.apply_hook_metadata_with_home(
+            "claude",
+            &claude_hook("SessionStart", perf, &perf_path),
+            home,
+        ));
+        let record = registry.record("claude").unwrap();
+        assert_eq!(record.agent_session_id.as_deref(), Some(perf));
+        assert_eq!(record.transcript_path.as_deref(), Some(&*perf_path));
+        assert_eq!(record.title, "Performance pass");
+    }
+
+    #[test]
+    fn a_tab_never_takes_a_conversation_another_live_tab_holds() {
+        let temp = tempfile::tempdir().expect("temp");
+        let mine = "0199f2c4-1a2b-4c3d-8e9f-0000000000c3";
+        let theirs = "0199f2c4-1a2b-4c3d-8e9f-0000000000d4";
+        let mine_path = claude_transcript(temp.path(), mine, "Mine");
+        let theirs_path = claude_transcript(temp.path(), theirs, "Theirs");
+        let mut registry = Registry::new(engine(), temp.path().join("state.json"));
+        for (id, agent_id, path) in [("a", mine, &mine_path), ("b", theirs, &theirs_path)] {
+            let mut session = record(id);
+            session.kind = AgentKind::CLAUDE_CODE;
+            session.agent_session_id = Some(agent_id.to_owned());
+            session.transcript_path = Some(path.clone());
+            session.title = if id == "a" { "Mine" } else { "Theirs" }.into();
+            session.title_source = TitleSource::AgentProvided;
+            registry
+                .spawn(
+                    SessionSpec {
+                        id: id.into(),
+                        pty: crate::PtySpec::new(vec!["/bin/cat".into()], "/tmp"),
+                        manifest_id: "claude-code".into(),
+                        authority: crate::Authority::ProcessOnly,
+                        logs_dir: temp.path().join("logs"),
+                        holder: None,
+                        remote: None,
+                        defer_launch: false,
+                    },
+                    session,
+                )
+                .unwrap();
+        }
+
+        registry.apply_hook_metadata_with_home(
+            "a",
+            &claude_hook("SessionStart", theirs, &theirs_path),
+            Some(temp.path()),
+        );
+        let a = registry.record("a").unwrap();
+        assert_eq!(a.agent_session_id.as_deref(), Some(mine));
+        assert_eq!(a.title, "Mine");
+        assert_eq!(
+            registry.record("b").unwrap().agent_session_id.as_deref(),
+            Some(theirs)
+        );
     }
 
     #[test]

@@ -101,3 +101,14 @@ a.eyebrow:hover { color: var(--rp-text); }
   .guide-pager { grid-template-columns: 1fr; }
   .prompt { padding-right: 18px; padding-top: 44px; }
 }
+
+/* What's new: one section per release, one clip per highlight. */
+.whats-new .release { max-width: 760px; padding-top: 8px; }
+.release-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding-bottom: 14px; border-bottom: 1px solid #ffffff14; margin-bottom: 28px; }
+.release-heading h2 { margin: 0; font-size: 22px; font-weight: 500; letter-spacing: -.02em; }
+.release-heading span { font-size: 13.5px; color: #8f88a3; }
+.release-item { margin: 0 0 44px; }
+.release-item h3 { margin: 16px 0 6px; font-size: 18px; font-weight: 550; letter-spacing: -.01em; color: var(--rp-text); }
+.release-item p { margin: 0; max-width: 620px; font-size: 16px; line-height: 1.65; color: #c9c2d8; }
+.release-clip { margin: 0; }
+.release-clip img { display: block; width: 100%; max-width: 720px; height: auto; border-radius: 12px; border: 1px solid #ffffff17; box-shadow: 0 18px 40px -22px #000c; background: #191724; }

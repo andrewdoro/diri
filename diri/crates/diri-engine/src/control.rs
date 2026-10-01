@@ -33,6 +33,7 @@ mod hook_queue;
 mod message_delivery;
 mod operations;
 mod orchestration;
+mod schedules;
 mod tasks;
 mod workspaces;
 
@@ -126,6 +127,7 @@ pub struct ControlServer {
     /// Where note Sessions keep their files; `None` resolves the standard
     /// notes directory (tests pin a temporary one).
     notes_dir: Option<PathBuf>,
+    scheduler: Arc<schedules::Scheduler>,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -172,6 +174,14 @@ fn local_session_uses_worktree(record: &diri_proto::SessionRecord, target: &Path
 }
 
 impl ControlServer {
+    /// Configure private power endpoints before starting the scheduler.
+    pub fn with_schedule_power(mut self, config: crate::wake::PowerConfig) -> Self {
+        Arc::get_mut(&mut self.scheduler)
+            .expect("scheduler not started")
+            .power = config;
+        self
+    }
+
     pub fn new(registry: Arc<Mutex<Registry>>, socket_path: impl Into<PathBuf>) -> Self {
         // Capture the bytes this process actually started from before an app
         // updater can replace the bundle path underneath the live daemon.
@@ -236,6 +246,7 @@ impl ControlServer {
             agent_scans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             hook_reports: hook_queue::HookQueue::new(),
             notes_dir: None,
+            scheduler: Arc::new(schedules::Scheduler::default()),
         }
     }
 
@@ -245,6 +256,7 @@ impl ControlServer {
     pub fn with_injection(mut self, config: InjectionConfig) -> Self {
         let _ = crate::inject::write_claude_hooks_file(&config.inject_dir);
         let _ = crate::inject::write_claude_mcp_file(&config.inject_dir, &config.cli_path);
+        let _ = crate::inject::write_claude_skills_plugin(&config.inject_dir);
         self.injection = Some(config);
         self
     }
@@ -946,6 +958,11 @@ impl ControlServer {
             Method::TASK_ANSWER => self.task_answer(params),
             Method::TASK_CANCEL => self.task_cancel(params),
             Method::TASK_LIST => self.task_list(params),
+            Method::SCHEDULE_CREATE => self.schedule_create(params),
+            Method::SCHEDULE_UPDATE => self.schedule_update(params),
+            Method::SCHEDULE_DELETE => self.schedule_delete(params),
+            Method::SCHEDULE_LIST => self.schedule_list(),
+            Method::SCHEDULE_RUN_NOW => self.schedule_run_now(params),
             Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),
             Method::SESSION_DELIVER_MESSAGE => self.session_deliver_message(params),
             Method::SESSION_SEND_KEY => self.session_send_key(params),
@@ -1056,13 +1073,14 @@ impl ControlServer {
     /// `generic` need an explicit `argv`, since their manifests declare no
     /// binary.
     fn session_spawn(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
-        self.session_spawn_identified(params, None)
+        self.session_spawn_identified(params, None, None)
     }
 
     fn session_spawn_identified(
         &self,
         params: Option<JsonValue>,
         reserved_id: Option<String>,
+        scheduled: Option<diri_proto::schedules::ScheduledRunInfo>,
     ) -> Result<JsonValue, ControlError> {
         let raw = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
         // Validate before any account, worktree, or remote side effect. Missing
@@ -1080,7 +1098,7 @@ impl ControlServer {
             p.host.as_deref(),
         )?;
         if p.host.is_some() {
-            return self.session_spawn_remote(p, argv, account_profile, reserved_id);
+            return self.session_spawn_remote(p, argv, account_profile, reserved_id, scheduled);
         }
         if let Some(profile) = &account_profile
             && profile.agent == "codex"
@@ -1219,6 +1237,7 @@ impl ControlServer {
             crate::accounts::bind_pty(profile, &mut pty)?;
         }
         let mut record = new_record(&id, &kind, &cwd);
+        record.scheduled_run = scheduled;
         record.terminal_cwd = start_directory.map(|path| path.to_string_lossy().into_owned());
         record.account_profile = account_profile;
         record.kind = p.kind.clone();
@@ -1572,6 +1591,7 @@ impl ControlServer {
         caller_argv: Vec<String>,
         mut account_profile: Option<diri_proto::AgentAccountProfile>,
         reserved_id: Option<String>,
+        scheduled: Option<diri_proto::schedules::ScheduledRunInfo>,
     ) -> Result<JsonValue, ControlError> {
         let manager = self
             .remote
@@ -1749,6 +1769,7 @@ impl ControlServer {
         };
 
         let mut record = new_record(&id, &kind, &captured.cwd);
+        record.scheduled_run = scheduled;
         record.account_profile = account_profile;
         record.kind = p.kind.clone();
         record.originating_prompt = p.initial_prompt.clone();
@@ -2817,14 +2838,9 @@ impl ControlServer {
         if let Some(store) = &self.remote_bindings {
             let _ = store.remove(&p.session_id.0);
         }
-        // Closing a note's tab puts its file in the notes trash, from which
-        // "reopen closed" brings it back; its history stays either way.
-        if removed.is_note()
-            && let Some(note_id) = &removed.note_id
-            && let Ok(store) = self.note_store()
-        {
-            let _ = store.trash(note_id);
-        }
+        // Closing a note's tab never touches its file: the note stays in
+        // Search notes (as a closed note) and opening it there brings its tab
+        // back, the way closed chats stay in conversation search.
         self.events.record_removed(&removed);
         self.events.publish(
             diri_proto::EventName::SESSION_REMOVED,
@@ -4179,7 +4195,8 @@ impl ControlServer {
                     let Ok(mut registry) = server.registry.lock() else {
                         return;
                     };
-                    let live_sessions = registry.live_count();
+                    // An enabled schedule is work the Engine must stay up for.
+                    let live_sessions = registry.live_count() + server.scheduler.enabled_count();
                     if !watch.observe(live_sessions, connections, Instant::now(), grace) {
                         continue;
                     }
@@ -4546,6 +4563,7 @@ pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::Session
         note_id: None,
         foreground_ports: None,
         terminal_progress: None,
+        scheduled_run: None,
     }
 }
 
@@ -4901,6 +4919,13 @@ fn prepare_agent_input(
         .unwrap_or(false);
         if copilot {
             accept_copilot_folder_trust(registry, session_id);
+        }
+        let cursor = with_session(registry, session_id, |session| {
+            session.manifest_id() == diri_proto::AgentKind::CURSOR_ID
+        })
+        .unwrap_or(false);
+        if cursor {
+            prepare_cursor_input(registry, session_id)?;
         }
         inject_initial_prompt(registry, session_id, prompt)?;
     }
@@ -5307,6 +5332,55 @@ fn is_copilot_folder_trust_screen(lines: &[String]) -> bool {
         && crate::detect::bottom_non_empty(lines, 3)
             .iter()
             .any(|line| line.contains("enter to select") && line.contains("esc to cancel"))
+}
+
+/// Cursor asks for workspace trust before creating its composer. Pasting into
+/// that selector drops the prompt, and the injector's later Enter accepts trust.
+/// Answer that specific selector first, with the same workspace-trust tradeoff
+/// as Claude/Gemini/Pi. Never send an initial prompt to onboarding: any byte there
+/// starts browser login. Wait for the user to finish it, or fail unconfirmed.
+fn prepare_cursor_input(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+) -> Result<(), InitialPromptFailure> {
+    let mut accepted = false;
+    for _ in 0..200 {
+        let (exited, lines) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        })
+        .ok_or(InitialPromptFailure::SessionEnded)?;
+        if exited {
+            return Err(InitialPromptFailure::SessionEnded);
+        }
+        if is_cursor_workspace_trust_screen(&lines) {
+            if !accepted {
+                with_session(registry, session_id, |session| {
+                    session.send_text("a", false)
+                })
+                .ok_or(InitialPromptFailure::SessionEnded)?
+                .map_err(|_| InitialPromptFailure::InputFailed)?;
+                accepted = true;
+            }
+        } else if crate::detect::bottom_non_empty(&lines, 8)
+            .iter()
+            .any(|line| {
+                let line = line.trim();
+                line.starts_with("→ Plan, search, build anything")
+                    || line.starts_with("→ Add a follow-up")
+            })
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(InitialPromptFailure::SubmissionUnconfirmed)
+}
+
+fn is_cursor_workspace_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 8).join("\n");
+    bottom.contains("[a] Trust this workspace")
+        && bottom.contains("[q] Quit")
+        && bottom.contains("Use arrow keys to navigate, Enter to select, or press the key shown")
 }
 
 /// Types and submits an initial prompt at most once. Screen observations can
@@ -5884,6 +5958,7 @@ mod tests {
             note_id: None,
             foreground_ports: None,
             terminal_progress: None,
+            scheduled_run: None,
         }
     }
 
@@ -6002,13 +6077,14 @@ mod tests {
         assert_eq!(note.doc.todo_progress(), (0, 1));
         assert_eq!(note.project(), Some(project.to_string_lossy().as_ref()));
 
-        // Closing the note's tab trashes its file; reopening brings it back.
+        // Closing the note's tab keeps its file, so search can still find it;
+        // reopening brings the tab back.
         ok_of(call(
             &server,
             "session.remove",
             Some(json!({ "sessionID": record.id.0 })),
         ));
-        assert!(store.load(&note_id).is_err(), "closed note is in the trash");
+        assert!(store.load(&note_id).is_ok(), "a closed note stays findable");
         let reopened = ok_of(call(&server, "session.reopen_last", None));
         assert_eq!(reopened["id"], record.id.0.as_str());
         assert_eq!(store.load(&note_id).unwrap().doc.title, "Launch plan");
@@ -7594,10 +7670,18 @@ mod tests {
             Arc::clone(&registry),
             temp.path().join("daemon.sock"),
         ));
+        // Only SessionStart may move the tab to another conversation, so the
+        // later reports switch with it; applied out of order, the first
+        // prompt would arrive for a foreign conversation and lose its title.
         fn prompt(uuid: &str, prompt: &str) -> Option<JsonValue> {
+            let event = if uuid == "uuid-1" {
+                "UserPromptSubmit"
+            } else {
+                "SessionStart"
+            };
             Some(json!({
-                "kind": "claude-hook", "dirijorSessionID": "s_hook", "event": "UserPromptSubmit",
-                "payload": {"session_id": uuid, "hook_event_name": "UserPromptSubmit", "prompt": prompt},
+                "kind": "claude-hook", "dirijorSessionID": "s_hook", "event": event,
+                "payload": {"session_id": uuid, "hook_event_name": event, "prompt": prompt},
             }))
         }
         let busy = registry.lock().expect("registry");
@@ -8453,6 +8537,20 @@ mod tests {
             include_str!("../tests/fixtures/copilot_screens/idle.txt")
         );
         assert!(!is_copilot_folder_trust_screen(&lines(&stale)));
+    }
+
+    #[test]
+    fn cursor_trust_requires_the_live_selector() {
+        let lines = |screen: &str| screen.lines().map(str::to_owned).collect::<Vec<_>>();
+        assert!(is_cursor_workspace_trust_screen(&lines(include_str!(
+            "../tests/fixtures/cursor_screens/trust.txt"
+        ))));
+        assert!(!is_cursor_workspace_trust_screen(&lines(include_str!(
+            "../tests/fixtures/cursor_screens/idle.txt"
+        ))));
+        assert!(!is_cursor_workspace_trust_screen(&lines(include_str!(
+            "../tests/fixtures/cursor_screens/login.txt"
+        ))));
     }
 
     #[test]

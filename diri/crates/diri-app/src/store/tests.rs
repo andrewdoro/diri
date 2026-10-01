@@ -68,6 +68,7 @@ pub(super) fn session(value: &str, project: &str, created: f64) -> SessionRecord
         note_id: None,
         foreground_ports: None,
         terminal_progress: None,
+        scheduled_run: None,
     }
 }
 
@@ -2699,6 +2700,9 @@ struct FakeRemoveEngine {
     _home: tempfile::TempDir,
     socket: std::path::PathBuf,
     removes: Arc<std::sync::atomic::AtomicUsize>,
+    /// A `host.locate_repo` request the Engine has read and not yet answered,
+    /// the way a lookup against a slow host sits while other requests flow.
+    held_lookup: Arc<std::sync::Mutex<Option<(u64, std::os::unix::net::UnixStream)>>>,
 }
 
 impl FakeRemoveEngine {
@@ -2714,6 +2718,8 @@ impl FakeRemoveEngine {
         let removes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let sessions = Arc::new(std::sync::Mutex::new(sessions));
         let remove_count = Arc::clone(&removes);
+        let held_lookup = Arc::new(std::sync::Mutex::new(None));
+        let holding = Arc::clone(&held_lookup);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
@@ -2762,6 +2768,11 @@ impl FakeRemoveEngine {
                                 }
                             }
                         }
+                        Method::HOST_LOCATE_REPO => {
+                            let writer = writer.try_clone().expect("clone fake Engine stream");
+                            *holding.lock().expect("held lookup") = Some((id, writer));
+                            continue;
+                        }
                         _ => Err(ControlError::bad_request("unsupported by the fake Engine")),
                     };
                     let mut bytes = serde_json::to_vec(&ControlMessage::Response { id, result })
@@ -2777,7 +2788,32 @@ impl FakeRemoveEngine {
             _home: home,
             socket,
             removes,
+            held_lookup,
         }
+    }
+
+    fn is_holding_a_lookup(&self) -> bool {
+        self.held_lookup.lock().expect("held lookup").is_some()
+    }
+
+    fn answer_held_lookup(&self, path: &str) {
+        use std::io::Write as _;
+
+        let (id, mut writer) = self
+            .held_lookup
+            .lock()
+            .expect("held lookup")
+            .take()
+            .expect("a held lookup");
+        let result = Ok(serde_json::to_value(diri_proto::HostLocateRepoResult {
+            path: Some(path.to_owned()),
+            origin_url: None,
+        })
+        .expect("locate result"));
+        let mut bytes = serde_json::to_vec(&diri_proto::ControlMessage::Response { id, result })
+            .expect("encode response");
+        bytes.push(b'\n');
+        writer.write_all(&bytes).expect("answer the held lookup");
     }
 
     async fn runtime(&self) -> StoreRuntime {
@@ -2853,6 +2889,65 @@ async fn a_rejected_close_restores_the_retained_session_and_allows_a_retry() {
     }
     eventually("the second close reaches the Engine", || {
         engine.removes.load(Ordering::SeqCst) == 2
+    })
+    .await;
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_repository_lookup_does_not_hold_up_an_unrelated_close() {
+    use std::sync::atomic::Ordering;
+
+    let engine = FakeRemoveEngine::start(
+        vec![session("one", "p", 2.0), session("two", "p", 1.0)],
+        FakeRemove::Reject,
+    );
+    let runtime = engine.runtime().await;
+    let store = Arc::clone(&runtime.store);
+    let forge = Some("forge".to_owned());
+
+    {
+        let mut store = store.write().unwrap();
+        store.select(id("two"));
+        store.begin_repo_targeting();
+        store.request_repo_target(forge.clone());
+    }
+    eventually("the lookup reaches the Engine", || {
+        engine.is_holding_a_lookup()
+    })
+    .await;
+
+    // Every control below is queued behind the lookup the Engine is sitting on.
+    let mut detachments = runtime.detachments();
+    {
+        let mut store = store.write().unwrap();
+        store.select(id("one"));
+        store.request_close(vec![id("one")]);
+    }
+    eventually("the close reaches the Engine and is settled", || {
+        engine.removes.load(Ordering::SeqCst) == 1
+            && store.read().unwrap().action_failure().is_some()
+    })
+    .await;
+    let mut detached = Vec::new();
+    while let Ok(id) = detachments.try_recv() {
+        detached.push(id);
+    }
+    assert!(
+        detached.contains(&id("one")),
+        "the closed session's terminal was not told to detach: {detached:?}"
+    );
+    assert!(engine.is_holding_a_lookup(), "the lookup was never slow");
+    assert_eq!(
+        store.read().unwrap().repo_target(forge.as_deref()),
+        Some(&super::RepoTarget::Pending)
+    );
+
+    engine.answer_held_lookup("/srv/code/diri");
+    eventually("the lookup still lands once the host answers", || {
+        store.read().unwrap().repo_target(forge.as_deref())
+            == Some(&super::RepoTarget::Resolved("/srv/code/diri".to_owned()))
     })
     .await;
 
@@ -3435,6 +3530,7 @@ fn a_new_terminal_starts_where_the_last_terminal_in_its_project_was() {
         terminal_cwd: Some(cwd.to_owned()),
         note_id: None,
         terminal_progress: None,
+        scheduled_run: None,
         ..session(value, project, 2.0)
     };
     let (mut store, mut effects) = hydrated(
@@ -3494,6 +3590,7 @@ fn only_terminals_carry_a_location_for_their_hover() {
         terminal_cwd: Some("/work/p/web".into()),
         note_id: None,
         terminal_progress: None,
+        scheduled_run: None,
         ..session("term", "p", 1.0)
     };
     assert_eq!(

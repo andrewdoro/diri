@@ -1237,3 +1237,58 @@ fn unavailable_transport_is_not_a_process_exit_and_cannot_complete_a_turn() {
         matches!(actual.status_change, Some(SessionStatus::Exited(info)) if info.code == Some(126))
     );
 }
+
+#[test]
+fn answered_cursor_trust_can_settle_on_one_unchanged_idle_frame() {
+    let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
+    let now = settled(&mut reducer, t0());
+    reducer.reduce(
+        StatusSignal::Screen(blocker(1, "Workspace Trust Required")),
+        now,
+    );
+    reducer.reduce(StatusSignal::UserKeystroke, now + Duration::from_millis(10));
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Idle, 2)),
+        now + Duration::from_millis(20),
+    );
+    reducer.reduce(StatusSignal::Tick, now + Duration::from_millis(100));
+    assert!(matches!(reducer.status(), SessionStatus::NeedsInput(_)));
+    reducer.reduce(StatusSignal::Tick, now + Duration::from_secs(1));
+    assert_eq!(reducer.status(), &SessionStatus::Idle);
+}
+
+#[test]
+fn a_reappearing_blocker_cancels_the_quiet_idle_frame() {
+    let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
+    let now = settled(&mut reducer, t0());
+    reducer.reduce(
+        StatusSignal::Screen(blocker(1, "Workspace Trust Required")),
+        now,
+    );
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Idle, 2)),
+        now + Duration::from_millis(20),
+    );
+    reducer.reduce(
+        StatusSignal::Screen(blocker(3, "Workspace Trust Required")),
+        now + Duration::from_millis(40),
+    );
+    reducer.reduce(StatusSignal::Tick, now + Duration::from_secs(1));
+    assert!(matches!(reducer.status(), SessionStatus::NeedsInput(_)));
+}
+
+#[test]
+fn cursor_transcript_cannot_finish_a_live_spinner() {
+    let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
+    let now = settled(&mut reducer, t0());
+    let mut working = observation(ManifestState::Working, 1);
+    working.matched_rule_id = "working-status-line".into();
+    reducer.reduce(StatusSignal::Screen(working), now);
+    reducer.reduce(
+        StatusSignal::CursorTranscriptIdle,
+        now + Duration::from_millis(100),
+    );
+    let outcome = reducer.reduce(StatusSignal::Tick, now + Duration::from_secs(1));
+    assert_eq!(reducer.status(), &SessionStatus::Working);
+    assert!(!outcome.turn_completed);
+}

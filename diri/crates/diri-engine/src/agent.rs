@@ -1197,6 +1197,12 @@ mod tests {
             Some(vec!["--resume".to_string(), "uuid-1".to_string()])
         );
 
+        // Cursor's resume subcommand takes no id. An exact native id uses --resume.
+        assert_eq!(
+            descriptor("cursor").resume_args(Some("native-id")),
+            Some(vec!["--resume".into(), "native-id".into()])
+        );
+
         // The latest-session agents: no id anywhere, so the bare token is the
         // whole resume. A manifest with no `resume` block cannot resume at all.
         for (id, token) in [

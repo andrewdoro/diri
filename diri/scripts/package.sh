@@ -26,6 +26,7 @@ universal_mcp_binary="${universal_dir}/dirijor-mcp"
 universal_engine_binary="${universal_dir}/dirijord-rs"
 universal_holder_binary="${universal_dir}/diri-holder"
 universal_askpass_binary="${universal_dir}/diri-ssh-askpass"
+universal_wake_helper_binary="${universal_dir}/diri-wake-helper"
 
 # Toolchain location. The migration-era toolchain lived in /tmp, which macOS
 # sweeps -- a reboot deleted it mid-project and releases could not be built at
@@ -142,7 +143,7 @@ cp "${universal_mcp_binary}" "${app_bin_dir}/dirijor-mcp"
 # Helper catalog below is consumed by this executable directly.
 echo "==> Building the authoritative Rust Engine (universal)"
 cargo build --release --package diri-engine --bin dirijord-rs --bin diri-holder \
-    --bin diri-ssh-askpass "${mac_targets[@]}"
+    --bin diri-ssh-askpass --bin diri-wake-helper "${mac_targets[@]}"
 lipo -create \
     "${target_dir}/aarch64-apple-darwin/release/dirijord-rs" \
     "${target_dir}/x86_64-apple-darwin/release/dirijord-rs" \
@@ -157,10 +158,22 @@ lipo -create \
     -output "${universal_askpass_binary}"
 verify_universal "${universal_engine_binary}"
 verify_universal "${universal_holder_binary}"
+lipo -create \
+    "${target_dir}/aarch64-apple-darwin/release/diri-wake-helper" \
+    "${target_dir}/x86_64-apple-darwin/release/diri-wake-helper" \
+    -output "${universal_wake_helper_binary}"
 verify_universal "${universal_askpass_binary}"
+verify_universal "${universal_wake_helper_binary}"
 cp "${universal_engine_binary}" "${app_bin_dir}/dirijord-rs"
 cp "${universal_holder_binary}" "${app_bin_dir}/diri-holder"
 cp "${universal_askpass_binary}" "${app_bin_dir}/diri-ssh-askpass"
+cp "${universal_wake_helper_binary}" "${app_bin_dir}/diri-wake-helper"
+# The wake helper's launchd plist, registered at runtime through
+# SMAppService.daemonServiceWithPlistName and approved once by an admin.
+launch_daemons_dir="${app_path}/Contents/Library/LaunchDaemons"
+mkdir -p "${launch_daemons_dir}"
+cp "${workspace_dir}/assets/com.dirijor.diri.wake.plist" "${launch_daemons_dir}/"
+plutil -lint "${launch_daemons_dir}/com.dirijor.diri.wake.plist" >/dev/null
 
 # The default SSH transport bootstraps one exact Rust Helper artifact selected
 # by remote OS/architecture. This build is independent of all daemon products
@@ -217,6 +230,8 @@ codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bi
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/dirijord-rs"
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/diri-holder"
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/diri-ssh-askpass"
+codesign --force --options runtime "${ts_flag[@]}" --identifier com.dirijor.diri.wake \
+    --sign "${sign_id}" "${app_bin_dir}/diri-wake-helper"
 # The Apple remote Helper is deliberately NOT signed here. Signing rewrites the
 # Mach-O, and its length and digest are already recorded in the catalog manifest
 # that the Engine verifies before upload; signing after the fact invalidates the

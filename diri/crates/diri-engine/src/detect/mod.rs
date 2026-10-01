@@ -403,7 +403,7 @@ mod tests {
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 117, "the shipped ruleset lost rules");
+        assert_eq!(rules, 119, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
             let expected_empty = matches!(id, "shell" | "generic");
@@ -1439,6 +1439,70 @@ mod tests {
                 observation.prompt_excerpt.as_deref().map(str::trim),
                 Some("Which option?")
             );
+        }
+    }
+
+    /// Real 100x30 screens from cursor-agent 2026.09.28-64d2043 through
+    /// tests/cursor_real.rs, default zen UI (OSC status indicators off).
+    #[test]
+    fn cursor_rules_match_the_screens_cursor_cli_draws() {
+        let engine = engine();
+        let cases = [
+            (
+                include_str!("../../tests/fixtures/cursor_screens/login.txt"),
+                ManifestState::BlockedQuestion,
+                "login-dialog",
+            ),
+            (
+                include_str!("../../tests/fixtures/cursor_screens/browser-login.txt"),
+                ManifestState::BlockedQuestion,
+                "login-dialog",
+            ),
+            (
+                include_str!("../../tests/fixtures/cursor_screens/trust.txt"),
+                ManifestState::BlockedQuestion,
+                "workspace-trust-dialog",
+            ),
+            (
+                include_str!("../../tests/fixtures/cursor_screens/working.txt"),
+                ManifestState::Working,
+                "working-status-line",
+            ),
+            (
+                include_str!("../../tests/fixtures/cursor_screens/permission.txt"),
+                ManifestState::BlockedPermission,
+                "confirm-dialog",
+            ),
+            // The accepted trust dialog stays above this composer; it must not stick.
+            (
+                include_str!("../../tests/fixtures/cursor_screens/idle.txt"),
+                ManifestState::Idle,
+                "idle-follow-up-placeholder",
+            ),
+        ];
+        for (screen, state, rule) in cases {
+            let lines: Vec<_> = screen.lines().collect();
+            let observation = engine
+                .evaluate(&cursor_snapshot(&lines, None), "cursor")
+                .expect(screen);
+            assert_eq!(observation.state, state, "{screen}");
+            assert_eq!(observation.matched_rule_id, rule, "{screen}");
+        }
+    }
+
+    #[test]
+    fn cursor_spinner_frames_include_braille_blank() {
+        let engine = engine();
+        // spinner-definitions.ts in 2026.09.28-64d2043. U+2800 is not whitespace.
+        for frame in ["⠀⠞", "⠠⠜", "⠰⠰", "⠘⠤", "⠘⠆", "⠘⠣", "⠰⠳", "⠠⠛"]
+        {
+            let screen = include_str!("../../tests/fixtures/cursor_screens/working.txt")
+                .replace("⠠⠜", frame);
+            let lines: Vec<_> = screen.lines().collect();
+            let observation = engine
+                .evaluate(&cursor_snapshot(&lines, None), "cursor")
+                .unwrap();
+            assert_eq!(observation.state, ManifestState::Working, "{frame}");
         }
     }
 

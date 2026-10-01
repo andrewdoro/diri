@@ -1,0 +1,42 @@
+# Diri
+
+> Diri is a native desktop app for running many coding agents (Claude Code, Codex, Cursor, Gemini and 16 more) side by side, with live status, git worktrees, review, notes, remote SSH hosts, and an MCP server that lets agents start and coordinate other agents.
+
+Each page is available as Markdown at the URL below. The full set is concatenated in https://diri.sh/llms-full.txt. A read-only docs MCP server is at https://diri.sh/mcp.
+
+
+## Getting started
+
+- [Diri documentation](https://diri.sh/docs/index.md): How to install diri, run coding agents side by side, keep their work apart, review it, and let agents start and coordinate other agents over MCP.
+- [Install](https://diri.sh/docs/install.md): Install diri on macOS with the DMG or Homebrew, understand how updates arrive, try the Linux and iPhone betas, and remove every local file.
+- [Quickstart](https://diri.sh/docs/quickstart.md): Go from a fresh install to a running agent in diri: install an agent, pick a folder, start a session, read its status, and answer when it asks.
+- [Keyboard shortcuts](https://diri.sh/docs/keyboard-shortcuts.md): Every diri keyboard shortcut grouped by task, plus which surface wins a contested key, how to rebind, and the Linux equivalents.
+
+## Working with agents
+
+- [Sessions](https://diri.sh/docs/sessions.md): How diri sessions work: status colors, notifications, the sidebar, searching and resuming past chats, persistence across quits, hibernation and terminal features.
+- [Worktrees and review](https://diri.sh/docs/worktrees.md): Give each diri agent its own git worktree and branch, review its diff in the Review panel, commit, follow pull request checks, and clean up afterwards.
+- [Notes](https://diri.sh/docs/notes.md): Write plans and to-dos in diri Notes, hand any to-do to an agent with the note as context, follow its progress live, and let agents write back.
+- [Recipes and scheduled tasks](https://diri.sh/docs/scheduled-tasks.md): Save a prompt, agent, project and worktree choice as a recipe and rerun it in one click. Timed schedules are not available in diri yet.
+- [Accounts and usage](https://diri.sh/docs/accounts.md): Save Claude Code and Codex logins as profiles, switch every open tab to another account in one click, and see estimated cost, tokens and plan limits.
+
+## Automation
+
+- [MCP server](https://diri.sh/docs/mcp.md): diri's built-in MCP server lets agents start other agents, assign tracked tasks, wait for results, review diffs and merge branches. Set it up and use it well.
+- [MCP tool reference](https://diri.sh/docs/mcp-tools.md): Every tool the dirijor MCP server exposes, with its arguments, types and defaults. Generated from the server's own catalog, so it always matches the app.
+- [dirijor CLI](https://diri.sh/docs/cli.md): Reference for the dirijor command-line tool. List, read, start and drive diri sessions, manage worktrees, layouts and notes, and script diri from a shell.
+- [Supported agents](https://diri.sh/docs/agents.md): Every coding agent diri ships a manifest for, what each supports for status, resume, fork and MCP, and how to add your own agent with a custom manifest.
+
+## Remote
+
+- [Remote hosts](https://diri.sh/docs/remote-hosts.md): Run agents on your own servers over SSH. diri reuses your OpenSSH setup and needs no tmux, sudo or remote service. Learn what survives a dropped connection.
+
+## Reference
+
+- [Security model](https://diri.sh/docs/security.md): What diri protects and what it does not. Agent privileges, MCP and CLI authority, lineage rules, remote trust, diagnostics and privacy, and how to report a vulnerability.
+- [Troubleshooting](https://diri.sh/docs/troubleshooting.md): Diagnose diri problems with dirijor doctor, find logs and state on macOS and Linux, fix common agent and remote issues, and file a useful bug report.
+
+## Optional
+
+- [Guides](https://diri.sh/guides/): Beginner walkthroughs with screenshots.
+- [Source code](https://github.com/cristicretu/diri): Apache-2.0.

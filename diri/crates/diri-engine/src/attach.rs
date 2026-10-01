@@ -1266,6 +1266,7 @@ mod tests {
             note_id: None,
             foreground_ports: None,
             terminal_progress: None,
+            scheduled_run: None,
         };
         let child = ProcessIdentity::new(
             4321,

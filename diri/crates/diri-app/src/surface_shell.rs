@@ -119,6 +119,7 @@ const HIBERNATE_OPTIONS: [(u32, &str); 6] = [
 enum SettingsMenu {
     DefaultAgent,
     TerminalTheme,
+    TerminalFont,
     HibernateAfter,
     MemoryLimit,
     FileEditor,
@@ -358,11 +359,16 @@ impl HostEditor {
 
 pub(crate) enum UtilitySurfacesEvent {
     AccountLoginOpened,
+    /// A What's New thumbnail was clicked: open the sheet on that highlight.
+    ShowWhatsNew(usize),
 }
 impl gpui::EventEmitter<UtilitySurfacesEvent> for UtilitySurfaces {}
 
 pub struct UtilitySurfaces {
+    /// Installed monospace families, read when the font picker opens.
+    terminal_font_families: Vec<String>,
     skills: gpui::Entity<crate::skills_page::SkillsPage>,
+    schedules: gpui::Entity<crate::schedules_page::SchedulesPage>,
     accounts: AccountsState,
     phone_access: Option<crate::phone_access::PhoneAccess>,
     phone_loading: bool,
@@ -393,6 +399,12 @@ pub struct UtilitySurfaces {
     usage_chart_frame_pending: bool,
     usage_numbers: crate::number_flow::Bank,
     release_notes: ReleaseNotesState,
+    /// Finished-state stills of the newest release's What's New clips, for
+    /// the thumbnails on the What's New page, in the appearance they match.
+    whats_new_posters: Option<(
+        diri_ui::Appearance,
+        Vec<gpui::Entity<crate::whats_new::ClipPlayer>>,
+    )>,
     settings_scroll: ScrollHandle,
     settings_scroller: diri_ui::ScrollerState,
     settings_search: QueryEditor,
@@ -422,6 +434,10 @@ pub struct UtilitySurfaces {
     host_initialization: Option<HostInitialization>,
     host_initialization_generation: u64,
     prefs: Prefs,
+    login_item: crate::login_item::LoginItem,
+    /// The registration macOS last reported, which is what the toggle shows;
+    /// `prefs.start_at_login` only mirrors it.
+    login_item_state: crate::login_item::LoginItemState,
     store: crate::store::WindowStore,
     store_runtime: Arc<StoreRuntime>,
     runtime: Arc<Runtime>,
@@ -465,6 +481,22 @@ impl UtilitySurfaces {
         include_editor.insert_multiline(&quick_open::load_include(&include_path));
         let include_persisted = include_editor.text().to_owned();
         let mut roots_editor = QueryEditor::default();
+        // App start: the user may have approved or removed the login item in
+        // System Settings since the preference was last saved.
+        let login_item = crate::login_item::LoginItem::system();
+        let login_item_state = login_item.observe();
+        {
+            let mut store = store_runtime
+                .store
+                .write()
+                .expect("session store lock poisoned");
+            let saved = store.preferences().start_at_login;
+            let actual = login_item_state.preference(saved);
+            if actual != saved {
+                // Best effort: Settings reconciles again whenever it opens.
+                let _ = store.update_preferences(|prefs| prefs.start_at_login = actual);
+            }
+        }
         let (prefs, hosts, agents_host) = {
             let store = store_runtime
                 .store
@@ -485,6 +517,7 @@ impl UtilitySurfaces {
             Some("whats-new" | "what's-new") => SettingsTab::WhatsNew,
             Some("agents") => SettingsTab::Agents,
             Some("skills") => SettingsTab::Skills,
+            Some("schedules") => SettingsTab::Schedules,
             Some("accounts") => SettingsTab::Accounts,
             Some("shortcuts") => SettingsTab::Shortcuts,
             Some("worktrees") => SettingsTab::Worktrees,
@@ -554,9 +587,20 @@ impl UtilitySurfaces {
                 .map(|session| PathBuf::from(&session.cwd));
             skills.update(cx, |skills, cx| skills.open(project, cx));
         }
+        let schedules = cx.new(|cx| {
+            crate::schedules_page::SchedulesPage::new(
+                Arc::clone(&store_runtime),
+                Arc::clone(&runtime),
+                cx,
+            )
+        });
+        if settings_tab == SettingsTab::Schedules {
+            schedules.update(cx, |schedules, cx| schedules.open(cx));
+        }
         Self {
             focus,
             skills,
+            schedules,
             accounts: AccountsState::default(),
             phone_access: None,
             phone_loading: false,
@@ -587,6 +631,7 @@ impl UtilitySurfaces {
             usage_chart_frame_pending: false,
             usage_numbers: crate::number_flow::Bank::default(),
             release_notes: ReleaseNotesState::default(),
+            whats_new_posters: None,
             settings_scroll: ScrollHandle::new(),
             settings_scroller: diri_ui::ScrollerState::new(),
             settings_search: QueryEditor::default(),
@@ -616,11 +661,14 @@ impl UtilitySurfaces {
             host_initialization: None,
             host_initialization_generation: 0,
             prefs,
+            login_item,
+            login_item_state,
             store: crate::store::WindowStore::from_canonical(Arc::clone(&store_runtime.store)),
             store_runtime,
             runtime,
             updates,
             show_version_picker: false,
+            terminal_font_families: Vec::new(),
             activity: "Connected client · shared daemon remains untouched".to_owned(),
             diagnostics_report,
             privacy: Default::default(),
@@ -848,6 +896,51 @@ impl UtilitySurfaces {
             self.activity = "Settings saved for diri".to_owned();
             true
         }
+    }
+
+    /// Shows `state` and brings the saved preference into line with it, so a
+    /// refused or still-unapproved registration is never stored as "on".
+    fn apply_login_item_state(&mut self, state: crate::login_item::LoginItemState) {
+        self.login_item_state = state;
+        let enabled = state.preference(self.prefs.start_at_login);
+        if enabled != self.prefs.start_at_login {
+            // Only this field: Settings may be opening, and `update_prefs`
+            // would also save whatever the editors still hold from last time.
+            let result = self
+                .store
+                .write()
+                .expect("session store lock poisoned")
+                .update_preferences(|prefs| prefs.start_at_login = enabled);
+            match result {
+                Ok(()) => {
+                    self.prefs.start_at_login = enabled;
+                    self.store_runtime.publish_local_change();
+                }
+                Err(error) => self.activity = format!("Could not save settings: {error}"),
+            }
+        }
+        if state.failed() {
+            self.activity = state.detail();
+        }
+    }
+
+    fn toggle_login_item(&mut self, cx: &mut Context<Self>) {
+        if !self.login_item_state.available() {
+            return;
+        }
+        let state = self.login_item.set(!self.login_item_state.enabled());
+        self.apply_login_item_state(state);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    fn set_login_item_backend(
+        &mut self,
+        backend: impl crate::login_item::LoginItemBackend + 'static,
+    ) {
+        self.login_item = crate::login_item::LoginItem::new(backend);
+        let state = self.login_item.observe();
+        self.apply_login_item_state(state);
     }
 
     fn persist_include(&mut self) -> bool {
@@ -1583,6 +1676,8 @@ impl UtilitySurfaces {
             .expect("session store lock poisoned")
             .preferences()
             .clone();
+        let login_item_state = self.login_item.observe();
+        self.apply_login_item_state(login_item_state);
         self.surface = Surface::Settings;
         self.settings_scroll.set_offset(point(px(0.0), px(0.0)));
         self.settings_search.clear();
@@ -1602,6 +1697,7 @@ impl UtilitySurfaces {
         }
         if self.settings_tab == SettingsTab::WhatsNew {
             self.refresh_release_notes(cx);
+            self.load_whats_new_posters(cx);
         }
         cx.notify();
     }
@@ -1685,12 +1781,17 @@ impl UtilitySurfaces {
         self.settings_tab = tab;
         if tab == SettingsTab::WhatsNew {
             self.refresh_release_notes(cx);
+            self.load_whats_new_posters(cx);
         }
         if tab == SettingsTab::Worktrees {
             self.load_worktrees(cx);
         }
         if tab == SettingsTab::Skills {
             self.refresh_skills(cx);
+        }
+        if tab == SettingsTab::Schedules {
+            self.schedules
+                .update(cx, |schedules, cx| schedules.open(cx));
         }
         if tab == SettingsTab::Accounts {
             self.refresh_accounts(cx);
@@ -2015,6 +2116,14 @@ impl UtilitySurfaces {
             && self
                 .skills
                 .update(cx, |skills, cx| skills.handle_key(event, cx))
+        {
+            return;
+        }
+        if self.surface == Surface::Settings
+            && self.settings_tab == SettingsTab::Schedules
+            && self
+                .schedules
+                .update(cx, |schedules, cx| schedules.handle_key(event, cx))
         {
             return;
         }
@@ -2484,6 +2593,7 @@ impl UtilitySurfaces {
             SettingsTab::WhatsNew => self.whats_new_settings(cx).into_any_element(),
             SettingsTab::Agents => self.agents_settings(cx).into_any_element(),
             SettingsTab::Skills => self.skills.clone().into_any_element(),
+            SettingsTab::Schedules => self.schedules.clone().into_any_element(),
             SettingsTab::Accounts => self.accounts_settings(cx).into_any_element(),
             SettingsTab::Shortcuts => self.shortcuts_settings(cx).into_any_element(),
             SettingsTab::Terminal => self.terminal_settings(cx).into_any_element(),
@@ -2720,8 +2830,109 @@ impl UtilitySurfaces {
         settings_page("Phone access", content, colors)
     }
 
+    /// Decodes the thumbnails' stills once per appearance, off the main thread.
+    fn load_whats_new_posters(&mut self, cx: &mut Context<Self>) {
+        let appearance = self.settings_colors().appearance;
+        if self
+            .whats_new_posters
+            .as_ref()
+            .is_some_and(|(loaded, _)| *loaded == appearance)
+        {
+            return;
+        }
+        let posters = crate::whats_new::latest(&crate::whats_new::current_version())
+            .into_iter()
+            .flat_map(|release| release.highlights)
+            .map(|highlight| {
+                let clip = highlight.clip.for_appearance(appearance);
+                cx.new(|cx| crate::whats_new::ClipPlayer::new(clip, true, cx))
+            })
+            .collect();
+        self.whats_new_posters = Some((appearance, posters));
+    }
+
+    /// The newest release's highlights as thumbnails; each opens the sheet on
+    /// its clip.
+    fn whats_new_highlights(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let colors = self.settings_colors();
+        let release = *crate::whats_new::latest(&crate::whats_new::current_version()).first()?;
+        let posters = self
+            .whats_new_posters
+            .as_ref()
+            .map(|(_, posters)| posters.clone())
+            .unwrap_or_default();
+        let cards = release
+            .highlights
+            .iter()
+            .enumerate()
+            .map(|(index, highlight)| {
+                div()
+                    .id(("whats-new-highlight", index))
+                    .debug_selector(move || format!("whats-new-highlight-{index}"))
+                    .w(px(176.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .cursor_pointer()
+                    .group("whats-new-highlight")
+                    .child(
+                        div()
+                            .w(px(176.0))
+                            .h(px(110.0))
+                            .rounded(px(Radius::ROW))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(colors.primary.alpha(0.08))
+                            .bg(colors.background)
+                            .hover(move |style| style.border_color(colors.primary.alpha(0.22)))
+                            .children(posters.get(index).cloned()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(Typo::ROW.size))
+                            .text_color(colors.primary)
+                            .child(highlight.title),
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(UtilitySurfacesEvent::ShowWhatsNew(index));
+                    }))
+            })
+            .collect::<Vec<_>>();
+        Some(
+            div()
+                .p(px(16.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .text_size(px(Typo::TITLE.size))
+                                .font_weight(Typo::TITLE.weight)
+                                .text_color(colors.primary)
+                                .child(format!("New in diri {}", release.version)),
+                        )
+                        .child(surface_button(
+                            "Watch",
+                            "whats-new-watch",
+                            colors,
+                            cx,
+                            |_, cx| cx.emit(UtilitySurfacesEvent::ShowWhatsNew(0)),
+                        )),
+                )
+                .child(div().flex().flex_wrap().gap(px(12.0)).children(cards))
+                .into_any_element(),
+        )
+    }
+
     fn whats_new_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
+        let highlights = self.whats_new_highlights(cx);
         let content = match &self.release_notes {
             ReleaseNotesState::Idle | ReleaseNotesState::Loading => div()
                 .id("release-notes-loading")
@@ -2824,7 +3035,14 @@ impl UtilitySurfaces {
 
         settings_page(
             "What's New",
-            setting_section("LATEST RELEASE", content, colors),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(SETTINGS_SECTION_GAP))
+                .when_some(highlights, |page, highlights| {
+                    page.child(setting_section("HIGHLIGHTS", highlights, colors))
+                })
+                .child(setting_section("LATEST RELEASE", content, colors)),
             colors,
         )
     }
@@ -2859,21 +3077,7 @@ impl UtilitySurfaces {
                         .flex_col()
                         .when(cfg!(target_os = "macos"), |behavior| {
                             behavior
-                                .child(toggle_row(
-                                    "Start diri at login",
-                                    "Open diri automatically after you sign in.",
-                                    self.prefs.start_at_login,
-                                    "toggle-login",
-                                    colors,
-                                    cx,
-                                    |this, cx| {
-                                        let enabled = !this.prefs.start_at_login;
-                                        this.update_prefs(move |prefs| {
-                                            prefs.start_at_login = enabled;
-                                        });
-                                        cx.notify();
-                                    },
-                                ))
+                                .child(login_item_row(self.login_item_state, colors, cx))
                                 .child(setting_divider(colors))
                         })
                         .child(toggle_row(
@@ -3906,6 +4110,7 @@ impl UtilitySurfaces {
         Some(match self.settings_menu.as_ref()? {
             SettingsMenu::DefaultAgent => (self.default_agent_options(colors, cx), 204.0),
             SettingsMenu::TerminalTheme => (self.terminal_theme_options(colors, cx), 252.0),
+            SettingsMenu::TerminalFont => (self.terminal_font_options(colors, cx), 252.0),
             SettingsMenu::HibernateAfter => (self.hibernate_options(colors, cx), 172.0),
             SettingsMenu::MemoryLimit => (self.memory_options(colors, cx), 132.0),
             SettingsMenu::FileEditor => (self.file_editor_options(colors, cx), 204.0),
@@ -4396,83 +4601,24 @@ impl UtilitySurfaces {
     fn terminal_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
         let selected = theme(&self.prefs.terminal_theme);
-        let can_make_smaller = self.prefs.terminal_font_size > 10.0;
-        let can_make_larger = self.prefs.terminal_font_size < 20.0;
-        let font_control = div()
-            .h(px(32.0))
-            .rounded(px(Radius::ROW))
-            .border_1()
-            .border_color(colors.primary.alpha(0.12))
-            .bg(colors.primary.alpha(0.04))
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .child(
-                div()
-                    .id("font-smaller")
-                    .w(px(34.0))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(16.0))
-                    .text_color(if can_make_smaller {
-                        colors.primary
-                    } else {
-                        colors.tertiary
-                    })
-                    .when(can_make_smaller, |button| {
-                        button
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(colors.primary.alpha(0.08)))
-                            .active(move |style| style.bg(colors.primary.alpha(0.12)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_prefs(|prefs| prefs.zoom_terminal(-1.0));
-                                cx.notify();
-                            }))
-                    })
-                    .child("−"),
-            )
-            .child(HairlineDivider::vertical(colors))
-            .child(
-                div()
-                    .w(px(58.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .font_family(crate::fonts::mono_family())
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.primary)
-                    .child(format!("{:.0} pt", self.prefs.terminal_font_size)),
-            )
-            .child(HairlineDivider::vertical(colors))
-            .child(
-                div()
-                    .id("font-larger")
-                    .w(px(34.0))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(16.0))
-                    .text_color(if can_make_larger {
-                        colors.primary
-                    } else {
-                        colors.tertiary
-                    })
-                    .when(can_make_larger, |button| {
-                        button
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(colors.primary.alpha(0.08)))
-                            .active(move |style| style.bg(colors.primary.alpha(0.12)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_prefs(|prefs| prefs.zoom_terminal(1.0));
-                                cx.notify();
-                            }))
-                    })
-                    .child("+"),
-            );
+        let font_control = settings_stepper(
+            "font",
+            format!("{:.0} pt", self.prefs.terminal_font_size),
+            self.prefs.terminal_font_size > Prefs::MIN_TERMINAL_FONT_SIZE,
+            self.prefs.terminal_font_size < Prefs::MAX_TERMINAL_FONT_SIZE,
+            colors,
+            cx,
+            |prefs, step| prefs.zoom_terminal(step),
+        );
+        let line_height_control = settings_stepper(
+            "line-height",
+            format!("{:.1}", self.prefs.terminal_line_height),
+            self.prefs.terminal_line_height > Prefs::MIN_TERMINAL_LINE_HEIGHT,
+            self.prefs.terminal_line_height < Prefs::MAX_TERMINAL_LINE_HEIGHT,
+            colors,
+            cx,
+            |prefs, step| prefs.terminal_line_height += step * 0.1,
+        );
 
         let choices = div().w_full().flex().gap(px(12.0)).children(
             [(0, "System"), (1, "Light"), (2, "Dark")]
@@ -4535,7 +4681,9 @@ impl UtilitySurfaces {
                 .child(choices)
                 .child(appearance_diff_preview(
                     selected,
+                    crate::fonts::terminal_family(&self.prefs.terminal_font_family),
                     self.prefs.terminal_font_size,
+                    self.prefs.terminal_line_height,
                 ))
                 .child(
                     div()
@@ -4586,17 +4734,20 @@ impl UtilitySurfaces {
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Code font",
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(colors.secondary)
-                                .child(crate::fonts::mono_family()),
+                            "Terminal font",
+                            self.terminal_font_dropdown(cx),
                             colors,
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Code font size",
+                            "Font size",
                             font_control,
+                            colors,
+                        ))
+                        .child(appearance_divider(colors))
+                        .child(appearance_setting_row(
+                            "Line height",
+                            line_height_control,
                             colors,
                         ))
                         .child(appearance_divider(colors))
@@ -5430,6 +5581,88 @@ impl UtilitySurfaces {
             })
     }
 
+    fn terminal_font_options(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let configured = self.prefs.terminal_font_family.clone();
+        let mut options = div()
+            .id("terminal-font-options")
+            .max_h(px(300.0))
+            .overflow_y_scroll()
+            .p(px(4.0))
+            .flex()
+            .flex_col();
+        let choices = std::iter::once(None).chain(self.terminal_font_families.iter().map(Some));
+        for (index, family) in choices.enumerate() {
+            let is_selected = family.map_or(configured.is_empty(), |family| *family == configured);
+            let stored = family.cloned().unwrap_or_default();
+            let label = family.map_or_else(
+                || format!("Default ({})", crate::fonts::mono_family()),
+                Clone::clone,
+            );
+            // Each family is named in its own face, so the list is the preview.
+            let face = family.map_or(crate::fonts::mono_family(), String::as_str);
+            options = options.child(
+                div()
+                    .id(SharedString::from(format!("terminal-font-option-{index}")))
+                    .h(px(Metrics::ROW_HEIGHT))
+                    .px(px(8.0))
+                    .rounded(px(Radius::inner(crate::floating::MENU_RADIUS, 4.0)))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .bg(Fill::selected(colors, is_selected))
+                    .cursor_pointer()
+                    .glass_menu_row(colors, false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_menu = None;
+                        let family = stored.clone();
+                        this.update_prefs(move |prefs| prefs.terminal_font_family = family);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(SharedString::from(face.to_owned()))
+                            .text_size(px(Typo::ROW.size))
+                            .child(label),
+                    )
+                    .when(is_selected, |row| {
+                        row.child(sf_symbol("checkmark", 10.0, colors.secondary))
+                    }),
+            );
+        }
+        options.into_any_element()
+    }
+
+    fn terminal_font_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = self.settings_colors();
+        let configured = &self.prefs.terminal_font_family;
+        let label = if configured.is_empty() {
+            format!("Default ({})", crate::fonts::mono_family())
+        } else if crate::fonts::terminal_family(configured) == configured {
+            configured.clone()
+        } else {
+            format!("{configured} (not installed)")
+        };
+        let open = self.settings_menu == Some(SettingsMenu::TerminalFont);
+        let mut control = div()
+            .relative()
+            .min_w(px(158.0))
+            .child(settings_select_button(
+                label,
+                "terminal-font-dropdown",
+                open,
+                SettingsMenu::TerminalFont,
+                colors,
+                cx,
+            ));
+        if open {
+            control = control.child(self.settings_menu_host(cx));
+        }
+        control.into_any_element()
+    }
+
     fn terminal_theme_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
         let selected = theme(&self.prefs.terminal_theme);
         let colors = self.settings_colors();
@@ -6088,6 +6321,87 @@ fn toggle_row(
         )
 }
 
+/// "Start diri at login". Unlike a plain preference toggle it shows what
+/// macOS reports, says why when that differs from what was asked, and is
+/// inert where there is no app bundle to register.
+fn login_item_row(
+    state: crate::login_item::LoginItemState,
+    colors: SemanticColors,
+    cx: &mut Context<UtilitySurfaces>,
+) -> impl IntoElement {
+    let enabled = state.enabled();
+    let available = state.available();
+    div()
+        .id("toggle-login")
+        .debug_selector(|| "toggle-login".into())
+        .min_h(px(SETTINGS_ROW_HEIGHT))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .when(available, |row| {
+            row.cursor_pointer()
+                .hover(move |style| style.bg(colors.primary.alpha(0.025)))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_login_item(cx)))
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .w_full()
+                        .whitespace_normal()
+                        .text_size(px(Typo::ROW_EMPHASIZED.size))
+                        .font_weight(Typo::ROW_EMPHASIZED.weight)
+                        .text_color(if available {
+                            colors.primary
+                        } else {
+                            colors.secondary
+                        })
+                        .child("Start diri at login"),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "toggle-login-detail".into())
+                        .min_w(px(0.0))
+                        .w_full()
+                        .whitespace_normal()
+                        .text_size(px(Typo::META.size))
+                        .line_height(px(14.0))
+                        .text_color(if state.failed() {
+                            Ink::DANGER
+                        } else {
+                            colors.tertiary
+                        })
+                        .child(wrappable_setting_copy(state.detail().into())),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(30.0))
+                .h(px(18.0))
+                .p(px(2.0))
+                .rounded(px(9.0))
+                .bg(if enabled {
+                    Ink::FRESH.alpha(0.72)
+                } else {
+                    colors.primary.alpha(0.14)
+                })
+                .when(!available, |toggle| toggle.opacity(0.45))
+                .flex()
+                .justify_end()
+                .when(!enabled, |toggle| toggle.justify_start())
+                .child(div().size(px(14.0)).rounded(px(7.0)).bg(colors.primary)),
+        )
+}
+
 fn setting_section(
     title: &'static str,
     content: impl IntoElement,
@@ -6494,6 +6808,9 @@ fn settings_tab_matches(tab: SettingsTab, query: &str) -> bool {
         SettingsTab::Skills => {
             "skills catalogue catalog instructions personal project plugins search SKILL.md"
         }
+        SettingsTab::Schedules => {
+            "schedules scheduled tasks cron timer daily weekdays every morning run later catch up missed sleep wake open at login keep awake"
+        }
         SettingsTab::Accounts => {
             "accounts profiles work personal login authentication codex claude default config home"
         }
@@ -6844,6 +7161,71 @@ fn setting_divider(colors: SemanticColors) -> impl IntoElement {
         .bg(colors.primary.alpha(0.055))
 }
 
+/// A `−  value  +` control. `change` receives -1.0 or 1.0 and edits the
+/// preferences; each end is disabled once its bound is reached.
+fn settings_stepper(
+    id: &'static str,
+    value: String,
+    can_decrease: bool,
+    can_increase: bool,
+    colors: SemanticColors,
+    cx: &mut Context<UtilitySurfaces>,
+    change: fn(&mut Prefs, f32),
+) -> AnyElement {
+    let step_button = |suffix: &str, glyph: &'static str, enabled: bool, step: f32| {
+        div()
+            .id(SharedString::from(format!("{id}-{suffix}")))
+            .w(px(34.0))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(16.0))
+            .text_color(if enabled {
+                colors.primary
+            } else {
+                colors.tertiary
+            })
+            .when(enabled, |button| {
+                button
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(colors.primary.alpha(0.08)))
+                    .active(move |style| style.bg(colors.primary.alpha(0.12)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.update_prefs(|prefs| change(prefs, step));
+                        cx.notify();
+                    }))
+            })
+            .child(glyph)
+    };
+    div()
+        .h(px(32.0))
+        .rounded(px(Radius::ROW))
+        .border_1()
+        .border_color(colors.primary.alpha(0.12))
+        .bg(colors.primary.alpha(0.04))
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .child(step_button("smaller", "−", can_decrease, -1.0))
+        .child(HairlineDivider::vertical(colors))
+        .child(
+            div()
+                .w(px(58.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_family(crate::fonts::mono_family())
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(colors.primary)
+                .child(value),
+        )
+        .child(HairlineDivider::vertical(colors))
+        .child(step_button("larger", "+", can_increase, 1.0))
+        .into_any_element()
+}
+
 fn settings_select_button(
     label: impl Into<SharedString>,
     id: impl Into<SharedString>,
@@ -6872,6 +7254,10 @@ fn settings_select_button(
             } else {
                 Some(menu)
             };
+            if this.settings_menu == Some(SettingsMenu::TerminalFont) {
+                // Read on open, so a font installed while diri runs shows up.
+                this.terminal_font_families = crate::fonts::monospace_families(cx);
+            }
             cx.notify();
         }))
         .child(
@@ -7105,8 +7491,14 @@ fn appearance_mode_card(
         )
 }
 
-fn appearance_diff_preview(theme: TermTheme, font_size: f32) -> impl IntoElement {
-    let line_height = (font_size * 1.5).ceil();
+fn appearance_diff_preview(
+    theme: TermTheme,
+    family: &str,
+    font_size: f32,
+    line_height_scale: f32,
+) -> impl IntoElement {
+    // Roughly a monospace face's natural row, stretched like the terminal's.
+    let line_height = (font_size * 1.2 * line_height_scale).ceil();
     let column = |added: bool| {
         let tint = if added { theme.ansi[2] } else { theme.ansi[1] };
         div()
@@ -7196,7 +7588,7 @@ fn appearance_diff_preview(theme: TermTheme, font_size: f32) -> impl IntoElement
         .border_1()
         .border_color(theme.foreground.alpha(0.09))
         .bg(theme.background)
-        .font_family(crate::fonts::mono_family())
+        .font_family(SharedString::from(family.to_owned()))
         .font_weight(FontWeight::NORMAL)
         .text_size(px(font_size))
         .flex()
@@ -7420,6 +7812,7 @@ mod tests {
             Ok("whats-new") => SettingsTab::WhatsNew,
             Ok("agents") => SettingsTab::Agents,
             Ok("skills") => SettingsTab::Skills,
+            Ok("schedules") => SettingsTab::Schedules,
             Ok("accounts") => SettingsTab::Accounts,
             Ok("terminal") => SettingsTab::Terminal,
             Ok("worktrees") => SettingsTab::Worktrees,
@@ -7494,6 +7887,16 @@ mod tests {
                 window.refresh();
             })
             .expect("scroll to privacy settings");
+            cx.run_until_parked();
+        }
+        if std::env::var("DIRI_VISUAL_SETTINGS_TAB").as_deref() == Ok("whats-new") {
+            // The thumbnails decode on their own threads.
+            for _ in 0..40 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                cx.run_until_parked();
+            }
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
             cx.run_until_parked();
         }
         let screenshot = cx
@@ -8192,6 +8595,35 @@ mod tests {
                             surfaces.set_window_transparency(value, cx);
                         });
                     }
+                    let family = std::env::var("DIRI_APPEARANCE_FONT").ok();
+                    let line_height = std::env::var("DIRI_APPEARANCE_LINE_HEIGHT")
+                        .ok()
+                        .and_then(|value| value.parse::<f32>().ok());
+                    if family.is_some() || line_height.is_some() {
+                        harness.surfaces.update(cx, |surfaces, cx| {
+                            surfaces.update_prefs(move |prefs| {
+                                if let Some(family) = family {
+                                    prefs.terminal_font_family = family;
+                                }
+                                if let Some(line_height) = line_height {
+                                    prefs.terminal_line_height = line_height;
+                                }
+                            });
+                            cx.notify();
+                        });
+                    }
+                    if std::env::var_os("DIRI_APPEARANCE_FONT_MENU").is_some() {
+                        harness.surfaces.update(cx, |surfaces, cx| {
+                            // The live listing needs the main thread; the
+                            // fixture names families every Mac ships.
+                            surfaces.terminal_font_families =
+                                ["Andale Mono", "Courier New", "Menlo", "Monaco", "PT Mono"]
+                                    .map(str::to_owned)
+                                    .to_vec();
+                            surfaces.settings_menu = Some(SettingsMenu::TerminalFont);
+                            cx.notify();
+                        });
+                    }
                     if std::env::var_os("DIRI_APPEARANCE_FILE_EDITOR_MENU").is_some() {
                         harness.surfaces.update(cx, |surfaces, cx| {
                             surfaces.settings_menu = Some(SettingsMenu::FileEditor);
@@ -8361,6 +8793,7 @@ mod tests {
                     };
                     let document = Arc::new(crate::markdown::MarkdownDocument::parse(&release.body));
                     surfaces.release_notes = ReleaseNotesState::Loaded { release, document };
+                    surfaces.load_whats_new_posters(cx);
                 }
                 if tab == SettingsTab::Worktrees {
                     surfaces.worktrees.entries = worktree_settings::preview_entries();
@@ -8378,6 +8811,14 @@ mod tests {
                         surfaces.worktrees.entries.clear();
                         surfaces.worktrees.error = Some("Couldn't connect to the engine. Refresh to retry.".into());
                     }
+                }
+                if tab == SettingsTab::Schedules {
+                    surfaces.schedules.update(cx, |schedules, _| {
+                        schedules.seed_preview(
+                            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as f64,
+                            std::env::var("DIRI_VISUAL_SCHEDULE_DRAFT").is_ok_and(|value| !value.is_empty()),
+                        )
+                    });
                 }
                 if tab == SettingsTab::Skills {
                     surfaces.skills.update(cx, |skills, _| {
@@ -8918,6 +9359,154 @@ mod tests {
         // The panel now shows what is actually stored, so a second action
         // cannot resurrect the stale copy either.
         surfaces.read_with(cx, |surfaces, _| assert_eq!(surfaces.prefs, saved));
+    }
+
+    /// The toggle used to save `start_at_login` and stop. It now goes through
+    /// the login-item seam, and the preference follows what macOS reports.
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn login_toggle_registers_with_the_system_and_mirrors_its_answer(cx: &mut TestAppContext) {
+        use crate::login_item::{LoginItemStatus, testing::Fake};
+
+        let (harness, cx) = open_settings_workbench(cx);
+        let surfaces = harness.read_with(cx, |harness, _| harness.surfaces.clone());
+        let store = surfaces.read_with(cx, |surfaces, _| surfaces.store.clone());
+        let saved = || store.read().unwrap().preferences().start_at_login;
+        let fake = Fake::with_status(LoginItemStatus::NotRegistered);
+        surfaces.update(cx, |surfaces, cx| {
+            surfaces.set_login_item_backend(fake.clone());
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let toggle = cx.debug_bounds("toggle-login").expect("login toggle");
+        cx.simulate_click(toggle.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(fake.calls(), ["register"]);
+        assert!(saved());
+        surfaces.read_with(cx, |surfaces, _| {
+            assert!(surfaces.login_item_state.enabled());
+            assert!(surfaces.prefs.start_at_login);
+        });
+
+        // macOS refuses the removal: the item is still registered, so neither
+        // the switch nor the preference may claim otherwise.
+        fake.refuse(2);
+        cx.simulate_click(toggle.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(fake.calls(), ["register", "unregister"]);
+        assert!(saved());
+        surfaces.read_with(cx, |surfaces, _| {
+            assert!(surfaces.login_item_state.enabled());
+            assert_eq!(
+                surfaces.login_item_state.detail(),
+                "macOS could not update Login Items (error 2)."
+            );
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn a_refused_or_unapproved_login_item_is_not_saved_as_on(cx: &mut TestAppContext) {
+        use crate::login_item::{LoginItemStatus, testing::Fake};
+
+        let (harness, cx) = open_settings_workbench(cx);
+        let surfaces = harness.read_with(cx, |harness, _| harness.surfaces.clone());
+        let store = surfaces.read_with(cx, |surfaces, _| surfaces.store.clone());
+        let saved = || store.read().unwrap().preferences().start_at_login;
+        let fake = Fake::with_status(LoginItemStatus::NotRegistered);
+        fake.refuse(3);
+        surfaces.update(cx, |surfaces, cx| {
+            surfaces.set_login_item_backend(fake.clone());
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let toggle = cx.debug_bounds("toggle-login").expect("login toggle");
+        cx.simulate_click(toggle.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(fake.calls(), ["register"]);
+        assert!(!saved());
+        surfaces.read_with(cx, |surfaces, _| {
+            assert!(!surfaces.login_item_state.enabled());
+            assert!(surfaces.login_item_state.failed());
+            assert!(!surfaces.prefs.start_at_login);
+        });
+
+        let fake = Fake::with_status(LoginItemStatus::NotRegistered);
+        fake.hold_for_approval();
+        surfaces.update(cx, |surfaces, cx| {
+            surfaces.set_login_item_backend(fake.clone());
+            cx.notify();
+        });
+        cx.simulate_click(toggle.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(fake.calls(), ["register", "open_approval_settings"]);
+        assert!(!saved());
+        surfaces.read_with(cx, |surfaces, _| {
+            assert!(!surfaces.login_item_state.enabled());
+            assert!(
+                surfaces
+                    .login_item_state
+                    .detail()
+                    .contains("System Settings > General > Login Items")
+            );
+        });
+
+        // The user approves it in System Settings; reopening Settings notices.
+        fake.set_status(LoginItemStatus::Enabled);
+        surfaces.update(cx, |surfaces, cx| surfaces.open_settings(cx));
+        cx.run_until_parked();
+        assert!(saved());
+        surfaces.read_with(cx, |surfaces, _| {
+            assert!(surfaces.login_item_state.enabled())
+        });
+    }
+
+    /// Opening Settings trusts macOS over a stale preference, in both
+    /// directions, and an unbundled build offers nothing to click.
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn opening_settings_reflects_the_actual_login_item(cx: &mut TestAppContext) {
+        use crate::login_item::{LoginItemStatus, testing::Fake};
+
+        let (harness, cx) = open_settings_workbench(cx);
+        let surfaces = harness.read_with(cx, |harness, _| harness.surfaces.clone());
+        let store = surfaces.read_with(cx, |surfaces, _| surfaces.store.clone());
+        let saved = || store.read().unwrap().preferences().start_at_login;
+
+        // Without a bundle the row is inert and says why; the preference the
+        // installed app saved is left alone.
+        store
+            .write()
+            .unwrap()
+            .update_preferences(|prefs| prefs.start_at_login = true)
+            .unwrap();
+        surfaces.update(cx, |surfaces, cx| surfaces.open_settings(cx));
+        cx.run_until_parked();
+        let toggle = cx.debug_bounds("toggle-login").expect("login toggle");
+        cx.simulate_click(toggle.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(saved());
+        surfaces.read_with(cx, |surfaces, _| {
+            assert!(!surfaces.login_item_state.available());
+            assert!(!surfaces.login_item_state.enabled());
+            assert_eq!(
+                surfaces.login_item_state.detail(),
+                "Available when diri runs from the installed app."
+            );
+        });
+
+        // The preference says on, but the user removed the item in System
+        // Settings (or it was never registered, as before this fix).
+        let fake = Fake::with_status(LoginItemStatus::NotRegistered);
+        surfaces.update(cx, |surfaces, cx| {
+            surfaces.set_login_item_backend(fake.clone());
+            surfaces.open_settings(cx);
+        });
+        cx.run_until_parked();
+        assert!(!saved());
+        assert!(fake.calls().is_empty(), "looking must not register");
     }
 
     #[gpui::test]

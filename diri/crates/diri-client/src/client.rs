@@ -135,7 +135,7 @@ impl ClientCore {
     /// IF YOU ADD AN EVENT KIND THAT DIRI NEEDS, ADD IT HERE TOO. Server-side
     /// filtering means an unlisted kind never reaches `route_message`, and the
     /// symptom is silence, not an error.
-    const EVENT_KINDS: [&'static str; 7] = [
+    const EVENT_KINDS: [&'static str; 8] = [
         EventName::SESSION_UPDATED,
         EventName::SESSION_NOTIFICATION,
         EventName::SESSION_CLIPBOARD,
@@ -143,6 +143,7 @@ impl ClientCore {
         EventName::SESSION_REMOVED,
         EventName::PROJECT_UPDATED,
         EventName::WORKSPACE_UPDATED,
+        EventName::SCHEDULE_UPDATED,
     ];
 
     async fn request<P: Serialize + ?Sized>(
@@ -951,6 +952,45 @@ impl DaemonClient {
         params: WorktreeListParams,
     ) -> Result<Vec<WorktreeInfo>, ClientError> {
         self.typed(Method::WORKTREE_LIST, &params).await
+    }
+
+    pub async fn schedules(
+        &self,
+    ) -> Result<diri_proto::schedules::ScheduleListResult, ClientError> {
+        self.no_params(Method::SCHEDULE_LIST).await
+    }
+
+    pub async fn create_schedule(
+        &self,
+        spec: &diri_proto::schedules::ScheduleSpec,
+    ) -> Result<diri_proto::schedules::ScheduleRecord, ClientError> {
+        self.typed(Method::SCHEDULE_CREATE, spec).await
+    }
+
+    pub async fn update_schedule(
+        &self,
+        params: &diri_proto::schedules::ScheduleUpdateParams,
+    ) -> Result<diri_proto::schedules::ScheduleRecord, ClientError> {
+        self.typed(Method::SCHEDULE_UPDATE, params).await
+    }
+
+    pub async fn delete_schedule(&self, id: &str) -> Result<(), ClientError> {
+        self.empty(
+            Method::SCHEDULE_DELETE,
+            &diri_proto::schedules::ScheduleIdParams { id: id.to_owned() },
+        )
+        .await
+    }
+
+    pub async fn run_schedule_now(
+        &self,
+        id: &str,
+    ) -> Result<diri_proto::schedules::ScheduleRecord, ClientError> {
+        self.typed(
+            Method::SCHEDULE_RUN_NOW,
+            &diri_proto::schedules::ScheduleIdParams { id: id.to_owned() },
+        )
+        .await
     }
 
     pub async fn worktree_cleanup(&self, params: WorktreeCleanupParams) -> Result<(), ClientError> {

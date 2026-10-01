@@ -27,20 +27,14 @@ impl ToolDefinition {
     }
 }
 
-/// How agents keep a Diri note current. It is part of the MCP server's
-/// instructions and the note tools point at it, so every agent learns the
-/// same short contract. People who are not developers read these notes.
-pub const NOTES_CONTRACT: &str = "Diri Notes are the person's plans, briefs, and to-do lists. People who are not developers read them, so write plainly.\n\
-- If whoami shows origin_note, you were started from a note: read it first with read_note {\"note\":\"origin\"}. It is your brief.\n\
-- As you find important things (a decision, a finding, a blocker, a result, a link), add one short entry with write_note {\"note\":\"origin\",\"entry\":\"...\"}: one or two plain sentences, no progress chatter, no logs or code dumps. It is filed under your to-do, or in the note's Updates.\n\
-- Prefer adding. Change or remove existing text only when the person asks for it, or to keep your own entries current (tick a row, change \"Fix\" to \"Done\"): use edit_note, which works like editing a file (exact old text, new text), or replace_section for everything under a heading. Never silently delete the person's writing; every version is kept and the person can restore one.\n\
-- Tick your own sub-tasks as you finish them (write_note with todo and checked:true). Leave the to-do you were started from unticked: the person reviews your work and ticks it.\n\
-- Finish with a one-paragraph result: report_to_parent {\"status\":\"done\",\"summary\":\"...\"} is added to the note.\n\
-- To explain something or hand over a longer write-up, use create_note: it makes a new note under you in the sidebar, and open:true shows it to the person.";
-
 pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
     let kind_enum: Vec<Value> = kinds.iter().map(|kind| json!(kind)).collect();
     let mut tools = vec![
+        ToolDefinition::new(
+            "get_skill",
+            "Read one of Diri's skills: the detailed rules for a Diri capability, as Markdown. Read the matching skill before acting: scheduling (run anything later, at a time, or repeatedly; waking the Mac), notes (work started from or written to a Diri note), orchestration (parallel agents, tasks, waiting, retries). Claude Code sessions also have them as skills named diri:<name>.",
+            json!({"type":"object","properties":{"name":{"type":"string","enum":["scheduling","notes","orchestration"]}},"required":["name"]}),
+        ),
         ToolDefinition::new(
             "submit_task",
             "Assign a tracked task to an authorized Agent. Returns a durable task_id and delivery receipt, and tells the Agent to acknowledge and report that exact task. Reuse request_id on retries. Identical target/text defaults to one task; use a new request_id only for intentional additional work. Unknown delivery never permits a fresh copy. Pass result_schema to require a JSON result of that shape. Await it with wait_any (several tasks) or wait_for_task.",
@@ -115,6 +109,39 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
                 },
                 "required": ["kind", "cwd"]
             }),
+        ),
+        ToolDefinition::new(
+            "schedule_agent",
+            "Schedule an agent run owned by Diri, not by this session: it survives this session closing and Diri restarting. Use it whenever the user wants something done later, at a time, or repeatedly, instead of your own cron/loop tools. How runs work: at each due time Diri opens a NEW top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation, so write a self-contained prompt: the goal, the repo and relevant context, what to produce, and where the result goes (open a PR, write a file, post a summary). For code changes pass worktree:true and base \"origin/main\" so each run starts clean. Give a short `name`. When: exactly one of cron (five fields, the Mac's local time, e.g. \"0 9 * * 1-5\" weekdays 09:00), in_minutes (relative one-off), or at_ms (epoch ms). Missed runs: if the Mac was asleep or Diri was closed, the newest missed run fires once when it is back, within catch_up_hours (default 12); older ones are recorded as missed. wake_mac:true (use when the user wants it to run even if the Mac is asleep): Diri wakes the Mac 2 minutes early (lid must be open), keeps it awake while the agent works, then puts it back to sleep if nobody used it. It needs the one-time \"Allow diri to wake the Mac\" approval in Settings > Schedules; if list_schedules reports wakeHelperError, tell the user to turn it on. After creating, confirm in words from the returned nextDue, e.g. \"weekdays at 09:00, next run Monday; it will wake the Mac\".",
+            json!({
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": kind_enum},
+                    "cwd": {"type": "string"},
+                    "prompt": {"type": "string", "minLength": 1, "maxLength": 1048576},
+                    "name": {"type": "string", "maxLength": 200},
+                    "cron": {"type": "string"},
+                    "at_ms": {"type": "number"},
+                    "in_minutes": {"type": "number", "minimum": 0},
+                    "worktree": {"type": "boolean", "description": "Start each run in a fresh worktree."},
+                    "branch": {"type": "string"},
+                    "base": {"type": "string", "description": "Starting ref for each run's worktree, e.g. origin/main."},
+                    "catch_up_hours": {"type": "number", "minimum": 0, "maximum": 168, "description": "A run missed by up to this long still fires late; 0 never catches up. Default 12."},
+                    "keep_awake": {"type": "boolean", "description": "Keep an awake Mac from idle-sleeping shortly before each run and while it works. Cannot wake a sleeping Mac."},
+                    "wake_mac": {"type": "boolean", "description": "Wake a sleeping Mac (lid open) 2 minutes before each run, keep it awake while the run works, then let it sleep again. Needs the one-time wake approval in Settings > Schedules; list_schedules reports if it is missing."}
+                },
+                "required": ["kind", "cwd", "prompt"]
+            }),
+        ),
+        ToolDefinition::new(
+            "list_schedules",
+            "List every Diri schedule with its next due time and recent runs (onTime, late with lateReason asleep/notRunning, missed, failed, manual) and the session each run opened.",
+            json!({"type":"object","properties":{}}),
+        ),
+        ToolDefinition::new(
+            "delete_schedule",
+            "Delete a Diri schedule. Sessions its earlier runs opened are left alone.",
+            json!({"type":"object","properties":{"schedule_id":{"type":"string","minLength":1}},"required":["schedule_id"]}),
         ),
         ToolDefinition::new(
             "spawn_agents",
@@ -451,7 +478,7 @@ pub(crate) fn validate_arguments(tool: &str, arguments: &Value) -> Result<(), St
         .ok_or_else(|| format!("unknown or unavailable tool: {tool}"))?;
     // Kind aliases/custom commands are resolved against the live catalog by
     // spawn; the static validator must not use an empty discovery enum.
-    if tool == "spawn_agent" {
+    if tool == "spawn_agent" || tool == "schedule_agent" {
         definition.input_schema["properties"]["kind"]
             .as_object_mut()
             .unwrap()

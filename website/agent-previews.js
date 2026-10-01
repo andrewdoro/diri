@@ -19,12 +19,14 @@ const agentPreviews = (() => {
   const command = (symbol, placeholder) => `<span class="composer-prefix">${symbol}</span><span>${placeholder}</span><span class="terminal-cursor" aria-hidden="true"></span>`;
   return {
     swarm: {
+      // Final state of the scripted swarm. app.js reveals [data-step] lines and flips [data-child] states on a timeline.
       render(chat) {
-        const child = (state, title, agent) => `<div class="swarm-child"><span class="swarm-state ${state}">${state === 'done' ? '✓' : '◌'}</span><span>${title}</span>${mark(agent)}</div>`;
+        const child = (n, title, agent) => `<div class="swarm-child" data-child="${n}"><span class="swarm-state done">✓</span><span>${title}</span>${mark(agent)}</div>`;
+        const answer = (step, text) => `<div class="claude-answer" data-step="${step}"><span class="claude-bullet">●</span><div><p>${text}</p></div></div>`;
         return {
-          html: `<div class="claude-welcome"><pre class="claude-mascot" aria-hidden="true"> ▐▛███▜▌\n▝▜█████▛▘\n  ▘▘ ▝▝</pre><div><strong>Claude Code</strong><span>Opus</span><small>~/fun/diri</small></div></div><div class="claude-user">❯ ${chat.prompt}</div><div class="claude-answer"><span class="claude-bullet">●</span><div><p>Three independent pieces. I’ll give each its own agent and worktree.</p></div></div><div class="claude-tool"><span class="claude-bullet">●</span><div><strong>diri</strong><span> - spawn_agents (3 agents)</span><div class="swarm-list">${child('done', 'Write the release notes', 'codex')}${child('run', 'Verify the Linux build', 'claude')}${child('run', 'Test the updater', 'gemini')}</div></div></div><div class="claude-answer"><span class="claude-bullet">●</span><div><p>Release notes are in. Reviewing the diff while the other two finish.</p></div></div>`,
-          composer: command('❯', 'Waiting for 2 agents'),
-          footer: '<span>2 agents running</span><span>Opus</span>',
+          html: `<div class="claude-welcome"><pre class="claude-mascot" aria-hidden="true"> ▐▛███▜▌\n▝▜█████▛▘\n  ▘▘ ▝▝</pre><div><strong>Claude Code</strong><span>Opus</span><small>~/fun/diri</small></div></div><div class="claude-user" data-step="prompt">❯ ${chat.prompt}</div>${answer('plan', 'Three independent pieces. I’ll give each its own agent and worktree.')}<div class="claude-tool" data-step="spawn"><span class="claude-bullet">●</span><div><strong>diri</strong><span> - spawn_agents (3 agents)</span><div class="swarm-list">${child(1, 'Write the release notes', 'codex')}${child(2, 'Verify the Linux build', 'claude')}${child(3, 'Test the updater', 'gemini')}</div></div></div>${answer('notes', 'Release notes are in. Reviewing the diff while the other two finish.')}${answer('done', 'All three are done: notes written, Linux build verified, updater tested. Ready to tag 0.9.')}`,
+          composer: command('❯', 'Ask a follow-up'),
+          footer: '<span class="swarm-footer">3 agents finished</span><span>Opus</span>',
           changes: changes('RELEASE_NOTES.md', ['+## 0.9', '+', '+- Agents can start other agents', '+- Faster session restore', '+- Linux: Wayland fixes'])
         };
       }

@@ -290,6 +290,7 @@ fn main() {
     // their sidebar Session. Only this singleton, now bound, may adopt.
     server.spawn_note_adoption();
     server.spawn_agent_relaunch();
+    server.spawn_scheduler();
 
     // One-shot, off the accept path: reclaim per-session files no record,
     // holder, or remote binding stands behind. Never repeated while idle.

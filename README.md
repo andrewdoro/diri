@@ -9,9 +9,9 @@ every change in one place to review. Native, built with Rust and GPUI. macOS,
 with Linux in beta.
 
 [Download](https://github.com/cristicretu/diri/releases/latest) ·
-[Getting started](docs/GETTING_STARTED.md) ·
+[Getting started](https://diri.sh/docs/quickstart/) ·
 [Guides](https://diri.sh/guides/) ·
-[Documentation](docs/README.md) ·
+[Documentation](https://diri.sh/docs/) ·
 [Contributing](CONTRIBUTING.md)
 
 <img width="1862" height="1194" alt="diri running several coding agents side by side" src="docs/images/diri-hero.webp" />

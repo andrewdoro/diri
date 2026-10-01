@@ -5059,9 +5059,18 @@ fn pump_held(
         // startup-work bound: the remaining tail must fit the same budget a
         // cold replay would use, even if a checkpoint went stale during a
         // sustained output flood. Anything unusable is a cache miss.
+        //
+        // Bytes below `exit_marker_floor` were written by a prior incarnation
+        // of this session id (a resume reuses the log). Neither a checkpoint
+        // of that dead child nor a tail cut through its output may seed this
+        // child's screen: the old frames start mid-sequence, at the old size,
+        // and stay painted until the new child first clears. A checkpoint at
+        // exactly the floor is the dead child's final screen; this child's
+        // screen there is empty, which replaying from the floor reproduces.
         let restored = crate::checkpoint::ScreenCheckpoint::load(&checkpoint_path)
             .filter(|checkpoint| {
-                checkpoint.log_offset <= tail
+                checkpoint.log_offset > exit_marker_floor
+                    && checkpoint.log_offset <= tail
                     && tail - checkpoint.log_offset <= replay_budget as u64
             })
             .filter(|checkpoint| {
@@ -5103,9 +5112,13 @@ fn pump_held(
                 checkpoint.marker_buffer,
             ),
             None => {
-                let start = log.preferred_replay_start(replay_budget);
-                shared.keyboard_known.store(start == 0, Ordering::SeqCst);
-                if start != 0 {
+                let floor = exit_marker_floor.min(tail);
+                let start = log.preferred_replay_start(replay_budget).max(floor);
+                // Replaying from this child's first byte sees every keyboard
+                // mode it set, just as replaying a whole log from zero does.
+                let whole_child = start == 0 || start == floor;
+                shared.keyboard_known.store(whole_child, Ordering::SeqCst);
+                if !whole_child {
                     shared
                         .screen
                         .lock()
