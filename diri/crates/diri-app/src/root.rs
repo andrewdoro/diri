@@ -9179,6 +9179,8 @@ mod tests {
                         root.set_inspector_open(true, cx);
                     }
                 });
+                // The caption dims its glyphs for an inactive window.
+                window.activate_window();
             })
             .unwrap();
             cx.run_until_parked();
@@ -9186,6 +9188,27 @@ mod tests {
                 .unwrap()
                 .save(std::path::Path::new(&output).join(format!("{name}.png")))
                 .unwrap();
+            // `DIRI_CAPTION_HITMAP=1` also writes which window control area
+            // answers each 2 pt cell of the title rows, for a hit-area overlay.
+            if std::env::var_os("DIRI_CAPTION_HITMAP").is_some() {
+                let mut map = String::new();
+                cx.update_window(window.into(), |_, window, _| {
+                    for y in (0..64).step_by(2) {
+                        for x in (0..1100).step_by(2) {
+                            let at = point(px(x as f32 + 1.0), px(y as f32 + 1.0));
+                            if let Some(area) = window.window_control_area_at(at) {
+                                map.push_str(&format!("{x} {y} {area:?}\n"));
+                            }
+                        }
+                    }
+                })
+                .unwrap();
+                std::fs::write(
+                    std::path::Path::new(&output).join(format!("{name}-hitmap.txt")),
+                    map,
+                )
+                .unwrap();
+            }
             cx.update_window(window.into(), |_, window, _| window.remove_window())
                 .unwrap();
             cx.run_until_parked();
