@@ -99,8 +99,9 @@ diri/scripts/release.sh 0.4.1
 While the macOS build runs locally, two things wait on GitHub Actions in the
 background (`scripts/await-ci.sh`): CI's clippy/test run on that commit, which
 is the release gate, and the `linux-packages-<commit>` artifact from a Nightly
-run on it. If no Nightly run exists for the commit, the script dispatches one
-(about 40 minutes, overlapping the macOS build and notarization). Both are
+run on it. Merging the version bump starts that run by itself (only the Linux
+package jobs, about 15 minutes), so it is usually ready when the macOS side
+is; if none exists for the commit, the script dispatches one. Both are
 joined before anything is published. Builds use `diri/target/release-pipeline`,
 a cache nothing else writes to, so a release recompiles only what changed.
 
