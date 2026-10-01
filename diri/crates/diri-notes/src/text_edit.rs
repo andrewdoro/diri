@@ -286,8 +286,24 @@ mod tests {
             .to_owned();
         let done = row.replace("Fix", "Done");
         let edited = edit(&mut note, &row, &done, false).unwrap();
-        assert!(edited.excerpt.contains(&done), "{}", edited.excerpt);
-        assert!(body(&note).contains(&done));
+        // Tables are re-tidied, so compare rows with spacing ignored.
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        assert!(
+            squash(&edited.excerpt).contains(&squash(&done)),
+            "{}",
+            edited.excerpt
+        );
+        let after = body(&note);
+        let new_row = after.lines().find(|l| l.contains("#562")).unwrap();
+        assert_eq!(squash(new_row), squash(&done));
+        // The re-tidied row is what read_note shows next, and it matches.
+        edit(
+            &mut note,
+            new_row,
+            &new_row.replace("Done", "Shipped"),
+            false,
+        )
+        .unwrap();
         assert_eq!(note.front.get("id"), Some("n1"), "identity is untouched");
     }
 

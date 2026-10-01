@@ -1604,12 +1604,16 @@ mod tests {
             "{result}"
         );
         let after = bridge.call("read_note", &json!({"note": id})).unwrap();
-        assert!(
-            after["markdown"]
-                .as_str()
-                .unwrap()
-                .contains(&row.replace("Fix", "Done"))
-        );
+        // Tables are re-tidied after an edit; the row reads Done.
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        let new_row = after["markdown"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .find(|l| l.contains("#562"))
+            .unwrap()
+            .to_owned();
+        assert_eq!(squash(&new_row), squash(&row.replace("Fix", "Done")));
 
         // History: the version before, then the agent's change.
         let history = bridge.call("note_history", &json!({"note": id})).unwrap();

@@ -287,6 +287,9 @@ Agents edit a note the way they edit a Markdown file.
     shows the closest line. A repeat lists where each match is.
   - It returns the changed lines with a line of context, plus the new
     version id.
+  - The text is re-tidied after every change (tables re-aligned), so the
+    next `old_string` should be copied from the returned lines or a fresh
+    `read_note`, not from what the agent sent. The description says so.
 - **`replace_section(note, heading, markdown)`** replaces everything under a
   heading, up to the next heading of the same or a higher level, and keeps
   the heading.
