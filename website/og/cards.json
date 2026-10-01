@@ -1,0 +1,388 @@
+[
+  {
+    "key": "docs",
+    "url": "/docs/",
+    "eyebrow": "Documentation",
+    "title": "Diri documentation",
+    "hash": "be1e095242f68165"
+  },
+  {
+    "key": "docs-install",
+    "url": "/docs/install/",
+    "eyebrow": "Docs · Getting started",
+    "title": "Install",
+    "hash": "c6b135854353390e"
+  },
+  {
+    "key": "docs-quickstart",
+    "url": "/docs/quickstart/",
+    "eyebrow": "Docs · Getting started",
+    "title": "Quickstart",
+    "hash": "64b7d6893a78f307"
+  },
+  {
+    "key": "docs-keyboard-shortcuts",
+    "url": "/docs/keyboard-shortcuts/",
+    "eyebrow": "Docs · Getting started",
+    "title": "Keyboard shortcuts",
+    "hash": "fea5ec2b963abb88"
+  },
+  {
+    "key": "docs-sessions",
+    "url": "/docs/sessions/",
+    "eyebrow": "Docs · Working with agents",
+    "title": "Sessions",
+    "hash": "7e5f5b6a99c7389e"
+  },
+  {
+    "key": "docs-worktrees",
+    "url": "/docs/worktrees/",
+    "eyebrow": "Docs · Working with agents",
+    "title": "Worktrees and review",
+    "hash": "860fa738bc11fdd4"
+  },
+  {
+    "key": "docs-notes",
+    "url": "/docs/notes/",
+    "eyebrow": "Docs · Working with agents",
+    "title": "Notes",
+    "hash": "6cc93c02d762dee1"
+  },
+  {
+    "key": "docs-scheduled-tasks",
+    "url": "/docs/scheduled-tasks/",
+    "eyebrow": "Docs · Working with agents",
+    "title": "Recipes and scheduled tasks",
+    "hash": "3d4f4a1790d4f30c"
+  },
+  {
+    "key": "docs-accounts",
+    "url": "/docs/accounts/",
+    "eyebrow": "Docs · Working with agents",
+    "title": "Accounts and usage",
+    "hash": "feb65177634161a7"
+  },
+  {
+    "key": "docs-mcp",
+    "url": "/docs/mcp/",
+    "eyebrow": "Docs · Automation",
+    "title": "MCP server",
+    "hash": "cfd28ec1a43e729f"
+  },
+  {
+    "key": "docs-mcp-tools",
+    "url": "/docs/mcp-tools/",
+    "eyebrow": "Docs · Automation",
+    "title": "MCP tool reference",
+    "hash": "a945c455f205621e"
+  },
+  {
+    "key": "docs-cli",
+    "url": "/docs/cli/",
+    "eyebrow": "Docs · Automation",
+    "title": "dirijor CLI",
+    "hash": "d1170751f500b75f"
+  },
+  {
+    "key": "docs-agents",
+    "url": "/docs/agents/",
+    "eyebrow": "Docs · Automation",
+    "title": "Supported agents",
+    "hash": "542b6960bd781ee9"
+  },
+  {
+    "key": "docs-remote-hosts",
+    "url": "/docs/remote-hosts/",
+    "eyebrow": "Docs · Remote",
+    "title": "Remote hosts",
+    "hash": "41a51bf9e914938b"
+  },
+  {
+    "key": "docs-security",
+    "url": "/docs/security/",
+    "eyebrow": "Docs · Reference",
+    "title": "Security model",
+    "hash": "0fbc97039529700a"
+  },
+  {
+    "key": "docs-troubleshooting",
+    "url": "/docs/troubleshooting/",
+    "eyebrow": "Docs · Reference",
+    "title": "Troubleshooting",
+    "hash": "58ec3930e444289d"
+  },
+  {
+    "key": "agents-claude-code",
+    "url": "/agents/claude-code/",
+    "eyebrow": "Agents",
+    "title": "Run Claude Code in parallel",
+    "logo": "claude",
+    "hash": "410ac244007ba5fe"
+  },
+  {
+    "key": "agents-codex",
+    "url": "/agents/codex/",
+    "eyebrow": "Agents",
+    "title": "Run Codex in parallel",
+    "logo": "codex",
+    "hash": "fdd8e053f82233b1"
+  },
+  {
+    "key": "agents-antigravity",
+    "url": "/agents/antigravity/",
+    "eyebrow": "Agents",
+    "title": "Run Antigravity in parallel",
+    "letter": "A",
+    "hash": "b44a8d4a0394bb9d"
+  },
+  {
+    "key": "agents-cursor",
+    "url": "/agents/cursor/",
+    "eyebrow": "Agents",
+    "title": "Run Cursor in parallel",
+    "logo": "cursor",
+    "hash": "c26e5cbf66d09f90"
+  },
+  {
+    "key": "agents-gemini",
+    "url": "/agents/gemini/",
+    "eyebrow": "Agents",
+    "title": "Run Gemini in parallel",
+    "logo": "gemini",
+    "hash": "48cce755a10c75bf"
+  },
+  {
+    "key": "agents-aider",
+    "url": "/agents/aider/",
+    "eyebrow": "Agents",
+    "title": "Run Aider in parallel",
+    "letter": "A",
+    "hash": "bcaf9880dad8d641"
+  },
+  {
+    "key": "agents-amp",
+    "url": "/agents/amp/",
+    "eyebrow": "Agents",
+    "title": "Run Amp in parallel",
+    "letter": "A",
+    "hash": "5091190ee22d5164"
+  },
+  {
+    "key": "agents-cline",
+    "url": "/agents/cline/",
+    "eyebrow": "Agents",
+    "title": "Run Cline CLI in parallel",
+    "letter": "C",
+    "hash": "8980b072d1a744c0"
+  },
+  {
+    "key": "agents-copilot",
+    "url": "/agents/copilot/",
+    "eyebrow": "Agents",
+    "title": "Run Copilot CLI in parallel",
+    "logo": "copilot",
+    "hash": "fff4b075c5517087"
+  },
+  {
+    "key": "agents-devin",
+    "url": "/agents/devin/",
+    "eyebrow": "Agents",
+    "title": "Run Devin in parallel",
+    "letter": "D",
+    "hash": "cb09f2dbfd31dbd6"
+  },
+  {
+    "key": "agents-droid",
+    "url": "/agents/droid/",
+    "eyebrow": "Agents",
+    "title": "Run Droid in parallel",
+    "letter": "D",
+    "hash": "a3cf54e410666457"
+  },
+  {
+    "key": "agents-grok",
+    "url": "/agents/grok/",
+    "eyebrow": "Agents",
+    "title": "Run Grok in parallel",
+    "letter": "G",
+    "hash": "79b070ef1bdc323f"
+  },
+  {
+    "key": "agents-hermes",
+    "url": "/agents/hermes/",
+    "eyebrow": "Agents",
+    "title": "Run Hermes in parallel",
+    "letter": "H",
+    "hash": "7eee94461d2774c7"
+  },
+  {
+    "key": "agents-kilo",
+    "url": "/agents/kilo/",
+    "eyebrow": "Agents",
+    "title": "Run Kilo Code in parallel",
+    "letter": "K",
+    "hash": "f6adbeb5be405347"
+  },
+  {
+    "key": "agents-kimi",
+    "url": "/agents/kimi/",
+    "eyebrow": "Agents",
+    "title": "Run Kimi in parallel",
+    "logo": "kimi",
+    "hash": "b637ba06a0adf733"
+  },
+  {
+    "key": "agents-kiro",
+    "url": "/agents/kiro/",
+    "eyebrow": "Agents",
+    "title": "Run Kiro in parallel",
+    "letter": "K",
+    "hash": "774e7ab3d3cda128"
+  },
+  {
+    "key": "agents-maki",
+    "url": "/agents/maki/",
+    "eyebrow": "Agents",
+    "title": "Run Maki in parallel",
+    "letter": "M",
+    "hash": "7c9ec259b4ab3009"
+  },
+  {
+    "key": "agents-opencode",
+    "url": "/agents/opencode/",
+    "eyebrow": "Agents",
+    "title": "Run OpenCode in parallel",
+    "logo": "opencode",
+    "hash": "9c354db8caaacdb6"
+  },
+  {
+    "key": "agents-pi",
+    "url": "/agents/pi/",
+    "eyebrow": "Agents",
+    "title": "Run Pi in parallel",
+    "logo": "pi",
+    "hash": "324cb2937560fb8e"
+  },
+  {
+    "key": "agents-qoder",
+    "url": "/agents/qoder/",
+    "eyebrow": "Agents",
+    "title": "Run Qoder CLI in parallel",
+    "letter": "Q",
+    "hash": "004e2685456699c1"
+  },
+  {
+    "key": "agents",
+    "url": "/agents/",
+    "eyebrow": "Agents",
+    "title": "20 coding agents, side by side",
+    "hash": "2f2926dddfee8e1f"
+  },
+  {
+    "key": "compare-cmux",
+    "url": "/compare/cmux/",
+    "eyebrow": "Compare",
+    "title": "diri vs cmux",
+    "hash": "541cfbcfb3317f40"
+  },
+  {
+    "key": "compare-conductor",
+    "url": "/compare/conductor/",
+    "eyebrow": "Compare",
+    "title": "diri vs Conductor",
+    "hash": "9a00d40ac4d2d617"
+  },
+  {
+    "key": "compare-herdr",
+    "url": "/compare/herdr/",
+    "eyebrow": "Compare",
+    "title": "diri vs herdr",
+    "hash": "c7084c9c90fa6353"
+  },
+  {
+    "key": "compare-superset",
+    "url": "/compare/superset/",
+    "eyebrow": "Compare",
+    "title": "diri vs Superset",
+    "hash": "76eab803f8cee285"
+  },
+  {
+    "key": "compare",
+    "url": "/compare/",
+    "eyebrow": "Compare",
+    "title": "diri compared",
+    "hash": "4c9bc17f79d23e17"
+  },
+  {
+    "key": "whats-new-0-9-0",
+    "url": "/whats-new/0.9.0/",
+    "eyebrow": "Release · October 1, 2026",
+    "title": "diri 0.9.0",
+    "subtitle": "Notes, and to-dos that start agents",
+    "hash": "045699cf8b129151"
+  },
+  {
+    "key": "whats-new",
+    "url": "/whats-new/",
+    "eyebrow": "What's new",
+    "title": "diri 0.9.0",
+    "subtitle": "Notes, and to-dos that start agents",
+    "hash": "20fa8d4c3055f612"
+  },
+  {
+    "key": "guides-agent-teams",
+    "url": "/guides/agent-teams/",
+    "eyebrow": "Guide",
+    "title": "Let agents work as a team",
+    "hash": "e24c11af9cebe237"
+  },
+  {
+    "key": "guides-first-agent",
+    "url": "/guides/first-agent/",
+    "eyebrow": "Guide",
+    "title": "Your first agent",
+    "hash": "59919509147199f4"
+  },
+  {
+    "key": "guides",
+    "url": "/guides/",
+    "eyebrow": "Guides",
+    "title": "Learn diri in an afternoon",
+    "hash": "43b602a78dfd841f"
+  },
+  {
+    "key": "guides-never-lose-work",
+    "url": "/guides/never-lose-work/",
+    "eyebrow": "Guide",
+    "title": "Never lose your work",
+    "hash": "bcba534e5fa0da5c"
+  },
+  {
+    "key": "guides-parallel-agents",
+    "url": "/guides/parallel-agents/",
+    "eyebrow": "Guide",
+    "title": "Run several agents at once",
+    "hash": "060bb27c65637975"
+  },
+  {
+    "key": "guides-remote-sessions",
+    "url": "/guides/remote-sessions/",
+    "eyebrow": "Guide",
+    "title": "Run agents on your own server",
+    "hash": "d9d16d06f9be8e9e"
+  },
+  {
+    "key": "guides-review-changes",
+    "url": "/guides/review-changes/",
+    "eyebrow": "Guide",
+    "title": "Review what changed",
+    "hash": "95d83fb2062b62b7"
+  },
+  {
+    "key": "guides-shortcuts",
+    "url": "/guides/shortcuts/",
+    "eyebrow": "Guide",
+    "title": "Shortcuts worth learning",
+    "hash": "57bdc8aba388050e"
+  }
+]

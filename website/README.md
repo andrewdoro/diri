@@ -24,15 +24,30 @@ The workspace contains curated demonstration data, not a live Diri session. Down
 
 `index.html`, `style.css`, `app.js`, `agent-previews.js`, `downloads.js`, and `assets/` can be served by any static host. `server.mjs` is a loopback-only development server. There are no external fonts, analytics, runtime dependencies, or third-party scripts.
 
-## Documentation
+## Generated pages
 
-`/docs/` is generated from Markdown in `docs-src/` by `scripts/docs.mjs` (no dependencies). Edit a page, then run `npm run docs`; the HTML in `docs/`, the Markdown twins (`docs/<page>.md`), `docs/search.json`, `llms.txt`, `llms-full.txt`, and the sitemap entries are rewritten and committed, so `npm run dev` still needs no build step. `npm run verify` fails when the generated files are stale. The sidebar order lives in `NAV` at the top of the script; every page must be listed there exactly once.
+`npm run docs` (`scripts/site.mjs`) regenerates every data-driven page. Output is committed, so `npm run dev` still needs no build step, and `npm run verify` fails when anything is stale.
+
+| Section | Source | Builder |
+| --- | --- | --- |
+| `/docs/` | `docs-src/*.md`, sidebar order in `NAV` | `scripts/docs.mjs` |
+| `/agents/` | The Engine's agent manifests in `diri/crates/diri-engine/manifests` | `scripts/pages.mjs` |
+| `/compare/` | `compare-src/*.md` (competitor facts must cite a source and a checked date) | `scripts/pages.mjs` |
+| `/whats-new/` and `/whats-new/<version>/` | `whats-new-src/releases.json` | `scripts/pages.mjs` |
+
+Each run also rewrites `llms.txt`, `llms-full.txt`, the generated sitemap entries, the Markdown twin of each docs, agent and comparison page, and `docs/search.json`. Guides stay hand-written HTML; only their share image is set by the generator. Adding a manifest adds an agent page. Adding a release to `releases.json` adds a release page and updates What's new.
 
 Pages use a small Markdown subset: `##`–`####` headings (ids are generated), paragraphs, single-level lists, GFM tables, fenced code with an optional title after the language (```` ```toml ~/.codex/config.toml ````), `> [!NOTE]` / `[!TIP]` / `[!WARNING]` callouts, images on their own line, and inline `<kbd>`. Frontmatter needs `title` and an 80–180 character `description`; `nav` and `lead` are optional.
 
+### Share cards
+
+Every generated page and guide has its own 1200×630 card in `og/`. `npm run og` draws the ones whose text changed with headless Chrome and saves JPEGs with `sips`, so it runs on a Mac (set `CHROME` to use another Chrome). `og/rendered.json` records what each card was drawn from; `npm run verify` names any card that needs redrawing. Change the design in `scripts/og.mjs` and bump `CARD_DESIGN` in `scripts/site.mjs` to redraw them all.
+
+### MCP reference and agent access
+
 The [MCP tool reference](https://diri.sh/docs/mcp-tools/) is generated from `docs-src/mcp-tools.json`, which a Rust test (`diri/crates/dirijor-mcp/tests/docs_catalog.rs`) keeps identical to the server's real tool catalog. After changing a tool, run `DIRI_UPDATE_DOCS=1 cargo test -p dirijor-mcp --test docs_catalog` from `diri/`, then `npm run docs`.
 
-Agents can read the docs three ways: the Markdown twin of every page, `llms.txt` / `llms-full.txt`, and the read-only docs MCP server at `/mcp` (`functions/mcp.js`, see [CLOUDFLARE.md](CLOUDFLARE.md)). ⌘K search and the MCP server share one ranking function, `docs-search.js`.
+Agents can read the site three ways: the Markdown twin of each page, `llms.txt` / `llms-full.txt`, and the read-only docs MCP server at `/mcp` (`functions/mcp.js`, see [CLOUDFLARE.md](CLOUDFLARE.md)). ⌘K search and the MCP server share one ranking function, `docs-search.js`.
 
 ## Release downloads
 

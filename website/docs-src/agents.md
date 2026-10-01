@@ -6,6 +6,8 @@ diri knows how to launch and read 20 terminal coding agents, plus a plain shell.
 
 ## Agent catalog
 
+Each agent also has its own page with setup steps and what diri adds: see [all agents](/agents/), for example [Claude Code](/agents/claude-code/) or [Codex](/agents/codex/).
+
 | Agent | Command | Status from | Resume | Fork | Quick approve | diri MCP | Hooks |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | `claude` | Hooks | Exact conversation | Yes | Yes | Auto | Yes |

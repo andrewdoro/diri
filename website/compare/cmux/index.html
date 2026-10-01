@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>diri vs cmux: cmux alternative · Diri</title>
+  <meta name="description" content="cmux is a free, scriptable Ghostty-based Mac terminal for agents; diri adds agent status, worktrees, review and agent-to-agent tasks, with sessions that outlive the app.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/compare/cmux/">
+  <link rel="alternate" type="text/markdown" href="/compare/cmux.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="diri vs cmux">
+  <meta property="og:description" content="cmux is a free, scriptable Ghostty-based Mac terminal for agents; diri adds agent status, worktrees, review and agent-to-agent tasks, with sessions that outlive the app.">
+  <meta property="og:url" content="https://diri.sh/compare/cmux/">
+  <meta property="og:image" content="https://diri.sh/og/compare-cmux.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="diri vs cmux">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"diri vs cmux","description":"cmux is a free, scriptable Ghostty-based Mac terminal for agents; diri adds agent status, worktrees, review and agent-to-agent tasks, with sessions that outlive the app.","url":"https://diri.sh/compare/cmux/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page article-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <main id="main">
+      <header class="guide-heading"><a class="eyebrow" href="/compare/">Compare</a><h1>diri vs cmux</h1><p>cmux is a free, scriptable Ghostty-based Mac terminal for agents; diri adds agent status, worktrees, review and agent-to-agent tasks, with sessions that outlive the app.</p>
+        <div class="guide-meta"><span>Checked 2026-10-01</span><span>Sources linked</span></div></header>
+      <div class="guide-layout"><nav class="guide-toc" aria-label="On this page"><span>On this page</span><a href="#at-a-glance">At a glance</a><a href="#where-diri-is-different">Where diri is different</a><a href="#where-cmux-is-a-better-fit">Where cmux is a better fit</a><a href="#switching">Switching</a><a href="#sources">Sources</a></nav>
+        <article class="docs-content article-content">
+<p>cmux is a free, open-source macOS terminal built on libghostty, with vertical tabs, split panes, a scriptable browser, notification rings when an agent needs you, and a CLI and socket API for everything. diri is a free, open-source native app built specifically around coding agents: 20 agent CLIs with live status, optional git worktrees, a Review panel, notes, and an MCP server that lets agents start and coordinate other agents. Both are native Mac apps that run agents in real terminals; cmux is a general terminal first, diri is an agent manager first.</p>
+<h2 id="at-a-glance"><a class="anchor" href="#at-a-glance" aria-hidden="true" tabindex="-1">#</a>At a glance</h2>
+<div class="table-wrap"><table><thead><tr><th></th><th>diri</th><th>cmux</th></tr></thead><tbody><tr><td>Platforms</td><td>macOS 15 or newer (universal), Linux beta on x86_64 Ubuntu, iPhone companion beta</td><td>macOS only for now; iOS app in TestFlight beta</td></tr><tr><td>Price</td><td>Free</td><td>Free; a Founder's Edition offers early access features</td></tr><tr><td>License</td><td>Apache-2.0</td><td>GPL-3.0-or-later for the client; server components under BSL 1.1</td></tr><tr><td>Built with</td><td>Rust and GPUI</td><td>Swift and AppKit on libghostty</td></tr><tr><td>Agents</td><td>20 agents with manifests for launch, resume and status, plus any shell</td><td>Any agent that runs in a terminal</td></tr><tr><td>Status and attention</td><td>Working, needs you, done per session, from hooks or screen rules; notifications and an inbox</td><td>Notification rings and unread badges, triggered by OSC 9/99/777, the CLI or agent hooks</td></tr><tr><td>Isolation</td><td>Optional git worktree per agent</td><td>Not documented</td></tr><tr><td>Review</td><td>Review panel: diff, stage, discard, commit, PR checks and comments</td><td>Sidebar shows git branch and PR status; no diff panel documented</td></tr><tr><td>Remote hosts</td><td>SSH hosts with a per-session helper; no tmux, sudo or service install</td><td><code>cmux ssh</code> workspaces, with browser panes routed through the remote network; can attach to remote tmux sessions</td></tr><tr><td>Agents controlling agents</td><td>MCP server: spawn agents in worktrees, tracked tasks, wait_any, get_diff, integrate</td><td>CLI and socket API: create workspaces, split panes, send input, read screens; Claude Code teammates as native splits</td></tr><tr><td>Session persistence</td><td>Holder process per session; agents keep running when the app quits</td><td>Restores layout, directories and best-effort scrollback on relaunch; does not keep live processes, supported agents can resume via hooks</td></tr><tr><td>Notes and planning</td><td>Notes with to-dos that start agents and receive reports</td><td>Not documented</td></tr></tbody></table></div>
+<h2 id="where-diri-is-different"><a class="anchor" href="#where-diri-is-different" aria-hidden="true" tabindex="-1">#</a>Where diri is different</h2>
+<h3 id="agents-keep-running-when-you-quit"><a class="anchor" href="#agents-keep-running-when-you-quit" aria-hidden="true" tabindex="-1">#</a>Agents keep running when you quit</h3>
+<p>In diri each session lives in its own holder process, not in the window. Quit the app or update the Engine and every agent keeps working with its full screen. cmux restores your layout and scrollback on relaunch, and resumes supported agents from saved session ids, but says it does not checkpoint live processes. See <a href="/docs/sessions/#persistence">Sessions</a>.</p>
+<h3 id="it-knows-what-each-agent-is-doing"><a class="anchor" href="#it-knows-what-each-agent-is-doing" aria-hidden="true" tabindex="-1">#</a>It knows what each agent is doing</h3>
+<p>diri ships a manifest for each of 20 agents describing how to launch, resume and fork it and how to read its state. The sidebar shows working, needs you and done for every session, turns red on destructive-looking prompts, and ⇧⌘J jumps to the next one waiting. See <a href="/docs/agents/">Supported agents</a>.</p>
+<h3 id="work-isolation-and-review-built-in"><a class="anchor" href="#work-isolation-and-review-built-in" aria-hidden="true" tabindex="-1">#</a>Work isolation and review built in</h3>
+<p>Agents can each get a git worktree, and the Review panel shows what a session changed against the default branch or HEAD, with stage, discard, commit, and PR checks and comments. See <a href="/docs/worktrees/">Worktrees and review</a>.</p>
+<h3 id="orchestration-with-tracked-results"><a class="anchor" href="#orchestration-with-tracked-results" aria-hidden="true" tabindex="-1">#</a>Orchestration with tracked results</h3>
+<p>cmux's socket API drives terminals: panes, keystrokes, screen reads. diri's MCP server works one level up. A lead agent assigns tasks that complete only when the helper reports back, optionally against a JSON schema, waits on whichever finishes first, reads the helper's final message from its transcript, and merges its branch. See <a href="/docs/mcp/">MCP server</a>.</p>
+<h3 id="remote-without-tmux"><a class="anchor" href="#remote-without-tmux" aria-hidden="true" tabindex="-1">#</a>Remote without tmux</h3>
+<p>diri's remote sessions use a small verified helper per session instead of <code>tmux</code>, and test whether the host keeps sessions alive after a disconnect. See <a href="/docs/remote-hosts/">Remote hosts</a>.</p>
+<h2 id="where-cmux-is-a-better-fit"><a class="anchor" href="#where-cmux-is-a-better-fit" aria-hidden="true" tabindex="-1">#</a>Where cmux is a better fit</h2>
+<ul><li><strong>A general-purpose terminal.</strong> If you want one terminal for everything, with agents as one use among many, cmux is a full Ghostty-based terminal with vertical and horizontal tabs and splits.</li><li><strong>A scriptable browser next to the terminal.</strong> cmux splits a real browser pane beside your shell and lets scripts navigate, snapshot the DOM, click, type and evaluate JavaScript. diri gives agents a browser tool, not a browser pane.</li><li><strong>Agent-agnostic by design.</strong> cmux needs no per-agent support: anything that prints a standard notification escape sequence lights up. diri reads status through per-agent manifests, so a brand-new agent needs a manifest for accurate status.</li><li><strong>Fits a tmux workflow.</strong> If you already keep work in tmux on remote boxes, cmux can attach to those sessions directly.</li></ul>
+<h2 id="switching"><a class="anchor" href="#switching" aria-hidden="true" tabindex="-1">#</a>Switching</h2>
+<p>diri runs the same agent CLIs with your existing logins, and nothing in your repositories changes.</p>
+<ul><li>Install diri and open a folder: <a href="/docs/quickstart/">Quickstart</a>.</li><li>For agents cmux would show as plain terminals, check whether diri has a manifest: <a href="/docs/agents/">Supported agents</a>. If not, a short JSON file adds one.</li><li>Replace <code>cmux ssh</code> hosts with the same destinations under <strong>Settings → Remote</strong>: <a href="/docs/remote-hosts/">Remote hosts</a>.</li><li>Scripts written against cmux's socket can move to the <a href="/docs/cli/">dirijor CLI</a> or, from inside agents, the <a href="/docs/mcp-tools/">MCP tools</a>.</li><li>Agent pages: <a href="/agents/claude-code/">Claude Code</a>, <a href="/agents/codex/">Codex</a>, <a href="/agents/gemini/">Gemini</a>, <a href="/agents/opencode/">OpenCode</a>.</li></ul>
+<h2 id="sources"><a class="anchor" href="#sources" aria-hidden="true" tabindex="-1">#</a>Sources</h2>
+<ul><li><a href="https://cmux.com/" rel="noopener">cmux homepage</a> — checked 2026-10-01</li><li><a href="https://github.com/manaflow-ai/cmux" rel="noopener">cmux on GitHub</a> — checked 2026-10-01</li><li><a href="https://github.com/manaflow-ai/cmux/blob/main/README.md" rel="noopener">cmux README</a> — checked 2026-10-01</li></ul>
+        <aside class="install-box">
+          <div class="install-copy"><strong>Try diri side by side</strong><span>Free and open source. macOS 15 or newer, Linux in beta. Bring the agent CLIs and accounts you already have.</span></div>
+          <div class="install-actions"><a class="button primary" href="https://github.com/cristicretu/diri/releases/latest"><span class="icon" data-icon="download" aria-hidden="true"></span>Download for macOS</a><div class="code-block install-brew" data-lang="sh"><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">brew</span> install <span class="tk-flag">--cask</span> cristicretu/diri/diri</code></pre></div></div>
+        </aside>
+        
+        </article>
+      </div>
+    </main>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a><a href="/agents/">Agents</a><a href="/compare/">Compare</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>
