@@ -102,7 +102,8 @@ impl WorkspaceCatalog {
 
 impl SessionStore {
     /// A fixture's store that reads as connected, without the Connecting toast.
-    #[cfg(test)]
+    // Only the macOS What's New clip fixture uses this.
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn mark_connected_for_test(&mut self) {
         self.daemon_state = DaemonState::Connected;
     }

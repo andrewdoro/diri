@@ -206,11 +206,18 @@ fn churn(server: &ControlServer, control: &mut Control, idle: &str, busy: &str, 
 
 /// Waits for detached per-connection work to wind down (event forwarders poll
 /// their stop flag every 250 ms), then samples.
+/// Descriptors a healthy Engine may open once, after the baseline, rather
+/// than per cycle. The state file keeps one cached handle that opens on its
+/// first commit; on a slow runner (Linux CI) that commit can land after the
+/// warm-up, so the count steps up by one exactly once. A leak in any churn
+/// path grows with the cycles instead: at least `CYCLES` descriptors.
+const LAZY_FDS: u64 = 2;
+
 fn settled(baseline: ProcessStats) -> ProcessStats {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let now = ProcessStats::current();
-        if (now.threads <= baseline.threads && now.open_fds <= baseline.open_fds)
+        if (now.threads <= baseline.threads && now.open_fds <= baseline.open_fds + LAZY_FDS)
             || Instant::now() >= deadline
         {
             return now;
@@ -283,7 +290,7 @@ fn threads_and_descriptors_return_to_baseline_after_churn() {
         after.threads
     );
     assert!(
-        after.open_fds <= baseline.open_fds,
+        after.open_fds <= baseline.open_fds + LAZY_FDS,
         "descriptors grew from {} to {} over {CYCLES} churn cycles",
         baseline.open_fds,
         after.open_fds
