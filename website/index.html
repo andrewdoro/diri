@@ -165,7 +165,7 @@
   <script src="app.js" defer></script>
   <script type="module" src="downloads.js"></script>
   <script type="module" src="stats.js"></script>
-  <noscript><style>.star-count { opacity: 1; }</style></noscript>
+  <noscript><style>.cadence, .star-count { opacity: 1; }</style></noscript>
 </head>
 <body>
   <div class="page-sky" aria-hidden="true"></div>
@@ -179,13 +179,14 @@
     <main id="main">
       <section class="intro" aria-labelledby="page-title">
         <div class="intro-heading">
+          <a class="cadence" id="cadence" href="https://github.com/cristicretu/diri/commits/main"><span class="cadence-dot" aria-hidden="true"></span><span>Commits in the last 30 days</span></a>
           <h1 id="page-title">The best way to work with coding agents</h1>
-          <p>Run Claude Code, Codex and 20 more agents side by side. Step in only when one needs you.</p>
+          <p>Run Claude Code, Codex, and any other agent in parallel. Step in only when one needs you.</p>
         </div>
         <div class="intro-actions">
           <a id="download-primary" class="button primary" href="https://github.com/cristicretu/diri/releases/latest"><img class="button-mark" src="/assets/brand/apple.svg" width="15" height="15" alt=""><span class="button-label">Download for macOS</span></a>
           <details class="download-options">
-            <summary class="button secondary text-link">Other platforms<span class="icon" data-icon="chevron-down" aria-hidden="true"></span></summary>
+            <summary class="button secondary"><span class="os-marks" aria-hidden="true"><img src="/assets/brand/linux.svg" width="14" height="15" alt=""><img class="upcoming" src="/assets/brand/windows.svg" width="12" height="12" alt=""></span>Other platforms</summary>
             <div class="download-menu">
               <div class="download-menu-head"><span id="download-version">macOS 15+ · Linux beta</span><a id="download-notes" href="https://github.com/cristicretu/diri/releases/latest">Release notes</a></div>
               <div id="download-assets"></div>
@@ -197,17 +198,6 @@
         </div>
       </section>
 
-      <section class="compatible works-with" aria-label="Preview each agent"><span class="works-with-label">Works with</span><div>
-        <button class="agent-switch" data-chat="notes" aria-pressed="false"><i class="agent-logo claude" data-agent="claude"></i>Claude Code</button>
-        <button class="agent-switch" data-chat="website" aria-pressed="true"><i class="agent-logo" data-agent="codex"></i>Codex</button>
-        <button class="agent-switch" data-chat="details" aria-pressed="false"><i class="agent-logo" data-agent="cursor"></i>Cursor</button>
-        <button class="agent-switch" data-chat="weekend" aria-pressed="false"><i class="agent-logo gemini" data-agent="gemini"></i>Gemini</button>
-        <span class="agent-chip"><i class="agent-logo" data-agent="pi"></i>Pi</span>
-        <span class="agent-chip"><i class="agent-logo" data-agent="opencode"></i>OpenCode</span>
-        <span class="agent-chip"><i class="agent-logo" data-agent="copilot"></i>Copilot</span>
-        <span class="agent-chip"><i class="agent-logo" data-agent="kimi"></i>Kimi</span>
-        <a class="agent-more" href="/agents/">and 14 more</a>
-      </div></section>
 
       <section class="product" aria-label="Interactive Diri preview" data-nosnippet>
         <div class="desktop-stage">
@@ -283,6 +273,18 @@
         </div>
       </section>
 
+
+      <section class="compatible" aria-label="Preview each agent"><div>
+        <button class="agent-switch" data-chat="notes" aria-pressed="false"><i class="agent-logo claude" data-agent="claude"></i>Claude Code</button>
+        <button class="agent-switch" data-chat="website" aria-pressed="true"><i class="agent-logo" data-agent="codex"></i>Codex</button>
+        <button class="agent-switch" data-chat="details" aria-pressed="false"><i class="agent-logo" data-agent="cursor"></i>Cursor</button>
+        <button class="agent-switch" data-chat="weekend" aria-pressed="false"><i class="agent-logo gemini" data-agent="gemini"></i>Gemini</button>
+        <span class="agent-chip"><i class="agent-logo" data-agent="pi"></i>Pi</span>
+        <span class="agent-chip"><i class="agent-logo" data-agent="opencode"></i>OpenCode</span>
+        <span class="agent-chip"><i class="agent-logo" data-agent="copilot"></i>Copilot</span>
+        <span class="agent-chip"><i class="agent-logo" data-agent="kimi"></i>Kimi</span>
+        <a class="agent-more" href="/agents/">+14 more</a>
+      </div></section>
 
       <section class="features" id="features" aria-labelledby="features-title">
         <div class="features-heading"><h2 id="features-title">Features</h2><a href="/docs/">Read the docs <span class="icon" data-icon="chevron-right" aria-hidden="true"></span></a></div>

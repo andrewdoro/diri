@@ -1089,32 +1089,3 @@ html { overflow-x: clip; }
 .faq-grid dt { font-size: 15.5px; font-weight: 500; color: #f4f0fa; }
 .faq-grid dd { margin: 8px 0 0; font-size: 14px; line-height: 1.6; color: #a9a2bc; text-wrap: pretty; }
 @media (max-width: 850px) { .faq-grid { grid-template-columns: minmax(0, 1fr); } }
-
-/* Hero: a calm statement, one grey line, a plain white download, then the agents diri runs as a quiet row. The window does the rest. */
-.intro { padding: 104px 0 0; }
-.intro-heading h1 { max-width: none; margin: 0; font-size: 40px; font-weight: 500; line-height: 1.15; letter-spacing: -.025em; color: #f4f0fa; text-wrap: balance; }
-.intro-heading > p { max-width: 520px; margin: 16px auto 0; font-size: 17px; line-height: 1.6; color: #a9a2bc; text-wrap: balance; }
-.intro-actions { gap: 22px; margin-top: 32px; }
-.intro-actions .button.primary { color: #17151f; background: #f4f0fa; border-color: #f4f0fa; box-shadow: 0 1px 0 #fff inset, 0 10px 30px -12px #00000080; }
-.intro-actions .button.primary .button-mark { filter: brightness(0); }
-.intro-actions .button.secondary.text-link { height: auto; padding: 0; gap: 6px; background: none; border: 0; color: #cfc8de; font-weight: 450; }
-.intro-actions .button.secondary.text-link .icon { width: 12px; height: 12px; opacity: .7; }
-@media (hover: hover) and (pointer: fine) {
-  .intro-actions .button.primary:hover { background: #fff; border-color: #fff; }
-  .intro-actions .button.secondary.text-link:hover { color: #fff; background: none; }
-}
-.works-with { padding: 56px 0 64px; border: 0; flex-direction: column; gap: 14px; }
-.works-with-label { font-size: 12.5px; color: #8f87a3; }
-.works-with > div { gap: 6px !important; flex-wrap: wrap; justify-content: center; }
-.works-with :is(.agent-switch, .agent-chip, .agent-more) { color: #b6afc9 !important; text-shadow: none !important; }
-.works-with .agent-logo { color: #b6afc9 !important; filter: none !important; }
-.works-with .agent-switch[aria-pressed="true"] { color: #f4f0fa !important; background: #ffffff12 !important; }
-.works-with .agent-switch[aria-pressed="true"] .agent-logo { color: #f4f0fa !important; }
-.works-with .agent-more { border-color: #ffffff1f !important; }
-@media (max-width: 600px) {
-  .intro { padding-top: 56px; }
-  .intro-heading h1 { font-size: 30px; }
-  .intro-heading > p { font-size: 15.5px; }
-  .works-with { padding: 36px 0 40px; }
-}
-.works-with .agent-more { border: 0 !important; padding-inline: 10px; text-decoration: underline; text-decoration-color: #ffffff2e; text-underline-offset: 4px; }
