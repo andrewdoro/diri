@@ -1146,3 +1146,14 @@ html { overflow-x: clip; }
   .intro-heading .inline-agent .agent-logo { display: none; }
   .intro-heading .inline-agent { gap: 0; }
 }
+
+/* Headline and subtitle, not one run-on paragraph: a larger white claim, then a smaller grey line that names the agents with their marks. */
+.intro-heading h1 { max-width: none !important; font-size: 46px !important; font-weight: 550 !important; line-height: 1.1 !important; letter-spacing: -.03em !important; }
+.intro-heading > p { max-width: 640px !important; margin-top: 18px !important; font-size: 19px !important; font-weight: 400 !important; line-height: 1.6 !important; letter-spacing: -.005em !important; }
+.intro-heading .inline-agent { gap: .3em; }
+.intro-heading .inline-agent .agent-logo { width: .85em; height: .85em; }
+@media (max-width: 600px) {
+  .intro-heading h1 { font-size: 32px !important; }
+  .intro-heading > p { font-size: 16px !important; }
+  .intro-heading .inline-agent .agent-logo { display: inline-block; }
+}
