@@ -1170,3 +1170,27 @@ html { overflow-x: clip; }
   .intro-heading > p { font-size: 16px !important; }
   .sub-line { display: inline; }
 }
+
+/* Craft pass on the hero.
+   One rhythm (24 / 16 / 32 / 72), a firmer headline with near-default tracking, a subtitle with real contrast,
+   logos seated on the text baseline at one optical size, a single hairline pill, and a crisp button instead of a glow. */
+.intro { padding-top: 72px !important; padding-bottom: 72px !important; }
+.release-pill { gap: 0; margin-bottom: 24px; padding: 5px 12px; font-size: 12.5px; color: #a9a2bc; background: transparent; border: 1px solid #ffffff17; }
+.release-pill-tag { padding: 0 10px 0 0; margin-right: 10px; border-radius: 0; background: none; border-right: 1px solid #ffffff1f; color: #f4f0fa; font-weight: 500; font-size: inherit; }
+.release-pill .icon { width: 11px; height: 11px; margin-left: 6px; opacity: .55; }
+.intro-heading h1 { font-size: 44px !important; font-weight: 600 !important; letter-spacing: -.012em !important; line-height: 1.1 !important; color: #fbf9ff; }
+.intro-heading > p { margin-top: 16px !important; font-size: 18px !important; line-height: 1.6 !important; letter-spacing: 0 !important; color: #b9b2ca !important; }
+.intro-heading .inline-agent, .intro-heading .inline-agent .agent-logo { color: #b9b2ca !important; }
+.intro-heading .inline-agent { display: inline; white-space: nowrap; }
+.intro-heading .inline-agent .agent-logo { display: inline-block; width: 15px; height: 15px; margin-right: 5px; vertical-align: -2px; }
+.intro-heading .inline-agent .agent-logo.gemini { width: 13px; height: 13px; vertical-align: -1px; }
+.intro-actions { gap: 24px !important; margin-top: 32px !important; }
+.intro-actions .button.primary { height: 42px; padding: 0 18px; border-radius: 10px; box-shadow: inset 0 1px 0 #fff, 0 1px 2px #0000004d !important; }
+@media (max-width: 600px) {
+  .intro { padding-top: 40px !important; padding-bottom: 40px !important; }
+  .intro-heading h1 { font-size: 31px !important; }
+  .intro-heading > p { font-size: 16px !important; }
+  .intro-heading .inline-agent .agent-logo { width: 13px; height: 13px; }
+}
+@media (min-width: 601px) { .intro-heading h1 { font-size: 40px !important; letter-spacing: -.014em !important; } }
+@media (max-width: 600px) { .intro-heading h1 { font-size: 30px !important; } }
