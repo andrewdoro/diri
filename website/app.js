@@ -11,12 +11,9 @@ setInputMethod('pointer');
 document.addEventListener('pointerdown', () => setInputMethod('pointer'), true);
 document.addEventListener('keydown', () => setInputMethod('keyboard'), true);
 const icon = name => `<span class="icon" data-icon="${name}" aria-hidden="true"></span>`;
+// Icon images come from style.css ([data-icon] / [data-agent] rules); this only keeps them out of the accessibility tree.
 function paintIcons(root = document) {
-  $$('[data-icon], [data-agent]', root).forEach(el => {
-    const folder = el.dataset.agent ? 'brand' : 'icons';
-    el.style.setProperty('--icon', `url("assets/${folder}/${el.dataset.agent || el.dataset.icon}.svg")`);
-    el.setAttribute('aria-hidden', 'true');
-  });
+  $$('[data-icon], [data-agent]', root).forEach(el => el.setAttribute('aria-hidden', 'true'));
 }
 const chats = {
   release: { title: 'Ship the 0.9 release', agent: 'claude', name: 'Claude Code', view: 'swarm', prompt: 'Use diri to ship 0.9: split the work across agents and report back.' },

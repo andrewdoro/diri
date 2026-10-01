@@ -28,8 +28,8 @@ button:disabled { cursor: default; }
 [hidden] { display: none !important; }
 p, h1, h2 { margin: 0; }
 .icon, .agent-logo, .brand-mark { display: inline-block; width: 16px; height: 16px; flex: 0 0 auto; background: currentColor; mask: var(--icon) center / contain no-repeat; -webkit-mask: var(--icon) center / contain no-repeat; }
-.agent-logo { --icon: url('assets/brand/claude.svg'); }
-.brand-mark { --icon: url('assets/brand/diri.svg'); width: 23px; height: 18px; }
+.agent-logo { --icon: url('/assets/brand/claude.svg'); }
+.brand-mark { --icon: url('/assets/brand/diri.svg'); width: 23px; height: 18px; }
 .site-wrap { max-width: 1024px; padding: 0 32px; margin: 0 auto; }
 .site-header { height: 106px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .wordmark { display: inline-flex; align-items: center; gap: 9px; font-size: 29px; font-weight: 680; letter-spacing: -1.5px; line-height: 1; }
@@ -1067,3 +1067,78 @@ html { overflow-x: clip; }
   .intro-heading .inline-agent .agent-logo { display: none; }
   .intro-heading .inline-agent { gap: 0; }
 }
+
+/* Icons get their image from CSS, not app.js, so the first frame never shows bare squares. Regenerate when adding an icon. */
+[data-icon="apps"] { --icon: url('/assets/icons/apps.svg'); }
+[data-icon="archive"] { --icon: url('/assets/icons/archive.svg'); }
+[data-icon="bell"] { --icon: url('/assets/icons/bell.svg'); }
+[data-icon="branch"] { --icon: url('/assets/icons/branch.svg'); }
+[data-icon="check-circle"] { --icon: url('/assets/icons/check-circle.svg'); }
+[data-icon="check"] { --icon: url('/assets/icons/check.svg'); }
+[data-icon="chevron-down"] { --icon: url('/assets/icons/chevron-down.svg'); }
+[data-icon="chevron-left"] { --icon: url('/assets/icons/chevron-left.svg'); }
+[data-icon="chevron-right"] { --icon: url('/assets/icons/chevron-right.svg'); }
+[data-icon="chevron-up-down"] { --icon: url('/assets/icons/chevron-up-down.svg'); }
+[data-icon="clock"] { --icon: url('/assets/icons/clock.svg'); }
+[data-icon="close"] { --icon: url('/assets/icons/close.svg'); }
+[data-icon="code"] { --icon: url('/assets/icons/code.svg'); }
+[data-icon="copy"] { --icon: url('/assets/icons/copy.svg'); }
+[data-icon="download"] { --icon: url('/assets/icons/download.svg'); }
+[data-icon="expand"] { --icon: url('/assets/icons/expand.svg'); }
+[data-icon="external-link"] { --icon: url('/assets/icons/external-link.svg'); }
+[data-icon="file"] { --icon: url('/assets/icons/file.svg'); }
+[data-icon="folder"] { --icon: url('/assets/icons/folder.svg'); }
+[data-icon="github"] { --icon: url('/assets/icons/github.svg'); }
+[data-icon="keyboard"] { --icon: url('/assets/icons/keyboard.svg'); }
+[data-icon="lifebuoy"] { --icon: url('/assets/icons/lifebuoy.svg'); }
+[data-icon="local-agents"] { --icon: url('/assets/icons/local-agents.svg'); }
+[data-icon="markdown"] { --icon: url('/assets/icons/markdown.svg'); }
+[data-icon="monitor"] { --icon: url('/assets/icons/monitor.svg'); }
+[data-icon="moon"] { --icon: url('/assets/icons/moon.svg'); }
+[data-icon="more"] { --icon: url('/assets/icons/more.svg'); }
+[data-icon="new-agent"] { --icon: url('/assets/icons/new-agent.svg'); }
+[data-icon="note"] { --icon: url('/assets/icons/note.svg'); }
+[data-icon="plug"] { --icon: url('/assets/icons/plug.svg'); }
+[data-icon="plus"] { --icon: url('/assets/icons/plus.svg'); }
+[data-icon="pull-request"] { --icon: url('/assets/icons/pull-request.svg'); }
+[data-icon="refresh"] { --icon: url('/assets/icons/refresh.svg'); }
+[data-icon="return"] { --icon: url('/assets/icons/return.svg'); }
+[data-icon="search"] { --icon: url('/assets/icons/search.svg'); }
+[data-icon="server"] { --icon: url('/assets/icons/server.svg'); }
+[data-icon="settings"] { --icon: url('/assets/icons/settings.svg'); }
+[data-icon="shield"] { --icon: url('/assets/icons/shield.svg'); }
+[data-icon="sidebar-right"] { --icon: url('/assets/icons/sidebar-right.svg'); }
+[data-icon="sidebar"] { --icon: url('/assets/icons/sidebar.svg'); }
+[data-icon="split"] { --icon: url('/assets/icons/split.svg'); }
+[data-icon="terminal"] { --icon: url('/assets/icons/terminal.svg'); }
+[data-icon="user"] { --icon: url('/assets/icons/user.svg'); }
+[data-icon="warning"] { --icon: url('/assets/icons/warning.svg'); }
+[data-icon="working-0"] { --icon: url('/assets/icons/working-0.svg'); }
+[data-agent="apple"] { --icon: url('/assets/brand/apple.svg'); }
+[data-agent="claude"] { --icon: url('/assets/brand/claude.svg'); }
+[data-agent="codex"] { --icon: url('/assets/brand/codex.svg'); }
+[data-agent="copilot"] { --icon: url('/assets/brand/copilot.svg'); }
+[data-agent="cursor"] { --icon: url('/assets/brand/cursor.svg'); }
+[data-agent="diri-icon"] { --icon: url('/assets/brand/diri-icon.svg'); }
+[data-agent="diri"] { --icon: url('/assets/brand/diri.svg'); }
+[data-agent="gemini"] { --icon: url('/assets/brand/gemini.svg'); }
+[data-agent="kimi"] { --icon: url('/assets/brand/kimi.svg'); }
+[data-agent="linux"] { --icon: url('/assets/brand/linux.svg'); }
+[data-agent="opencode"] { --icon: url('/assets/brand/opencode.svg'); }
+[data-agent="pi"] { --icon: url('/assets/brand/pi.svg'); }
+[data-agent="windows"] { --icon: url('/assets/brand/windows.svg'); }
+
+/* Guides and questions follow the bento: a heading row, then cards or a two-column list. */
+.more-section { padding-top: 56px; }
+.guide-card { position: relative; padding-right: 44px; transition: border-color 140ms ease, background-color 140ms ease; }
+.guide-card dt a { color: #f4f0fa; }
+.guide-card dt a::after { content: ''; position: absolute; inset: 0; border-radius: inherit; }
+.guide-card > .icon { position: absolute; top: 24px; right: 20px; width: 14px; height: 14px; color: #8f87a3; transition: transform 140ms ease, color 140ms ease; }
+@media (hover: hover) and (pointer: fine) { .guide-card:hover { background: #ffffff0a; border-color: #ffffff1c; } .guide-card:hover > .icon { color: #f4f0fa; transform: translateX(2px); } }
+.guide-card:focus-within { outline: 2px solid var(--rp-rose); outline-offset: 2px; }
+.guide-card dt a:focus-visible { outline: none; }
+.faq-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 48px; margin: 8px 0 0; }
+.faq-grid > div { padding: 22px 0; border-top: 1px solid #ffffff0f; }
+.faq-grid dt { font-size: 15.5px; font-weight: 500; color: #f4f0fa; }
+.faq-grid dd { margin: 8px 0 0; font-size: 14px; line-height: 1.6; color: #a9a2bc; text-wrap: pretty; }
+@media (max-width: 850px) { .faq-grid { grid-template-columns: minmax(0, 1fr); } }
