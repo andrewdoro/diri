@@ -5058,12 +5058,14 @@ fn wait_until_ready(registry: &Arc<Mutex<Registry>>, session_id: &str) -> bool {
         if exited {
             return false;
         }
-        if paste {
+        if paste && !text.trim().is_empty() {
             // Paste mode says the input line exists; it does NOT say the TUI
             // has stopped repainting over it. Claude Code turns paste mode on
             // while its banner and tips panel are still landing, and anything
             // typed into that window is discarded. Wait for the screen to
-            // hold still before treating the composer as real.
+            // hold still before treating the composer as real. OpenCode
+            // turns paste mode on before its first paint: a blank screen is
+            // not a composer, however still it holds.
             return screen_settled(registry, session_id);
         }
         if !text.trim().is_empty() && text == last_text {

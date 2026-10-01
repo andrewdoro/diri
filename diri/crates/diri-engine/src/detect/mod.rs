@@ -403,7 +403,7 @@ mod tests {
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 111, "the shipped ruleset lost rules");
+        assert_eq!(rules, 112, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
             let expected_empty = matches!(id, "shell" | "generic");
@@ -782,6 +782,92 @@ mod tests {
                 (observation.state, observation.matched_rule_id.as_str()),
                 (state, rule_id),
                 "{lines:#?}"
+            );
+        }
+    }
+
+    /// Screens captured from OpenCode 1.18 driven through the Engine
+    /// (`tests/opencode_real.rs`). OpenCode draws no idle marker beyond its
+    /// footer, so without the footer rule no screen read as idle and every
+    /// session sat Starting, then Working, forever.
+    #[test]
+    fn opencode_rules_match_the_screens_opencode_draws() {
+        let composer = [
+            "   ┃",
+            "   ┃  Build · Fake Model Fake",
+            "   ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        ];
+        let with_composer = |lines: &[&'static str], footer: &'static str| {
+            lines
+                .iter()
+                .chain(composer.iter())
+                .copied()
+                .chain([footer])
+                .collect::<Vec<_>>()
+        };
+        let cases = [
+            (
+                // First run, no provider configured: the home screen.
+                vec![
+                    "                                ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▄ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀",
+                    "              ┃",
+                    "              ┃  Ask anything... \"Fix a TODO in the codebase\"",
+                    "              ┃",
+                    "              ┃  Build · Big Pickle OpenCode Zen",
+                    "              ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+                    "                                                    tab agents  ctrl+p commands",
+                    "                       ● Tip Run /connect to add an AI provider and start coding",
+                    "   ~/project                                                               1.17.9",
+                ],
+                ManifestState::Idle,
+                "idle-footer",
+            ),
+            (
+                with_composer(
+                    &["   ┃  SLOW stream something", "      ▣  Build · Fake Model"],
+                    "    ■⬝⬝⬝⬝⬝⬝⬝  esc interrupt                         tab agents  ctrl+p commands",
+                ),
+                ManifestState::Working,
+                "working-interrupt",
+            ),
+            (
+                // After a turn the token count replaces "tab agents".
+                with_composer(
+                    &[
+                        "      part 7 slow part 8 slow part 9 SLOWDONE",
+                        "      ▣  Build · Fake Model · 6.7s",
+                    ],
+                    "                                                         15  ctrl+p commands",
+                ),
+                ManifestState::Idle,
+                "idle-footer",
+            ),
+            (
+                vec![
+                    "   ┃  RUNCMD for me",
+                    "      $ touch diri-e2e-file",
+                    "      ▣  Build · Fake Model",
+                    "   ┃",
+                    "   ┃  △ Permission required",
+                    "   ┃    # Create the e2e marker file",
+                    "   ┃",
+                    "   ┃  $ touch diri-e2e-file",
+                    "   ┃",
+                    "   ┃   Allow once   Allow always   Reject     ctrl+f fullscreen  ⇆ select  enter confirm",
+                ],
+                ManifestState::BlockedPermission,
+                "blocked-permission",
+            ),
+        ];
+
+        let engine = engine();
+        for (lines, state, rule) in cases {
+            let observation = engine
+                .evaluate(&ScreenSnapshot::from_lines(lines), "opencode")
+                .expect("OpenCode screen should match");
+            assert_eq!(
+                (observation.state, observation.matched_rule_id.as_str()),
+                (state, rule)
             );
         }
     }
