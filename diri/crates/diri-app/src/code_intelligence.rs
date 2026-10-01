@@ -27,10 +27,15 @@ const MAX_SYMBOL_BYTES: u64 = 256 * 1024;
 const MAX_SYMBOL_INDEX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SYMBOLS_PER_FILE: usize = 256;
 
-/// Prepare an explicitly activated local terminal file for the system opener.
-/// Unlike source browsing, this permits files outside the workspace and does
-/// not read their contents. The caller must establish that the session is local.
-pub(crate) fn local_reference_url(cwd: &Path, reference: &str) -> Option<url::Url> {
+/// Where an explicitly activated local terminal reference points: the path
+/// it names joined to `cwd` (with `~` expanded), and the line it names.
+/// Unlike source browsing, this permits files outside the workspace and
+/// touches no filesystem; the caller checks existence and that the session
+/// is local.
+pub(crate) fn local_reference(
+    cwd: &Path,
+    reference: &str,
+) -> Option<(PathBuf, Option<SourceTarget>)> {
     let parsed = parse_reference_fragment(reference)?;
     let path = if let Ok(relative) = parsed.path.strip_prefix("~") {
         PathBuf::from(std::env::var_os("HOME")?).join(relative)
@@ -39,7 +44,7 @@ pub(crate) fn local_reference_url(cwd: &Path, reference: &str) -> Option<url::Ur
     } else {
         cwd.join(parsed.path)
     };
-    url::Url::from_file_path(path).ok()
+    Some((path, parsed.target))
 }
 
 const IGNORED_DIRECTORIES: &[&str] = &[
@@ -1128,7 +1133,12 @@ fn parse_file_uri(uri: &str) -> Option<ParsedReference> {
     let uri = uri.trim_end_matches([',', ';', ')', ']']);
     let (encoded_path, fragment) = uri.split_once('#').unwrap_or((uri, ""));
     let decoded = percent_decode(encoded_path)?;
-    let target = parse_line_fragment(fragment);
+    // Node prints ESM frames as `file:///app/index.js:10:5`, with the
+    // position after the path rather than in a fragment.
+    let (decoded, target) = match parse_line_fragment(fragment) {
+        Some(target) => (decoded.as_str(), Some(target)),
+        None => parse_colon_target(&decoded),
+    };
     let path = PathBuf::from(decoded);
     path.is_absolute()
         .then_some(ParsedReference { path, target })
@@ -1378,29 +1388,34 @@ mod tests {
     #[test]
     fn local_terminal_links_resolve_without_workspace_or_source_file_restrictions() {
         let cwd = Path::new("/tmp/workspace");
-        for (reference, expected) in [
-            ("../preview.html", "file:///tmp/workspace/../preview.html"),
-            ("/tmp/preview.png:9", "file:///tmp/preview.png"),
-            ("src/main.rs(42,7)", "file:///tmp/workspace/src/main.rs"),
+        let at = |line, column| Some(SourceTarget { line, column });
+        for (reference, path, target) in [
+            ("../preview.html", "/tmp/workspace/../preview.html", None),
+            ("/tmp/preview.png:9", "/tmp/preview.png", at(9, 1)),
+            ("src/main.rs(42,7)", "/tmp/workspace/src/main.rs", at(42, 7)),
+            ("src/app.rs:42:9", "/tmp/workspace/src/app.rs", at(42, 9)),
             (
                 "file://localhost/tmp/preview%20image.png#L2",
-                "file:///tmp/preview%20image.png",
+                "/tmp/preview image.png",
+                at(2, 1),
             ),
-            ("/tmp/preview #1.html", "file:///tmp/preview%20%231.html"),
+            ("file:///app/index.js:10:5", "/app/index.js", at(10, 5)),
+            ("/tmp/preview #1.html", "/tmp/preview #1.html", None),
         ] {
             assert_eq!(
-                local_reference_url(cwd, reference).unwrap().as_str(),
-                expected
+                local_reference(cwd, reference),
+                Some((PathBuf::from(path), target)),
+                "{reference}"
             );
         }
         if let Some(home) = std::env::var_os("HOME") {
             assert_eq!(
-                local_reference_url(cwd, "~/Desktop/preview.png"),
-                url::Url::from_file_path(PathBuf::from(home).join("Desktop/preview.png")).ok(),
+                local_reference(cwd, "~/Desktop/preview.png").map(|(path, _)| path),
+                Some(PathBuf::from(home).join("Desktop/preview.png")),
             );
         }
-        assert!(local_reference_url(cwd, "file://another-host/tmp/image.png").is_none());
-        assert!(local_reference_url(cwd, "file:///tmp/bad%XX.png").is_none());
+        assert!(local_reference(cwd, "file://another-host/tmp/image.png").is_none());
+        assert!(local_reference(cwd, "file:///tmp/bad%XX.png").is_none());
     }
 
     fn write(path: &Path, contents: impl AsRef<[u8]>) {

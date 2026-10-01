@@ -548,15 +548,6 @@ impl RootView {
                         });
                     }
                 }
-                TerminalPaneEvent::OpenFileReference { reference, cwd, .. } => {
-                    let inspector = this.inspector.clone();
-                    this.reveal_inspector(cx);
-                    if let Some(inspector) = inspector {
-                        inspector.update(cx, |inspector, cx| {
-                            inspector.open_file_reference(cwd.clone(), reference.clone(), cx);
-                        });
-                    }
-                }
                 TerminalPaneEvent::Feedback { message } => {
                     this.show_quote_feedback("Terminal", message.clone(), cx);
                 }
@@ -1558,20 +1549,6 @@ impl RootView {
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
                             TerminalPaneEvent::RevealSession(id),
                         ) => this.open_workspace_launch_session(id.clone(), window, cx),
-                        crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
-                            TerminalPaneEvent::OpenFileReference { reference, cwd, .. },
-                        ) => {
-                            this.reveal_inspector(cx);
-                            if let Some(inspector) = &this.inspector {
-                                inspector.update(cx, |inspector, cx| {
-                                    inspector.open_file_reference(
-                                        cwd.clone(),
-                                        reference.clone(),
-                                        cx,
-                                    )
-                                });
-                            }
-                        }
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
                             TerminalPaneEvent::Feedback { message },
                         ) => this.show_quote_feedback("Terminal", message.clone(), cx),

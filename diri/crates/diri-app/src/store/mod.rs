@@ -37,7 +37,7 @@ use crate::switcher::{
 };
 
 pub use prefs::{
-    InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
+    FileEditor, InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
     WindowMaterial, WindowMode, WindowPlacement,
 };
 pub use projection::{SidebarProject, SidebarProjection, SidebarRow};
