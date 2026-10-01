@@ -1235,3 +1235,4 @@ html { overflow-x: clip; }
   .sub-line { display: block; }
 }
 @media (max-width: 600px) { .sub-line { display: inline; } }
+.nowrap { white-space: nowrap; }
