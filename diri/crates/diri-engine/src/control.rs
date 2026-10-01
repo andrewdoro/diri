@@ -6189,6 +6189,55 @@ mod tests {
         assert!(matches!(after.status, diri_proto::SessionStatus::Idle));
     }
 
+    /// A note an agent wrote belongs to the user: the agent ending, being
+    /// closed, or vanishing in a restart leaves the note and its file alone.
+    #[test]
+    fn a_note_outlives_the_agent_that_wrote_it() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (registry, server) = note_server(&temp);
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let mut agent = new_record("s_agent", "claude-code", &project.to_string_lossy());
+        agent.status = diri_proto::SessionStatus::Working;
+        registry.lock().expect("registry").insert_record(agent);
+        let note = ok_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({
+                "kind": "note",
+                "cwd": project.to_string_lossy(),
+                "title": "Findings",
+                "parent": "s_agent",
+            })),
+        ));
+        let note: diri_proto::SessionRecord = serde_json::from_value(note).expect("record");
+        let note_id = note.note_id.clone().expect("note id");
+
+        let intact = || {
+            let record = registry
+                .lock()
+                .expect("registry")
+                .record(&note.id.0)
+                .expect("the note is still listed");
+            assert_eq!(record.note_id.as_deref(), Some(note_id.as_str()));
+            assert!(matches!(record.status, diri_proto::SessionStatus::Idle));
+            let store =
+                diri_notes::store::NoteStore::open(temp.path().join("notes")).expect("store");
+            assert_eq!(store.load(&note_id).expect("file").doc.title, "Findings");
+        };
+        // The agent's holder is gone after a restart.
+        registry.lock().expect("registry").reap_orphans_for_test();
+        intact();
+        ok_of(call(
+            &server,
+            "session.remove",
+            Some(json!({ "sessionID": "s_agent" })),
+        ));
+        intact();
+        server.adopt_orphan_notes().expect("adopt");
+        intact();
+    }
+
     fn note_server(temp: &tempfile::TempDir) -> (Arc<Mutex<Registry>>, Arc<ControlServer>) {
         let registry = Arc::new(Mutex::new(Registry::new(
             engine(),

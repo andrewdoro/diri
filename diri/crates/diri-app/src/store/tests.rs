@@ -3651,3 +3651,67 @@ fn opening_a_note_file_spawns_a_note_session_that_adopts_it() {
     assert_eq!(params.kind, AgentKind::NOTE);
     assert_eq!(params.note_id.as_deref(), Some("20261001-090000-abcd"));
 }
+
+/// A note an agent wrote is the user's, not the agent's: closing, archiving,
+/// or losing the agent leaves the note in the sidebar at the agent's place.
+#[test]
+fn a_note_outlives_the_agent_that_wrote_it() {
+    let mut note = session("note", "p", 2.0);
+    note.kind = AgentKind::new(AgentKind::NOTE_ID);
+    note.note_id = Some("n-1".into());
+    note.parent = Some(id("agent"));
+    let visible = |store: &mut SessionStore| {
+        let projection = store.sidebar_projection();
+        projection
+            .projects
+            .iter()
+            .flat_map(|group| group.sessions.iter())
+            .map(|row| (row.id().clone(), row.depth))
+            .collect::<Vec<_>>()
+    };
+
+    let (mut store, mut effects) = hydrated(
+        vec![session("agent", "p", 1.0), note.clone()],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+    store.request_close(vec![id("agent")]);
+    store.confirm_pending_close();
+    let removed: Vec<_> = drain(&mut effects)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            StoreEffect::Remove(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        removed,
+        vec![id("agent")],
+        "closing the agent never closes its note"
+    );
+    assert_eq!(visible(&mut store), vec![(id("note"), 0)]);
+    store.remove_session_record(&id("agent"));
+    assert_eq!(visible(&mut store), vec![(id("note"), 0)]);
+
+    let (mut store, _) = hydrated(
+        vec![session("agent", "p", 1.0), note.clone()],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    store.archive_sessions(vec![id("agent")]);
+    assert_eq!(visible(&mut store), vec![(id("note"), 0)]);
+
+    let mut exited = session("agent", "p", 1.0);
+    exited.status = SessionStatus::Exited(ExitInfo {
+        reason: ExitReason::Signaled,
+        code: None,
+        signal: Some(9),
+    });
+    let (mut store, _) = hydrated(
+        vec![exited, note],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    assert!(visible(&mut store).contains(&(id("note"), 1)));
+}

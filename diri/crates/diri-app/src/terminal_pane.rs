@@ -1194,6 +1194,12 @@ impl TerminalPane {
             }
             SessionSource::Fixed(_) => HashSet::new(),
         };
+        // A note has no terminal: the Engine closes its attach at once, and
+        // the transport retried that twice a second for as long as it showed.
+        let resident_ids: HashSet<_> = resident_ids
+            .into_iter()
+            .filter(|id| !store.sessions().get(id).is_some_and(|s| s.is_note()))
+            .collect();
         // A parked terminal for a session the store no longer lists is dead
         // weight; one for a session that just became resident is superseded
         // below by promotion.
@@ -8606,6 +8612,51 @@ mod tests {
             window,
             cx,
         );
+    }
+
+    /// A selected note never mounts a terminal: the Engine refuses the attach
+    /// and the transport used to retry it twice a second while it showed.
+    #[gpui::test]
+    fn a_selected_note_never_attaches_a_terminal(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let mut note = fixture_session();
+        note.kind = diri_proto::AgentKind::new(diri_proto::AgentKind::NOTE_ID);
+        note.note_id = Some("n-1".into());
+        let mut agent = fixture_session();
+        agent.id = SessionId::new("agent");
+        let (note_id, agent_id) = (note.id.clone(), agent.id.clone());
+        {
+            let mut store = runtime.store.write().unwrap();
+            store.upsert_session(note);
+            store.upsert_session(agent);
+            store.select(note_id.clone());
+        }
+        let store_runtime = Arc::clone(&runtime);
+        let (pane, cx) =
+            cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            assert!(
+                pane.residents.is_empty(),
+                "a note has no terminal to attach"
+            );
+        });
+        store_runtime
+            .store
+            .write()
+            .unwrap()
+            .select(agent_id.clone());
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            assert!(pane.residents.contains_key(&agent_id));
+            assert!(!pane.residents.contains_key(&note_id));
+        });
     }
 
     #[gpui::test]
