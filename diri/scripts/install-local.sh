@@ -16,7 +16,17 @@ fi
 mkdir -p "${install_dir}"
 # Installing over a live bundle corrupts the code-signature seal (ditto merges
 # without deleting stale files; overwriting mapped pages gets the running app
-# SIGKILLed with "Code Signature Invalid"). Quit, remove, then copy fresh.
+# SIGKILLed with "Code Signature Invalid"). Copy fresh beside it instead.
+next_app="${installed_app}.diri-next"
+previous_app="${installed_app}.diri-previous"
+rm -rf "${next_app}" "${previous_app}"
+ditto "${source_app}" "${next_app}"
+codesign --verify --deep --strict "${next_app}"
+
+# When diri exits, macOS reads the bundle at its path to decide whether the
+# processes it started may outlive it. A missing or half-copied bundle there
+# gets the Engine, every Holder and every Agent terminated, so once diri is
+# gone the path only ever changes by rename.
 if pgrep -x diri >/dev/null 2>&1; then
     pkill -x diri || true
     for _ in $(seq 1 20); do
@@ -24,9 +34,11 @@ if pgrep -x diri >/dev/null 2>&1; then
         sleep 0.2
     done
 fi
-rm -rf "${installed_app}"
-ditto "${source_app}" "${installed_app}"
-codesign --verify --deep --strict "${installed_app}"
+if [[ -e "${installed_app}" ]]; then
+    mv "${installed_app}" "${previous_app}"
+fi
+mv "${next_app}" "${installed_app}"
+rm -rf "${previous_app}"
 
 echo "Installed ${installed_app}"
 

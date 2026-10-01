@@ -69,11 +69,20 @@ run a manual check, which reports "up to date" rather than staying silent.
 
 A process cannot reliably delete the bundle it is executing from, so
 `install.rs` generates a small `/bin/sh` helper, spawns it detached in its own
-process group, and quits. The helper waits (up to 60 s) for diri's pid to
-disappear, renames the old bundle to `diri.app.diri-previous`, and copies the
-staged bundle into place with `ditto`. An explicit update restart relaunches it;
-a normal quit does not. If the copy fails it restores the old bundle — an
-interrupted install leaves a working app, never a hole.
+process group, and quits. The helper first copies the staged bundle to
+`diri.app.diri-next` beside the running app with `ditto`, waits (up to 60 s)
+for diri's pid to disappear, then renames the old bundle to
+`diri.app.diri-previous` and the new one into place. An explicit update restart
+relaunches it; a normal quit does not. If anything fails it restores the old
+bundle — an interrupted install leaves a working app, never a hole.
+
+After diri exits, its path only ever changes by rename. At that moment macOS
+(loginwindow, asking Background Task Management) reads the bundle at diri's
+path to decide whether the processes diri started may outlive it. When the
+bundle is missing or half copied the answer is an error, and macOS terminates
+the Engine, every Holder and every Agent — every live session is lost. Copying
+into the app's path after the exit opened that window for as long as `ditto`
+ran; `scripts/install-local.sh` follows the same rule.
 
 Staging lives in `~/Library/Caches/diri/updates/<version>/`, with the helper's
 log at `install.log` there. Directories for versions at or below the running
@@ -248,3 +257,7 @@ be a real notarized bundle.
 - **An install went wrong.** `~/Library/Caches/diri/updates/<version>/install.log`
   holds the helper's output, and `diri.app.diri-previous` next to the app is
   the pre-update bundle if the restore path also failed.
+- **Every session was lost across an update.** Check the unified log for
+  `log show --predicate 'process == "loginwindow" AND category == "quitsupport"'`
+  around the quit: `askBTM: Error -98` followed by "scheduling its
+  subordinates' termination" means the bundle was unreadable when diri exited.

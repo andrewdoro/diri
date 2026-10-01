@@ -802,8 +802,8 @@ impl Registry {
     /// [`reap_orphans`]: Registry::reap_orphans
     pub fn restore(&mut self, holder: &HolderConfig, logs_dir: &Path) -> Vec<String> {
         let records_before = self.records.len();
-        let adopted = self.adopt_live_holders(holder, logs_dir);
-        self.reap_orphans();
+        let (adopted, stale) = self.adopt_live_holders(holder, logs_dir);
+        self.reap_orphans(stale);
         if self.records.len() > records_before {
             let _ = self.persist_now();
         }
@@ -825,10 +825,12 @@ impl Registry {
     /// daemon and this Mac, so their records stay untouched.
     #[cfg(test)]
     pub(crate) fn reap_orphans_for_test(&mut self) {
-        self.reap_orphans();
+        self.reap_orphans(0);
     }
 
-    fn reap_orphans(&mut self) {
+    /// `stale` counts holder sockets that were still on disk but refused:
+    /// holders that were killed, as opposed to a reboot, which clears them.
+    fn reap_orphans(&mut self, stale: usize) {
         let orphaned: Vec<String> = self
             .records
             .values()
@@ -842,7 +844,7 @@ impl Registry {
         if orphaned.is_empty() {
             return;
         }
-        diri_telemetry::warn_event!("engine.holders_lost", count = orphaned.len());
+        diri_telemetry::warn_event!("engine.holders_lost", count = orphaned.len(), stale = stale);
         for id in &orphaned {
             if let Some(record) = self.records.get_mut(id) {
                 diri_telemetry::event!(
@@ -866,10 +868,15 @@ impl Registry {
     /// Adopts the holders that are still answering. See [`restore`].
     ///
     /// [`restore`]: Registry::restore
-    fn adopt_live_holders(&mut self, holder: &HolderConfig, logs_dir: &Path) -> Vec<String> {
+    /// Returns the adopted session ids and how many sockets refused.
+    fn adopt_live_holders(
+        &mut self,
+        holder: &HolderConfig,
+        logs_dir: &Path,
+    ) -> (Vec<String>, usize) {
         let holders_dir = HolderPaths::new(&holder.holders_dir, "probe").directory;
         let Ok(entries) = std::fs::read_dir(&holders_dir) else {
-            return Vec::new();
+            return (Vec::new(), 0);
         };
         let holder_session_ids: Vec<String> = entries
             .flatten()
@@ -887,6 +894,7 @@ impl Registry {
             .collect();
 
         let mut adopted = Vec::new();
+        let mut stale = 0;
         for session_id in holder_session_ids {
             if self.sessions.contains_key(&session_id) {
                 continue;
@@ -903,6 +911,7 @@ impl Registry {
                         stage = "stat",
                         kind = crate::telemetry::holder_error_kind(&error),
                     );
+                    stale += 1;
                     continue;
                 }
             };
@@ -1009,7 +1018,7 @@ impl Registry {
                 }
             }
         }
-        adopted
+        (adopted, stale)
     }
 
     /// The manifest engine these sessions were started with.
@@ -5283,7 +5292,7 @@ mod tests {
         fold_session_view(&mut adopted, &unsampled);
         assert_eq!(adopted.terminal_cwd.as_deref(), Some("/work/diri/crates"));
 
-        after.reap_orphans();
+        after.reap_orphans(0);
         let lost = after.record("shell").expect("record");
         assert!(matches!(
             lost.status,

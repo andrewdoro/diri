@@ -2,9 +2,15 @@
 //!
 //! A process cannot reliably delete the bundle it is executing out of, so the
 //! swap runs from a detached `/bin/sh` helper that waits for diri to exit
-//! first. The helper renames the old bundle aside before unpacking the new one
-//! and puts it back if anything fails, so an interrupted install leaves a
-//! working app rather than a hole where one used to be.
+//! first. The helper unpacks the new bundle beside the old one while diri is
+//! still running, then swaps them by renaming, and puts the old one back if
+//! anything fails, so an interrupted install leaves a working app rather than
+//! a hole where one used to be.
+//!
+//! The swap must be renames only: when diri exits, macOS reads the bundle at
+//! its path to decide whether the processes diri started may keep running. A
+//! path that is missing or half unpacked at that moment gets the Engine, every
+//! Holder, and every Agent terminated.
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -303,9 +309,9 @@ pub fn installer_script(pid: u32, staged_app: &Path, target: &Path, relaunch: bo
     let target = shell_quote(&target.to_string_lossy());
     let attempts = EXIT_GRACE_SECONDS * 10;
     let after_success = if relaunch {
-        "    exec /usr/bin/open \"$target\""
+        "        exec /usr/bin/open \"$target\""
     } else {
-        "    exit 0"
+        "        exit 0"
     };
     let after_restore = if relaunch {
         "/usr/bin/open \"$target\""
@@ -320,34 +326,51 @@ set -u
 pid={pid}
 staged={staged}
 target={target}
+next="$target.diri-next"
+backup="$target.diri-previous"
+
+# Copy first, beside the live bundle, while diri is still running. The moment
+# diri exits, macOS reads the bundle at its path to decide whether the
+# processes diri started may outlive it; a path that is missing or half
+# unpacked then gets the Engine, every Holder and every Agent terminated. So
+# after the exit, the path may only change by rename.
+rm -rf "$next"
+staged_ok=1
+if ! /usr/bin/ditto "$staged" "$next"; then
+    echo "could not unpack $staged; keeping the current app" >&2
+    rm -rf "$next"
+    staged_ok=0
+fi
 
 waited=0
 while kill -0 "$pid" 2>/dev/null; do
     waited=$((waited + 1))
     if [ "$waited" -gt {attempts} ]; then
         echo "diri (pid $pid) is still running after {EXIT_GRACE_SECONDS}s; not touching $target" >&2
+        rm -rf "$next"
         exit 1
     fi
     sleep 0.1
 done
 
-backup="$target.diri-previous"
-rm -rf "$backup"
-if [ -e "$target" ] && ! mv "$target" "$backup"; then
-    echo "could not move $target aside; nothing was changed" >&2
-    exit 1
-fi
-
-if /usr/bin/ditto "$staged" "$target"; then
+if [ "$staged_ok" -eq 1 ]; then
     rm -rf "$backup"
+    if [ -e "$target" ] && ! mv "$target" "$backup"; then
+        echo "could not move $target aside; nothing was changed" >&2
+        rm -rf "$next"
+    elif mv "$next" "$target"; then
+        rm -rf "$backup"
 {after_success}
+    else
+        echo "install failed; restoring the previous bundle" >&2
+        rm -rf "$target"
+        if [ -e "$backup" ]; then
+            mv "$backup" "$target"
+        fi
+        rm -rf "$next"
+    fi
 fi
 
-echo "install failed; restoring the previous bundle" >&2
-rm -rf "$target"
-if [ -e "$backup" ]; then
-    mv "$backup" "$target"
-fi
 {after_restore}
 exit 1
 "#
@@ -395,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn waits_for_the_running_app_before_touching_anything() {
+    fn waits_for_the_running_app_before_touching_its_bundle() {
         let script = script();
         let wait = script.find("kill -0").expect("a wait loop");
         let mutate = script.find("mv \"$target\"").expect("the rename");
@@ -404,16 +427,26 @@ mod tests {
     }
 
     #[test]
-    fn moves_the_old_bundle_aside_rather_than_deleting_it_first() {
+    fn unpacks_beside_the_app_before_it_exits_and_swaps_by_rename() {
         let script = script();
-        let rename = script.find("mv \"$target\" \"$backup\"").expect("rename");
-        let unpack = script.find("/usr/bin/ditto \"$staged\"").expect("ditto");
-        assert!(rename < unpack);
+        let unpack = script
+            .find("/usr/bin/ditto \"$staged\" \"$next\"")
+            .expect("ditto");
+        let wait = script.find("kill -0").expect("a wait loop");
+        let aside = script.find("mv \"$target\" \"$backup\"").expect("rename");
+        let swap = script.find("mv \"$next\" \"$target\"").expect("swap");
+        assert!(unpack < wait, "the slow copy happens while diri still runs");
+        assert!(wait < aside && aside < swap);
+        assert_eq!(
+            script.matches("/usr/bin/ditto").count(),
+            1,
+            "nothing is unpacked into the app's path"
+        );
         // The old bundle is only discarded once the new one is in place.
         let discard = script
-            .find("rm -rf \"$backup\"\n    exec")
+            .find("rm -rf \"$backup\"\n        exec")
             .expect("cleanup");
-        assert!(unpack < discard);
+        assert!(swap < discard);
     }
 
     #[test]
@@ -464,7 +497,7 @@ mod tests {
             false,
         );
         assert!(!script.contains("/usr/bin/open"));
-        assert!(script.contains("rm -rf \"$backup\"\n    exit 0"));
+        assert!(script.contains("rm -rf \"$backup\"\n        exit 0"));
     }
 
     /// Runs the real helper against throwaway bundles.
@@ -525,6 +558,113 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stdout).contains("relaunched"));
     }
 
+    /// The moment diri exits, macOS asks Background Task Management whether
+    /// the bundle at its path may keep running in the background. If nothing
+    /// readable is there, the answer is an error and loginwindow terminates
+    /// every process diri started — the Engine, the Holders, and the Agents.
+    /// So once the app is gone, its path may only ever be absent for the
+    /// instant between two renames, never for the length of an unpack.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_bundle_path_is_never_missing_for_an_unpack_after_diri_exits() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let staged = fake_bundle(directory.path(), "staged.app", "new");
+        // Enough files that copying them takes far longer than a rename.
+        let resources = staged.join("Contents/Resources");
+        fs::create_dir_all(&resources).expect("resources");
+        for index in 0..3000 {
+            fs::write(resources.join(format!("r{index}")), [0_u8; 512]).expect("resource");
+        }
+        fs::write(staged.join("Contents/Info.plist"), "plist").expect("plist");
+        let target = fake_bundle(directory.path(), "diri.app", "old");
+        fs::create_dir_all(target.join("Contents/Resources")).expect("resources");
+        for index in [0, 1500, 2999] {
+            fs::write(target.join(format!("Contents/Resources/r{index}")), "").expect("resource");
+        }
+        fs::write(target.join("Contents/Info.plist"), "plist").expect("plist");
+        // What macOS reads: a bundle that is all there, not a directory that
+        // `ditto` has created and is still filling.
+        let complete = |bundle: &Path| {
+            [
+                "Contents/Info.plist",
+                "Contents/MacOS/diri",
+                "Contents/Resources/r0",
+                "Contents/Resources/r1500",
+                "Contents/Resources/r2999",
+            ]
+            .iter()
+            .all(|file| bundle.join(file).exists())
+        };
+
+        let mut app = Command::new("/bin/sleep").arg("30").spawn().expect("app");
+        let script = installer_script(app.id(), &staged, &target, true)
+            .replace("/usr/bin/open", "echo relaunched");
+        let mut helper = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("helper");
+
+        // The expensive copy happens while diri still runs, beside the live
+        // bundle, which stays untouched.
+        let next = directory.path().join("diri.app.diri-next");
+        let staging = Instant::now() + Duration::from_secs(10);
+        while !next.join("Contents/MacOS/diri").exists() && Instant::now() < staging {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let staged_while_running = next.join("Contents/MacOS/diri").exists();
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            fs::read_to_string(target.join("Contents/MacOS/diri")).expect("read"),
+            "old",
+            "the running app's bundle is never touched before it exits"
+        );
+
+        app.kill().expect("quit the app");
+        app.wait().expect("reap the app");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut longest_gap = Duration::ZERO;
+        let mut missing_since: Option<Instant> = None;
+        let finished = loop {
+            let now = Instant::now();
+            match (complete(&target), missing_since) {
+                (false, None) => missing_since = Some(now),
+                (true, Some(since)) => {
+                    longest_gap = longest_gap.max(now - since);
+                    missing_since = None;
+                }
+                _ => {}
+            }
+            if let Some(status) = helper.try_wait().expect("poll helper") {
+                break status;
+            }
+            assert!(now < deadline, "the helper did not finish");
+        };
+        if let Some(since) = missing_since {
+            longest_gap = longest_gap.max(since.elapsed());
+        }
+
+        assert!(finished.success(), "the swap succeeds");
+        assert!(
+            longest_gap < Duration::from_millis(20),
+            "diri.app was missing for {longest_gap:?} after diri exited"
+        );
+        assert!(
+            staged_while_running,
+            "the new bundle is copied beside the old one before diri exits"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("Contents/MacOS/diri")).expect("read"),
+            "new"
+        );
+        assert!(!next.exists(), "nothing is left beside the app");
+        assert!(!directory.path().join("diri.app.diri-previous").exists());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn the_helper_restores_the_old_bundle_when_the_unpack_fails() {
@@ -546,6 +686,7 @@ mod tests {
             "the original bundle must be restored byte for byte"
         );
         assert!(!directory.path().join("diri.app.diri-previous").exists());
+        assert!(!directory.path().join("diri.app.diri-next").exists());
     }
 
     #[test]
@@ -573,6 +714,7 @@ mod tests {
             "old",
             "a still-running diri must never have its bundle swapped"
         );
+        assert!(!directory.path().join("diri.app.diri-next").exists());
     }
 
     #[cfg(target_os = "macos")]
