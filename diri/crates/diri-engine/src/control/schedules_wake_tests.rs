@@ -325,36 +325,32 @@ fn matched_alarm_still_requires_kernel_timer_wake_evidence() {
 }
 
 #[test]
-fn dark_wake_is_promoted_before_the_run_is_due_using_only_the_fake_command() {
+fn dark_wake_is_promoted_on_alarm_timing_without_asking_the_helper() {
     use std::os::unix::fs::PermissionsExt;
-    let helper = FakeHelper::new();
-    let command = helper._temp.path().join("fake-caffeinate");
+    let temp = tempfile::tempdir().unwrap();
+    let command = temp.path().join("fake-caffeinate");
     std::fs::write(&command, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n").unwrap();
     std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let scheduler = Arc::new(Scheduler {
+    // No helper listens here: an unrecognised or unreadable kernel wake
+    // reason must not stop the run from holding the Mac awake.
+    let scheduler = Scheduler {
         power: PowerConfig {
+            socket_path: temp.path().join("absent.sock"),
             caffeinate: Some(command.clone()),
-            ..helper.power.clone()
         },
         ..Scheduler::default()
-    });
-    scheduler.wakes.lock().unwrap().accepted = vec![500_000];
-    *scheduler.last_sleep.lock().unwrap() = Some((100_000, 530_000));
-    let worker = {
-        let scheduler = Arc::clone(&scheduler);
-        std::thread::spawn(move || scheduler.promote_observed_wake(530_000))
     };
-    let (request, reply) = helper.next();
-    assert_eq!(request, Request::Status);
-    reply
-        .send(Response {
-            ok: true,
-            timer_wake: true,
-            ..Response::default()
-        })
-        .unwrap();
-    worker.join().unwrap();
     let output = command.with_file_name("fake-caffeinate.args");
+
+    // A wake nowhere near an armed alarm is not ours: no nudge.
+    scheduler.wakes.lock().unwrap().accepted = vec![500_000];
+    *scheduler.last_sleep.lock().unwrap() = Some((100_000, 900_000));
+    scheduler.promote_observed_wake(900_000);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!output.exists(), "promoted a wake diri did not arm");
+
+    *scheduler.last_sleep.lock().unwrap() = Some((100_000, 530_000));
+    scheduler.promote_observed_wake(530_000);
     let deadline = Instant::now() + Duration::from_secs(2);
     while std::fs::read_to_string(&output).ok().as_deref() != Some("-u\n-t\n5\n") {
         assert!(

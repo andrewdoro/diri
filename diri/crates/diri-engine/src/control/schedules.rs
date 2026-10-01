@@ -313,7 +313,12 @@ impl Scheduler {
     }
 
     fn promote_observed_wake(&self, now: i64) {
-        if self.attributed_wake(now).is_some()
+        // Timing alone is enough here: a wake landing on diri's own alarm is
+        // the run the user asked for, and showing the (locked) display is
+        // harmless. The kernel wake-reason string varies across Mac models,
+        // so requiring it would let an unrecognised one drop the Mac back to
+        // sleep mid-run. Only the sleep-again decision needs that proof.
+        if self.wake_started(now).is_some()
             && let Some(mut child) = self.power.command(&["-u", "-t", "5"])
         {
             // Promotion must happen at the alarm, not two minutes later at
@@ -761,37 +766,45 @@ impl super::ControlServer {
             || active
                 .iter()
                 .any(|run| now - run.fired_ms < KEEP_AWAKE_RUN_CAP_MS);
+        let mut sleep_from = None;
         if !wanted
             && active.is_empty()
             && !spawning
             && let Some(woke) = *sleep_due
-        {
-            // Includes unrelated sessions and capped runs. Keep the registry
-            // locked until the request returns so new PTYs cannot start between
-            // this check and the helper's independent console/HID check.
-            let busy = registry
+            // Any other session still working (or waiting on the user) keeps
+            // the Mac up; it then sleeps on its own idle timer as usual.
+            && !registry
                 .records()
                 .iter()
-                .any(|record| busy_status(&record.status));
-            if !busy {
-                *sleep_due = None;
-                self.scheduler.set_keep_awake(false);
-                // Round up and include the wake lead, not just run duration.
-                let min_idle_secs = ((now - woke).max(0) as u64)
-                    .div_ceil(1000)
-                    .max(crate::wake::MIN_SLEEP_IDLE_SECS);
-                match self
-                    .scheduler
-                    .power
-                    .call(&crate::wake::Request::SleepIfIdle {
-                        min_idle_secs,
-                        idle_since_ms: Some(woke),
-                    }) {
-                    Ok(response) => {
-                        eprintln!("diri-scheduler: sleep after run: slept={}", response.slept)
-                    }
-                    Err(error) => eprintln!("diri-scheduler: sleep after run failed: {error}"),
+                .any(|record| busy_status(&record.status))
+        {
+            *sleep_due = None;
+            sleep_from = Some(woke);
+        }
+        // Never hold the Registry (or the scheduler's locks) across the helper
+        // call: it may take seconds, and every session operation waits on the
+        // Registry. A session started in this window was started by someone
+        // at the keyboard, which the helper's own HID idle check refuses.
+        drop(sleep_due);
+        drop(registry);
+        drop(active);
+        if let Some(woke) = sleep_from {
+            self.scheduler.set_keep_awake(false);
+            // Round up and include the wake lead, not just run duration.
+            let min_idle_secs = ((now - woke).max(0) as u64)
+                .div_ceil(1000)
+                .max(crate::wake::MIN_SLEEP_IDLE_SECS);
+            match self
+                .scheduler
+                .power
+                .call(&crate::wake::Request::SleepIfIdle {
+                    min_idle_secs,
+                    idle_since_ms: Some(woke),
+                }) {
+                Ok(response) => {
+                    eprintln!("diri-scheduler: sleep after run: slept={}", response.slept)
                 }
+                Err(error) => eprintln!("diri-scheduler: sleep after run failed: {error}"),
             }
         }
         wanted

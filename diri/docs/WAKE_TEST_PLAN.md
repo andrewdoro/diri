@@ -31,7 +31,7 @@ hand, use sudo, or load its plist with launchctl.
      nc -w 2 -U "$HOME/Library/Application Support/Dirijor/daemon.sock"
    printf '%s\n' '{"id":2,"method":"session.list","params":{}}' |
      nc -w 2 -U "$HOME/Library/Application Support/Dirijor/daemon.sock"
-   grep 'diri-scheduler:' "$HOME/Library/Application Support/Dirijor/logs/dirijord.log" | tail -20
+   grep 'diri-scheduler:' "$HOME/Library/Application Support/Dirijor/logs/dirijord-rs.boot.log" | tail -20
    ```
 
    Use the configured Engine socket/log paths if this install overrides them.
