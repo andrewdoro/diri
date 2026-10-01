@@ -1048,9 +1048,10 @@ impl AttachHub {
             }
 
             if !frames.is_empty() {
-                // Two publications per input may bypass coalescing: one can
-                // be a trailing change already in flight, and the next is the
-                // actual terminal response. The bounded budget prevents a
+                // A few publications per input may bypass coalescing: one can
+                // be a trailing change already in flight, the rest are the
+                // terminal's response, which a TUI often writes in parts
+                // (`INTERACTIVE_GRID_BUDGET`). The bounded budget prevents a
                 // keystroke from unthrottling sustained output indefinitely.
                 wake.consume_interactive_priority();
                 last_emission = Instant::now();
@@ -1078,6 +1079,7 @@ impl AttachHub {
                     requires_enhanced,
                 );
                 trace_hop!(FrameEnqueued);
+                wake.note_published_for_telemetry();
             }
 
             {

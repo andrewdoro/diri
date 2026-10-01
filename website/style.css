@@ -629,10 +629,10 @@ body { isolation: isolate; position: relative; min-height: 100svh; }
   background:
     radial-gradient(48% 30% at 50% 66%, #f6cdb2d9, transparent 72%),
     radial-gradient(34% 30% at 12% 62%, #dc9387cc, transparent 70%),
-    radial-gradient(34% 30% at 90% 56%, #a8c2e8b8, transparent 70%),
+    radial-gradient(34% 30% at 90% 56%, #a8c2e8a6, transparent 66%),
     radial-gradient(44% 30% at 72% 84%, #7d6db6d0, transparent 70%),
     radial-gradient(40% 26% at 26% 86%, #b77fa8b0, transparent 70%),
-    linear-gradient(180deg, #191724 0%, #1f1b2e 16%, #3c2f55 30%, #8a6f9a 46%, #c99aa6 60%, #8b78b8 78%, #2a2440 92%, #191724 100%);
+    linear-gradient(180deg, #191724 0%, #1f1b2e 16%, #3c2f55 30%, #8a6f9a 46%, #c99aa6 60%, #6e5d96 76%, #2a2440 90%, #191724 100%);
   -webkit-mask-image: linear-gradient(#000 82%, transparent); mask-image: linear-gradient(#000 82%, transparent); }
 .page-sky::before { content: ''; position: absolute; inset: 0; opacity: .2; mix-blend-mode: soft-light; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
 .desktop-stage { padding: 0; background: none; box-shadow: none; border-radius: 0; overflow: visible; }
@@ -884,3 +884,10 @@ html { overflow-x: clip; }
 .site-wrap { padding-top: 12px; }
 .site-header { margin-top: 0; }
 @media (max-width: 600px) { .site-wrap { padding-top: 10px; } .site-header { margin-top: 0; } }
+
+/* The agent strip sits on the brightest band of the sky: near-white names and marks, a faint shadow for separation. */
+.compatible > div, .compatible .agent-switch, .compatible .agent-chip, .compatible .agent-more { color: #f4f0fa; text-shadow: 0 1px 2px #1a10304d; }
+.compatible .agent-logo, .compatible .agent-logo.claude, .compatible .agent-logo.gemini { color: #f4f0fa; filter: drop-shadow(0 1px 1.5px #1a103059); }
+.compatible .agent-switch[aria-pressed="true"] { background: #ffffff24; }
+.compatible .agent-more { border-color: #ffffff47; }
+@media (hover: hover) and (pointer: fine) { .compatible .agent-switch:hover, .compatible .agent-more:hover { color: #fff; background: #ffffff1c; } }

@@ -403,7 +403,7 @@ mod tests {
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 113, "the shipped ruleset lost rules");
+        assert_eq!(rules, 115, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
             let expected_empty = matches!(id, "shell" | "generic");
@@ -782,6 +782,68 @@ mod tests {
                 (observation.state, observation.matched_rule_id.as_str()),
                 (state, rule_id),
                 "{lines:#?}"
+            );
+        }
+    }
+
+    /// Visible grids captured from Kimi Code 2.1.1 via `tests/kimi_real.rs`.
+    /// Only temporary paths/session IDs are normalized in the fixture screens.
+    #[test]
+    fn kimi_rules_match_the_screens_kimi_draws() {
+        let engine = engine();
+        let cases = [
+            (
+                include_str!("../../tests/fixtures/kimi_screens/trust.txt"),
+                ManifestState::BlockedQuestion,
+                "workspace-trust-dialog",
+            ),
+            (
+                include_str!("../../tests/fixtures/kimi_screens/login.txt"),
+                ManifestState::BlockedQuestion,
+                "login-platform-dialog",
+            ),
+            (
+                include_str!("../../tests/fixtures/kimi_screens/no_model.txt"),
+                ManifestState::Idle,
+                "idle-composer",
+            ),
+            (
+                include_str!("../../tests/fixtures/kimi_screens/idle.txt"),
+                ManifestState::Idle,
+                "idle-composer",
+            ),
+            (
+                include_str!("../../tests/fixtures/kimi_screens/working.txt"),
+                ManifestState::Working,
+                "working-spinner-verb",
+            ),
+            (
+                include_str!("../../tests/fixtures/kimi_screens/permission.txt"),
+                ManifestState::BlockedPermission,
+                "blocked-approval-panel",
+            ),
+        ];
+        for (text, state, rule_id) in cases {
+            let observe = |text: &str| {
+                engine
+                    .evaluate(
+                        &ScreenSnapshot::from_lines(text.lines().map(str::to_owned)),
+                        "kimi",
+                    )
+                    .expect("captured Kimi screen must match")
+            };
+            let actual = observe(text);
+            assert_eq!(
+                (actual.state, actual.matched_rule_id.as_str()),
+                (state, rule_id),
+                "{text}"
+            );
+            // The permanent model footer can say `kimi-k2.5 thinking` even
+            // while idle or choosing a dialog. It is not a working signal.
+            let actual = observe(&text.replace("fake-model thinking", "kimi-k2.5 thinking"));
+            assert_eq!(
+                (actual.state, actual.matched_rule_id.as_str()),
+                (state, rule_id)
             );
         }
     }

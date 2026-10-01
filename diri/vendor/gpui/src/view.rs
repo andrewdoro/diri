@@ -354,6 +354,7 @@ impl<V: View> Element for ViewElement<V> {
                         (layout_id, None)
                     }
                     _ => {
+                        window.frame_stats.views_rendered += 1;
                         let mut element = self
                             .view
                             .take()
@@ -434,6 +435,7 @@ impl<V: View> Element for ViewElement<V> {
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
                         {
+                            window.frame_stats.views_reused += 1;
                             let prepaint_start = window.prepaint_index();
                             window.reuse_prepaint(previous.prepaint.clone());
                             cx.entities
@@ -469,6 +471,7 @@ impl<V: View> Element for ViewElement<V> {
                                 .map(|previous| previous.prepaint.start.clone()),
                             start: prepaint_start.clone(),
                         });
+                        window.frame_stats.views_rendered += 1;
                         let (mut element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                             let mut element = self
                                 .view

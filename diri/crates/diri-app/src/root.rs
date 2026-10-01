@@ -5719,6 +5719,485 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// A screen of agent-like TUI content: coloured prose, a boxed composer,
+    /// a status line with a spinner. `phase` scrolls the prose.
+    #[cfg(target_os = "macos")]
+    fn real_use_screen_rows(
+        cols: u16,
+        rows: u16,
+        phase: usize,
+    ) -> Vec<Vec<diri_proto::grid::GridCell>> {
+        use diri_proto::grid::{GridCell, TermColor, TermStyle};
+        const WORDS: [&str; 24] = [
+            "Reading",
+            "crates/diri-app/src/root.rs",
+            "fn",
+            "render(&mut",
+            "self)",
+            "->",
+            "impl",
+            "IntoElement",
+            "the",
+            "terminal",
+            "pane",
+            "is",
+            "cached;",
+            "updated",
+            "3",
+            "files",
+            "(+42",
+            "-7)",
+            "cargo",
+            "test",
+            "--release",
+            "passed",
+            "Ok(())",
+            "✓",
+        ];
+        let colors = [
+            TermColor::Default,
+            TermColor::Ansi(2),
+            TermColor::Ansi(4),
+            TermColor::Rgb(215, 119, 87),
+            TermColor::Ansi(8),
+            TermColor::Rgb(177, 185, 249),
+        ];
+        let cols = usize::from(cols);
+        let mut screen = Vec::with_capacity(usize::from(rows));
+        let text_row = |seed: usize| {
+            let mut cells = Vec::with_capacity(cols);
+            let mut word = seed;
+            while cells.len() + 1 < cols.saturating_sub(4) {
+                let text = WORDS[word % WORDS.len()];
+                let color = colors[(word / 3) % colors.len()];
+                let style = if word.is_multiple_of(11) {
+                    TermStyle::BOLD
+                } else {
+                    TermStyle::empty()
+                };
+                for character in text.chars() {
+                    cells.push(GridCell::new(
+                        character as u32,
+                        color,
+                        TermColor::DefaultInverted,
+                        style,
+                    ));
+                }
+                cells.push(GridCell::BLANK);
+                word = word.wrapping_mul(31).wrapping_add(7) % 997;
+                if word.is_multiple_of(9) {
+                    break;
+                }
+            }
+            cells.truncate(cols);
+            cells
+        };
+        let body = usize::from(rows).saturating_sub(6);
+        for row in 0..body {
+            screen.push(text_row(row + phase));
+        }
+        let border = |left: char, fill: char, right: char| {
+            let mut cells = vec![GridCell::new(
+                left as u32,
+                TermColor::Ansi(8),
+                TermColor::DefaultInverted,
+                TermStyle::empty(),
+            )];
+            cells.extend((2..cols).map(|_| {
+                GridCell::new(
+                    fill as u32,
+                    TermColor::Ansi(8),
+                    TermColor::DefaultInverted,
+                    TermStyle::empty(),
+                )
+            }));
+            cells.push(GridCell::new(
+                right as u32,
+                TermColor::Ansi(8),
+                TermColor::DefaultInverted,
+                TermStyle::empty(),
+            ));
+            cells
+        };
+        screen.push(vec![GridCell::BLANK; cols]);
+        screen.push(border('╭', '─', '╮'));
+        let mut prompt = border('│', ' ', '│');
+        for (index, character) in "> ".chars().enumerate() {
+            prompt[index + 2].scalar = character as u32;
+        }
+        screen.push(prompt);
+        screen.push(border('╰', '─', '╯'));
+        screen.push(real_use_status_row(cols, phase));
+        screen.push(vec![GridCell::BLANK; cols]);
+        screen.truncate(usize::from(rows));
+        screen
+    }
+
+    #[cfg(target_os = "macos")]
+    fn real_use_status_row(cols: usize, phase: usize) -> Vec<diri_proto::grid::GridCell> {
+        use diri_proto::grid::{GridCell, TermColor, TermStyle};
+        const SPINNER: [char; 6] = ['·', '✢', '✳', '✶', '✻', '✽'];
+        let text = format!(
+            "{} Thinking… ({}s · ↑ {} tokens · esc to interrupt)",
+            SPINNER[phase % SPINNER.len()],
+            phase / 10,
+            1_200 + phase * 7
+        );
+        let mut cells: Vec<GridCell> = text
+            .chars()
+            .map(|character| {
+                GridCell::new(
+                    character as u32,
+                    TermColor::Rgb(215, 119, 87),
+                    TermColor::DefaultInverted,
+                    TermStyle::empty(),
+                )
+            })
+            .collect();
+        cells.resize(cols, GridCell::BLANK);
+        cells.truncate(cols);
+        cells
+    }
+
+    /// Real sessions carry their pull requests: a description, CI checks and
+    /// the review discussion. Every third session gets one to three. The
+    /// sizes are illustrative, not measured from a real fleet: here row
+    /// comparison is under 1% of `Window::draw`, where a sample of the
+    /// installed app put it at 8%.
+    #[cfg(target_os = "macos")]
+    fn real_use_pull_requests(sessions: &mut [diri_proto::SessionRecord]) {
+        for (index, session) in sessions.iter_mut().enumerate() {
+            if !index.is_multiple_of(3) {
+                continue;
+            }
+            let prs = (0..1 + index % 3)
+                .map(|pr| {
+                    serde_json::from_value::<diri_proto::model::PullRequestStatus>(serde_json::json!({
+                        "url": format!("https://github.com/example/repo/pull/{}", 500 + index * 2 + pr),
+                        "number": 500 + index * 2 + pr,
+                        "title": format!("Make the thing faster, part {pr}"),
+                        "author": "someone",
+                        "body": "Summary of the change. ".repeat(700),
+                        "baseRefName": "main",
+                        "headRefName": format!("perf/branch-{index}-{pr}"),
+                        "state": "OPEN",
+                        "isDraft": false,
+                        "reviewDecision": "REVIEW_REQUIRED",
+                        "additions": 420,
+                        "deletions": 73,
+                        "changedFiles": 12,
+                        "commentCount": 18,
+                        "reviewCount": 3,
+                        "checksPassed": 9,
+                        "checksFailed": 0,
+                        "checksPending": 1,
+                        "checks": (0..10).map(|check| serde_json::json!({
+                            "name": format!("CI / job {check}"),
+                            "result": "success",
+                            "url": format!("https://github.com/example/repo/actions/runs/{check}"),
+                        })).collect::<Vec<_>>(),
+                        "discussion": (0..40).map(|comment| serde_json::json!({
+                            "kind": "comment",
+                            "author": "reviewer",
+                            "body": format!("Comment {comment}: ").repeat(50),
+                        })).collect::<Vec<_>>(),
+                        "fetchedAt": 1_750_000_000_000.0,
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            session.pull_requests = Some(prs);
+        }
+    }
+
+    /// Frame cost under heavy real use, the fixture behind the 2026-09-30
+    /// telemetry investigation: 51 sessions (four working) in the sidebar or
+    /// the horizontal strip, a workspace tab split into three busy agent
+    /// terminals, all driven at their real cadences on a 120 Hz tick: one
+    /// pane streaming (whole screen scrolls, 30 Hz), two spinners (10 and 8
+    /// Hz), the sidebar's 125 ms activity tick and a store publication every
+    /// 200 ms. Every tick with something due draws one frame, the way a
+    /// display link coalesces them. Prints the frame distribution and GPUI's
+    /// per-phase breakdown.
+    ///
+    /// `DIRI_BENCH_A11Y=1` attaches pretend assistive technology (what a Mac
+    /// running Rectangle, Raycast, Wispr Flow and the like does to every
+    /// app). `DIRI_BENCH_TABS=horizontal` swaps the sidebar for the strip.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal frame-distribution bench; run explicitly on macOS"]
+    fn real_use_frame_distribution() {
+        use diri_proto::workspace::*;
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        diri_ui::set_mark_rasterizer(bench_stand_in_raster);
+        let a11y = std::env::var("DIRI_BENCH_A11Y").is_ok_and(|value| value == "1");
+        let horizontal = std::env::var("DIRI_BENCH_TABS").is_ok_and(|value| value == "horizontal");
+        let ticks: usize = std::env::var("DIRI_BENCH_TICKS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2_400);
+        let services = test_services();
+        let workspace = WorkspaceId::new("real-use");
+        {
+            let mut store = services.store.store.write().unwrap();
+            let mut fleet = SidebarPreviewFixture::bench_fleet(51, 4).list;
+            if std::env::var("DIRI_BENCH_PRS").map_or(true, |value| value != "0") {
+                real_use_pull_requests(&mut fleet.sessions);
+            }
+            store.hydrate(fleet);
+            store
+                .update_preferences(|prefs| {
+                    if horizontal {
+                        prefs.tab_orientation = crate::store::TabOrientation::Horizontal;
+                        prefs.horizontal_tabs_visible = true;
+                        prefs.sidebar_visible = false;
+                    } else {
+                        prefs.sidebar_visible = true;
+                    }
+                })
+                .unwrap();
+            let pane = |name: &str, session: &str| LayoutNode::Pane {
+                id: PaneId::new(name),
+                session_id: SessionId::new(session),
+            };
+            store.seed_workspace_snapshot_for_test(WorkspaceSnapshot {
+                revision: 1,
+                workspaces: vec![WorkspaceRecord {
+                    project_id: None,
+                    id: workspace.clone(),
+                    name: "Real use".into(),
+                    selected_tab: Some(TabId::new("real-tab")),
+                    tabs: vec![WorkspaceTab {
+                        id: TabId::new("real-tab"),
+                        title: None,
+                        focused_pane: PaneId::new("a-stream"),
+                        zoomed_pane: None,
+                        layout: LayoutNode::Split {
+                            id: SplitId::new("outer"),
+                            axis: LayoutAxis::Horizontal,
+                            fraction: 0.55,
+                            first: Box::new(pane("a-stream", "bench-0")),
+                            second: Box::new(LayoutNode::Split {
+                                id: SplitId::new("inner"),
+                                axis: LayoutAxis::Vertical,
+                                fraction: 0.5,
+                                first: Box::new(pane("b-spinner", "bench-1")),
+                                second: Box::new(pane("c-spinner", "bench-2")),
+                            }),
+                        },
+                    }],
+                }],
+                ..Default::default()
+            });
+        }
+        let window: gpui::AnyWindowHandle = cx
+            .open_window(size(px(1728.0), px(1080.0)), |window, cx| {
+                cx.new(|cx| {
+                    let root = RootView::new(services, false, PreviewScenario::Empty, window, cx);
+                    root.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.activate_workspace(Some(workspace), cx)
+                    });
+                    root
+                })
+            })
+            .unwrap()
+            .into();
+        cx.run_until_parked();
+        let root = cx
+            .update_window(window, |root, _, _| root.downcast::<RootView>().unwrap())
+            .unwrap();
+        let (sidebar, terminals) = cx.update(|cx| {
+            let root = root.read(cx);
+            (
+                root.sidebar.clone(),
+                root.workspace_workbench
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .terminals_for_test(),
+            )
+        });
+        assert_eq!(terminals.len(), 3, "three mounted panes");
+        // Seed every pane with a full screen at its own size.
+        for terminal in &terminals {
+            cx.update(|cx| {
+                terminal.update(cx, |terminal, cx| {
+                    let (cols, rows) = terminal.selected_grid_size_for_test().unwrap_or((0, 0));
+                    let (cols, rows) = if cols < 20 || rows < 10 {
+                        // Not attached, so never sized: fill the pane at
+                        // Menlo 13's cell size.
+                        terminal
+                            .geometry_for_test()
+                            .0
+                            .map_or((120, 40), |viewport| {
+                                (
+                                    (viewport.width / 7.83) as u16,
+                                    ((viewport.height - 44.0) / 16.0) as u16,
+                                )
+                            })
+                    } else {
+                        (cols, rows)
+                    };
+                    let mut grid = diri_term::buffer::GridBuffer::new(cols, rows);
+                    for (row, cells) in real_use_screen_rows(cols, rows, 0).into_iter().enumerate()
+                    {
+                        let start = row * usize::from(cols);
+                        for (col, cell) in cells.into_iter().enumerate() {
+                            grid.cells[start + col] = cell;
+                        }
+                    }
+                    terminal.seed_preview_grid_for_test(grid, cx);
+                    cx.notify();
+                })
+            });
+        }
+        cx.run_until_parked();
+        if a11y {
+            cx.update_window(window, |_, window, _| {
+                window.set_accessibility_active_for_test(true)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+        let sizes: Vec<(u16, u16)> = cx.update(|cx| {
+            terminals
+                .iter()
+                .map(|terminal| {
+                    terminal
+                        .read(cx)
+                        .selected_grid_size_for_test()
+                        .unwrap_or((120, 40))
+                })
+                .collect()
+        });
+        // (period in 120 Hz ticks, what happens)
+        let step = |cx: &mut HeadlessAppContext, tick: usize| -> bool {
+            let stream = tick.is_multiple_of(4);
+            let spinner_b = tick.is_multiple_of(12);
+            let spinner_c = tick.is_multiple_of(15);
+            let activity = tick.is_multiple_of(15);
+            let publication = tick.is_multiple_of(24);
+            if !(stream || spinner_b || spinner_c || activity || publication) {
+                return false;
+            }
+            cx.update_window(window, |_, window, cx| {
+                if stream {
+                    let (cols, rows) = sizes[0];
+                    let screen = real_use_screen_rows(cols, rows, tick / 4);
+                    terminals[0].update(cx, |terminal, cx| {
+                        terminal.land_rows_for_test(
+                            screen
+                                .into_iter()
+                                .enumerate()
+                                .map(|(row, cells)| (row as u16, cells))
+                                .collect(),
+                            (4, rows.saturating_sub(4)),
+                            window,
+                            cx,
+                        )
+                    });
+                }
+                for (index, due) in [(1, spinner_b), (2, spinner_c)] {
+                    if due {
+                        let (cols, rows) = sizes[index];
+                        let status = real_use_status_row(usize::from(cols), tick / 12);
+                        terminals[index].update(cx, |terminal, cx| {
+                            terminal.land_rows_for_test(
+                                vec![(rows.saturating_sub(2), status)],
+                                (4, rows.saturating_sub(4)),
+                                window,
+                                cx,
+                            )
+                        });
+                    }
+                }
+                if activity {
+                    sidebar.update(cx, |sidebar, cx| {
+                        sidebar.advance_activity_frame_for_test(cx)
+                    });
+                }
+                if publication {
+                    sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+                    root.update(cx, |_, cx| cx.notify());
+                }
+            })
+            .unwrap();
+            cx.run_until_parked();
+            true
+        };
+        for tick in 0..240 {
+            step(&mut cx, tick);
+        }
+        let paints_before = diri_term::element::PaintTotals::now();
+        let mut frames: Vec<(Duration, gpui::FrameStats)> = Vec::new();
+        let start_cpu = bench_cpu_seconds();
+        for tick in 240..240 + ticks {
+            let started = Instant::now();
+            if step(&mut cx, tick) {
+                let elapsed = started.elapsed();
+                let stats = cx
+                    .update_window(window, |_, window, _| window.last_frame_stats())
+                    .unwrap();
+                frames.push((elapsed, stats));
+            }
+        }
+        let cpu = bench_cpu_seconds() - start_cpu;
+        let paints = diri_term::element::PaintTotals::now().since(paints_before);
+        let n = frames.len();
+        let mut walls: Vec<Duration> = frames.iter().map(|(wall, _)| *wall).collect();
+        let mut draws: Vec<Duration> = frames.iter().map(|(_, stats)| stats.total()).collect();
+        walls.sort();
+        draws.sort();
+        let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
+        let pick = |samples: &[Duration], q: f64| {
+            ms(samples[((samples.len() - 1) as f64 * q).round() as usize])
+        };
+        let mean = |f: &dyn Fn(&gpui::FrameStats) -> f64| {
+            frames.iter().map(|(_, stats)| f(stats)).sum::<f64>() / n as f64
+        };
+        eprintln!(
+            "real-use a11y={a11y} tabs={} frames={n} step_ms p50={:.3} p90={:.3} p99={:.3} max={:.3} \
+             draw_ms p50={:.3} p90={:.3} p99={:.3} cpu_ms_per_frame={:.3} \
+             layout={:.3} prepaint={:.3} paint={:.3} a11y={:.3} finish={:.3} views_rendered={:.1} views_reused={:.1} \
+             terminal_paints_per_frame={:.2} terminal_ms_per_frame={:.3} shape_misses={}",
+            if horizontal { "horizontal" } else { "sidebar" },
+            pick(&walls, 0.5),
+            pick(&walls, 0.9),
+            pick(&walls, 0.99),
+            pick(&walls, 1.0),
+            pick(&draws, 0.5),
+            pick(&draws, 0.9),
+            pick(&draws, 0.99),
+            cpu * 1000.0 / n as f64,
+            mean(&|stats| ms(stats.layout)),
+            mean(&|stats| ms(stats.prepaint)),
+            mean(&|stats| ms(stats.paint)),
+            mean(&|stats| ms(stats.a11y)),
+            mean(&|stats| ms(stats.finish)),
+            mean(&|stats| f64::from(stats.views_rendered)),
+            mean(&|stats| f64::from(stats.views_reused)),
+            paints.paints as f64 / n as f64,
+            paints.micros as f64 / 1000.0 / n as f64,
+            paints.shape_misses,
+        );
+        if let Ok(output) = std::env::var("DIRI_BENCH_SCREENSHOT") {
+            cx.capture_screenshot(window).unwrap().save(output).unwrap();
+        }
+        drop(root);
+        drop(sidebar);
+        drop(terminals);
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     /// Rows reused across activity ticks, no-op store publications and
     /// root-only frames paint exactly what a full re-render paints: after the
     /// ticks, a `window.refresh()` that rebuilds everything at the same mark

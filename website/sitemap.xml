@@ -2,6 +2,11 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://diri.sh/</loc></url>
   <url><loc>https://diri.sh/guides/</loc></url>
+  <url><loc>https://diri.sh/guides/first-agent/</loc></url>
+  <url><loc>https://diri.sh/guides/never-lose-work/</loc></url>
   <url><loc>https://diri.sh/guides/parallel-agents/</loc></url>
+  <url><loc>https://diri.sh/guides/agent-teams/</loc></url>
+  <url><loc>https://diri.sh/guides/review-changes/</loc></url>
   <url><loc>https://diri.sh/guides/remote-sessions/</loc></url>
+  <url><loc>https://diri.sh/guides/shortcuts/</loc></url>
 </urlset>

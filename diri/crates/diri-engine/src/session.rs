@@ -166,13 +166,27 @@ const ECHO_WINDOW: Duration = Duration::from_millis(100);
 /// which put ~9 ms of pure waiting between every keypress and its character.
 /// Output that answers recent input is published the moment it is parsed,
 /// provided the screen did not lose content doing it, since that is the
-/// half-erased repaint batching exists to hide.
+/// half-erased repaint batching exists to hide. A synchronized update
+/// (DECSET 2026) the child closed is complete by its own declaration, so it
+/// answers even when the redraw removed cells: Claude Code's placeholder and
+/// shortcut hint disappearing as typing starts, a completion menu closing.
+///
+/// A TUI often answers one key in several writes (erase, redraw, then a
+/// status row), so a keystroke buys up to [`ECHO_PUBLICATIONS`] immediate
+/// publications within [`ECHO_WINDOW`], not one. Output that keeps coming
+/// after that is batched as before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EchoRequest {
     at: Instant,
     /// The input was an editing key, whose echo legitimately removes cells.
     erases: bool,
+    /// Immediate publications this input may still buy.
+    publications: u8,
 }
+
+/// How many immediate publications one keystroke buys: an erase-and-redraw
+/// answer plus a status row or two, the most a TUI writes for one key.
+pub(crate) const ECHO_PUBLICATIONS: u8 = 4;
 
 impl EchoRequest {
     fn for_input(bytes: &[u8], at: Instant) -> Self {
@@ -180,26 +194,39 @@ impl EchoRequest {
         let erases = bytes
             .iter()
             .any(|byte| matches!(byte, 0x7f | 0x08 | 0x17 | 0x15));
-        Self { at, erases }
+        Self {
+            at,
+            erases,
+            publications: ECHO_PUBLICATIONS,
+        }
     }
 
     fn expired(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.at) > ECHO_WINDOW
     }
 
+    /// This request after one immediate publication, or `None` once it has
+    /// bought all it may.
+    fn spend(mut self) -> Option<Self> {
+        self.publications = self.publications.saturating_sub(1);
+        (self.publications > 0).then_some(self)
+    }
+
     /// Whether output that took the screen from `filled_before` to
     /// `filled_after` filled cells is this input's complete answer. An
     /// editing key may clear up to one row, the most a line editor erases
-    /// for one keypress; anything else that lost cells is mid-repaint.
+    /// for one keypress; anything else that lost cells is mid-repaint,
+    /// unless it ended on a closed synchronized update (`complete`).
     fn answered_by(
         &self,
         now: Instant,
         filled_before: usize,
         filled_after: usize,
         cols: usize,
+        complete: bool,
     ) -> bool {
         let allowance = if self.erases { cols } else { 0 };
-        !self.expired(now) && filled_after + allowance >= filled_before
+        !self.expired(now) && (complete || filled_after + allowance >= filled_before)
     }
 }
 
@@ -575,15 +602,16 @@ impl Shared {
             Some(EchoRequest::for_input(bytes, Instant::now()));
     }
 
-    /// Consumes the pending keystroke when `answered` says this output is its
-    /// echo. An expired request is dropped either way.
+    /// Spends one of the pending keystroke's immediate publications when
+    /// `answered` says this output answers it. An expired request is dropped
+    /// either way.
     fn take_echo_if(&self, answered: impl FnOnce(&EchoRequest) -> bool) -> bool {
         let mut request = self.echo_request.lock().expect("echo request");
         let Some(pending) = *request else {
             return false;
         };
         if answered(&pending) {
-            *request = None;
+            *request = pending.spend();
             return true;
         }
         if pending.expired(Instant::now()) {
@@ -659,6 +687,89 @@ pub(crate) struct GridWake {
 struct GridWakeInner {
     state: Mutex<GridWakeState>,
     changed: Condvar,
+    echo: EchoTiming,
+}
+
+/// Engine-side keystroke timing for telemetry, lock-free: the first input of
+/// a burst, the first PTY output after it (`input.echo.engine`: the Holder,
+/// the PTY and the agent's own reaction) and the first attach frame published
+/// after that output (`input.echo.publish`: batching and coalescing here).
+/// Times are µs since [`echo_epoch`] + 1; 0 means none pending.
+struct EchoTiming {
+    written: AtomicU64,
+    output: AtomicU64,
+    class: diri_telemetry::AgentClass,
+}
+
+/// Longer than this is not an echo; a stale input is replaced.
+const ECHO_TIMING_MAX: Duration = Duration::from_secs(2);
+
+fn echo_epoch_us() -> u64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(Instant::now);
+    u64::try_from(epoch.elapsed().as_micros())
+        .unwrap_or(u64::MAX - 1)
+        .saturating_add(1)
+}
+
+impl EchoTiming {
+    fn engine_metric(&self) -> &'static str {
+        use diri_telemetry::AgentClass;
+        match self.class {
+            AgentClass::Claude => "input.echo.engine.claude",
+            AgentClass::Codex => "input.echo.engine.codex",
+            AgentClass::Cursor => "input.echo.engine.cursor",
+            AgentClass::Gemini => "input.echo.engine.gemini",
+            AgentClass::Shell => "input.echo.engine.shell",
+            AgentClass::Other => "input.echo.engine.other",
+        }
+    }
+
+    fn note_input(&self) {
+        if !diri_telemetry::is_enabled() {
+            return;
+        }
+        let now = echo_epoch_us();
+        let written = self.written.load(Ordering::Acquire);
+        let max = u64::try_from(ECHO_TIMING_MAX.as_micros()).unwrap_or(u64::MAX);
+        if written == 0 || now.saturating_sub(written) > max {
+            self.output.store(0, Ordering::Release);
+            self.written.store(now, Ordering::Release);
+        }
+    }
+
+    /// One atomic load unless a keystroke is waiting for its output.
+    fn note_output(&self) {
+        let written = self.written.load(Ordering::Acquire);
+        if written == 0 {
+            return;
+        }
+        let now = echo_epoch_us();
+        if self
+            .output
+            .compare_exchange(0, now, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            let elapsed = Duration::from_micros(now.saturating_sub(written));
+            if elapsed <= ECHO_TIMING_MAX {
+                diri_telemetry::observe("input.echo.engine", elapsed);
+                diri_telemetry::observe(self.engine_metric(), elapsed);
+            }
+        }
+    }
+
+    fn note_published(&self) {
+        let output = self.output.load(Ordering::Acquire);
+        if output == 0 {
+            return;
+        }
+        self.output.store(0, Ordering::Release);
+        self.written.store(0, Ordering::Release);
+        let elapsed = Duration::from_micros(echo_epoch_us().saturating_sub(output));
+        if elapsed <= ECHO_TIMING_MAX {
+            diri_telemetry::observe("input.echo.publish", elapsed);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -672,10 +783,19 @@ struct GridWakeState {
     interactive_budget: u8,
 }
 
-const INTERACTIVE_GRID_BUDGET: u8 = 2;
+/// Publications per input that may bypass the attach pump's coalescing: one
+/// can be a trailing change already in flight, the rest are the terminal's
+/// response, which the session pump publishes in up to
+/// [`ECHO_PUBLICATIONS`] parts.
+const INTERACTIVE_GRID_BUDGET: u8 = 1 + ECHO_PUBLICATIONS;
 
 impl GridWake {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::for_agent("")
+    }
+
+    fn for_agent(manifest_id: &str) -> Self {
         Self {
             inner: Arc::new(GridWakeInner {
                 state: Mutex::new(GridWakeState {
@@ -683,8 +803,29 @@ impl GridWake {
                     interactive_budget: 0,
                 }),
                 changed: Condvar::new(),
+                echo: EchoTiming {
+                    written: AtomicU64::new(0),
+                    output: AtomicU64::new(0),
+                    class: diri_telemetry::agent_class(manifest_id),
+                },
             }),
         }
+    }
+
+    /// A keystroke was written to the child; see [`EchoTiming`].
+    fn note_input_for_telemetry(&self) {
+        self.inner.echo.note_input();
+    }
+
+    /// The child produced output; see [`EchoTiming`].
+    fn note_output_for_telemetry(&self) {
+        self.inner.echo.note_output();
+    }
+
+    /// A frame carrying the child's latest output was queued to attached
+    /// clients; see [`EchoTiming`].
+    pub(crate) fn note_published_for_telemetry(&self) {
+        self.inner.echo.note_published();
     }
 
     pub(crate) fn notify(&self) {
@@ -2758,6 +2899,7 @@ impl Session {
             // Let the attachment pump interrupt a background coalescing wait
             // instead of making typed input cross an 8 ms frame boundary.
             self.shared.grid_wake.prioritize_interactive_changes();
+            self.shared.grid_wake.note_input_for_telemetry();
             self.shared.request_echo(bytes);
         }
         self.observe_prompt_input(bytes);
@@ -3180,7 +3322,7 @@ fn new_shared(
         remote_grid: Mutex::new(None),
         remote_output_offset: AtomicU64::new(0),
         held_screen_offset: AtomicU64::new(0),
-        grid_wake: GridWake::new(),
+        grid_wake: GridWake::for_agent(&spec.manifest_id),
         agent: spec.manifest_id.clone(),
         launched_at: fresh.then(Instant::now),
         terminate_requested: AtomicBool::new(false),
@@ -4465,6 +4607,7 @@ fn pump(
             Ok(usize::MAX) => {}
             Ok(0) => break, // the child closed the terminal
             Ok(n) => {
+                shared.grid_wake.note_output_for_telemetry();
                 let closed = feed_output_batch(&shared, &mut reader, &mut buffer, n);
                 // One detection pass per batch, not per read: the reducer
                 // discards observations it has already judged anyway.
@@ -4697,6 +4840,7 @@ fn feed_output_batch(
         let (mid_repaint, blank_repaint) = {
             let mut screen = shared.screen.lock().expect("screen");
             let before = *filled_before.get_or_insert_with(|| screen.filled_cells());
+            let synchronized = screen.synchronized_updates_completed();
             screen.feed(&buffer[..count]);
             if screen.has_notifications() {
                 shared.bump_state_version();
@@ -4705,7 +4849,14 @@ fn feed_output_batch(
                 note_agent_exit(shared, status, &screen);
             }
             let after = screen.filled_cells();
-            (after < before, after == 0 && before != 0)
+            // A closed synchronized update is a whole frame, however much
+            // it erased: nothing is left to wait for.
+            let complete = screen.synchronized_updates_completed() != synchronized
+                && !screen.in_synchronized_update();
+            (
+                !complete && after < before,
+                !complete && after == 0 && before != 0,
+            )
         };
         total += count;
 
@@ -5338,12 +5489,15 @@ fn pump_held(
             // catches up it runs again, so a settled screen is never stale.
             let evaluate_now = last_eval_at.is_none_or(|at: Instant| at.elapsed() >= EVAL_INTERVAL);
             eval_dirty = !evaluate_now;
-            let (observation, replies, filled_after, cols) = {
+            let (observation, replies, filled_after, cols, complete) = {
                 let mut screen = shared.screen.lock().expect("screen");
                 let historical_bytes =
                     replay_until.saturating_sub(start).min(output.len() as u64) as usize;
                 batch_filled.get_or_insert(screen.filled_cells());
+                let synchronized = screen.synchronized_updates_completed();
                 screen.feed_with_history(output, historical_bytes);
+                let complete = screen.synchronized_updates_completed() != synchronized
+                    && !screen.in_synchronized_update();
                 if screen.has_notifications() {
                     shared.bump_state_version();
                 }
@@ -5363,7 +5517,13 @@ fn pump_held(
                 } else {
                     None
                 };
-                (observation, replies, screen.filled_cells(), screen.size().0)
+                (
+                    observation,
+                    replies,
+                    screen.filled_cells(),
+                    screen.size().0,
+                    complete,
+                )
             };
             // The child is blocked reading the answer to its query, so send it
             // through the holder's input path before publishing anything.
@@ -5382,6 +5542,9 @@ fn pump_held(
             if !replies.is_empty() && !historical {
                 let _ = client.write(&replies);
             }
+            if !historical && !replaying {
+                shared.grid_wake.note_output_for_telemetry();
+            }
             let batch_started = *publish_pending.get_or_insert_with(Instant::now);
             // A keystroke's echo cannot wait for the empty poll that proves
             // the burst is over; see [`EchoRequest`].
@@ -5390,7 +5553,7 @@ fn pump_held(
                 && batch_filled.is_some_and(|filled_before| {
                     let now = Instant::now();
                     shared.take_echo_if(|request| {
-                        request.answered_by(now, filled_before, filled_after, cols)
+                        request.answered_by(now, filled_before, filled_after, cols, complete)
                     })
                 });
             if caught_up || answers_input || batch_started.elapsed() >= OUTPUT_BATCH_CEILING {
@@ -6398,7 +6561,7 @@ mod grid_wake_tests {
 
     use std::time::Duration;
 
-    use super::GridWake;
+    use super::{GridWake, INTERACTIVE_GRID_BUDGET};
 
     #[test]
     fn grid_waiter_sleeps_until_a_real_change_and_coalesces_generations() {
@@ -6429,7 +6592,7 @@ mod grid_wake_tests {
     }
 
     #[test]
-    fn interactive_priority_covers_two_grid_changes_then_expires() {
+    fn interactive_priority_covers_a_bounded_number_of_grid_changes_then_expires() {
         let wake = GridWake::new();
         let observed = wake.generation();
         wake.prioritize_interactive_changes();
@@ -6438,19 +6601,20 @@ mod grid_wake_tests {
         assert_eq!(unchanged.generation, observed);
         assert!(!unchanged.interactive);
 
-        wake.notify();
-        let changed = wake.wait_for_change(observed, Duration::from_secs(1));
-        assert!(changed.generation > observed);
-        assert!(changed.interactive);
+        // A trailing change already in flight, then the terminal's response
+        // in up to `ECHO_PUBLICATIONS` parts.
+        let mut generation = observed;
+        for _ in 0..INTERACTIVE_GRID_BUDGET {
+            wake.notify();
+            let changed = wake.wait_for_change(generation, Duration::from_secs(1));
+            assert!(changed.generation > generation);
+            assert!(changed.interactive);
+            generation = changed.generation;
+            wake.consume_interactive_priority();
+        }
 
-        wake.consume_interactive_priority();
         wake.notify();
-        let trailing = wake.wait_for_change(changed.generation, Duration::from_secs(1));
-        assert!(trailing.interactive);
-
-        wake.consume_interactive_priority();
-        wake.notify();
-        let background = wake.wait_for_change(trailing.generation, Duration::from_secs(1));
+        let background = wake.wait_for_change(generation, Duration::from_secs(1));
         assert!(!background.interactive);
     }
 }
@@ -7181,16 +7345,19 @@ mod echo_request_tests {
         let at = Instant::now();
         let request = EchoRequest::for_input(b"a", at);
         assert!(!request.erases);
-        assert!(request.answered_by(at, 10, 11, 80));
-        assert!(request.answered_by(at, 10, 10, 80), "a cursor move alone");
+        assert!(request.answered_by(at, 10, 11, 80, false));
+        assert!(
+            request.answered_by(at, 10, 10, 80, false),
+            "a cursor move alone"
+        );
     }
 
     #[test]
     fn output_that_loses_cells_after_a_typed_key_is_a_repaint_in_progress() {
         let at = Instant::now();
         let request = EchoRequest::for_input(b"a", at);
-        assert!(!request.answered_by(at, 400, 399, 80));
-        assert!(!request.answered_by(at, 400, 0, 80));
+        assert!(!request.answered_by(at, 400, 399, 80, false));
+        assert!(!request.answered_by(at, 400, 0, 80, false));
     }
 
     #[test]
@@ -7199,10 +7366,10 @@ mod echo_request_tests {
         for key in [&b"\x7f"[..], b"\x08", b"\x17", b"\x15"] {
             let request = EchoRequest::for_input(key, at);
             assert!(request.erases, "{key:?}");
-            assert!(request.answered_by(at, 100, 99, 80), "{key:?}");
-            assert!(request.answered_by(at, 100, 20, 80), "{key:?}");
+            assert!(request.answered_by(at, 100, 99, 80, false), "{key:?}");
+            assert!(request.answered_by(at, 100, 20, 80, false), "{key:?}");
             assert!(
-                !request.answered_by(at, 100, 19, 80),
+                !request.answered_by(at, 100, 19, 80, false),
                 "{key:?}: more than a row is a repaint"
             );
         }
@@ -7214,8 +7381,29 @@ mod echo_request_tests {
         let request = EchoRequest::for_input(b"a", at);
         let late = at + ECHO_WINDOW + Duration::from_millis(1);
         assert!(request.expired(late));
-        assert!(!request.answered_by(late, 10, 11, 80));
-        assert!(request.answered_by(at + ECHO_WINDOW, 10, 11, 80));
+        assert!(!request.answered_by(late, 10, 11, 80, false));
+        assert!(request.answered_by(at + ECHO_WINDOW, 10, 11, 80, false));
+    }
+
+    #[test]
+    fn a_keystroke_buys_a_bounded_number_of_immediate_publications() {
+        let mut request = Some(EchoRequest::for_input(b"a", Instant::now()));
+        let mut bought = 0;
+        while let Some(pending) = request {
+            request = pending.spend();
+            bought += 1;
+        }
+        assert_eq!(bought, ECHO_PUBLICATIONS);
+    }
+
+    #[test]
+    fn a_closed_synchronized_update_answers_even_when_it_removed_cells() {
+        let at = Instant::now();
+        let request = EchoRequest::for_input(b"a", at);
+        assert!(request.answered_by(at, 400, 120, 80, true));
+        assert!(request.answered_by(at, 400, 0, 80, true));
+        let late = at + ECHO_WINDOW + Duration::from_millis(1);
+        assert!(!request.answered_by(late, 400, 120, 80, true));
     }
 }
 

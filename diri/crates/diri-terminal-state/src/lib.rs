@@ -545,6 +545,18 @@ impl HeadlessScreen {
         self.settle();
     }
 
+    /// Synchronized updates (DECSET 2026) the child has closed with its ESU,
+    /// so far. A feed that raises it, and leaves no update open, ended on a
+    /// frame the child declared complete.
+    pub fn synchronized_updates_completed(&self) -> u64 {
+        self.parser.synchronized_updates_completed()
+    }
+
+    /// Whether a synchronized update is open (its bytes are held back).
+    pub fn in_synchronized_update(&self) -> bool {
+        self.parser.sync_timeout().sync_timeout().is_some()
+    }
+
     /// Ends a synchronized update (DECSET 2026) whose deadline has passed.
     ///
     /// Between `\e[?2026h` and `\e[?2026l` the parser holds every byte back so

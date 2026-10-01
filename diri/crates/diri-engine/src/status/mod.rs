@@ -189,6 +189,7 @@ struct InternalState {
     // On-screen blocker tracking.
     screen_blocker_active: bool,
     blocker_miss_scans: u32,
+    blocker_miss_since: Option<SystemTime>,
 
     // Screen belief.
     screen_belief: Option<ManifestState>,
@@ -226,6 +227,7 @@ impl InternalState {
             claude_pending_work: false,
             screen_blocker_active: false,
             blocker_miss_scans: 0,
+            blocker_miss_since: None,
             screen_belief: None,
             last_screen_seq: None,
             last_matched_rule_id: None,
@@ -885,6 +887,7 @@ impl StatusReducer {
         if clear_screen_blocker {
             self.state.screen_blocker_active = false;
             self.state.blocker_miss_scans = 0;
+            self.state.blocker_miss_since = None;
         }
         self.state.turn_in_flight = true;
         if clear_screen_blocker {
@@ -910,6 +913,7 @@ impl StatusReducer {
         }
         self.state.screen_blocker_active = false;
         self.state.blocker_miss_scans = 0;
+        self.state.blocker_miss_since = None;
         self.state.pending_needs_input = None;
         self.state.hold_idle_against_screen = true;
         self.state.idle_strong = true;
@@ -1142,6 +1146,8 @@ impl StatusReducer {
         // transitions entirely.
         if observation.state == ManifestState::Skip {
             self.state.skip_active = true;
+            self.state.blocker_miss_scans = 0;
+            self.state.blocker_miss_since = None;
             return;
         }
         self.state.skip_active = false;
@@ -1158,6 +1164,7 @@ impl StatusReducer {
         if let Some(kind) = needs_input_kind(observation.state) {
             self.state.screen_blocker_active = true;
             self.state.blocker_miss_scans = 0;
+            self.state.blocker_miss_since = None;
             let detail = screen_detail(kind, &observation, now);
             self.state.pending_needs_input = Some(detail.clone());
             outcome.needs_input = Some(detail);
@@ -1172,12 +1179,14 @@ impl StatusReducer {
         // prompt the user is still looking at.
         if self.state.screen_blocker_active {
             self.state.blocker_miss_scans += 1;
+            self.state.blocker_miss_since.get_or_insert(now);
             if self.state.blocker_miss_scans < self.timing.blocker_clear_scans {
                 return;
             }
             self.state.screen_blocker_active = false;
             self.state.blocker_miss_scans = 0;
-            self.apply_non_blocker_screen(&observation, now, true, outcome);
+            self.state.blocker_miss_since = None;
+            self.apply_non_blocker_screen(observation.state, now, true, outcome);
             return;
         }
 
@@ -1195,17 +1204,17 @@ impl StatusReducer {
             }
         }
 
-        self.apply_non_blocker_screen(&observation, now, false, outcome);
+        self.apply_non_blocker_screen(observation.state, now, false, outcome);
     }
 
     fn apply_non_blocker_screen(
         &mut self,
-        observation: &ScreenObservation,
+        state: ManifestState,
         now: SystemTime,
         cleared_blocker: bool,
         outcome: &mut ReducerOutcome,
     ) {
-        match observation.state {
+        match state {
             ManifestState::Working => {
                 if self.state.hold_idle_against_screen {
                     return;
@@ -1260,6 +1269,25 @@ impl StatusReducer {
                 )
                 | None => {}
             }
+        }
+
+        // Like idle confirmation, blocker dismissal must not require an
+        // extra redraw. Kimi can paint its composer once after trust and stay
+        // quiet forever. Preserve the two-frame fast path, but let a stable
+        // non-blocker belief clear after the existing debounce cap. A fresh
+        // blocker or a skip screen cancels this timer.
+        if self.state.screen_blocker_active
+            && !self.state.skip_active
+            && self.state.blocker_miss_since.is_some_and(|since| {
+                now.duration_since(since).unwrap_or_default() >= self.timing.idle_confirm_cap
+            })
+            && let Some(state @ (ManifestState::Idle | ManifestState::Working)) =
+                self.state.screen_belief
+        {
+            self.state.screen_blocker_active = false;
+            self.state.blocker_miss_scans = 0;
+            self.state.blocker_miss_since = None;
+            self.apply_non_blocker_screen(state, now, true, outcome);
         }
 
         // Running but unreadable for long enough becomes unknown rather than a

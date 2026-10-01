@@ -292,6 +292,55 @@ fn a_blocker_survives_one_stray_non_blocker_frame() {
 }
 
 #[test]
+fn a_dismissed_blocker_clears_when_the_composer_stops_redrawing() {
+    // Kimi paints the idle composer once after workspace trust, then goes
+    // quiet. A second changed content sequence may never arrive.
+    for authority in [Authority::ScreenPrimary, Authority::HooksPrimary] {
+        let mut reducer = StatusReducer::new(authority, t0());
+        let now = settled(&mut reducer, t0());
+        if authority == Authority::HooksPrimary {
+            reducer.reduce(hook(ClaudeHook::UserPromptSubmit), now);
+        }
+        reducer.reduce(StatusSignal::Screen(blocker(1, "Trust this folder?")), now);
+        let idle_at = now + Duration::from_millis(100);
+        reducer.reduce(
+            StatusSignal::Screen(observation(ManifestState::Idle, 2)),
+            idle_at,
+        );
+        reducer.reduce(StatusSignal::Tick, idle_at + Duration::from_millis(100));
+        assert!(matches!(reducer.status(), SessionStatus::NeedsInput(_)));
+        let outcome = reducer.reduce(StatusSignal::Tick, idle_at + Duration::from_millis(701));
+        assert_eq!(
+            outcome.status_change,
+            Some(if authority == Authority::HooksPrimary {
+                SessionStatus::Working // An unfinished hook-owned turn stays alive.
+            } else {
+                SessionStatus::Idle
+            })
+        );
+    }
+}
+
+#[test]
+fn a_reappearing_or_hidden_blocker_cancels_the_quiet_clear() {
+    for state in [ManifestState::BlockedPermission, ManifestState::Skip] {
+        let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
+        let now = settled(&mut reducer, t0());
+        reducer.reduce(StatusSignal::Screen(blocker(1, "proceed?")), now);
+        reducer.reduce(
+            StatusSignal::Screen(observation(ManifestState::Idle, 2)),
+            now,
+        );
+        reducer.reduce(
+            StatusSignal::Screen(observation(state, 3)),
+            now + Duration::from_millis(100),
+        );
+        reducer.reduce(StatusSignal::Tick, now + Duration::from_secs(2));
+        assert!(matches!(reducer.status(), SessionStatus::NeedsInput(_)));
+    }
+}
+
+#[test]
 fn a_skip_screen_holds_the_current_state() {
     // The transcript viewer covers the prompt; the session has not changed.
     let mut reducer = StatusReducer::new(Authority::HooksPrimary, t0());
