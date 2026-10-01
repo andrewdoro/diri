@@ -61,10 +61,11 @@ pub(crate) fn caption_lane() -> f32 {
     }
 }
 
-/// Windows places the 16 px window icon 16 px from the left edge and the
-/// next element 16 px after it.
+/// Windows places the 16 px window icon about 16 px from the left edge.
+/// Diri centres it on the sidebar's row glyph column instead (the project
+/// chevron box spans 18–36 pt), so the icon heads that column.
 const WINDOW_ICON_SIZE: f32 = 16.0;
-const WINDOW_ICON_INSET: f32 = 16.0;
+const WINDOW_ICON_INSET: f32 = 27.0 - WINDOW_ICON_SIZE / 2.0;
 const WINDOW_ICON_LANE: f32 = WINDOW_ICON_INSET + WINDOW_ICON_SIZE + 4.0;
 
 /// Whether macOS draws its traffic lights over the window's top-left corner.

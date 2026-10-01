@@ -9712,7 +9712,7 @@ mod tests {
         let sidebar_toggle = cx.debug_bounds("sidebar-toggle").unwrap();
         assert_eq!(area_at(cx, sidebar_toggle.center()), None);
         assert_eq!(
-            area_at(cx, point(px(40.0), px(20.0))),
+            area_at(cx, point(px(60.0), px(20.0))),
             Some(WindowControlArea::Drag),
             "the sidebar's empty title row moves the window"
         );
@@ -9723,11 +9723,12 @@ mod tests {
             "so does the pane's title bar"
         );
         assert_eq!(area_at(cx, point(px(500.0), px(300.0))), None);
-        // The app icon opens the system menu at Windows' 16 px inset.
+        // The app icon opens the system menu, centred on the sidebar's row
+        // glyph column.
         let icon = cx
             .debug_bounds("window-icon")
             .expect("vertical tabs show the window icon");
-        assert_eq!(icon.center().x, px(24.0));
+        assert_eq!(icon.center().x, px(27.0));
         assert_eq!(icon.center().y, px(Metrics::TITLE_BAR / 2.0));
         assert_eq!(area_at(cx, icon.center()), None, "the icon is a button");
 
