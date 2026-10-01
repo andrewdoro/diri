@@ -321,7 +321,7 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `clipboard.paste` | info | `outcome` (`sent`\|`review`\|`into_find`\|`image_staged`\|`image_stage_failed`\|`empty_clipboard`\|`no_session`\|`no_terminal`\|`no_text`\|`copy_mode`\|`ignored_in_find`), `kind, size, bracketed, ms` | "paste doesn't work" |
 | `clipboard.image_upload_failed` | error | `session` | image paste into a remote session |
 | `term.slow_paint` | warn | `ms, cols, rows, shape_misses` | one terminal paint ≥ 50 ms |
-| `update.check` / `update.download` / `update.install` | info; error on failure | `outcome, from, to, user_initiated, ms, error_kind` | updates that fail or never arrive |
+| `update.check` / `update.download` / `update.install` | info; error on failure | `outcome, from, to, user_initiated, ms, error_kind, http_status` (network `error_kind`: `dns`, `connect`, `timeout`, `tls`, `not_found`, `rate_limited`, `http_error`, `network`) | updates that fail or never arrive |
 
 Sizes are buckets (`0`, `<64`, `<1k`, `<16k`, `<256k`, `<1m`, `>=1m`); no
 clipboard, paste, keystroke or terminal content is ever recorded.

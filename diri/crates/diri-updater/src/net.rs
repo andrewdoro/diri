@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::error::{Result, UpdateError};
+use crate::error::{NetworkFailure, Result, UpdateError};
 
 const CURL: &str = "/usr/bin/curl";
 const FEED_TIMEOUT_SECONDS: u32 = 20;
@@ -20,6 +20,14 @@ const DOWNLOAD_TIMEOUT_SECONDS: u32 = 900;
 const PROGRESS_POLL: Duration = Duration::from_millis(150);
 pub(crate) const MAX_FEED_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+/// A feed fetch that failed this fast on a transient cause gets one more try
+/// after [`RETRY_DELAY`]; a slow failure has already cost the user enough.
+const RETRY_WITHIN: Duration = Duration::from_secs(5);
+const RETRY_DELAY: Duration = Duration::from_secs(1);
+/// curl prints this line on stderr after every transfer (`write-out`), so a
+/// failure carries the HTTP status even when curl's exit code does not: over
+/// HTTP/2 macOS curl reports `--fail` errors as exit 56, not 22.
+const STATUS_MARKER: &str = "diri-http-status:";
 
 /// Downloads over `curl`, with the hardening the installer depends on.
 #[derive(Clone, Debug, Default)]
@@ -31,6 +39,19 @@ impl Http {
     }
 
     pub fn fetch_text(&self, url: &str) -> Result<String> {
+        let started = std::time::Instant::now();
+        match self.fetch_text_once(url) {
+            Err(UpdateError::Network { failure, .. })
+                if failure.is_transient() && started.elapsed() < RETRY_WITHIN =>
+            {
+                std::thread::sleep(RETRY_DELAY);
+                self.fetch_text_once(url)
+            }
+            result => result,
+        }
+    }
+
+    fn fetch_text_once(&self, url: &str) -> Result<String> {
         let output = self
             .curl()
             .stdin(Stdio::piped())
@@ -47,7 +68,10 @@ impl Http {
                 child.wait_with_output()
             })?;
         if !output.status.success() {
-            return Err(UpdateError::Network(curl_detail(&output.stderr)));
+            if output.status.code() == Some(CURLE_FILESIZE_EXCEEDED) {
+                return Err(UpdateError::Feed("feed exceeds the 1 MiB limit".to_owned()));
+            }
+            return Err(curl_failure(output.status.code(), &output.stderr));
         }
         if output.stdout.len() > usize::try_from(MAX_FEED_BYTES).unwrap_or(usize::MAX) {
             return Err(UpdateError::Feed("feed exceeds the 1 MiB limit".to_owned()));
@@ -100,15 +124,18 @@ impl Http {
         loop {
             if let Some(status) = child.try_wait()? {
                 if !status.success() {
-                    let mut stderr = String::new();
+                    let mut buffer = Vec::new();
                     if let Some(mut pipe) = child.stderr.take() {
                         use std::io::Read as _;
-                        let mut buffer = Vec::new();
                         let _ = pipe.read_to_end(&mut buffer);
-                        stderr = curl_detail(&buffer);
                     }
                     let _ = fs::remove_file(destination);
-                    return Err(UpdateError::Network(stderr));
+                    if status.code() == Some(CURLE_FILESIZE_EXCEEDED) {
+                        return Err(UpdateError::Integrity(format!(
+                            "download exceeded its declared size of {expected_size} bytes"
+                        )));
+                    }
+                    return Err(curl_failure(status.code(), &buffer));
                 }
                 break;
             }
@@ -170,6 +197,9 @@ impl Http {
         config.push_str("connect-timeout = 15\n");
         config.push_str("max-redirs = 5\n");
         config.push_str(&format!("user-agent = \"diri-updater/{}\"\n", crate::AGENT));
+        config.push_str(&format!(
+            "write-out = \"%{{stderr}}{STATUS_MARKER}%{{http_code}}\\n\"\n"
+        ));
         if let Some(path) = output {
             config.push_str(&format!("output = \"{}\"\n", path.display()));
         }
@@ -241,13 +271,57 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
-fn curl_detail(stderr: &[u8]) -> String {
+// curl exit codes (`man curl`, EXIT CODES) the classifier relies on.
+const CURLE_COULDNT_RESOLVE_PROXY: i32 = 5;
+const CURLE_COULDNT_RESOLVE_HOST: i32 = 6;
+const CURLE_COULDNT_CONNECT: i32 = 7;
+const CURLE_HTTP_RETURNED_ERROR: i32 = 22;
+const CURLE_OPERATION_TIMEDOUT: i32 = 28;
+const CURLE_FILESIZE_EXCEEDED: i32 = 63;
+const CURLE_TLS: [i32; 9] = [35, 51, 53, 54, 58, 59, 60, 77, 83];
+
+/// Turns a failed curl run into an error that says what actually went wrong.
+fn curl_failure(code: Option<i32>, stderr: &[u8]) -> UpdateError {
     let text = String::from_utf8_lossy(stderr);
-    let detail = text.trim();
-    if detail.is_empty() {
-        "curl exited non-zero".to_owned()
+    let mut status = None;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        match line.strip_prefix(STATUS_MARKER) {
+            Some(value) => status = value.trim().parse::<u16>().ok(),
+            None if !line.trim().is_empty() => lines.push(line.trim()),
+            None => {}
+        }
+    }
+    let detail = if lines.is_empty() {
+        format!("curl exited with {code:?}")
     } else {
-        detail.to_owned()
+        lines.join("; ")
+    };
+    UpdateError::network(classify(code, status, &detail), detail)
+}
+
+fn classify(code: Option<i32>, status: Option<u16>, detail: &str) -> NetworkFailure {
+    // An HTTP error status is the most specific fact there is, whatever exit
+    // code curl chose to report it under.
+    match status {
+        Some(404) => return NetworkFailure::NotFound,
+        Some(status @ (403 | 429)) => return NetworkFailure::RateLimited(status),
+        Some(status @ 400..=599) => return NetworkFailure::Http(status),
+        _ => {}
+    }
+    match code {
+        Some(CURLE_COULDNT_RESOLVE_PROXY | CURLE_COULDNT_RESOLVE_HOST) => NetworkFailure::Dns,
+        Some(CURLE_COULDNT_CONNECT) => NetworkFailure::Connect,
+        Some(CURLE_OPERATION_TIMEDOUT) if detail.contains("Resolving timed out") => {
+            NetworkFailure::Dns
+        }
+        Some(CURLE_OPERATION_TIMEDOUT) if detail.contains("Failed to connect") => {
+            NetworkFailure::Connect
+        }
+        Some(CURLE_OPERATION_TIMEDOUT) => NetworkFailure::Timeout,
+        Some(code) if CURLE_TLS.contains(&code) => NetworkFailure::Tls,
+        Some(CURLE_HTTP_RETURNED_ERROR) => NetworkFailure::Http(status.unwrap_or(0)),
+        _ => NetworkFailure::Other,
     }
 }
 
@@ -298,6 +372,107 @@ mod tests {
         let command = http.curl();
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["-K", "-"]);
+    }
+
+    fn failure(code: i32, stderr: &str) -> NetworkFailure {
+        match curl_failure(Some(code), stderr.as_bytes()) {
+            UpdateError::Network { failure, .. } => failure,
+            other => panic!("expected a network error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn http_errors_are_not_reported_as_unreachable() {
+        // macOS curl over HTTP/2 reports `--fail` as exit 56 (verified against
+        // a missing GitHub release asset), so the status line decides.
+        let missing = "curl: (56) The requested URL returned error: 404\ndiri-http-status:404\n";
+        assert_eq!(failure(56, missing), NetworkFailure::NotFound);
+        let throttled = "curl: (22) The requested URL returned error: 429\ndiri-http-status:429\n";
+        assert_eq!(failure(22, throttled), NetworkFailure::RateLimited(429));
+        assert_eq!(
+            failure(22, "diri-http-status:403\n"),
+            NetworkFailure::RateLimited(403)
+        );
+        assert_eq!(
+            failure(56, "diri-http-status:503\n"),
+            NetworkFailure::Http(503)
+        );
+    }
+
+    #[test]
+    fn transport_failures_name_their_cause() {
+        let none = "\ndiri-http-status:000\n";
+        assert_eq!(
+            failure(
+                6,
+                &format!("curl: (6) Could not resolve host: github.com{none}")
+            ),
+            NetworkFailure::Dns
+        );
+        assert_eq!(
+            failure(
+                28,
+                "curl: (28) Resolving timed out after 15000 milliseconds"
+            ),
+            NetworkFailure::Dns
+        );
+        assert_eq!(
+            failure(
+                28,
+                "curl: (28) Failed to connect to github.com port 443 after 15002 ms: Timeout was reached"
+            ),
+            NetworkFailure::Connect
+        );
+        assert_eq!(
+            failure(
+                28,
+                "curl: (28) Operation timed out after 20001 milliseconds"
+            ),
+            NetworkFailure::Timeout
+        );
+        assert_eq!(failure(7, none), NetworkFailure::Connect);
+        assert_eq!(failure(60, none), NetworkFailure::Tls);
+        assert_eq!(
+            failure(56, "curl: (56) Recv failure"),
+            NetworkFailure::Other
+        );
+    }
+
+    #[test]
+    fn the_status_marker_stays_out_of_the_detail() {
+        let error = curl_failure(
+            Some(56),
+            b"curl: (56) The requested URL returned error: 404\ndiri-http-status:404\n",
+        );
+        let text = error.to_string();
+        assert!(!text.contains(STATUS_MARKER), "{text}");
+        assert!(text.contains("not_found"), "{text}");
+    }
+
+    #[test]
+    fn only_quick_blips_are_retried() {
+        assert!(NetworkFailure::Dns.is_transient());
+        assert!(NetworkFailure::Http(502).is_transient());
+        assert!(!NetworkFailure::NotFound.is_transient());
+        assert!(!NetworkFailure::RateLimited(429).is_transient());
+        assert!(!NetworkFailure::Timeout.is_transient());
+    }
+
+    #[test]
+    fn a_real_curl_failure_is_classified_from_its_own_output() {
+        // Nothing listens on the discard port, so the connection is refused
+        // locally without touching the network; this proves the write-out
+        // line and exit code survive the trip through the config on stdin.
+        let error = Http::new()
+            .fetch_text_once("https://127.0.0.1:9/appcast.json")
+            .expect_err("nothing listens on port 9");
+        match error {
+            UpdateError::Network { failure, detail } => {
+                assert_eq!(failure, NetworkFailure::Connect, "{detail}");
+                assert!(!detail.contains(STATUS_MARKER), "{detail}");
+            }
+            other => panic!("expected a network error, got {other}"),
+        }
     }
 
     #[test]

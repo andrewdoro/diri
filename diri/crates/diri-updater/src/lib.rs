@@ -26,7 +26,7 @@ pub mod version;
 
 use std::path::{Path, PathBuf};
 
-pub use error::{Result, UpdateError};
+pub use error::{NetworkFailure, Result, UpdateError};
 pub use feed::{Eligibility, Feed, Release};
 pub use version::Version;
 
@@ -389,6 +389,27 @@ mod tests {
             assert!(release.parsed_version().is_some(), "{release:?}");
             net::validated_download_url(&release.url, RELEASES_HOST).expect("pinned host");
         }
+    }
+
+    /// A release asset that is not there must read as "missing", not as
+    /// "couldn't reach the host" — GitHub serves it over HTTP/2, where curl
+    /// reports the 404 under exit 56.
+    #[test]
+    #[ignore = "requires network access to the releases host"]
+    fn a_missing_release_asset_is_reported_as_not_found() {
+        let error = Http::new()
+            .fetch_text("https://github.com/cristicretu/diri/releases/latest/download/missing.json")
+            .expect_err("no such asset");
+        assert!(
+            matches!(
+                error,
+                UpdateError::Network {
+                    failure: NetworkFailure::NotFound,
+                    ..
+                }
+            ),
+            "{error}"
+        );
     }
 
     /// Live end-to-end of the half the feed test does not reach: actually pull

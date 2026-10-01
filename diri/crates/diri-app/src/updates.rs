@@ -290,7 +290,7 @@ fn record_update(
 ) {
     let error_kind = error.map(|error| match error {
         UpdateError::NotUpdatable(_) => "not_updatable",
-        UpdateError::Network(_) => "network",
+        UpdateError::Network { failure, .. } => failure.kind(),
         UpdateError::Feed(_) => "feed",
         UpdateError::UntrustedUrl(_) => "untrusted_url",
         UpdateError::Integrity(_) => "integrity",
@@ -312,6 +312,13 @@ fn record_update(
         ),
         ("ms", diri_telemetry::Value::from(started.elapsed())),
         ("error_kind", diri_telemetry::Value::from(error_kind)),
+        (
+            "http_status",
+            diri_telemetry::Value::from(error.and_then(|error| match error {
+                UpdateError::Network { failure, .. } => failure.http_status(),
+                _ => None,
+            })),
+        ),
     ];
     // An unsupported build (a `cargo run`) failing to update is expected.
     let severity = match error {
@@ -1215,7 +1222,10 @@ mod tests {
             ) -> UpdateResult<StagedUpdate> {
                 if self.0.downloads.load(Ordering::SeqCst) == 0 {
                     self.0.downloads.fetch_add(1, Ordering::SeqCst);
-                    return Err(UpdateError::Network("interrupted".to_owned()));
+                    return Err(UpdateError::Network {
+                        failure: diri_updater::NetworkFailure::Other,
+                        detail: "interrupted".to_owned(),
+                    });
                 }
                 self.0.download_and_stage(release, on_progress)
             }
