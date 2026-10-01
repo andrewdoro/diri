@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use diri_proto::frames::{Frame, FrameCodec, FrameType};
+use diri_proto::frames::{AttachRejection, Frame, FrameCodec, FrameType};
 use diri_proto::grid::GridUpdate;
 use diri_proto::methods::{AttachRequest, ClientRole};
 use diri_proto::model::SessionId;
@@ -46,6 +46,9 @@ pub enum TerminalChunk {
         secret_input: bool,
     },
     Pong,
+    /// The Engine refused this attach and closed. Reattaching with the same
+    /// request will be refused again until the session itself changes.
+    Rejected(AttachRejection),
 }
 
 /// The receiving half of an attachment.
@@ -488,6 +491,8 @@ async fn run_connection(
     let ended = serve_connection(stream, commands, chunks, keepalive_enabled).await;
     match (ended, attached) {
         (Ok(()), _) => true,
+        // A refusal is the Engine's decision, recorded by whoever acts on it.
+        (Err("rejected"), _) => false,
         (Err(reason), Some(session)) => {
             crate::telemetry::attachment_ended(&session, reason, started.elapsed());
             false
@@ -600,6 +605,16 @@ async fn process_incoming(
             .send(TerminalChunk::Pong)
             .await
             .map_err(|_| "receiver_closed")?,
+        FrameType::AttachRejected => {
+            let reason = frame
+                .attach_rejected_payload()
+                .unwrap_or(AttachRejection::Other(0));
+            // The reason must reach the caller even if it is not draining:
+            // the Engine closes right after, and the EOF would otherwise be
+            // all the caller learns.
+            let _ = chunks.send(TerminalChunk::Rejected(reason)).await;
+            return Err("rejected");
+        }
         // These byte-replay frames belong to the retired VT-parsing client.
         FrameType::Output | FrameType::ReplayBegin | FrameType::ReplayEnd => {}
         // The daemon does not send client-to-daemon frame types.
@@ -689,6 +704,45 @@ mod tests {
     use tokio::time::timeout;
 
     use super::{SessionAttachment, TerminalChunk, process_incoming};
+
+    #[tokio::test]
+    async fn a_refusal_reaches_the_caller_before_the_channel_ends() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut server = BufReader::new(server);
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            let frame = Frame::attach_rejected(diri_proto::frames::AttachRejection::NotTerminal);
+            server
+                .get_mut()
+                .write_all(&FrameCodec::encode(&frame).unwrap())
+                .await
+                .unwrap();
+            // Closing at once, as the Engine does.
+        });
+        let mut attachment = SessionAttachment::adopt_with_options(
+            client,
+            SessionId("a-note".into()),
+            super::AttachmentOptions::default(),
+        )
+        .await
+        .unwrap();
+        peer.await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), attachment.chunks.recv())
+                .await
+                .unwrap(),
+            Some(TerminalChunk::Rejected(
+                diri_proto::frames::AttachRejection::NotTerminal
+            ))
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), attachment.chunks.recv())
+                .await
+                .unwrap(),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn checked_close_reports_peer_loss_instead_of_claiming_a_drained_writer() {

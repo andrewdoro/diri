@@ -950,10 +950,15 @@ pub(crate) struct TransportTrace {
     live_at: Option<Instant>,
     grids: u64,
     snapshots: u64,
+    /// Attaches in a row that ended before their first grid.
+    empty: u32,
 }
 
 /// Failed attaches in a row before the pane is recorded as failing.
 const ATTACH_FAILING_AFTER: u32 = 3;
+/// Empty attaches in a row after which one `pane.attach_flapping` stands in
+/// for the per-attempt attach/detach events until a grid arrives.
+const ATTACH_FLAPPING_AFTER: u32 = 3;
 
 impl TransportTrace {
     pub(crate) fn new(session: &diri_proto::SessionId) -> Self {
@@ -967,7 +972,13 @@ impl TransportTrace {
             live_at: None,
             grids: 0,
             snapshots: 0,
+            empty: 0,
         }
+    }
+
+    /// Per-attempt events are muted while the pane is flapping.
+    fn flapping(&self) -> bool {
+        self.empty >= ATTACH_FLAPPING_AFTER
     }
 
     pub(crate) fn connecting(&mut self) {
@@ -991,14 +1002,16 @@ impl TransportTrace {
     pub(crate) fn live(&mut self) {
         let connect = self.attempt_at.elapsed();
         diri_telemetry::observe("pane.attach", connect);
-        event!(
-            "pane.attached",
-            session = self.session.clone(),
-            reconnect = self.attaches > 0,
-            attempts = self.failures + 1,
-            connect_ms = connect,
-            since_mount_ms = self.mounted_at.elapsed()
-        );
+        if !self.flapping() {
+            event!(
+                "pane.attached",
+                session = self.session.clone(),
+                reconnect = self.attaches > 0,
+                attempts = self.failures + 1,
+                connect_ms = connect,
+                since_mount_ms = self.mounted_at.elapsed()
+            );
+        }
         self.attaches += 1;
         self.failures = 0;
         self.live_at = Some(Instant::now());
@@ -1011,6 +1024,7 @@ impl TransportTrace {
             return;
         };
         self.grids += 1;
+        self.empty = 0;
         if update.is_full_snapshot {
             self.snapshots += 1;
             if self.snapshots > 1 {
@@ -1043,16 +1057,44 @@ impl TransportTrace {
     }
 
     pub(crate) fn drain_interrupted(&self) {
-        diri_telemetry::warn_event!("pane.drain_interrupted", session = self.session.clone());
+        if !self.flapping() {
+            diri_telemetry::warn_event!("pane.drain_interrupted", session = self.session.clone());
+        }
     }
 
     pub(crate) fn detached(&mut self) {
+        let live_ms = self.live_at.take().map(|at| at.elapsed());
+        if !self.flapping() {
+            diri_telemetry::warn_event!(
+                "pane.detached",
+                session = self.session.clone(),
+                live_ms = live_ms,
+                grids = self.grids,
+                reseeds = self.snapshots.saturating_sub(1)
+            );
+        }
+        if self.grids == 0 {
+            self.empty += 1;
+            if self.empty == ATTACH_FLAPPING_AFTER {
+                diri_telemetry::warn_event!(
+                    "pane.attach_flapping",
+                    session = self.session.clone(),
+                    attaches = self.empty,
+                    since_mount_ms = self.mounted_at.elapsed()
+                );
+            }
+        }
+    }
+
+    /// The Engine refused the attach; the pane waits for the session to
+    /// change, so this is recorded once per refusal, not per retry.
+    pub(crate) fn rejected(&mut self, reason: diri_proto::frames::AttachRejection) {
+        self.live_at = None;
         diri_telemetry::warn_event!(
-            "pane.detached",
+            "pane.attach_rejected",
             session = self.session.clone(),
-            live_ms = self.live_at.take().map(|at| at.elapsed()),
-            grids = self.grids,
-            reseeds = self.snapshots.saturating_sub(1)
+            reason = reason.as_str(),
+            since_mount_ms = self.mounted_at.elapsed()
         );
     }
 }

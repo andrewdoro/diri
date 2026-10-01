@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use diri_proto::frames::{Frame, FrameCodec, FrameType};
+use diri_proto::frames::{AttachRejection, Frame, FrameCodec, FrameType};
 
 use crate::registry::Registry;
 use crate::session::{AttachmentSeed, GridSignature, GridWake};
@@ -200,6 +200,7 @@ struct SessionSinks {
 pub struct AttachHub {
     sessions: Arc<Mutex<HashMap<String, SessionSinks>>>,
     next_sink: Arc<AtomicU64>,
+    rejections: Arc<Mutex<RejectionLog>>,
     #[cfg(test)]
     registration_hook: Arc<Mutex<Option<RegistrationHook>>>,
 }
@@ -207,9 +208,72 @@ pub struct AttachHub {
 #[cfg(test)]
 type RegistrationHook = Arc<dyn Fn() + Send + Sync>;
 
+/// One `attach.rejected` per session per window: a client that keeps
+/// retrying a refused attach must not turn into tens of thousands of events.
+const REJECTION_EVENT_EVERY: Duration = Duration::from_secs(60);
+/// Sessions remembered by [`RejectionLog`] before stale ones are forgotten.
+const REJECTION_LOG_CAP: usize = 256;
+
+#[derive(Default)]
+struct RejectionLog(HashMap<String, (Instant, u64)>);
+
+impl RejectionLog {
+    /// `Some(suppressed since the last event)` when an event is due now.
+    fn due(&mut self, session_id: &str, now: Instant) -> Option<u64> {
+        if let Some((last, suppressed)) = self.0.get_mut(session_id) {
+            if now.duration_since(*last) < REJECTION_EVENT_EVERY {
+                *suppressed += 1;
+                return None;
+            }
+            let count = std::mem::take(suppressed);
+            *last = now;
+            return Some(count);
+        }
+        if self.0.len() >= REJECTION_LOG_CAP {
+            self.0
+                .retain(|_, (last, _)| now.duration_since(*last) < REJECTION_EVENT_EVERY);
+        }
+        self.0.insert(session_id.to_owned(), (now, 0));
+        Some(0)
+    }
+}
+
 impl AttachHub {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Refuses an attach for good: one [`FrameType::AttachRejected`] frame,
+    /// then the caller closes. A client that knows the frame stops retrying;
+    /// an older one fails to decode it and sees the same close as before.
+    pub(crate) fn reject(
+        &self,
+        writer: &Arc<Mutex<UnixStream>>,
+        session_id: &str,
+        reason: AttachRejection,
+    ) {
+        if let Some(suppressed) = self
+            .rejections
+            .lock()
+            .ok()
+            .and_then(|mut log| log.due(session_id, Instant::now()))
+        {
+            diri_telemetry::event!(
+                "attach.rejected",
+                session = diri_telemetry::id(session_id),
+                reason = reason.as_str(),
+                suppressed = suppressed,
+            );
+        }
+        let Ok(encoded) = FrameCodec::encode(&Frame::attach_rejected(reason)) else {
+            return;
+        };
+        if let Ok(mut stream) = writer.lock() {
+            // A fresh socket's buffer takes five bytes; the timeout only
+            // guards a peer that is somehow not reading at all.
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+            let _ = stream.write_all(&encoded);
+        }
     }
 
     pub fn serve_preview_set(
@@ -360,6 +424,8 @@ impl AttachHub {
                 .get(session_id)
                 .is_some_and(|session| !session.allows_keyboard_controller(enhanced_keyboard))
             {
+                drop(guard);
+                self.reject(&writer, session_id, AttachRejection::KeyboardUnsupported);
                 return;
             }
             let _ = guard.wake_session(session_id);
@@ -405,6 +471,10 @@ impl AttachHub {
                 return;
             };
             let Some(session) = guard.get(session_id) else {
+                drop(guard);
+                if !preview {
+                    self.reject(&writer, session_id, AttachRejection::SessionNotFound);
+                }
                 return;
             };
             if preview
@@ -421,6 +491,8 @@ impl AttachHub {
                 return;
             }
             if !preview && !session.allows_keyboard_controller(enhanced_keyboard) {
+                drop(guard);
+                self.reject(&writer, session_id, AttachRejection::KeyboardUnsupported);
                 return;
             }
             let seed = if preview {

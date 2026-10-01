@@ -31,6 +31,55 @@ pub enum FrameType {
     /// Pre-encoded terminal mouse report. Kept distinct from `Input` so
     /// status/prompt reducers never mistake escape sequences for typed text.
     Mouse = 11,
+    /// Engine → client, then the Engine closes: this attach can never
+    /// succeed as asked. Older clients fail to decode it, which ends the
+    /// attachment exactly as the bare close they got before.
+    AttachRejected = 12,
+}
+
+/// Why the Engine refused an attach. Retrying the same request is pointless
+/// until the session itself changes; the byte is the whole payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttachRejection {
+    /// The id names a note, which has no terminal.
+    NotTerminal,
+    /// No live session and no retained final terminal under this id.
+    SessionNotFound,
+    /// The program requested an enhanced-keyboard controller this client
+    /// did not offer.
+    KeyboardUnsupported,
+    /// A reason this client does not know yet. Still definitive.
+    Other(u8),
+}
+
+impl AttachRejection {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::NotTerminal => 1,
+            Self::SessionNotFound => 2,
+            Self::KeyboardUnsupported => 3,
+            Self::Other(code) => code,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::NotTerminal,
+            2 => Self::SessionNotFound,
+            3 => Self::KeyboardUnsupported,
+            other => Self::Other(other),
+        }
+    }
+
+    /// Telemetry name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotTerminal => "not_terminal",
+            Self::SessionNotFound => "session_not_found",
+            Self::KeyboardUnsupported => "keyboard_unsupported",
+            Self::Other(_) => "other",
+        }
+    }
 }
 
 impl TryFrom<u8> for FrameType {
@@ -49,6 +98,7 @@ impl TryFrom<u8> for FrameType {
             9 => Ok(Self::Scroll),
             10 => Ok(Self::Modes),
             11 => Ok(Self::Mouse),
+            12 => Ok(Self::AttachRejected),
             other => Err(FrameCodecError::UnknownFrameType(other)),
         }
     }
@@ -111,6 +161,20 @@ impl Frame {
     }
 
     #[must_use]
+    pub fn attach_rejected(reason: AttachRejection) -> Self {
+        Self::new(FrameType::AttachRejected, vec![reason.code()])
+    }
+
+    pub fn attach_rejected_payload(&self) -> Option<AttachRejection> {
+        if self.frame_type != FrameType::AttachRejected {
+            return None;
+        }
+        self.payload
+            .first()
+            .copied()
+            .map(AttachRejection::from_code)
+    }
+
     pub fn pong() -> Self {
         Self::new(FrameType::Pong, Vec::new())
     }
@@ -532,6 +596,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn attach_rejection_round_trips_and_keeps_unknown_codes() {
+        for reason in [
+            AttachRejection::NotTerminal,
+            AttachRejection::SessionNotFound,
+            AttachRejection::KeyboardUnsupported,
+            AttachRejection::Other(200),
+        ] {
+            let encoded = FrameCodec::encode(&Frame::attach_rejected(reason)).unwrap();
+            let decoded = FrameCodec::new().feed(&encoded).unwrap();
+            assert_eq!(decoded[0].attach_rejected_payload(), Some(reason));
+        }
+        assert_eq!(Frame::pong().attach_rejected_payload(), None);
+    }
+
+    #[test]
     fn frame_type_values_are_wire_stable() {
         let types = [
             FrameType::Output,
@@ -545,6 +624,7 @@ mod tests {
             FrameType::Scroll,
             FrameType::Modes,
             FrameType::Mouse,
+            FrameType::AttachRejected,
         ];
         for (index, frame_type) in types.into_iter().enumerate() {
             assert_eq!(frame_type as u8, index as u8 + 1);
@@ -555,8 +635,8 @@ mod tests {
             Err(FrameCodecError::UnknownFrameType(0))
         );
         assert_eq!(
-            FrameType::try_from(12),
-            Err(FrameCodecError::UnknownFrameType(12))
+            FrameType::try_from(13),
+            Err(FrameCodecError::UnknownFrameType(13))
         );
     }
 

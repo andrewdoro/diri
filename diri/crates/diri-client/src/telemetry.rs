@@ -138,21 +138,58 @@ pub(crate) fn attachment_ended(
     reason: &'static str,
     live: Duration,
 ) {
+    if reason == "receiver_closed" {
+        return;
+    }
+    let Some(suppressed) = closes_due(&session.0, live, Instant::now()) else {
+        return;
+    };
     match reason {
-        "receiver_closed" => {}
         "decode_error" | "bad_grid" | "bad_modes" => error_event!(
             "attach.closed",
             session = id(&session.0),
             reason = reason,
-            live_ms = live
+            live_ms = live,
+            suppressed = suppressed
         ),
         _ => warn_event!(
             "attach.closed",
             session = id(&session.0),
             reason = reason,
-            live_ms = live
+            live_ms = live,
+            suppressed = suppressed
         ),
     }
+}
+
+/// An attachment closed sooner than this never showed the user anything;
+/// a pane retrying such closes in a loop records one per window.
+const IMMEDIATE_CLOSE: Duration = Duration::from_secs(1);
+const IMMEDIATE_CLOSE_EVENT_EVERY: Duration = Duration::from_secs(60);
+const IMMEDIATE_CLOSE_SESSIONS_MAX: usize = 64;
+
+/// `Some(suppressed since the last event)` when this close should be
+/// recorded. Closes after a real attachment always are.
+fn closes_due(session: &str, live: Duration, now: Instant) -> Option<u64> {
+    static LOG: Mutex<Option<HashMap<String, (Instant, u64)>>> = Mutex::new(None);
+    let mut guard = LOG.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let log = guard.get_or_insert_with(HashMap::new);
+    if live >= IMMEDIATE_CLOSE {
+        return Some(log.remove(session).map_or(0, |(_, suppressed)| suppressed));
+    }
+    if let Some((last, suppressed)) = log.get_mut(session) {
+        if now.duration_since(*last) < IMMEDIATE_CLOSE_EVENT_EVERY {
+            *suppressed += 1;
+            return None;
+        }
+        *last = now;
+        return Some(std::mem::take(suppressed));
+    }
+    if log.len() >= IMMEDIATE_CLOSE_SESSIONS_MAX {
+        log.retain(|_, (last, _)| now.duration_since(*last) < IMMEDIATE_CLOSE_EVENT_EVERY);
+    }
+    log.insert(session.to_owned(), (now, 0));
+    Some(0)
 }
 
 /// Failed attempts in one outage before it is recorded as an error. With the
@@ -258,6 +295,31 @@ impl ConnectionRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pane_closing_at_once_in_a_loop_records_one_close_per_window() {
+        let start = Instant::now();
+        let instant = Duration::from_micros(200);
+        let session = "s_closes_due_loop";
+        assert_eq!(closes_due(session, instant, start), Some(0));
+        for tick in 1..120 {
+            let now = start + Duration::from_millis(500 * tick);
+            assert_eq!(closes_due(session, instant, now), None, "tick {tick}");
+        }
+        assert_eq!(
+            closes_due(session, instant, start + IMMEDIATE_CLOSE_EVENT_EVERY),
+            Some(119)
+        );
+        // A real attachment's close is always recorded.
+        assert_eq!(
+            closes_due(
+                session,
+                Duration::from_secs(5),
+                start + IMMEDIATE_CLOSE_EVENT_EVERY
+            ),
+            Some(0)
+        );
+    }
 
     #[test]
     fn rpc_error_messages_never_reach_the_client_spool() {

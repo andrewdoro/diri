@@ -189,6 +189,7 @@ recorded by the Engine, not the Holder.
 |---|---|---|---|
 | `attach.open` | debug | `session, preview, seed_bytes, ms` | slow seeds (blank pane on tab switch) |
 | `attach.close` | debug | `session, preview, attached_s` | attachments ending |
+| `attach.rejected` | info (≤ 1/min per session) | `session, reason` (`not_terminal`\|`session_not_found`\|`keyboard_unsupported`), `suppressed` (refusals since the last event) | an attach the Engine refused for good; it answers with an `AttachRejected` frame before closing. Replaces `attach.note_rejected` (before 2026-10-01: one per attempt, tens of thousands from one pane retrying a note every 500 ms) |
 | `attach.sink_dropped` | warn | `session, reason: backlog\|stalled, preview, attached_s` | a client that fell behind; it reattaches and is reseeded with a full grid |
 
 ### Remote
@@ -305,8 +306,10 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `client.identity_rejected` | warn (`instance_changed`), error | `reason, engine_kind, engine_build, engine_pid, proto` | stale/foreign daemon on the socket |
 | `rpc.error` | error | `method, kind, code, ms` | failing spawn/resume/kill… by method and Engine error code |
 | `rpc.slow` | warn | `method, ms` (≥ 2 s; not `events.wait`/`test.run`) | slow Engine operations |
-| `attach.closed` | warn, error (decode) | `session, reason` (`eof`\|`read_error`\|`write_error`\|`keepalive_timeout`\|`decode_error`\|`bad_grid`\|`bad_modes`\|`commands_closed`), `live_ms` | why a terminal connection dropped; protocol corruption |
-| `pane.attached` | info | `session, reconnect, attempts, connect_ms, since_mount_ms` | attach latency, reattach loops |
+| `attach.closed` | warn, error (decode) | `session, reason` (`eof`\|`read_error`\|`write_error`\|`keepalive_timeout`\|`decode_error`\|`bad_grid`\|`bad_modes`\|`commands_closed`), `live_ms`, `suppressed` | why a terminal connection dropped; protocol corruption. Closes under 1 s are recorded at most once a minute per session (`suppressed` counts the rest); refusals are recorded as `pane.attach_rejected` instead |
+| `pane.attached` | info | `session, reconnect, attempts, connect_ms, since_mount_ms` | attach latency, reattach loops. Muted, with `pane.detached` and `pane.drain_interrupted`, after 3 attaches in a row that ended before a grid |
+| `pane.attach_flapping` | warn | `session, attaches, since_mount_ms` | a pane whose attaches keep closing before a grid, for no stated reason (it backs off 0.5 s → 30 s) |
+| `pane.attach_rejected` | warn | `session, reason, since_mount_ms` | the Engine refused this pane's attach; the pane shows "Terminal unavailable" and waits for the session's status to change |
 | `pane.attach_failing` | error | `session, attempts, reason, since_mount_ms` | a session that cannot be attached (3 failures) |
 | `pane.first_grid` | debug; warn if not a snapshot | `session, ms, snapshot` | first frame missing or a diff before a seed |
 | `pane.first_paint` | debug | `session, ms, grid_ms, shown_ms, parked` | mount (or, for a pane nobody drew at mount, the first frame that showed it: `shown_ms` after mount) → the first frame that drew content, taken inside the terminal element's paint; `grid_ms` stays relative to mount. Once per mount of a resident per view. A pane that is never drawn (the selection pane under a workspace workbench, a warm pane of another tab, a window the system stopped drawing) records none; before 2026-09-30 the blank watchdog recorded those as a ~10 s "first paint" |

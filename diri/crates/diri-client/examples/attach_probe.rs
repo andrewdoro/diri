@@ -134,6 +134,9 @@ async fn main() {
                 );
             }
             TerminalChunk::Pong => {}
+            TerminalChunk::Rejected(reason) => {
+                eprintln!("[{:>7.1?}] rejected: {}", start.elapsed(), reason.as_str());
+            }
         }
     }
     attachment.close().await;

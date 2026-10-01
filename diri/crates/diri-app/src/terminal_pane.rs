@@ -81,6 +81,12 @@ const GRID_VERTICAL_PADDING: f32 = 12.0;
 const GRID_LAYOUT_HORIZONTAL_CHROME: f32 = 3.0;
 const GRID_LAYOUT_VERTICAL_CHROME: f32 = 2.0;
 const REATTACH_DELAY: Duration = Duration::from_millis(500);
+/// Ceiling for retrying while the Engine socket cannot be reached at all; an
+/// Engine restart should still be picked up within a few seconds.
+const REATTACH_MAX_UNREACHABLE: Duration = Duration::from_secs(4);
+/// Ceiling for retrying attaches the Engine accepts and then closes before
+/// sending anything, for a reason it did not name.
+const REATTACH_MAX_EMPTY: Duration = Duration::from_secs(30);
 const PANE_EVENT_QUEUE_CAPACITY: usize = 256;
 /// How often a live drag is allowed to push a new PTY geometry. Matched to the
 /// daemon's coalesced grid flush (also 8ms): resizing faster produces frames
@@ -141,6 +147,10 @@ enum AttachmentState {
     Attaching,
     Live,
     Reconnecting,
+    /// The Engine refused the attach for good (a note, an unknown id, a
+    /// keyboard this client cannot drive). Nothing retries until the
+    /// session's record changes.
+    Unavailable,
 }
 
 /// A reconnect has no trustworthy child modes until its fresh seed arrives.
@@ -571,6 +581,9 @@ struct ResidentTerminal {
     /// predecessor was detached.
     attachment_generation: AttachmentGeneration,
     attachment_state: AttachmentState,
+    /// The record's status when the attach was last refused or dropped; a
+    /// different status (resumed, relaunched) asks the transport to retry.
+    retry_after: Option<SessionStatus>,
     /// Last mode advertised by this attachment generation. Reset while the
     /// transport is not live so paste never trusts state from a dead child.
     bracketed_paste: bool,
@@ -1181,15 +1194,32 @@ impl TerminalPane {
                             store
                                 .sessions()
                                 .get(id)
-                                .is_some_and(|session| !session.is_archived())
+                                .is_some_and(|session| !session.is_archived() && !session.is_note())
                         })
                         .into_iter()
                         .collect()
                 } else {
-                    store.terminal_residency().resident().cloned().collect()
+                    // A note has no terminal: attaching one is refused, and a
+                    // resident note used to retry that every half second.
+                    store
+                        .terminal_residency()
+                        .resident()
+                        .filter(|id| {
+                            !store
+                                .sessions()
+                                .get(id)
+                                .is_some_and(|session| session.is_note())
+                        })
+                        .cloned()
+                        .collect()
                 }
             }
-            SessionSource::Fixed(id) if store.sessions().contains_key(id) => {
+            SessionSource::Fixed(id)
+                if store
+                    .sessions()
+                    .get(id)
+                    .is_some_and(|session| !session.is_note()) =>
+            {
                 HashSet::from([id.clone()])
             }
             SessionSource::Fixed(_) => HashSet::new(),
@@ -1305,6 +1335,7 @@ impl TerminalPane {
                     attachment,
                     attachment_generation: generation,
                     attachment_state: AttachmentState::Attaching,
+                    retry_after: None,
                     bracketed_paste: false,
                     secret_input: false,
                     find: None,
@@ -1338,6 +1369,7 @@ impl TerminalPane {
         self.observed_selected_id = selected_id.clone();
 
         self.reconcile_residency(cx);
+        self.retry_changed_sessions();
         if selection_changed {
             self.qol.clear_feedback();
             self.session_links.close();
@@ -1358,6 +1390,25 @@ impl TerminalPane {
         }
         self.reconcile_secure_input(window);
         cx.notify();
+    }
+
+    /// A detached resident whose session record changed status (a resume, a
+    /// relaunch, an Engine that came back) reattaches at once instead of
+    /// waiting out its backoff, or its refusal.
+    fn retry_changed_sessions(&mut self) {
+        let store = self.runtime.store.read().expect("store");
+        for (id, resident) in &mut self.residents {
+            let Some(waiting) = &resident.retry_after else {
+                continue;
+            };
+            let Some(session) = store.sessions().get(id) else {
+                continue;
+            };
+            if &session.status != waiting {
+                resident.retry_after = Some(session.status.clone());
+                resident.attachment.retry();
+            }
+        }
     }
 
     /// Holds macOS Secure Keyboard Entry exactly while keystrokes typed here
@@ -1768,6 +1819,20 @@ impl TerminalPane {
                         resident.keyboard = None;
                     }
                     resident.attachment_state = state;
+                    resident.retry_after = matches!(
+                        state,
+                        AttachmentState::Reconnecting | AttachmentState::Unavailable
+                    )
+                    .then(|| {
+                        self.runtime
+                            .store
+                            .read()
+                            .expect("store")
+                            .sessions()
+                            .get(&id)
+                            .map(|session| session.status.clone())
+                    })
+                    .flatten();
                 }
                 self.reconcile_secure_input(window);
                 if self.selected_id().as_ref() == Some(&id) {
@@ -1836,7 +1901,7 @@ impl TerminalPane {
                     cx.notify();
                 }
             }
-            PaneEvent::Chunk(_, _, TerminalChunk::Pong) => {}
+            PaneEvent::Chunk(_, _, TerminalChunk::Pong | TerminalChunk::Rejected(_)) => {}
             PaneEvent::FindSnapshot(id, generation, request, snapshot) => {
                 if !self.attachment_is_current(&id, generation) {
                     return;
@@ -2298,6 +2363,7 @@ impl TerminalPane {
             AttachmentState::Attaching => "attaching",
             AttachmentState::Live => "live",
             AttachmentState::Reconnecting => "reconnecting",
+            AttachmentState::Unavailable => "unavailable",
         };
         let suspect = BlankReport {
             generation,
@@ -4645,11 +4711,13 @@ impl TerminalPane {
                     })),
             );
         }
-        if show_attaching || attachment_state == AttachmentState::Reconnecting {
-            let message = if attachment_state == AttachmentState::Reconnecting {
-                "Reconnecting terminal…"
-            } else {
-                "Attaching…"
+        // An exited session's own pill already says it ended and offers Resume.
+        let unavailable = attachment_state == AttachmentState::Unavailable && !exited;
+        if show_attaching || attachment_state == AttachmentState::Reconnecting || unavailable {
+            let message = match attachment_state {
+                AttachmentState::Reconnecting => "Reconnecting terminal…",
+                AttachmentState::Unavailable => "Terminal unavailable",
+                _ => "Attaching…",
             };
             body = body.child(
                 div()
@@ -8606,6 +8674,34 @@ mod tests {
             window,
             cx,
         );
+    }
+
+    #[gpui::test]
+    fn a_selected_note_mounts_no_terminal_controller(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let mut note = fixture_session();
+        note.kind = ProtoAgentKind::NOTE;
+        note.note_id = Some("20261001-000000-beef".into());
+        let id = note.id.clone();
+        {
+            let mut store = runtime.store.write().unwrap();
+            store.upsert_session(note);
+            store.select(id.clone());
+        }
+        let (pane, cx) =
+            cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
+        pane.update_in(cx, |pane, window, cx| {
+            pane.reconcile_store_change(window, cx);
+            // A resident note attached, was refused, and retried every 500 ms.
+            assert!(!pane.residents.contains_key(&id));
+            assert!(pane.residents.is_empty());
+        });
     }
 
     #[gpui::test]

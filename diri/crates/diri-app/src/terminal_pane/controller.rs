@@ -64,6 +64,8 @@ struct ControlState {
     /// lease can tell whether another view left the PTY at a different size.
     requested_size: Option<(u16, u16)>,
     resize_wake: Arc<Notify>,
+    /// Cuts a reattach wait short; see [`AttachmentControl::retry`].
+    retry: Arc<Notify>,
     /// Flip-flopping PTY sizes (A→B→A…), the signature of a layout loop.
     resize_storm: crate::telemetry::ResizeStorm,
     /// Last `pane.input_rejected` event, to keep one per burst.
@@ -147,6 +149,12 @@ impl AttachmentControl {
             state.pending_resize = None;
             state.resize_wake.notify_one();
         }
+    }
+
+    /// The session's record changed: reattach now rather than after the
+    /// current backoff, or at all after a definitive refusal.
+    pub(super) fn retry(&self) {
+        self.state.lock().unwrap().retry.notify_one();
     }
 
     pub(super) fn ownership_revision(&self) -> u64 {
@@ -397,6 +405,7 @@ impl ControllerLease {
                 pending_resize: None,
                 requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                retry: Arc::new(Notify::new()),
                 resize_storm: crate::telemetry::ResizeStorm::default(),
                 rejection_recorded: None,
                 echo_due: None,
@@ -678,7 +687,11 @@ fn spawn_transport(
             if cancelled { return; }
         }
         let mut trace = crate::telemetry::TransportTrace::new(&id);
-        let echo = control.lock().unwrap().echo.clone();
+        let (echo, retry) = {
+            let state = control.lock().unwrap();
+            (state.echo.clone(), state.retry.clone())
+        };
+        let mut backoff = REATTACH_DELAY;
         loop {
             trace.connecting();
             let connect = SessionAttachment::connect(&socket, id.clone());
@@ -691,7 +704,13 @@ fn spawn_transport(
                 Ok(Err(_)) => trace.connect_failed("error"),
                 Err(_) => trace.connect_failed("timeout"),
             }
+            // Unreachable Engines and attaches that end before their first
+            // grid back off exponentially; a session that painted resets it.
+            let mut ceiling = REATTACH_MAX_UNREACHABLE;
             if let Ok(Ok(mut attachment)) = connected {
+                ceiling = REATTACH_MAX_EMPTY;
+                let mut rejected = None;
+                let mut painted = false;
                 let writer = attachment.handle();
                 let resize_wake = {
                     let mut state = control.lock().unwrap();
@@ -736,10 +755,13 @@ fn spawn_transport(
                         }
                         _ = &mut shutdown => break true,
                         chunk = attachment.chunks.recv() => match chunk {
+                            // The channel ends right after; remember why.
+                            Some(TerminalChunk::Rejected(reason)) => rejected = Some(reason),
                             Some(chunk) => {
                                 trace.chunk(&chunk);
                                 let grid = matches!(chunk, TerminalChunk::Grid(_));
                                 if grid {
+                                    painted = true;
                                     echo.frame_received();
                                 }
                                 let _ = events.send(PaneEvent::Chunk(id.clone(), 0, chunk));
@@ -757,21 +779,41 @@ fn spawn_transport(
                 // Linearize closed admission before draining. The existing
                 // single queue keeps all commands accepted before this point.
                 control.lock().unwrap().writer = None;
-                if !matches!(tokio::time::timeout(Duration::from_secs(2), attachment.close_checked()).await, Ok(Ok(()))) {
+                if !matches!(tokio::time::timeout(Duration::from_secs(2), attachment.close_checked()).await, Ok(Ok(()))) && rejected.is_none() {
                     // Payload-free diagnostic also covers EOF/write failure
                     // during last-view close, when no view remains to notify.
+                    // A refused attach never accepted input, so it has none to lose.
                     eprintln!("diri: terminal attachment drain interrupted; queued input may not have reached the session");
                     trace.drain_interrupted();
                 }
                 if stopping { return; }
+                if let Some(reason) = rejected {
+                    // The same request would be refused again: wait for the
+                    // pane to report that the session changed (resumed,
+                    // relaunched) instead of asking every half second.
+                    trace.rejected(reason);
+                    let _ = events.send(PaneEvent::AttachmentState(id.clone(), 0, AttachmentState::Unavailable));
+                    tokio::select! {
+                        _ = &mut shutdown => return,
+                        _ = retry.notified() => {}
+                    }
+                    backoff = REATTACH_DELAY;
+                    continue;
+                }
                 trace.detached();
                 let _ = events.send(PaneEvent::InputFeedback(id.clone(),
                     "Terminal connection interrupted. Recent input may not have reached the session; it will not be replayed.".into()));
+                if painted {
+                    backoff = REATTACH_DELAY;
+                }
             }
             let _ = events.send(PaneEvent::AttachmentState(id.clone(), 0, AttachmentState::Reconnecting));
+            let delay = backoff.min(ceiling);
+            backoff = (delay * 2).min(REATTACH_MAX_EMPTY);
             tokio::select! {
                 _ = &mut shutdown => return,
-                _ = tokio::time::sleep(REATTACH_DELAY) => {}
+                _ = retry.notified() => backoff = REATTACH_DELAY,
+                _ = tokio::time::sleep(delay) => {}
             }
         }
     });
@@ -929,6 +971,7 @@ mod tests {
                 pending_resize: None,
                 requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                retry: Arc::new(Notify::new()),
                 resize_storm: crate::telemetry::ResizeStorm::default(),
                 rejection_recorded: None,
                 echo_due: None,
@@ -982,6 +1025,144 @@ mod tests {
         last_stop.send(()).unwrap();
     }
 
+    /// An Engine that accepts every attach and closes it at once, after a
+    /// refusal frame when given one: the reconnect-storm shape.
+    fn closing_engine(
+        runtime: &tokio::runtime::Runtime,
+        refusal: Option<diri_proto::frames::AttachRejection>,
+    ) -> (PathBuf, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let path = std::env::temp_dir().join(format!(
+            "diri-refuse-{}-{}.sock",
+            std::process::id(),
+            NEXT_VIEW.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _enter = runtime.enter();
+        let listener = UnixListener::bind(&path).unwrap();
+        let connects = Arc::new(AtomicUsize::new(0));
+        let count = connects.clone();
+        let task = runtime.spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                let mut stream = BufReader::new(stream);
+                let mut hello = String::new();
+                let _ = stream.read_line(&mut hello).await;
+                if let Some(reason) = refusal {
+                    let frame = Frame::attach_rejected(reason);
+                    let _ = stream
+                        .get_mut()
+                        .write_all(&FrameCodec::encode(&frame).unwrap())
+                        .await;
+                }
+            }
+        });
+        (path, connects, task)
+    }
+
+    /// The transport's control state, every attachment state it reported,
+    /// and its shutdown.
+    type Transport = (
+        Arc<Mutex<ControlState>>,
+        Arc<Mutex<Vec<AttachmentState>>>,
+        oneshot::Sender<()>,
+    );
+
+    fn transport_against(runtime: &tokio::runtime::Runtime, path: PathBuf) -> Transport {
+        let (events, mut rx) = pane_event_channel();
+        let state = Arc::new(Mutex::new(ControlState {
+            owner: 1,
+            ownership_revision: 0,
+            writer: None,
+            last_resize: None,
+            pending_resize: None,
+            requested_size: None,
+            resize_wake: Arc::new(Notify::new()),
+            retry: Arc::new(Notify::new()),
+            resize_storm: crate::telemetry::ResizeStorm::default(),
+            rejection_recorded: None,
+            echo_due: None,
+            echo: Arc::default(),
+            resize_sends: 0,
+        }));
+        let (stop, shutdown) = oneshot::channel();
+        let (done, _) = watch::channel(false);
+        spawn_transport(
+            runtime.handle(),
+            path,
+            SessionId("a-note".into()),
+            state.clone(),
+            events,
+            shutdown,
+            (None, DrainFinished(done)),
+        );
+        let states = Arc::new(Mutex::new(Vec::new()));
+        let seen = states.clone();
+        runtime.spawn(async move {
+            let mut batch = Vec::new();
+            while rx.recv_batch(&mut batch).await {
+                for event in batch.drain(..) {
+                    if let PaneEvent::AttachmentState(_, _, state) = event {
+                        seen.lock().unwrap().push(state);
+                    }
+                }
+            }
+        });
+        (state, states, stop)
+    }
+
+    #[test]
+    fn a_refused_attach_waits_for_the_session_to_change_instead_of_retrying() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (path, connects, engine) = closing_engine(
+            &runtime,
+            Some(diri_proto::frames::AttachRejection::NotTerminal),
+        );
+        let (state, states, stop) = transport_against(&runtime, path.clone());
+        // Long enough for three retries at the old fixed 500 ms.
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(1700)).await });
+        assert_eq!(connects.load(Ordering::SeqCst), 1, "a refusal is final");
+        assert_eq!(
+            states.lock().unwrap().last(),
+            Some(&AttachmentState::Unavailable)
+        );
+
+        // The pane saw the session's record change: one more try.
+        state.lock().unwrap().retry.notify_one();
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(300)).await });
+        assert_eq!(connects.load(Ordering::SeqCst), 2);
+        let _ = stop.send(());
+        engine.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn attaches_that_close_at_once_back_off_exponentially() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // An older Engine closes without saying why.
+        let (path, connects, engine) = closing_engine(&runtime, None);
+        let (_state, states, stop) = transport_against(&runtime, path.clone());
+        // Fixed 500 ms retries attach 5 times in 2.2 s; 0.5 → 1 → 2 s waits
+        // attach at 0, 0.5 and 1.5 s.
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2200)).await });
+        let attempts = connects.load(Ordering::SeqCst);
+        assert!((2..=3).contains(&attempts), "{attempts} attaches");
+        assert!(
+            !states
+                .lock()
+                .unwrap()
+                .contains(&AttachmentState::Unavailable),
+            "an unexplained close is not a refusal"
+        );
+        let _ = stop.send(());
+        engine.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn measure_control_gate_cost_without_terminal_locking() {
         let (events, _rx) = pane_event_channel();
@@ -994,6 +1175,7 @@ mod tests {
                 pending_resize: None,
                 requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                retry: Arc::new(Notify::new()),
                 resize_storm: crate::telemetry::ResizeStorm::default(),
                 rejection_recorded: None,
                 echo_due: None,

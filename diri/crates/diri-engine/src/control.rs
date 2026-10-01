@@ -604,18 +604,20 @@ impl ControlServer {
                     // its immediate pass seeing a foreground/recent session
                     // even if registration has not completed yet.
                     if let Ok(mut registry) = self.registry.lock() {
-                        // The attach stream has no error frame: closing at once
-                        // is how it fails, as for any id without a terminal.
-                        if registry.is_note(&attach.attach.0) {
-                            diri_telemetry::event!(
-                                "attach.note_rejected",
-                                session = diri_telemetry::id(&attach.attach.0),
-                            );
-                            return Ok(());
-                        }
-                        if registry.get(&attach.attach.0).is_some_and(|session| {
+                        // A refusal is definitive: say why, then close, so the
+                        // client stops retrying instead of reconnecting forever.
+                        let rejection = if registry.is_note(&attach.attach.0) {
+                            Some(diri_proto::frames::AttachRejection::NotTerminal)
+                        } else if registry.get(&attach.attach.0).is_some_and(|session| {
                             !session.allows_keyboard_controller(attach.enhanced_keyboard)
                         }) {
+                            Some(diri_proto::frames::AttachRejection::KeyboardUnsupported)
+                        } else {
+                            None
+                        };
+                        if let Some(rejection) = rejection {
+                            drop(registry);
+                            self.attach.reject(&writer, &attach.attach.0, rejection);
                             return Ok(());
                         }
                         let _ = registry.ensure_session_awake(&attach.attach.0);
@@ -6199,6 +6201,50 @@ mod tests {
                 .with_notes_dir(temp.path().join("notes")),
         );
         (registry, server)
+    }
+
+    /// Attaches over a socket pair and returns everything the Engine wrote
+    /// before it closed.
+    fn refused_attach(server: &Arc<ControlServer>, id: &str) -> Vec<diri_proto::frames::Frame> {
+        let (mut client, engine_end) = UnixStream::pair().expect("pair");
+        let serving = {
+            let server = Arc::clone(server);
+            std::thread::spawn(move || server.serve(engine_end))
+        };
+        let mut line = serde_json::to_vec(&json!({ "attach": id })).expect("line");
+        line.push(b'\n');
+        client.write_all(&line).expect("attach line");
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("timeout");
+        let mut bytes = Vec::new();
+        client.read_to_end(&mut bytes).expect("engine closes");
+        serving.join().expect("serve").expect("served");
+        diri_proto::frames::FrameCodec::new()
+            .feed(&bytes)
+            .expect("frames")
+    }
+
+    #[test]
+    fn a_refused_attach_says_why_before_closing() {
+        use diri_proto::frames::AttachRejection;
+        let temp = tempfile::tempdir().expect("temp");
+        let (_, server) = note_server(&temp);
+        let note = ok_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({"kind": "note", "cwd": temp.path().to_string_lossy(), "title": "Plan"})),
+        ));
+        let note = note["id"].as_str().expect("id").to_owned();
+
+        for (id, reason) in [
+            (note.as_str(), AttachRejection::NotTerminal),
+            ("s_never_existed", AttachRejection::SessionNotFound),
+        ] {
+            let frames = refused_attach(&server, id);
+            assert_eq!(frames.len(), 1, "{id}: one frame, then EOF");
+            assert_eq!(frames[0].attach_rejected_payload(), Some(reason), "{id}");
+        }
     }
 
     #[test]
