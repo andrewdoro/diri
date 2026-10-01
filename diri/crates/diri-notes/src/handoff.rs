@@ -321,8 +321,8 @@ pub fn prompt(
         "\nThis note is your parent in Diri, and people who are not developers read it, so write \
          plainly. Re-read it any time with read_note (note \"{note_id}\" or \"origin\"). When you \
          find something important (a decision, a finding, a blocker, a result, a link), add one \
-         short entry with write_note entry; keep entries sparing, with no progress chatter. Never \
-         rewrite the person's text. Tick your own sub-tasks as you finish them. Finish with a \
+         short entry with write_note entry; keep entries sparing, with no progress chatter. Change \
+         the person's text only when they ask (edit_note), and never silently delete it. Tick your own sub-tasks as you finish them. Finish with a \
          one-paragraph result through report_to_parent with status done: it is added to the note.\n"
     ));
     out

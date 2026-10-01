@@ -423,6 +423,7 @@ fn who(author: &Author, agent_title: impl Fn(&str) -> Option<String>) -> String 
     match author {
         Author::User => "You".into(),
         Author::Cli => "Command line".into(),
+        Author::File => "Edited file".into(),
         Author::Session(id) => agent_title(id).unwrap_or_else(|| "An agent".into()),
     }
 }
@@ -431,6 +432,7 @@ fn author_icon(author: &Author) -> &'static str {
     match author {
         Author::User => "doc.text",
         Author::Cli => "terminal",
+        Author::File => "pencil",
         Author::Session(_) => "sparkle",
     }
 }

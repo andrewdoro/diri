@@ -425,7 +425,16 @@ impl NotePane {
         let PaneState::Open(open) = &mut self.state else {
             return;
         };
-        let theirs = store::parse_note(&source);
+        // A direct edit of the file (another editor, an agent's own file
+        // tools) is kept in history and cannot break the note's identity:
+        // the store repairs the front matter from the last known one.
+        let source = self
+            .store
+            .as_ref()
+            .and_then(|store| store.notice_outside_change(&open.id).ok())
+            .unwrap_or(source);
+        let mut theirs = store::parse_note(&source);
+        store::repair_front(&mut theirs.front, &open.id, &open.front);
         if open.dirty {
             let base = store::parse_note(&open.saved).doc;
             open.editor.update(cx, |view, cx| {

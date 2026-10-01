@@ -1134,3 +1134,79 @@ fn arrows_move_by_row_and_leave_the_table_at_its_edges(cx: &mut gpui::TestAppCon
     cx.run_until_parked();
     assert_eq!(step(cx, false), 1, "above");
 }
+
+#[gpui::test]
+fn edits_and_direct_file_changes_land_while_the_person_types(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, id) = store_with_plan();
+    let (pane, cx) = pane(cx, store.clone());
+    let session = SessionId::new("s_note");
+    pane.update_in(cx, |pane, window, cx| pane.show(&session, &id, window, cx));
+    let editor = editor(&pane, cx);
+    editor.update(cx, |view, _| {
+        let at = view
+            .editor
+            .blocks()
+            .iter()
+            .position(|b| b.text == "Keep files flat")
+            .unwrap();
+        view.editor
+            .set_caret(diri_notes::edit::Pos::new(at, "Keep files flat".len()));
+    });
+    type_text(&editor, " (decided)", cx);
+
+    // An agent's edit_note: change existing text in place.
+    store
+        .update(
+            &id,
+            &diri_notes::history::Author::Session("s_agent".into()),
+            |note| {
+                diri_notes::text_edit::edit(
+                    note,
+                    "Quick capture from anywhere",
+                    "Quick capture with ⌥⌘N",
+                    false,
+                )
+                .map(|_| ())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+            },
+        )
+        .unwrap();
+    pane.update(cx, |pane, cx| pane.reconcile(cx));
+    type_text(&editor, "!", cx);
+
+    // Then an agent edits the .md with its own file tools, dropping the
+    // front matter on the way.
+    let path = store.path_for(&id).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    let body = on_disk
+        .split_once("\n---\n")
+        .map_or(on_disk.as_str(), |(_, b)| b);
+    std::fs::write(
+        &path,
+        body.replace("Atomic file store", "Atomic, locked file store"),
+    )
+    .unwrap();
+    pane.update(cx, |pane, cx| pane.reconcile(cx));
+    type_text(&editor, "!", cx);
+    pane.update(cx, |pane, cx| pane.save(cx));
+
+    let file = std::fs::read_to_string(&path).unwrap();
+    assert!(file.contains("Keep files flat (decided)!!"), "{file}");
+    assert!(file.contains("Quick capture with ⌥⌘N"), "{file}");
+    assert!(file.contains("Atomic, locked file store"), "{file}");
+    assert!(
+        file.starts_with(&format!("---\nid: {id}\n")),
+        "identity repaired:\n{file}"
+    );
+    let versions = store.history().list(&id).unwrap();
+    assert!(
+        versions
+            .iter()
+            .any(|v| v.author == diri_notes::history::Author::File)
+    );
+    assert!(
+        versions
+            .iter()
+            .any(|v| v.author == diri_notes::history::Author::Session("s_agent".into()))
+    );
+}

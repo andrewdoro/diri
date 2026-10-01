@@ -288,7 +288,8 @@ impl NoteStore {
         edit: impl FnOnce(&mut Note) -> io::Result<T>,
     ) -> io::Result<(Note, T)> {
         let _lock = self.lock()?;
-        let before = self.load(id)?;
+        // A direct file edit since the last store write is kept first.
+        let before = parse_note(&self.notice_locked(id)?);
         let mut note = before.clone();
         let out = edit(&mut note)?;
         if note != before {
@@ -377,8 +378,48 @@ impl NoteStore {
         })();
         if result.is_err() {
             let _ = fs::remove_file(&tmp);
+        } else {
+            let _ = self.history().set_last_written(id, contents);
         }
         result
+    }
+
+    /// Takes in a change made to the file behind the store's back (another
+    /// editor, an agent's own file tools): history keeps the text as the
+    /// store last wrote it and then the new text, by [`Author::File`], and a
+    /// front matter the edit broke is repaired from the last known one so
+    /// the note keeps its identity. Returns the file's text, repaired.
+    pub fn notice_outside_change(&self, id: &str) -> io::Result<String> {
+        let _lock = self.lock()?;
+        self.notice_locked(id)
+    }
+
+    fn notice_locked(&self, id: &str) -> io::Result<String> {
+        let current = fs::read_to_string(self.path_for(id)?)?;
+        let history = self.history();
+        let Some(known) = history.last_written(id) else {
+            // Nothing written through the store yet: nothing to compare.
+            return Ok(current);
+        };
+        if known == current {
+            return Ok(current);
+        }
+        let now = history::now_ms();
+        let _ = history.record(id, &known, &Author::User, Reason::BeforeWrite, now);
+        let mut note = parse_note(&current);
+        let repaired = repair_front(&mut note.front, id, &parse_note(&known).front);
+        let source = if repaired {
+            note.to_markdown()
+        } else {
+            current
+        };
+        if repaired {
+            self.write(id, &source)?;
+        } else {
+            let _ = history.set_last_written(id, &source);
+        }
+        let _ = history.record(id, &source, &Author::File, Reason::Write, now);
+        Ok(source)
     }
 
     /// Stores a picture for note `id` and returns the path a note links it
@@ -555,6 +596,33 @@ pub fn resolve(notes: &[NoteMeta], query: &str) -> Resolve {
         1 => Resolve::Found(Box::new(matches.into_iter().next().expect("one match"))),
         _ => Resolve::Ambiguous(matches),
     }
+}
+
+/// Puts back the identity keys a direct edit dropped or changed (`id`,
+/// `created`, `project`, `session`, pin and archive state), taking them from
+/// `known`. The id always matches the file name. Returns whether anything
+/// changed. Other keys the edit added are kept.
+pub fn repair_front(front: &mut FrontMatter, id: &str, known: &FrontMatter) -> bool {
+    let mut changed = false;
+    if front.get(KEY_ID) != Some(id) {
+        front.set(KEY_ID, Some(id.to_owned()));
+        changed = true;
+    }
+    for key in [
+        KEY_CREATED,
+        KEY_PROJECT,
+        KEY_SESSION,
+        KEY_PINNED,
+        KEY_ARCHIVED,
+    ] {
+        if front.get(key).is_none()
+            && let Some(value) = known.get(key)
+        {
+            front.set(key, Some(value.to_owned()));
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub fn parse_note(source: &str) -> Note {
@@ -1061,5 +1129,58 @@ mod asset_tests {
         }
         assert!(is_image_path(Path::new("Shot.JPEG")));
         assert!(!is_image_path(Path::new("notes.md")));
+    }
+
+    #[test]
+    fn a_direct_file_edit_is_versioned_and_cannot_break_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NoteStore::open(dir.path().join("notes")).unwrap();
+        let (id, _) = store
+            .create_for_session(
+                Document::new("Plan", Vec::new()),
+                Some("/work/p"),
+                Some("s_note"),
+                &Author::User,
+            )
+            .unwrap();
+        // The person types; this save is throttled out of history but is
+        // the last text the store wrote.
+        let mut typed = store.load(&id).unwrap();
+        append_markdown(&mut typed, "typed just now");
+        let loaded = fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
+        store.save_if_unchanged(&id, &typed, &loaded).unwrap();
+        // Someone rewrites the file by hand and drops the front matter.
+        fs::write(
+            store.path_for(&id).unwrap(),
+            "# Plan\n\nrewritten by hand\n",
+        )
+        .unwrap();
+
+        let source = store.notice_outside_change(&id).unwrap();
+        let note = parse_note(&source);
+        assert_eq!(note.front.get(KEY_ID), Some(id.as_str()));
+        assert_eq!(note.front.get(KEY_SESSION), Some("s_note"));
+        assert_eq!(note.front.get(KEY_PROJECT), Some("/work/p"));
+        assert!(note.to_markdown().contains("rewritten by hand"));
+        assert_eq!(
+            fs::read_to_string(store.path_for(&id).unwrap()).unwrap(),
+            source,
+            "repaired on disk"
+        );
+
+        let versions = store.history().list(&id).unwrap();
+        assert_eq!(versions[0].author, Author::File);
+        assert!(
+            versions.iter().any(|v| store
+                .history()
+                .read(&id, v.id)
+                .unwrap()
+                .contains("typed just now")),
+            "the text before the edit is kept"
+        );
+        // Noticing again changes nothing.
+        let count = versions.len();
+        store.notice_outside_change(&id).unwrap();
+        assert_eq!(store.history().list(&id).unwrap().len(), count);
     }
 }

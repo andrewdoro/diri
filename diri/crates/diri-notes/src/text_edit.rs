@@ -1,0 +1,362 @@
+//! Editing a note as Markdown text, the way an agent edits a file.
+//!
+//! The text is the note's canonical body: [`body`] is exactly what
+//! `read_note` returns and what [`edit`] matches against: the writer's
+//! output without front matter, title first as a `# ` line. Because it is
+//! the writer's own output (normalised list markers, tidy tables, escaped
+//! characters), text an agent copies from `read_note` always matches.
+//!
+//! [`edit`] has the contract of a file Edit tool: `old` must occur exactly
+//! once (or every occurrence is replaced with `replace_all`), an empty `new`
+//! deletes, and a miss explains what is nearby so the caller can retry.
+//! [`replace_section`] swaps everything under one heading.
+
+use crate::doc::{BlockKind, Document};
+use crate::markdown::{self, FrontMatter};
+use crate::store::Note;
+
+/// The note as editable Markdown: title line, then blocks, no front matter.
+pub fn body(note: &Note) -> String {
+    markdown::write(&FrontMatter::default(), &note.doc)
+}
+
+/// What an edit changed, for the caller to show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edited {
+    /// How many places changed.
+    pub replacements: usize,
+    /// The changed region of the new body with a line of context each side.
+    pub excerpt: String,
+}
+
+/// Replaces `old` with `new` in the note's [`body`] and re-reads it.
+pub fn edit(note: &mut Note, old: &str, new: &str, replace_all: bool) -> Result<Edited, String> {
+    if old.is_empty() {
+        return Err("old_string is empty: copy the exact text to change from read_note".into());
+    }
+    if old == new {
+        return Err("old_string and new_string are the same, so nothing would change".into());
+    }
+    let text = body(note);
+    let found: Vec<usize> = text.match_indices(old).map(|(at, _)| at).collect();
+    match found.len() {
+        0 => return Err(no_match(&text, old)),
+        1 => {}
+        n if !replace_all => return Err(ambiguous(&text, old, &found, n)),
+        _ => {}
+    }
+    let first = found[0];
+    let edited = if replace_all {
+        text.replace(old, new)
+    } else {
+        format!("{}{new}{}", &text[..first], &text[first + old.len()..])
+    };
+    let (_, doc) = markdown::parse(&edited);
+    if doc.title.trim().is_empty() && !note.doc.title.trim().is_empty() && !edited.starts_with("# ")
+    {
+        // The title is the first `# ` line; removing it by accident would
+        // turn the first heading into the title. Keep the title instead.
+        return Err("that edit would remove the note's title (the first `# ` line); change it rather than delete it".into());
+    }
+    note.doc = doc;
+    let after = body(note);
+    Ok(Edited {
+        replacements: found.len(),
+        excerpt: around(&after, first, new.len().max(1)),
+    })
+}
+
+/// Replaces everything under `heading` (up to the next heading of the same
+/// or a higher level) with `markdown`, keeping the heading itself. `heading`
+/// is its text, optionally with its `#` marks to say which level. The note's
+/// title counts as the top heading: replacing it swaps the text before the
+/// first top-level heading.
+pub fn replace_section(
+    note: &mut Note,
+    heading: &str,
+    replacement: &str,
+) -> Result<Edited, String> {
+    let wanted = heading.trim();
+    let level = wanted.chars().take_while(|c| *c == '#').count();
+    let name = wanted.trim_start_matches('#').trim();
+    if name.is_empty() {
+        return Err("heading is empty: pass its text, e.g. \"Status\" or \"## Status\"".into());
+    }
+    let same = |text: &str| text.trim().eq_ignore_ascii_case(name);
+    let blocks = &note.doc.blocks;
+    let matches: Vec<(usize, u8)> = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| match b.kind {
+            BlockKind::Heading(l)
+                if same(&b.text) && (level == 0 || level as u8 == l + 1 || l as usize == level) =>
+            {
+                Some((i, l))
+            }
+            _ => None,
+        })
+        .collect();
+    let title_matches = same(&note.doc.title) && (level == 0 || level == 1);
+    let (start, end) = match (matches.as_slice(), title_matches) {
+        ([(index, level)], false) => {
+            let end = blocks[index + 1..]
+                .iter()
+                .position(|b| matches!(b.kind, BlockKind::Heading(l) if l <= *level))
+                .map_or(blocks.len(), |offset| index + 1 + offset);
+            (index + 1, end)
+        }
+        ([], true) => {
+            let end = blocks
+                .iter()
+                .position(|b| matches!(b.kind, BlockKind::Heading(1)))
+                .unwrap_or(blocks.len());
+            (0, end)
+        }
+        ([], false) => {
+            let headings: Vec<String> = blocks
+                .iter()
+                .filter_map(|b| match b.kind {
+                    BlockKind::Heading(l) => {
+                        Some(format!("{} {}", "#".repeat(l as usize + 1), b.text))
+                    }
+                    _ => None,
+                })
+                .collect();
+            return Err(if headings.is_empty() {
+                format!("no heading \"{name}\": this note has no headings; use edit_note instead")
+            } else {
+                format!(
+                    "no heading \"{name}\". The note's headings: {}",
+                    headings.join(" · ")
+                )
+            });
+        }
+        _ => {
+            return Err(format!(
+                "\"{name}\" names more than one heading; pass its level too (e.g. \"## {name}\") or use edit_note with surrounding text"
+            ));
+        }
+    };
+    let (_, parsed) = markdown::parse(&format!("\n{replacement}"));
+    let mut new_blocks: Vec<_> = parsed
+        .blocks
+        .into_iter()
+        .filter(|b| !(b.kind == BlockKind::Paragraph && b.text.is_empty()))
+        .collect();
+    // The replacement may repeat the heading; it is kept once.
+    if start > 0
+        && new_blocks
+            .first()
+            .is_some_and(|b| matches!(b.kind, BlockKind::Heading(_)) && same(&b.text))
+    {
+        new_blocks.remove(0);
+    }
+    let anchor = if start == 0 {
+        note.doc.title.clone()
+    } else {
+        note.doc.blocks[start - 1].text.clone()
+    };
+    let mut blocks = note.doc.blocks.clone();
+    blocks.splice(start..end, new_blocks);
+    note.doc = Document::new(note.doc.title.clone(), blocks);
+    let after = body(note);
+    let at = after.find(&anchor).unwrap_or(0);
+    Ok(Edited {
+        replacements: 1,
+        excerpt: around(&after, at, replacement.len().max(anchor.len())),
+    })
+}
+
+/// The lines covering `start..start + len` plus one line of context each side.
+fn around(text: &str, start: usize, len: usize) -> String {
+    let start = start.min(text.len());
+    let end = (start + len).min(text.len());
+    let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let from = text[..line_start.saturating_sub(1)]
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    let line_end = text[end..].find('\n').map_or(text.len(), |i| end + i);
+    let to = text[(line_end + 1).min(text.len())..]
+        .find('\n')
+        .map_or(text.len(), |i| line_end + 1 + i);
+    text[from..to].trim_end().to_owned()
+}
+
+fn ambiguous(text: &str, old: &str, found: &[usize], count: usize) -> String {
+    let places: Vec<String> = found
+        .iter()
+        .take(5)
+        .map(|&at| format!("line {}: {}", line_of(text, at), line_text(text, at)))
+        .collect();
+    format!(
+        "old_string appears {count} times; include more surrounding text so it is unique, or pass replace_all:true to change every one.\n{}{}",
+        places.join("\n"),
+        if count > 5 { "\n…" } else { "" }
+    ) + &format!("\n(old_string: {:?})", shorten(old))
+}
+
+fn no_match(text: &str, old: &str) -> String {
+    let mut hint = String::new();
+    // The most common slip: whitespace or case differs.
+    let squash = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    if squash(text).contains(&squash(old)) {
+        hint = "It matches if spaces, line breaks, or capital letters are ignored: copy the text exactly as read_note returns it.".into();
+    }
+    // Show the line that shares the longest start with old_string's first line.
+    let first = old
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(old)
+        .trim();
+    let best = text
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let common = line
+                .trim()
+                .chars()
+                .zip(first.chars())
+                .take_while(|(a, b)| a.eq_ignore_ascii_case(b))
+                .count();
+            let contains = line.to_lowercase().contains(&first.to_lowercase());
+            (if contains { usize::MAX } else { common }, i, line)
+        })
+        .max_by_key(|(score, i, _)| (*score, usize::MAX - i));
+    let nearby = match best {
+        Some((score, i, line)) if score >= 4 => {
+            format!("\nClosest text, line {}: {}", i + 1, shorten(line))
+        }
+        _ => String::new(),
+    };
+    format!(
+        "old_string was not found in the note. Read the note again with read_note and copy the text exactly (the note is Markdown, title first).{}{}",
+        if hint.is_empty() {
+            String::new()
+        } else {
+            format!("\n{hint}")
+        },
+        nearby
+    )
+}
+
+fn line_of(text: &str, at: usize) -> usize {
+    text[..at].matches('\n').count() + 1
+}
+
+fn line_text(text: &str, at: usize) -> String {
+    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    shorten(&text[start..end])
+}
+
+fn shorten(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= 120 {
+        text.to_owned()
+    } else {
+        format!("{}…", text.chars().take(120).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::parse_note;
+
+    const PRS: &str = "---\nid: n1\n---\n# Release tracker\n\nPRs in flight:\n\n| PR | State |\n| --- | --- |\n| #561 | Done |\n| #562 | Fix |\n\n## Status\n\nWaiting on review.\n\n- [ ] ship\n\n## Notes\n\nKeep this.\n";
+
+    #[test]
+    fn a_table_row_changes_from_fix_to_done() {
+        let mut note = parse_note(PRS);
+        let text = body(&note);
+        assert!(text.starts_with("# Release tracker\n"), "{text}");
+        assert!(
+            !text.contains("id: n1"),
+            "front matter is not editable text"
+        );
+        let row = text
+            .lines()
+            .find(|l| l.contains("#562"))
+            .unwrap()
+            .to_owned();
+        let done = row.replace("Fix", "Done");
+        let edited = edit(&mut note, &row, &done, false).unwrap();
+        assert!(edited.excerpt.contains(&done), "{}", edited.excerpt);
+        assert!(body(&note).contains(&done));
+        assert_eq!(note.front.get("id"), Some("n1"), "identity is untouched");
+    }
+
+    #[test]
+    fn edits_title_and_deletes() {
+        let mut note = parse_note(PRS);
+        edit(
+            &mut note,
+            "# Release tracker",
+            "# Release 0.9 tracker",
+            false,
+        )
+        .unwrap();
+        assert_eq!(note.doc.title, "Release 0.9 tracker");
+        edit(&mut note, "\n\nKeep this.", "", false).unwrap();
+        assert!(!body(&note).contains("Keep this"));
+        let error = edit(&mut note, "# Release 0.9 tracker\n\n", "", false).unwrap_err();
+        assert!(error.contains("title"), "{error}");
+    }
+
+    #[test]
+    fn misses_and_repeats_explain_themselves() {
+        let mut note = parse_note(PRS);
+        let missing = edit(&mut note, "Waiting on  REVIEW.", "x", false).unwrap_err();
+        assert!(missing.contains("not found"), "{missing}");
+        assert!(
+            missing.contains("spaces, line breaks, or capital letters"),
+            "{missing}"
+        );
+        assert!(missing.contains("Waiting on review."), "{missing}");
+        let twice = edit(&mut note, "| #56", "| PR #56", false).unwrap_err();
+        assert!(twice.contains("appears 2 times"), "{twice}");
+        assert!(twice.contains("replace_all"), "{twice}");
+        assert!(twice.contains("#561") && twice.contains("#562"), "{twice}");
+        let all = edit(&mut note, "| #56", "| PR #56", true).unwrap();
+        assert_eq!(all.replacements, 2);
+        assert!(edit(&mut note, "", "x", false).is_err());
+    }
+
+    #[test]
+    fn a_section_is_replaced_up_to_the_next_heading_of_its_level() {
+        let mut note = parse_note(PRS);
+        replace_section(&mut note, "Status", "Merged and released.\n\n- [x] ship").unwrap();
+        let text = body(&note);
+        assert!(
+            text.contains(
+                "## Status\n\nMerged and released.\n\n- [x] ship\n\n## Notes\n\nKeep this."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("Waiting on review"));
+        // Repeating the heading in the replacement does not duplicate it.
+        replace_section(&mut note, "## Status", "## Status\n\nAll done.").unwrap();
+        assert_eq!(body(&note).matches("## Status").count(), 1);
+        // The title's section is the text before the first top-level heading.
+        replace_section(&mut note, "Release tracker", "Intro rewritten.").unwrap();
+        let text = body(&note);
+        assert!(
+            text.starts_with("# Release tracker\n\nIntro rewritten.\n\n## Status"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn missing_and_ambiguous_headings_are_errors() {
+        let mut note = parse_note("# T\n\n## A\n\nx\n\n## A\n\ny\n");
+        let missing = replace_section(&mut note, "B", "z").unwrap_err();
+        assert!(missing.contains("## A"), "{missing}");
+        let ambiguous = replace_section(&mut note, "A", "z").unwrap_err();
+        assert!(ambiguous.contains("more than one"), "{ambiguous}");
+    }
+}

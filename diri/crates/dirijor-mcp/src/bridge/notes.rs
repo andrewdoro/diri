@@ -276,7 +276,10 @@ impl Bridge {
         {
             object.insert("session".into(), session_fact(record));
         }
-        object.insert("markdown".into(), json!(note.to_markdown()));
+        // Exactly the text edit_note matches: the canonical Markdown body,
+        // title first, front matter left out.
+        object.insert("markdown".into(), json!(diri_notes::text_edit::body(&note)));
+        object.insert("path".into(), json!(meta.path));
         object.insert("todos".into(), Value::Array(todos));
         object.insert("mentions".into(), Value::Array(mentions));
         if let Err(error) = sessions {
@@ -685,6 +688,100 @@ impl Bridge {
     fn adopt_note_session(&self, note_id: &str) -> Result<SessionRecord, String> {
         let params = json!({"kind": AgentKind::NOTE_ID, "cwd": "", "noteId": note_id});
         self.request_typed(Method::SESSION_SPAWN, params, NOTE_SPAWN_TIMEOUT)
+    }
+
+    /// Changes a note's text in place, like editing a Markdown file: the
+    /// exact `old_string` (unique unless `replace_all`) becomes `new_string`,
+    /// and an empty `new_string` deletes. Matches the Markdown `read_note`
+    /// returns.
+    pub(super) fn edit_note(&self, args: &Value) -> Result<Value, String> {
+        let old = args["old_string"]
+            .as_str()
+            .ok_or("old_string is required: the exact text to change, copied from read_note")?
+            .to_owned();
+        let new = args["new_string"].as_str().unwrap_or_default().to_owned();
+        let replace_all = optional_bool(args, "replace_all").unwrap_or(false);
+        self.change_note(args, |note| {
+            diri_notes::text_edit::edit(note, &old, &new, replace_all)
+        })
+    }
+
+    /// Replaces everything under one heading of a note.
+    pub(super) fn replace_section(&self, args: &Value) -> Result<Value, String> {
+        let heading = required_string(args, "heading")?;
+        let markdown = args["markdown"].as_str().unwrap_or_default().to_owned();
+        if markdown.len() > MAX_APPEND_BYTES {
+            return Err(format!("markdown is larger than {MAX_APPEND_BYTES} bytes"));
+        }
+        self.change_note(args, |note| {
+            diri_notes::text_edit::replace_section(note, &heading, &markdown)
+        })
+    }
+
+    /// Applies an in-place change under the store lock, attributed to the
+    /// caller, with history before and after; an open editor merges it in.
+    fn change_note(
+        &self,
+        args: &Value,
+        change: impl FnOnce(&mut Note) -> Result<diri_notes::text_edit::Edited, String>,
+    ) -> Result<Value, String> {
+        let store = self.note_store()?;
+        let snapshot = self.snapshot()?;
+        let meta = self.resolve_note(
+            &store,
+            &required_string(args, "note")?,
+            Some(&snapshot.sessions),
+        )?;
+        self.authorize_note_write(&snapshot, &meta)?;
+        let caller = self.require_caller()?.to_owned();
+        let (_, edited) = store
+            .update(&meta.id, &Author::Session(caller), |note| {
+                change(note).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+            })
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::InvalidInput => e.to_string(),
+                _ => format!("cannot change note {}: {e}", meta.id),
+            })?;
+        let version = store
+            .history()
+            .list(&meta.id)
+            .ok()
+            .and_then(|versions| versions.first().map(|v| v.id));
+        Ok(json!({
+            "note": meta.id,
+            "replacements": edited.replacements,
+            "changed": edited.excerpt,
+            "version": version,
+            "undo": "Every earlier version is kept: note_history lists them, and the person can restore one.",
+        }))
+    }
+
+    fn authorize_note_write(
+        &self,
+        snapshot: &SessionListResult,
+        meta: &NoteMeta,
+    ) -> Result<(), String> {
+        let note_session = note_sessions(&snapshot.sessions)
+            .get(meta.id.as_str())
+            .map(|record| record.id.0.clone());
+        let mentioned: Vec<String> = meta
+            .mentions
+            .iter()
+            .filter_map(|target| match target {
+                MentionTarget::Session(id) => Some(id.clone()),
+                MentionTarget::Note(_) => None,
+            })
+            .collect();
+        McpPolicy::new(
+            &snapshot.sessions,
+            &snapshot.projects,
+            self.caller.as_deref(),
+        )?
+        .authorize(WriteAction::WriteNote {
+            mentions: &mentioned,
+            note_session: note_session.as_deref(),
+        })?;
+        Ok(())
     }
 
     fn note_store(&self) -> Result<NoteStore, String> {
@@ -1471,5 +1568,159 @@ mod tests {
                 .all(|tool| !tool.name.contains("restore")),
             "restoring stays with the person"
         );
+    }
+
+    const TRACKER: &str = "PRs in flight:\n\n| PR | State |\n| --- | --- |\n| #561 | Done |\n| #562 | Fix |\n\n## Status\n\nWaiting on review.\n\n## Notes\n\nKeep this.";
+
+    #[test]
+    fn edit_note_changes_a_table_row_copied_from_read_note() {
+        let fixture = Fixture::new(sessions());
+        let id = fixture.note("Release tracker", None, TRACKER);
+        let bridge = fixture.bridge("root");
+        let read = bridge.call("read_note", &json!({"note": id})).unwrap();
+        let markdown = read["markdown"].as_str().unwrap();
+        assert!(markdown.starts_with("# Release tracker\n"), "{markdown}");
+        assert!(
+            !markdown.contains("id:"),
+            "front matter is not part of the text"
+        );
+        assert!(
+            read["path"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("{id}.md"))
+        );
+        // Copy the row exactly as read_note shows it.
+        let row = markdown.lines().find(|l| l.contains("#562")).unwrap();
+        let result = bridge
+            .call(
+                "edit_note",
+                &json!({"note": id, "old_string": row, "new_string": row.replace("Fix", "Done")}),
+            )
+            .unwrap();
+        assert_eq!(result["replacements"], 1);
+        assert!(
+            result["changed"].as_str().unwrap().contains("#562 | Done"),
+            "{result}"
+        );
+        let after = bridge.call("read_note", &json!({"note": id})).unwrap();
+        assert!(
+            after["markdown"]
+                .as_str()
+                .unwrap()
+                .contains(&row.replace("Fix", "Done"))
+        );
+
+        // History: the version before, then the agent's change.
+        let history = bridge.call("note_history", &json!({"note": id})).unwrap();
+        assert_eq!(history["versions"][0]["version"], result["version"]);
+        assert_eq!(history["versions"][0]["by"], "root");
+        let before = history["versions"][1]["version"].as_u64().unwrap();
+        let old = bridge
+            .call("note_history", &json!({"note": id, "version": before}))
+            .unwrap();
+        assert!(old["markdown"].as_str().unwrap().contains("#562 | Fix"));
+    }
+
+    #[test]
+    fn edit_note_explains_misses_and_repeats() {
+        let fixture = Fixture::new(sessions());
+        let id = fixture.note("Release tracker", None, TRACKER);
+        let bridge = fixture.bridge("root");
+        let missing = bridge
+            .call(
+                "edit_note",
+                &json!({"note": id, "old_string": "waiting on REVIEW", "new_string": "x"}),
+            )
+            .unwrap_err();
+        assert!(
+            missing.contains("not found") && missing.contains("Waiting on review."),
+            "{missing}"
+        );
+        let twice = bridge
+            .call(
+                "edit_note",
+                &json!({"note": id, "old_string": "| #56", "new_string": "| PR #56"}),
+            )
+            .unwrap_err();
+        assert!(twice.contains("appears 2 times"), "{twice}");
+        bridge
+            .call("edit_note", &json!({"note": id, "old_string": "| #56", "new_string": "| PR #56", "replace_all": true}))
+            .unwrap();
+        // Deleting is an empty new_string.
+        bridge
+            .call(
+                "edit_note",
+                &json!({"note": id, "old_string": "\n\nKeep this.", "new_string": ""}),
+            )
+            .unwrap();
+        let text = fixture.store().load(&id).unwrap();
+        assert!(!diri_notes::text_edit::body(&text).contains("Keep this"));
+    }
+
+    #[test]
+    fn replace_section_swaps_what_is_under_a_heading() {
+        let fixture = Fixture::new(sessions());
+        let id = fixture.note("Release tracker", None, TRACKER);
+        let bridge = fixture.bridge("root");
+        bridge
+            .call("replace_section", &json!({"note": id, "heading": "Status", "markdown": "Shipped in 0.9.\n\n- [x] tag the release"}))
+            .unwrap();
+        let body = diri_notes::text_edit::body(&fixture.store().load(&id).unwrap());
+        assert!(
+            body.contains(
+                "## Status\n\nShipped in 0.9.\n\n- [x] tag the release\n\n## Notes\n\nKeep this."
+            ),
+            "{body}"
+        );
+        let missing = bridge
+            .call(
+                "replace_section",
+                &json!({"note": id, "heading": "Risks", "markdown": "x"}),
+            )
+            .unwrap_err();
+        assert!(missing.contains("## Status"), "{missing}");
+    }
+
+    #[test]
+    fn delegated_agents_edit_only_their_own_notes() {
+        let (fixture, origin) = from_note();
+        fixture
+            .store()
+            .append(&origin, "Draft: Fix", &Author::Cli)
+            .unwrap();
+        let other = fixture.note("Someone else's", None, "Draft: Fix");
+        // `grandchild` is delegated (its parent is an agent) but descends from the note.
+        fixture
+            .bridge("grandchild")
+            .call(
+                "edit_note",
+                &json!({"note": "origin", "old_string": "Draft: Fix", "new_string": "Draft: Done"}),
+            )
+            .unwrap();
+        let denied = fixture
+            .bridge("grandchild")
+            .call(
+                "edit_note",
+                &json!({"note": other, "old_string": "Draft: Fix", "new_string": "x"}),
+            )
+            .unwrap_err();
+        assert!(denied.contains("denied"), "{denied}");
+        let denied = fixture
+            .bridge("grandchild")
+            .call(
+                "replace_section",
+                &json!({"note": other, "heading": "Someone else's", "markdown": "x"}),
+            )
+            .unwrap_err();
+        assert!(denied.contains("denied"), "{denied}");
+        // A root agent (the person's own chat) may edit any note.
+        fixture
+            .bridge("stranger")
+            .call(
+                "edit_note",
+                &json!({"note": other, "old_string": "Draft: Fix", "new_string": "Draft: Done"}),
+            )
+            .unwrap();
     }
 }

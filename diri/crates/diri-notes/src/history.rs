@@ -30,6 +30,8 @@ pub const HISTORY_DIR: &str = ".history";
 pub const EDIT_INTERVAL_MS: u64 = 60_000;
 pub const MAX_VERSIONS: usize = 200;
 pub const MAX_BYTES: u64 = 20 * 1024 * 1024;
+/// Not a version: the store's last written text (no `.md`, so never listed).
+const LAST_WRITTEN: &str = "last";
 
 const MINUTE: u64 = 60_000;
 const HOUR: u64 = 60 * MINUTE;
@@ -44,6 +46,9 @@ pub enum Author {
     Session(String),
     /// `dirijor note` from a terminal outside any Session.
     Cli,
+    /// Someone edited the `.md` file directly (another editor, an agent's
+    /// own file tools); noticed afterwards, so the editor is unknown.
+    File,
 }
 
 impl Author {
@@ -51,6 +56,7 @@ impl Author {
         match self {
             Self::User => "user",
             Self::Cli => "cli",
+            Self::File => "file",
             Self::Session(id) => id,
         }
     }
@@ -59,6 +65,7 @@ impl Author {
         match token {
             "user" => Some(Self::User),
             "cli" => Some(Self::Cli),
+            "file" => Some(Self::File),
             id if crate::store::is_valid_id(id) => Some(Self::Session(id.to_owned())),
             _ => None,
         }
@@ -69,6 +76,7 @@ impl Author {
         match self {
             Self::User => "you".into(),
             Self::Cli => "the command line".into(),
+            Self::File => "a direct file edit".into(),
             Self::Session(id) => id.clone(),
         }
     }
@@ -189,6 +197,23 @@ impl History {
         write_private(&dir.join(name), source)?;
         self.prune(note_id, now_ms)?;
         Ok(Some(id))
+    }
+
+    /// Remembers the exact text the store last wrote, so a change made
+    /// behind its back can be noticed and the text before it kept, even when
+    /// throttling kept no version of it.
+    pub fn set_last_written(&self, note_id: &str, source: &str) -> io::Result<()> {
+        let dir = self.note_dir(note_id)?;
+        create_private_dir(&self.dir)?;
+        create_private_dir(&dir)?;
+        let path = dir.join(LAST_WRITTEN);
+        let _ = fs::remove_file(path.with_extension("tmp"));
+        write_private(&path, source)
+    }
+
+    /// The text the store last wrote for this note, if it remembers it.
+    pub fn last_written(&self, note_id: &str) -> Option<String> {
+        fs::read_to_string(self.note_dir(note_id).ok()?.join(LAST_WRITTEN)).ok()
     }
 
     /// Versions, newest first, each with a summary of what it changed.

@@ -13,4 +13,5 @@ pub mod markdown;
 pub mod mention;
 pub mod merge;
 pub mod store;
+pub mod text_edit;
 pub mod work;
