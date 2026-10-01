@@ -53,7 +53,7 @@ use gpui::{
     AnyElement, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter, ExternalPaths,
     FocusHandle, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, Role,
     ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, Window, div,
-    font, prelude::*, px,
+    prelude::*, px,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -1175,7 +1175,15 @@ impl TerminalPane {
             if self.residents.contains_key(&id) {
                 continue;
             }
-            let mono = crate::fonts::terminal_font();
+            let mono = crate::fonts::terminal_font(
+                &self
+                    .runtime
+                    .store
+                    .read()
+                    .expect("session store lock poisoned")
+                    .preferences()
+                    .terminal_font_family,
+            );
             let generation = self.next_attachment_generation;
             self.next_attachment_generation = self.next_attachment_generation.wrapping_add(1);
             let parked = self
@@ -2881,13 +2889,9 @@ impl TerminalPane {
             .store
             .read()
             .expect("session store lock poisoned");
-        let font_size = store.preferences().terminal_font_size;
+        let typeface = TerminalType::from_prefs(store.preferences());
         drop(store);
-        let metrics = CellMetrics::measure(
-            window.text_system(),
-            &font(crate::fonts::mono_family()),
-            px(font_size),
-        );
+        let metrics = typeface.metrics(window);
         let viewport = self.viewport.unwrap_or_default();
         let grid_x = viewport.x + GRID_HORIZONTAL_PADDING / 2.0;
         // An overflowing grid is bottom-anchored (see render_grid_and_overlays),
@@ -2898,7 +2902,7 @@ impl TerminalPane {
             .and_then(|id| self.residents.get(&id))
             .map_or(0, |resident| resident.element.grid_rows());
         let anchor = self
-            .grid_row_overflow(grid_rows, font_size, window)
+            .grid_row_overflow(grid_rows, &typeface, window)
             .map_or(0.0, |grid_height| self.grid_inner_height() - grid_height);
         let grid_y = viewport.y + self.header_height() + 2.0 + anchor;
         let col = ((f32::from(position.x) - grid_x) / f32::from(metrics.cell_width))
@@ -3258,17 +3262,13 @@ impl TerminalPane {
     fn grid_row_overflow(
         &self,
         grid_rows: u16,
-        font_size: f32,
+        typeface: &TerminalType,
         window: &mut Window,
     ) -> Option<f32> {
         if grid_rows == 0 || self.viewport.is_none() {
             return None;
         }
-        let metrics = CellMetrics::measure(
-            window.text_system(),
-            &font(crate::fonts::mono_family()),
-            px(font_size),
-        );
+        let metrics = typeface.metrics(window);
         // A pixel of slack on top of the exact row height: the element derives
         // its row count back out with `floor(height / line_height)`, and an
         // exactly-sized box loses its last row to float error or to layout
@@ -3817,15 +3817,14 @@ impl TerminalPane {
         let Some(id) = self.selected_id() else {
             return;
         };
-        let font_size = self
-            .runtime
-            .store
-            .read()
-            .expect("session store lock poisoned")
-            .preferences()
-            .terminal_font_size;
-        let font = font(crate::fonts::mono_family());
-        let metrics = CellMetrics::measure(window.text_system(), &font, px(font_size));
+        let typeface = TerminalType::from_prefs(
+            self.runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .preferences(),
+        );
+        let metrics = typeface.metrics(window);
         let viewport = self.viewport.unwrap_or_default();
         let grid_x = viewport.x + GRID_HORIZONTAL_PADDING / 2.0;
         let grid_y = viewport.y + self.header_height() + 2.0;
@@ -3870,13 +3869,13 @@ impl TerminalPane {
         let Some(session) = self.selected_session() else {
             return;
         };
-        let font_size = self
-            .runtime
-            .store
-            .read()
-            .expect("session store lock poisoned")
-            .preferences()
-            .terminal_font_size;
+        let typeface = TerminalType::from_prefs(
+            self.runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .preferences(),
+        );
         let already_sized = self
             .residents
             .get(&session.id)
@@ -3898,11 +3897,7 @@ impl TerminalPane {
         }) else {
             return;
         };
-        let metrics = CellMetrics::measure(
-            window.text_system(),
-            &font(crate::fonts::mono_family()),
-            px(font_size),
-        );
+        let metrics = typeface.metrics(window);
         let size = estimated_grid_size(
             viewport.width,
             viewport.height,
@@ -4322,7 +4317,7 @@ impl TerminalPane {
         session: &SessionRecord,
         theme: TermTheme,
         colors: SemanticColors,
-        font_size: f32,
+        typeface: &TerminalType,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -4366,7 +4361,9 @@ impl TerminalPane {
                 diri_ui::Material::Opaque => 1.0,
                 diri_ui::Material::Glass => 0.0,
             })
-            .font_size(px(font_size))
+            .font(typeface.font.clone())
+            .font_size(px(typeface.size))
+            .line_height_scale(typeface.line_height)
             .focus_handle(self.focus.clone())
             .reduce_motion(cx.reduce_motion())
             .hovered_reference(self.qol.hit.clone());
@@ -4383,18 +4380,11 @@ impl TerminalPane {
         let show_attaching =
             attachment_state == AttachmentState::Attaching && !resident.element.has_content();
         let secret_input = resident.secret_input && attachment_state == AttachmentState::Live;
-        let overflow = self.grid_row_overflow(resident.element.grid_rows(), font_size, window);
+        let overflow = self.grid_row_overflow(resident.element.grid_rows(), typeface, window);
         let scroll_target = TerminalScrollTarget {
             element: resident.element.clone(),
             visible_rows: usize::from(resident.last_size.1.max(1)),
-            line_height: f32::from(
-                CellMetrics::measure(
-                    window.text_system(),
-                    &font(crate::fonts::mono_family()),
-                    px(font_size),
-                )
-                .line_height,
-            ),
+            line_height: f32::from(typeface.metrics(window).line_height),
             session: session.id.clone(),
             pane_tx: self.pane_tx.clone(),
         };
@@ -5003,7 +4993,7 @@ impl TerminalPane {
         if crate::alerts::enabled(cx) {
             self.sync_paste_prompt(window, cx);
         }
-        let (theme, colors, sidebar_colors, font_size) = {
+        let (theme, colors, sidebar_colors, typeface) = {
             let store = self
                 .runtime
                 .store
@@ -5013,7 +5003,7 @@ impl TerminalPane {
                 crate::app_theme::terminal_theme_in(&store),
                 crate::app_theme::colors_in(&store),
                 crate::app_theme::sidebar_colors_in(&store),
-                store.preferences().terminal_font_size,
+                TerminalType::from_prefs(store.preferences()),
             )
         };
         self.sync_status_glyphs(colors, window, cx);
@@ -5051,7 +5041,7 @@ impl TerminalPane {
                 .overflow_hidden()
                 .bg(colors.work_surface_nested())
                 .child(
-                    self.render_grid_and_overlays(&session, theme, colors, font_size, window, cx),
+                    self.render_grid_and_overlays(&session, theme, colors, &typeface, window, cx),
                 );
             if let Some(find) = self.render_find_bar(&session, colors, cx) {
                 terminal_surface = terminal_surface.child(find);
@@ -5601,6 +5591,29 @@ fn exit_description(session: &SessionRecord) -> String {
         ExitReason::External => "Imported session — not started yet".to_owned(),
         ExitReason::Archived => "Archived".to_owned(),
         ExitReason::Unknown => "Session ended".to_owned(),
+    }
+}
+
+/// The terminal typography preferences, resolved once per use so sizing,
+/// painting and hit-testing measure the same cell.
+struct TerminalType {
+    font: gpui::Font,
+    size: f32,
+    line_height: f32,
+}
+
+impl TerminalType {
+    fn from_prefs(prefs: &crate::store::Prefs) -> Self {
+        Self {
+            font: crate::fonts::terminal_font(&prefs.terminal_font_family),
+            size: prefs.terminal_font_size,
+            line_height: prefs.terminal_line_height,
+        }
+    }
+
+    fn metrics(&self, window: &Window) -> CellMetrics {
+        CellMetrics::measure(window.text_system(), &self.font, px(self.size))
+            .with_line_height_scale(self.line_height)
     }
 }
 
