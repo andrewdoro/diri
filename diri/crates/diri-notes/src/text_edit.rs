@@ -27,6 +27,10 @@ pub struct Edited {
     pub replacements: usize,
     /// The changed region of the new body with a line of context each side.
     pub excerpt: String,
+    /// `old` matched only once table spacing was ignored: Diri re-aligns
+    /// tables after each change, so a row an agent just wrote reads with
+    /// different padding.
+    pub tolerant: bool,
 }
 
 /// Replaces `old` with `new` in the note's [`body`] and re-reads it.
@@ -40,17 +44,43 @@ pub fn edit(note: &mut Note, old: &str, new: &str, replace_all: bool) -> Result<
     let text = body(note);
     let found: Vec<usize> = text.match_indices(old).map(|(at, _)| at).collect();
     match found.len() {
-        0 => return Err(no_match(&text, old)),
+        0 => {
+            return match tolerant_match(&text, old) {
+                Some(range) => apply(note, &text, range, new, true),
+                None => Err(no_match(&text, old)),
+            };
+        }
         1 => {}
         n if !replace_all => return Err(ambiguous(&text, old, &found, n)),
         _ => {}
     }
-    let first = found[0];
-    let edited = if replace_all {
-        text.replace(old, new)
-    } else {
-        format!("{}{new}{}", &text[..first], &text[first + old.len()..])
-    };
+    if !replace_all {
+        let first = found[0];
+        return apply(note, &text, first..first + old.len(), new, false);
+    }
+    let edited = text.replace(old, new);
+    finish(note, edited, found[0], new, found.len(), false)
+}
+
+fn apply(
+    note: &mut Note,
+    text: &str,
+    range: std::ops::Range<usize>,
+    new: &str,
+    tolerant: bool,
+) -> Result<Edited, String> {
+    let edited = format!("{}{new}{}", &text[..range.start], &text[range.end..]);
+    finish(note, edited, range.start, new, 1, tolerant)
+}
+
+fn finish(
+    note: &mut Note,
+    edited: String,
+    first: usize,
+    new: &str,
+    replacements: usize,
+    tolerant: bool,
+) -> Result<Edited, String> {
     let (_, doc) = markdown::parse(&edited);
     if doc.title.trim().is_empty() && !note.doc.title.trim().is_empty() && !edited.starts_with("# ")
     {
@@ -61,9 +91,79 @@ pub fn edit(note: &mut Note, old: &str, new: &str, replace_all: bool) -> Result<
     note.doc = doc;
     let after = body(note);
     Ok(Edited {
-        replacements: found.len(),
+        replacements,
         excerpt: around(&after, first, new.len().max(1)),
+        tolerant,
     })
+}
+
+/// The one place `old` occurs once spacing that Diri itself changes is
+/// ignored: runs of spaces next to `|` and trailing spaces, on table lines
+/// only (lines starting with `|`, and lines of `old` containing `|`).
+/// `None` unless exactly one place matches.
+fn tolerant_match(text: &str, old: &str) -> Option<std::ops::Range<usize>> {
+    if !old.contains('|') {
+        return None;
+    }
+    let (haystack, map) = squash_tables(text, |line| line.trim_start().starts_with('|'));
+    let (needle, _) = squash_tables(old, |line| line.contains('|'));
+    if needle.is_empty() {
+        return None;
+    }
+    let mut hits = haystack.match_indices(&needle).map(|(at, _)| at);
+    let start = hits.next()?;
+    if hits.next().is_some() {
+        return None;
+    }
+    let end = start + needle.len();
+    Some(map[start]..map[end - 1] + 1)
+}
+
+/// `text` with spaces dropped next to `|` and at line ends on the lines
+/// `is_table` picks, plus each kept byte's index in `text`.
+fn squash_tables(text: &str, is_table: impl Fn(&str) -> bool) -> (String, Vec<usize>) {
+    let mut out = String::with_capacity(text.len());
+    let mut map = Vec::with_capacity(text.len());
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let (content, newline) = match line.strip_suffix('\n') {
+            Some(content) => (content, true),
+            None => (line, false),
+        };
+        let table = is_table(content);
+        let bytes = content.as_bytes();
+        let keep_to = if table {
+            content.trim_end_matches(' ').len()
+        } else {
+            bytes.len()
+        };
+        for (i, &b) in bytes.iter().enumerate().take(keep_to) {
+            if table && b == b' ' {
+                // Drop a space that belongs to a run touching a pipe.
+                let before = bytes[..i].iter().rev().find(|&&c| c != b' ');
+                let after = bytes[i + 1..].iter().find(|&&c| c != b' ');
+                if before == Some(&b'|') || after == Some(&b'|') {
+                    continue;
+                }
+            }
+            out.push(b as char);
+            map.push(offset + i);
+        }
+        if newline {
+            out.push('\n');
+            map.push(offset + content.len());
+        }
+        offset += line.len();
+    }
+    // Bytes were copied one by one; rebuild UTF-8 faithfully.
+    let out = {
+        let mut bytes = Vec::with_capacity(map.len());
+        for &i in &map {
+            bytes.push(text.as_bytes()[i]);
+        }
+        String::from_utf8(bytes).expect("only ASCII spaces were removed")
+    };
+    (out, map)
 }
 
 /// Replaces everything under `heading` (up to the next heading of the same
@@ -164,6 +264,7 @@ pub fn replace_section(
     Ok(Edited {
         replacements: 1,
         excerpt: around(&after, at, replacement.len().max(anchor.len())),
+        tolerant: false,
     })
 }
 
@@ -374,5 +475,37 @@ mod tests {
         assert!(missing.contains("## A"), "{missing}");
         let ambiguous = replace_section(&mut note, "A", "z").unwrap_err();
         assert!(ambiguous.contains("more than one"), "{ambiguous}");
+    }
+
+    #[test]
+    fn a_second_edit_may_reuse_the_first_new_string_after_re_alignment() {
+        let mut note = parse_note(PRS);
+        let row = body(&note)
+            .lines()
+            .find(|l| l.contains("#562"))
+            .unwrap()
+            .to_owned();
+        // First edit: the agent's own spacing, which Diri then re-aligns.
+        let first_new = "| #562 | Done |";
+        let first = edit(&mut note, &row, first_new, false).unwrap();
+        assert!(!first.tolerant);
+        // Second edit: the previous new_string no longer matches exactly.
+        let second = edit(&mut note, first_new, "| #562 | Shipped |", false).unwrap();
+        assert!(second.tolerant, "matched ignoring table spacing");
+        let text = body(&note);
+        assert!(
+            text.contains("#562") && text.contains("Shipped") && !text.contains("Done  |\n| #562")
+        );
+        let row = text.lines().find(|l| l.contains("#562")).unwrap();
+        assert_eq!(row.split_whitespace().collect::<String>(), "|#562|Shipped|");
+        // Exact first: an exact match is never reported as tolerant.
+        let exact = edit(&mut note, "Waiting on review.", "Waiting on QA.", false).unwrap();
+        assert!(!exact.tolerant);
+        // Tolerance stays inside tables, and never picks among several rows.
+        assert!(edit(&mut note, "Waiting  on QA.", "x", false).is_err());
+        let mut two =
+            parse_note("# T\n\n| PR | State |\n| --- | --- |\n| #1 | Done |\n| #2 | Done |\n");
+        let error = edit(&mut two, "|Done|", "| x |", false).unwrap_err();
+        assert!(error.contains("not found"), "{error}");
     }
 }

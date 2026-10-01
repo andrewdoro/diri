@@ -666,5 +666,8 @@ fn change(
             _ => CliError::failure(format!("cannot change the note: {e}")),
         })?;
     println!("{}", edited.excerpt);
+    if edited.tolerant {
+        eprintln!("dirijor: matched the table row ignoring its spacing");
+    }
     Ok(())
 }

@@ -747,13 +747,19 @@ impl Bridge {
             .list(&meta.id)
             .ok()
             .and_then(|versions| versions.first().map(|v| v.id));
-        Ok(json!({
+        let mut result = json!({
             "note": meta.id,
             "replacements": edited.replacements,
             "changed": edited.excerpt,
             "version": version,
             "undo": "Every earlier version is kept: note_history lists them, and the person can restore one.",
-        }))
+        });
+        if edited.tolerant {
+            result["matched"] = json!(
+                "ignoring table spacing: Diri re-aligns tables after each change, so your text matched one row once spaces around | were ignored"
+            );
+        }
+        Ok(result)
     }
 
     fn authorize_note_write(
@@ -1726,5 +1732,44 @@ mod tests {
                 &json!({"note": other, "old_string": "Draft: Fix", "new_string": "Draft: Done"}),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn a_second_edit_reuses_the_first_new_string_on_a_re_aligned_row() {
+        let fixture = Fixture::new(sessions());
+        let id = fixture.note("Release tracker", None, TRACKER);
+        let bridge = fixture.bridge("root");
+        let markdown = bridge.call("read_note", &json!({"note": id})).unwrap()["markdown"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let row = markdown.lines().find(|l| l.contains("#562")).unwrap();
+        let first = bridge
+            .call(
+                "edit_note",
+                &json!({"note": id, "old_string": row, "new_string": "| #562 | Done |"}),
+            )
+            .unwrap();
+        assert!(first.get("matched").is_none(), "{first}");
+        // The agent reuses its own new_string; Diri has re-aligned the row.
+        let second = bridge
+            .call("edit_note", &json!({"note": id, "old_string": "| #562 | Done |", "new_string": "| #562 | Shipped |"}))
+            .unwrap();
+        assert!(
+            second["matched"]
+                .as_str()
+                .unwrap()
+                .contains("ignoring table spacing"),
+            "{second}"
+        );
+        let after = bridge.call("read_note", &json!({"note": id})).unwrap();
+        let row = after["markdown"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .find(|l| l.contains("#562"))
+            .unwrap()
+            .to_owned();
+        assert_eq!(row.split_whitespace().collect::<String>(), "|#562|Shipped|");
     }
 }

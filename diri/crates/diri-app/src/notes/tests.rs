@@ -1076,6 +1076,7 @@ fn tables_take_tab_navigation_and_paste_from_a_spreadsheet(cx: &mut gpui::TestAp
 
 /// The table from the user's screenshot, written the way an agent writes
 /// one: loose pipes, no padding, marks and chips in cells.
+#[cfg(target_os = "macos")]
 pub(crate) const AGENT_GAPS: &str = "# Launch readiness
 
 Where the Q4 launch stands against the 5/5 bar.
@@ -1092,6 +1093,7 @@ Next: review with the team on Friday.
 ";
 
 /// A table wider than the note's column: it scrolls sideways in its block.
+#[cfg(target_os = "macos")]
 pub(crate) const WIDE_TABLE: &str = "# Channel plan
 
 | Channel | Owner | Budget | Target CPA | Q1 | Q2 | Q3 | Q4 | Notes |
