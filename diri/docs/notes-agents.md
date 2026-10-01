@@ -267,6 +267,69 @@ The handoff brief that `start_from_note` gives an agent restates the same
 steps. `tests` in `dirijor-mcp` check the instructions, the tool
 descriptions, and that note tools avoid "repo/worktree/branch/commit".
 
+## Editing a note in place
+
+Agents edit a note the way they edit a Markdown file.
+
+- **The text is canonical.** `read_note`'s `markdown` is the note's body as
+  Diri's own writer prints it: title first as a `# ` line, front matter left
+  out, list markers normalised, tables tidy, special characters escaped.
+  `edit_note` matches against exactly that text (`diri_notes::text_edit::
+  body`), and so does `dirijor note show`, so text an agent copies always
+  matches.
+- **`edit_note(note, old_string, new_string, replace_all?)`** follows the
+  contract of a file Edit tool:
+  - `old_string` must appear exactly once, unless `replace_all`.
+  - An empty `new_string` deletes.
+  - The title line is editable like any other line, but deleting it is
+    refused.
+  - A miss says whether spaces or capital letters were the difference and
+    shows the closest line. A repeat lists where each match is.
+  - It returns the changed lines with a line of context, plus the new
+    version id.
+- **`replace_section(note, heading, markdown)`** replaces everything under a
+  heading, up to the next heading of the same or a higher level, and keeps
+  the heading.
+  - `## Status` picks a level when two headings share a name.
+  - The title counts as the top heading.
+  - It is an error when the heading is missing (the note's headings are
+    listed) or ambiguous.
+- **How changes are applied:** both tools go through `NoteStore::update`:
+  the store lock, the agent as author, and a version before and after. An
+  open editor merges the change live with the three-way merge, and the
+  person's undo still steps over it as one change.
+- **Policy:** the same as `write_note`. Root agents may edit any note.
+  Delegated agents may edit only the note they were started from, or notes
+  that mention them or an ancestor.
+- **Contract:** prefer adding. Change or remove existing text when the
+  person asks, or to keep your own entries current (tick a row, "Fix" →
+  "Done"). Never silently delete the person's writing: every version is
+  kept and the person can restore one.
+
+### Editing the `.md` directly
+
+`read_note` also returns `path`, and an agent may edit that file with its
+own Read/Edit tools. Diri makes this safe:
+
+- **The store remembers what it last wrote.** Every write records the exact
+  text in `.history/<id>/last`, which is not a version.
+- **The first to notice an outside change takes it in.** That is the open
+  note's file watcher, or any store write: the app's save, `write_note`,
+  `edit_note`, the CLI. It keeps the last-written text as a version, even
+  when typing throttled it out of history, and records the new text by
+  "a direct file edit" (`Author::File`).
+- **Identity survives.** If the edit broke or dropped the front matter, the
+  identity keys (`id`, `created`, `project`, `session`, pin and archive)
+  are restored from the last known front matter and written back. The id
+  always matches the file name.
+- **Typing is never overwritten.** With unsaved typing in the open note,
+  the direct edit is merged like any other outside write.
+- **Not covered:** a note that is not open and that nothing writes to is
+  noticed at its next store write, not at the moment of the edit.
+
+CLI: `dirijor note edit NOTE --old TEXT --new TEXT [--all]` and
+`dirijor note replace-section NOTE HEADING < new.md`.
+
 ## Agents creating and starting from notes
 
 - **`create_note`** takes a title, rich Markdown, an optional project and

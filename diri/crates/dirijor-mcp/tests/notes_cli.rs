@@ -273,3 +273,59 @@ fn create_open_history_and_a_restore_only_the_person_may_run() {
     let after = stdout(&run(None, &["note", "history", &id]));
     assert!(after.contains("restored the version from"), "{after}");
 }
+
+#[test]
+fn edit_and_replace_section_change_a_note_in_place() {
+    let setup = setup();
+    let missing = setup._temp.path().join("no-engine.sock");
+    let run = |words: &[&str]| dirijor(&missing, &setup.notes, &setup.project, None, words);
+    let id = stdout(&run(&[
+        "note",
+        "add",
+        "--inbox",
+        "Release tracker\n\n| PR | State |\n| --- | --- |\n| #562 | Fix |\n\n## Status\n\nWaiting.",
+    ]));
+    let shown = stdout(&run(&["note", "show", &id]));
+    let row = shown
+        .lines()
+        .find(|l| l.contains("#562"))
+        .unwrap()
+        .to_owned();
+    let changed = stdout(&run(&[
+        "note",
+        "edit",
+        &id,
+        "--old",
+        &row,
+        "--new",
+        &row.replace("Fix", "Done"),
+    ]));
+    assert!(changed.contains("#562 | Done"), "{changed}");
+
+    let missing_text = run(&["note", "edit", &id, "--old", "nope", "--new", "x"]);
+    assert!(!missing_text.status.success());
+    assert!(String::from_utf8_lossy(&missing_text.stderr).contains("not found"));
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_dirijor"))
+        .args(["note", "replace-section", &id, "Status"])
+        .current_dir(&setup.project)
+        .env_clear()
+        .env("DIRIJOR_SOCKET", &missing)
+        .env("DIRI_NOTES_DIR", &setup.notes)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Shipped in 0.9.")
+        .unwrap();
+    assert!(child.wait_with_output().unwrap().status.success());
+    let after = stdout(&run(&["note", "show", &id]));
+    assert!(after.contains("#562 | Done"), "{after}");
+    assert!(after.contains("## Status\n\nShipped in 0.9."), "{after}");
+    assert!(!after.contains("Waiting."), "{after}");
+}

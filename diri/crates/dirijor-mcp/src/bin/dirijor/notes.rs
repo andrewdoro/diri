@@ -27,6 +27,8 @@ dirijor note list [--project FOLDER] [--mentions SESSION|me] [--all] [--json]\n 
 dirijor note check NOTE TODO [--undo]   tick a to-do (TODO is its text or part of it)\n  \
 dirijor note link NOTE TODO SESSION    put a session's @-chip on a to-do\n  \
 dirijor note show NOTE                 print a note as Markdown\n  \
+dirijor note edit NOTE --old TEXT --new TEXT [--all]   change text in place (exact match; an empty --new deletes)\n  \
+dirijor note replace-section NOTE HEADING   replace everything under a heading with what you pipe in\n  \
 dirijor note history NOTE [VERSION]    list a note's earlier versions, or print one\n  \
 dirijor note restore NOTE VERSION      bring back an earlier version (the current text is kept in history)\n  \
 dirijor note path                      print the folder where notes are kept";
@@ -46,6 +48,8 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), CliError> {
         "add" | "new" | "create" => add(&store, rest),
         "history" | "versions" => history(&store, rest),
         "restore" => restore(&store, rest),
+        "edit" => edit(&store, rest),
+        "replace-section" => replace_section(&store, rest),
         "append" => append(&store, rest),
         "todo" => todo(&store, rest),
         "list" | "ls" => list(&store, rest),
@@ -76,6 +80,8 @@ struct Flags {
     undo: bool,
     inbox: bool,
     open: bool,
+    old: Option<String>,
+    new: Option<String>,
     all: bool,
     json: bool,
 }
@@ -91,6 +97,8 @@ fn flags(arguments: &[String]) -> Result<Flags, CliError> {
         undo: false,
         inbox: false,
         open: false,
+        old: None,
+        new: None,
         all: false,
         json: false,
     };
@@ -109,6 +117,8 @@ fn flags(arguments: &[String]) -> Result<Flags, CliError> {
             "--undo" => out.undo = true,
             "--inbox" => out.inbox = true,
             "--open" => out.open = true,
+            "--old" => out.old = Some(value("--old")?),
+            "--new" => out.new = Some(value("--new")?),
             "--pin" => out.pin = true,
             "--all" => out.all = true,
             "--json" => out.json = true,
@@ -608,4 +618,53 @@ fn calling_agent() -> Option<String> {
         .and_then(|listing| listing.sessions.iter().find(|r| r.id.0 == caller))
         .is_some_and(|record| record.kind.id() == diri_proto::AgentKind::SHELL_ID);
     (!is_terminal).then_some(caller)
+}
+
+/// `dirijor note edit NOTE --old TEXT --new TEXT [--all]`: the same exact
+/// text edit agents make, on the note as `dirijor note show` prints it.
+fn edit(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
+    let flags = flags(arguments)?;
+    let ([target], Some(old), Some(new)) = (flags.positional.as_slice(), &flags.old, &flags.new)
+    else {
+        return Err(CliError::failure(
+            "usage: dirijor note edit NOTE --old TEXT --new TEXT [--all]",
+        ));
+    };
+    let meta = resolve(store, target)?;
+    let replace_all = flags.all;
+    change(store, &meta, |note| {
+        diri_notes::text_edit::edit(note, old, new, replace_all)
+    })
+}
+
+/// `dirijor note replace-section NOTE HEADING` with the new Markdown on stdin.
+fn replace_section(store: &NoteStore, arguments: &[String]) -> Result<(), CliError> {
+    let flags = flags(arguments)?;
+    let [target, heading] = flags.positional.as_slice() else {
+        return Err(CliError::failure(
+            "usage: dirijor note replace-section NOTE HEADING < new.md",
+        ));
+    };
+    let markdown = text_or_stdin(&[])?;
+    let meta = resolve(store, target)?;
+    change(store, &meta, |note| {
+        diri_notes::text_edit::replace_section(note, heading, &markdown)
+    })
+}
+
+fn change(
+    store: &NoteStore,
+    meta: &NoteMeta,
+    apply: impl FnOnce(&mut diri_notes::store::Note) -> Result<diri_notes::text_edit::Edited, String>,
+) -> Result<(), CliError> {
+    let (_, edited) = store
+        .update(&meta.id, &Author::from_env(), |note| {
+            apply(note).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+        })
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::InvalidInput => CliError::failure(e.to_string()),
+            _ => CliError::failure(format!("cannot change the note: {e}")),
+        })?;
+    println!("{}", edited.excerpt);
+    Ok(())
 }
