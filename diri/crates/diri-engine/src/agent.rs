@@ -468,16 +468,39 @@ impl AgentDescriptor {
             // shell takes over it is otherwise lost, and an agent that dies at
             // startup looks exactly like one the user quit. A separate
             // `printf`, so the reset runs whatever the report does.
-            if let Some(status) = exit_status_parameter(&shell) {
+            //
+            // The user is told too: an agent that fails at startup otherwise
+            // leaves a bare prompt that looks like the agent never ran. Only
+            // for a failure code; a signal death is usually diri's or the
+            // user's own doing (hibernation, a kill), not a failure to report.
+            let status = exit_status_capture(&shell);
+            if let Some(status) = status {
                 command.push_str(&format!(
-                    "; printf '\\033]{}%s\\007' \"{status}\"",
-                    diri_terminal_state::AGENT_EXIT_OSC
+                    "; {}; printf '\\033]{}%s\\007' \"{}\"",
+                    status.save,
+                    diri_terminal_state::AGENT_EXIT_OSC,
+                    EXIT_STATUS_VARIABLE_REF
                 ));
             }
-            command.push_str(&format!(
-                "; printf '{AGENT_EXIT_TERMINAL_RESET}'; exec {} -i -l",
-                shell_quote(&shell)
-            ));
+            command.push_str(&format!("; printf '{AGENT_EXIT_TERMINAL_RESET}'"));
+            if let Some(and) = status.and_then(|status| status.and) {
+                let agent = spec
+                    .argv
+                    .first()
+                    .map_or("", |binary| binary.rsplit('/').next().unwrap_or(binary));
+                let shell_name = std::path::Path::new(&shell)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("login")
+                    .trim_start_matches('-');
+                command.push_str(&format!(
+                    "; [ \"{v}\" -ge 1 ]{and}[ \"{v}\" -le 128 ]{and}printf '{AGENT_EXIT_NOTICE}' {} \"{v}\" {}",
+                    shell_quote(agent),
+                    shell_quote(shell_name),
+                    v = EXIT_STATUS_VARIABLE_REF,
+                ));
+            }
+            command.push_str(&format!("; exec {} -i -l", shell_quote(&shell)));
             spec.argv = vec![shell, "-i".into(), "-l".into(), "-c".into(), command];
         } else if let Some(first) = spec.argv.first_mut()
             && !first.contains('/')
@@ -541,14 +564,45 @@ impl AgentDescriptor {
     }
 }
 
-/// How `shell` spells the last command's exit status, or `None` for a shell
-/// whose syntax is unknown, which then runs the wrapper without the report
-/// rather than risk a parse error that would stop the agent launching at all.
-fn exit_status_parameter(shell: &str) -> Option<&'static str> {
+/// How the wrapper keeps the agent's exit status for the report and the
+/// notice that follow it: `save` stores it in [`EXIT_STATUS_VARIABLE_REF`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExitStatusCapture {
+    save: &'static str,
+    /// How the shell chains the notice's conditions: `&&` in POSIX shells,
+    /// `; and` in fish (fish 2 has no `&&`). `None` for csh, which only gets
+    /// the report.
+    and: Option<&'static str>,
+}
+
+/// The wrapper's own variable; it dies with the `exec` into the login shell.
+const EXIT_STATUS_VARIABLE_REF: &str = "$__diri_agent_status";
+
+/// Shown under a wrapped agent that failed, before the login shell's prompt:
+/// the agent's name, its exit code and the shell the tab now is.
+const AGENT_EXIT_NOTICE: &str =
+    r"\n\033[2m%s exited with code %s. This tab is now a %s shell.\033[0m\n";
+
+/// `None` for a shell whose syntax is unknown, which then runs the wrapper
+/// without the report rather than risk a parse error that would stop the
+/// agent launching at all.
+fn exit_status_capture(shell: &str) -> Option<ExitStatusCapture> {
     let name = std::path::Path::new(shell).file_name()?.to_str()?;
     match name.trim_start_matches('-') {
-        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash" | "yash" => Some("$?"),
-        "fish" | "csh" | "tcsh" => Some("$status"),
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash" | "yash" => {
+            Some(ExitStatusCapture {
+                save: "__diri_agent_status=$?",
+                and: Some(" && "),
+            })
+        }
+        "fish" => Some(ExitStatusCapture {
+            save: "set __diri_agent_status $status",
+            and: Some("; and "),
+        }),
+        "csh" | "tcsh" => Some(ExitStatusCapture {
+            save: "set __diri_agent_status=$status",
+            and: None,
+        }),
         _ => None,
     }
 }
@@ -822,8 +876,12 @@ mod tests {
         assert_eq!(
             spec.argv[4],
             format!(
-                "'codex' '--version'; printf '\\033]6973;agent-exit;%s\\007' \"$?\"; \
-                 printf '{AGENT_EXIT_TERMINAL_RESET}'; exec '/bin/sh' -i -l"
+                "'codex' '--version'; __diri_agent_status=$?; \
+                 printf '\\033]6973;agent-exit;%s\\007' \"$__diri_agent_status\"; \
+                 printf '{AGENT_EXIT_TERMINAL_RESET}'; \
+                 [ \"$__diri_agent_status\" -ge 1 ] && [ \"$__diri_agent_status\" -le 128 ] && \
+                 printf '{AGENT_EXIT_NOTICE}' 'codex' \"$__diri_agent_status\" 'sh'; \
+                 exec '/bin/sh' -i -l"
             ),
             "the agent runs first, then the shell takes the PTY over"
         );
@@ -981,7 +1039,7 @@ mod tests {
         assert!(shells.contains(&"/bin/sh"));
         for shell in shells {
             // The agent: `sh -c` either exits 3 or SIGKILLs itself.
-            for (script, expected) in [("exit 3", 3), ("kill -9 $$", 128 + 9)] {
+            for (script, expected) in [("exit 0", 0), ("exit 3", 3), ("kill -9 $$", 128 + 9)] {
                 let wrapped = AgentDescriptor {
                     binary: Some("/bin/sh".into()),
                     return_to_login_shell: true,
@@ -1028,19 +1086,38 @@ mod tests {
                     .position(|window| window == b"\x1b[?1003l")
                     .expect("the reset still runs");
                 assert!(report < reset, "{shell}");
+                // A failure code is spelled out under the reset; a clean exit
+                // and a signal death leave the prompt as it was.
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let notice = stdout.find("sh exited with code 3. This tab is now a ");
+                assert_eq!(
+                    notice.is_some(),
+                    expected == 3,
+                    "{shell} `{script}`: {stdout:?}"
+                );
+                if let Some(notice) = notice {
+                    assert!(reset < notice, "{shell}");
+                    let name = Path::new(shell).file_name().unwrap().to_str().unwrap();
+                    assert!(
+                        stdout.contains(&format!("This tab is now a {name} shell.")),
+                        "{stdout:?}"
+                    );
+                }
+                assert!(!stdout.contains("exited with code 137"), "{stdout:?}");
             }
         }
     }
 
     #[test]
     fn unknown_shells_run_the_wrapper_without_the_report() {
-        assert_eq!(exit_status_parameter("/usr/bin/zsh"), Some("$?"));
-        assert_eq!(exit_status_parameter("-bash"), Some("$?"));
+        let save = |shell| exit_status_capture(shell).map(|capture| capture.save);
+        assert_eq!(save("/usr/bin/zsh"), Some("__diri_agent_status=$?"));
+        assert_eq!(save("-bash"), Some("__diri_agent_status=$?"));
         assert_eq!(
-            exit_status_parameter("/opt/homebrew/bin/fish"),
-            Some("$status")
+            save("/opt/homebrew/bin/fish"),
+            Some("set __diri_agent_status $status")
         );
-        assert_eq!(exit_status_parameter("/usr/local/bin/nu"), None);
+        assert_eq!(save("/usr/local/bin/nu"), None);
         let spec = AgentDescriptor {
             binary: Some("codex".into()),
             return_to_login_shell: true,

@@ -5068,13 +5068,24 @@ fn initial_prompt_control_error(session_id: &str, failure: InitialPromptFailure)
 /// until the workspace is trusted, so a hook proves the picker is not coming.
 /// Without that exit an already-trusted folder — the common case — held a
 /// spawn's initial prompt, and the spawn RPC with it, for the full 20s.
+///
+/// The answer is navigated, never typed blind. Claude 2.1 lists an
+/// unnumbered "No, exit" first and focused; the old answer, "1" and Enter,
+/// confirmed that and every first launch in a new folder exited with code 1.
+/// Enter is only ever pressed with the focus on "Yes, I trust this folder".
+///
+/// Claude drops keys that arrive just as the picker mounts, so each key is
+/// judged by the screen it leaves: an arrow that did not move the focus, or
+/// an Enter that did not close the picker, is pressed again, within a budget.
 fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut keys = 0;
+    let mut seen = false;
     for _ in 0..200 {
-        let Some((exited, screen, hooked)) = with_session(registry, session_id, |session| {
+        let Some((exited, lines, hooked)) = with_session(registry, session_id, |session| {
             let view = session.view();
             (
                 view.exited,
-                session.screen_lines().join("\n"),
+                session.screen_lines(),
                 view.status_evidence.is_some_and(|evidence| {
                     evidence.source == diri_proto::StatusEvidenceSource::Hook
                 }),
@@ -5085,37 +5096,111 @@ fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &s
         if exited {
             return;
         }
-        if is_claude_workspace_trust_screen(&screen) {
+        let Some(key) = claude_workspace_trust_key(&lines) else {
+            if hooked {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        if !seen {
+            seen = true;
+            std::thread::sleep(CLAUDE_TRUST_SETTLE);
+            continue;
+        }
+        if keys >= CLAUDE_TRUST_MAX_KEYS {
+            // The picker will not take the answer: leave it to the user.
+            diri_telemetry::warn_event!(
+                "prompt.workspace_trust_unanswered",
+                session = diri_telemetry::id(session_id),
+                keys = keys,
+            );
+            return;
+        }
+        let bytes: &[u8] = match key {
+            ClaudeTrustKey::Confirm => b"\r",
+            ClaudeTrustKey::Down => b"\x1b[B",
+            ClaudeTrustKey::Up => b"\x1b[A",
+        };
+        let _ = with_session(registry, session_id, |session| session.write_input(bytes));
+        keys += 1;
+        // Decide again only once the screen has answered, so a slow repaint
+        // never earns a second arrow past "Yes". After Enter this also lets
+        // Claude persist trust and replace the picker before a caller's
+        // initial prompt starts its own readiness loop.
+        let answered = wait_for_claude_trust_key_change(registry, session_id, key, 20);
+        if key == ClaudeTrustKey::Confirm && answered {
             diri_telemetry::event!(
                 "prompt.workspace_trust_accepted",
                 session = diri_telemetry::id(session_id),
+                keys = keys,
             );
-            let _ = with_session(registry, session_id, |session| session.send_text("1", true));
-            // Let Claude persist trust and replace the picker before a caller's
-            // initial prompt starts its own readiness/verification loop.
-            for _ in 0..20 {
-                std::thread::sleep(Duration::from_millis(100));
-                let changed = with_session(registry, session_id, |session| {
-                    !is_claude_workspace_trust_screen(&session.screen_lines().join("\n"))
-                })
-                .unwrap_or(true);
-                if changed {
-                    return;
-                }
-            }
             return;
         }
-        if hooked {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-fn is_claude_workspace_trust_screen(screen: &str) -> bool {
-    let normalized = screen.to_ascii_lowercase();
-    normalized.contains("yes, i trust this folder")
-        && (normalized.contains("1.") || normalized.contains("1 "))
+/// How long the picker stands before the first key, which Claude would
+/// otherwise drop while it is still mounting.
+const CLAUDE_TRUST_SETTLE: Duration = Duration::from_millis(300);
+
+/// Keys, arrows and Enters together, the trust watch may press before it
+/// gives the picker to the user.
+const CLAUDE_TRUST_MAX_KEYS: usize = 6;
+
+/// What accepts Claude's workspace-trust picker from where its `❯` focus is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaudeTrustKey {
+    /// The focus is on "Yes, I trust this folder".
+    Confirm,
+    Down,
+    Up,
+}
+
+/// The key that moves Claude's trust picker toward "Yes", or `None` when the
+/// picker — both of its options at the bottom of the screen, one focused —
+/// is not showing.
+fn claude_workspace_trust_key(lines: &[String]) -> Option<ClaudeTrustKey> {
+    let bottom = crate::detect::bottom_non_empty(lines, 12);
+    let find = |needle: &str| {
+        bottom
+            .iter()
+            .position(|line| line.to_ascii_lowercase().contains(needle))
+    };
+    let yes = find("yes, i trust this folder")?;
+    let no = find("no, exit")?;
+    let focused = |index: usize| bottom[index].trim_start().starts_with('❯');
+    if focused(yes) {
+        Some(ClaudeTrustKey::Confirm)
+    } else if focused(no) {
+        Some(if yes > no {
+            ClaudeTrustKey::Down
+        } else {
+            ClaudeTrustKey::Up
+        })
+    } else {
+        None
+    }
+}
+
+/// Whether the picker moved off `key` (or closed) within `ticks` × 100 ms.
+fn wait_for_claude_trust_key_change(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+    key: ClaudeTrustKey,
+    ticks: usize,
+) -> bool {
+    for _ in 0..ticks {
+        std::thread::sleep(Duration::from_millis(100));
+        let changed = with_session(registry, session_id, |session| {
+            claude_workspace_trust_key(&session.screen_lines()) != Some(key)
+        })
+        .unwrap_or(true);
+        if changed {
+            return true;
+        }
+    }
+    false
 }
 
 /// Answers Gemini CLI's "Do you trust the files in this folder?" dialog when
@@ -8708,15 +8793,34 @@ mod tests {
 
     #[test]
     fn workspace_trust_auto_accept_is_narrowly_scoped_to_claudes_exact_picker() {
-        assert!(is_claude_workspace_trust_screen(
-            "1. Yes, I trust this folder\n2. No, exit"
-        ));
-        assert!(!is_claude_workspace_trust_screen(
-            "1. Yes, allow this shell command\n2. No"
-        ));
-        assert!(!is_claude_workspace_trust_screen(
-            "Yes, I trust this folder"
-        ));
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let key = |screen: &str| claude_workspace_trust_key(&lines(screen));
+        // Claude Code 2.1.286, rendered: "No, exit" first, unnumbered, focused.
+        let current = " Claude Code'll be able to read, edit, and execute files here.\n\n \
+                       Security guide\n\n \
+                       ❯ No, exit\n   Yes, I trust this folder\n\n \
+                       Enter to confirm · Esc to cancel";
+        assert_eq!(key(current), Some(ClaudeTrustKey::Down));
+        let moved = current
+            .replace("❯ No, exit", "  No, exit")
+            .replace("  Yes, I trust", "❯ Yes, I trust");
+        assert_eq!(key(&moved), Some(ClaudeTrustKey::Confirm));
+        // The older numbered layout: "Yes" first and focused.
+        assert_eq!(
+            key("❯ 1. Yes, I trust this folder\n  2. No, exit\n\nEnter to confirm"),
+            Some(ClaudeTrustKey::Confirm)
+        );
+        assert_eq!(
+            key("  1. Yes, I trust this folder\n❯ 2. No, exit"),
+            Some(ClaudeTrustKey::Up)
+        );
+        // Not the picker: another dialog, the phrase alone, no focus.
+        assert_eq!(key("❯ 1. Yes, allow this shell command\n  2. No"), None);
+        assert_eq!(key("Yes, I trust this folder"), None);
+        assert_eq!(key("  Yes, I trust this folder\n  No, exit"), None);
+        // The phrases scrolled up out of the bottom of a busy screen.
+        let scrolled = format!("{current}{}", "\noutput".repeat(12));
+        assert_eq!(key(&scrolled), None);
     }
 
     #[test]

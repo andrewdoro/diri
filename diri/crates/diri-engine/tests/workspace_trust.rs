@@ -157,3 +157,131 @@ fn a_hook_ends_the_trust_watch_so_a_trusted_spawn_returns_promptly() {
         "spawn waited out the trust watch after the hook: {elapsed:?}"
     );
 }
+
+/// Claude Code 2.1's picker: "No, exit" listed first, unnumbered and focused;
+/// Enter there exits 1, the down arrow moves to "Yes". Typing "1" does
+/// nothing. Diri used to answer "1" and Enter, so every first launch in a new
+/// folder quit with code 1 a few seconds in.
+const CLAUDE_2_1_TRUST_PICKER: &str = r#"stty raw -echo
+draw() { printf '\033[2J\033[H Security guide\r\n\r\n %s No, exit\r\n %s Yes, I trust this folder\r\n\r\n Enter to confirm · Esc to cancel\r\n' "$1" "$2"; }
+focus=no; draw '❯' ' '
+while :; do
+  c=$(dd bs=1 count=1 2>/dev/null)
+  case "$c" in
+    B) focus=yes; draw ' ' '❯' ;;
+    A) focus=no; draw '❯' ' ' ;;
+    "$(printf '\r')")
+      if [ "$focus" = yes ]; then stty sane; printf '\033[2J\033[Htrusted> '; exec cat; fi
+      exit 1 ;;
+  esac
+done"#;
+
+#[test]
+fn the_trust_watch_moves_to_yes_before_it_presses_enter() {
+    let temp = tempfile::tempdir().expect("temp");
+    let server = start_server(temp.path());
+    let mut control = Control::connect(server.socket_path());
+    let record = control
+        .request(
+            "session.spawn",
+            json!({
+                "kind": { "claude-code": {} }, "cwd": "/tmp",
+                "argv": ["/bin/sh", "-c", CLAUDE_2_1_TRUST_PICKER],
+            }),
+        )
+        .expect("spawn");
+    let id = record["id"].as_str().expect("session id").to_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let screen = loop {
+        let screen = control
+            .request("session.read_screen", json!({ "sessionID": id }))
+            .map(|result| result["text"].as_str().unwrap_or_default().to_owned())
+            .unwrap_or_default();
+        if screen.contains("trusted>") || Instant::now() > deadline {
+            break screen;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let listed = control.request("session.list", json!({})).expect("list");
+    let _ = control.request("session.kill", json!({ "sessionID": id }));
+
+    assert!(
+        screen.contains("trusted>"),
+        "the picker was not answered with Yes: {screen:?} {listed}"
+    );
+}
+
+/// Opt-in: the real `claude` on PATH, in a fresh folder, answered by the trust
+/// watch. Runs against a throwaway `CLAUDE_CONFIG_DIR` with onboarding marked
+/// done and a fake API key, so it needs no sign-in, sends no prompt and never
+/// touches `~/.claude`; both temp directories are removed afterwards.
+/// `DIRI_REAL_CLAUDE=1 cargo test -p diri-engine --test workspace_trust -- --ignored --nocapture`
+#[test]
+#[ignore = "drives the real claude CLI; set DIRI_REAL_CLAUDE=1"]
+fn real_claude_reaches_its_composer_in_an_untrusted_folder() {
+    if std::env::var_os("DIRI_REAL_CLAUDE").is_none() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("temp");
+    let config = temp.path().join("claude-config");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let key = "sk-ant-diri-test-0000000000000000";
+    std::fs::write(
+        config.join(".claude.json"),
+        serde_json::to_vec(&json!({
+            "hasCompletedOnboarding": true,
+            "theme": "dark",
+            "customApiKeyResponses": { "approved": [&key[key.len() - 20..]], "rejected": [] },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let server = start_server(temp.path());
+    let mut control = Control::connect(server.socket_path());
+    let record = control
+        .request(
+            "session.spawn",
+            json!({
+                "kind": { "claude-code": {} }, "cwd": project,
+                "argv": [
+                    "/usr/bin/env",
+                    format!("CLAUDE_CONFIG_DIR={}", config.display()),
+                    format!("ANTHROPIC_API_KEY={key}"),
+                    "DISABLE_AUTOUPDATER=1",
+                    "claude",
+                ],
+            }),
+        )
+        .expect("spawn");
+    let id = record["id"].as_str().expect("session id").to_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut asked = false;
+    let screen = loop {
+        let screen = control
+            .request("session.read_screen", json!({ "sessionID": id }))
+            .map(|result| result["text"].as_str().unwrap_or_default().to_owned())
+            .unwrap_or_default();
+        asked |= screen.contains("trust this folder");
+        let composer = screen.contains("? for shortcuts") && !screen.contains("trust this folder");
+        if composer || Instant::now() > deadline {
+            break screen;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let listed = control.request("session.list", json!({})).expect("list");
+    let _ = control.request("session.kill", json!({ "sessionID": id }));
+    eprintln!("trust picker seen: {asked}\n{screen}");
+
+    assert!(
+        asked,
+        "Claude never asked to trust a fresh folder: {screen}"
+    );
+    assert!(
+        screen.contains("? for shortcuts") && !screen.contains("trust this folder"),
+        "Claude did not reach its composer: {screen} {listed}"
+    );
+}

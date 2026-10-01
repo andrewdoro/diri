@@ -7752,7 +7752,8 @@ mod foreground_program_tests {
 
         std::thread::sleep(Duration::from_millis(500));
         session.write_input(b"claude\r").unwrap();
-        // Trust dialog for a fresh folder: a blocker, answered with Enter.
+        // Trust dialog for a fresh folder: a blocker. Claude 2.1 focuses
+        // "No, exit" first, so move to "Yes" before Enter.
         let asked = run(
             &session,
             20,
@@ -7760,6 +7761,9 @@ mod foreground_program_tests {
         );
         eprintln!("--- trust prompt seen: {asked}");
         if asked {
+            std::thread::sleep(Duration::from_millis(500));
+            session.write_input(b"\x1b[B").unwrap();
+            std::thread::sleep(Duration::from_millis(300));
             session.write_input(b"\r").unwrap();
         }
         let mut idle_since = None;
