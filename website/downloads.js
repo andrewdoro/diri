@@ -50,12 +50,9 @@ export async function initDownloads(document, fetchRelease) {
   if (!release) return;
   const mac = release.downloads.find(asset => asset.primary);
   if (mac) {
-    // The hero and the closing section share one release.
-    for (const button of [primary, document.querySelector('#download-final')].filter(Boolean)) {
-      button.href = mac.url;
-      (button.querySelector('.button-label') ?? button).textContent = 'Download for macOS';
-      button.setAttribute('aria-label', `Download Diri ${release.version} for macOS, universal DMG`);
-    }
+    primary.href = mac.url;
+    (primary.querySelector('.button-label') ?? primary).textContent = 'Download for macOS';
+    primary.setAttribute('aria-label', `Download Diri ${release.version} for macOS, universal DMG`);
   }
   document.querySelector('#download-version').textContent = mac
     ? `${release.version} · macOS 15+` : release.version;
