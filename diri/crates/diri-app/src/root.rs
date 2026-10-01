@@ -46,9 +46,9 @@ use crate::commands::{
     DelegateSelectedSession, FocusSidebar, MoveSelectedSessionDown, MoveSelectedSessionUp,
     NewCodexSession, NewDefaultSession, NewNote, NewTerminal, OpenLauncher, OpenSettings,
     OpenWorktrees, QuoteSelection, QuoteSelectionToSession, RenameSelectedSession, ReopenSession,
-    SESSION_NAVIGATION_CONTEXT, SelectLastSession, SelectNextAttentionSession, SelectNextSession,
-    SelectPreviousSession, SelectSession1, SelectSession2, SelectSession3, SelectSession4,
-    SelectSession5, SelectSession6, SelectSession7, SelectSession8, ShowTodos,
+    SESSION_NAVIGATION_CONTEXT, SearchNotes, SelectLastSession, SelectNextAttentionSession,
+    SelectNextSession, SelectPreviousSession, SelectSession1, SelectSession2, SelectSession3,
+    SelectSession4, SelectSession5, SelectSession6, SelectSession7, SelectSession8, ShowTodos,
     ToggleAuxiliaryTerminal, ToggleCommandPalette, ToggleHistory, ToggleInspector, ToggleOverview,
     ToggleQuickOpen, ToggleSidebar, ToggleTabPeek,
 };
@@ -577,6 +577,14 @@ impl RootView {
                     }
                 },
             ).detach();
+            cx.subscribe_in(
+                navigation,
+                window,
+                |this, _, opened: &crate::navigation::NoteOpened, window, cx| {
+                    this.show_opened_note(opened, window, cx);
+                },
+            )
+            .detach();
         }
         cx.observe(&sidebar, |_, sidebar, cx| {
             if sidebar.read(cx).project_picker_active() {
@@ -2117,6 +2125,7 @@ impl RootView {
         {
             let global_overlay_command = [
                 CommandId::ToggleHistory,
+                CommandId::SearchNotes,
                 CommandId::OpenSettings,
                 CommandId::ToggleCommandPalette,
                 CommandId::ToggleQuickOpen,
@@ -2223,6 +2232,13 @@ impl RootView {
                 if let Some(navigation) = &self.navigation {
                     navigation.update(cx, |navigation, cx| {
                         navigation.toggle_history(&ToggleHistory, window, cx)
+                    });
+                }
+            }
+            CommandId::SearchNotes => {
+                if let Some(navigation) = &self.navigation {
+                    navigation.update(cx, |navigation, cx| {
+                        navigation.toggle_search_notes(&SearchNotes, window, cx)
                     });
                 }
             }
@@ -2502,6 +2518,25 @@ impl RootView {
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_todos_active(true, cx));
         window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// A note the palette just opened (selected, unarchived or adopted):
+    /// leave the To-dos page, put the caret on the block that matched and
+    /// focus the editor.
+    fn show_opened_note(
+        &mut self,
+        opened: &crate::navigation::NoteOpened,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_todos(cx);
+        if let (Some(block), Some(terminal)) = (opened.block, &self.terminal) {
+            terminal.update(cx, |terminal, _| {
+                terminal.reveal_block_in_note(opened.note_id.clone(), block)
+            });
+        }
+        self.focus_active_terminal(window, cx);
         cx.notify();
     }
 
@@ -5015,6 +5050,9 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(|this, _: &ShowTodos, window, cx| {
                 this.run_command(CommandId::ShowTodos, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SearchNotes, window, cx| {
+                this.run_command(CommandId::SearchNotes, window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.run_command(CommandId::OpenSettings, window, cx);

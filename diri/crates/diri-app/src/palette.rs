@@ -38,6 +38,12 @@ pub enum PaletteCommand {
     SyncPrefs {
         host: String,
     },
+    /// Show a note (from the notes ⌘K finds while typing), with the caret
+    /// on the block that matched.
+    OpenNote {
+        note_id: String,
+        block: Option<usize>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -314,6 +320,7 @@ fn append_management_actions(
                         CommandId::OpenWorktrees
                             | CommandId::NewNote
                             | CommandId::ShowTodos
+                            | CommandId::SearchNotes
                             | CommandId::ToggleSidebar
                             | CommandId::HorizontalTabs
                             | CommandId::VerticalTabs
@@ -526,6 +533,7 @@ pub fn actions_for_default_host(
         registered_action(CommandId::OpenWorktrees),
         registered_action(CommandId::NewNote),
         registered_action(CommandId::ShowTodos),
+        registered_action(CommandId::SearchNotes),
         registered_action(CommandId::ToggleSidebar),
         registered_action(CommandId::HorizontalTabs),
         registered_action(CommandId::VerticalTabs),
@@ -1114,6 +1122,7 @@ mod tests {
                 "worktrees",
                 "new-note",
                 "todos",
+                "search-notes",
                 "toggle-sidebar",
                 "horizontal-tabs",
                 "vertical-tabs",

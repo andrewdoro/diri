@@ -2711,12 +2711,28 @@ impl SessionStore {
     }
 
     pub fn spawn_kind(&mut self, kind: AgentKind, options: SpawnOptions) {
+        self.spawn_kind_adopting(kind, options, None);
+    }
+
+    /// Opens a notes file no Session claims as a note Session. The Engine
+    /// adopts by note id, so a repeat lands on the same Session.
+    pub fn open_note_file(&mut self, note_id: String, options: SpawnOptions) {
+        self.spawn_kind_adopting(AgentKind::NOTE, options, Some(note_id));
+    }
+
+    fn spawn_kind_adopting(
+        &mut self,
+        kind: AgentKind,
+        options: SpawnOptions,
+        note_id: Option<String>,
+    ) {
         let target = options
             .workspace_target
             .clone()
             .map(SpawnDestination::Workspace)
             .or_else(|| options.window_target.clone().map(SpawnDestination::Window));
-        let params = self.spawn_params(kind, options);
+        let mut params = self.spawn_params(kind, options);
+        params.note_id = note_id;
         if let Some(target) = target {
             self.request_workspace_spawn(target, params);
         } else {

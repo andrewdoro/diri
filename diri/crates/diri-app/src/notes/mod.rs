@@ -9,6 +9,7 @@
 
 pub(crate) mod chip;
 pub(crate) mod editor_view;
+pub(crate) mod search;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod todos;

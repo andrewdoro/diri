@@ -772,7 +772,10 @@ pub struct TerminalPane {
     /// Hosts the note when this pane's session is a note Session: a note has
     /// no PTY, so the pane shows the editor and never attaches.
     note: Option<Entity<crate::notes::NotePane>>,
-    pending_note_block: Option<usize>,
+    /// A block to put the caret on, for the next note shown or (when the
+    /// note id is set) only for that note: an adopted note file has no
+    /// Session yet, and the note still showing must not take its caret.
+    pending_note_block: Option<(Option<String>, usize)>,
     qol: QolState,
     /// The open Insert Path picker, bound to the session it was opened on.
     path_picker: Option<path_picker::PathPickerState>,
@@ -2578,7 +2581,12 @@ impl TerminalPane {
     /// Put the caret on a note block (from the To-dos page) once the note
     /// is shown.
     pub(crate) fn reveal_note_block(&mut self, block: usize) {
-        self.pending_note_block = Some(block);
+        self.pending_note_block = Some((None, block));
+    }
+
+    /// Put the caret on a block of note `note_id` once that note is shown.
+    pub(crate) fn reveal_block_in_note(&mut self, note_id: String, block: usize) {
+        self.pending_note_block = Some((Some(note_id), block));
     }
 
     /// Only the macOS window screenshots host a fixture note pane.
@@ -4894,7 +4902,10 @@ impl Render for TerminalPane {
         }
         if let Some((session, note_id)) = self.displayed_note() {
             let pane = self.note_pane(window, cx);
-            let reveal = self.pending_note_block.take();
+            let reveal = match &self.pending_note_block {
+                Some((Some(wanted), _)) if *wanted != note_id => None,
+                _ => self.pending_note_block.take().map(|(_, block)| block),
+            };
             pane.update(cx, |pane, cx| {
                 pane.show(&session, &note_id, window, cx);
                 if let Some(block) = reveal {

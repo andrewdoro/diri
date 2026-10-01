@@ -63,6 +63,7 @@ actions!(
         OpenWorktrees,
         NewNote,
         ShowTodos,
+        SearchNotes,
         NoteVersionHistory,
         OpenSettings,
         // Palette destination: open Settings even when it is already visible.
@@ -167,6 +168,7 @@ pub enum CommandId {
     OpenWorktrees,
     NewNote,
     ShowTodos,
+    SearchNotes,
     NoteVersionHistory,
     OpenSettings,
     ToggleSidebar,
@@ -655,6 +657,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         "todos to-dos tasks checklist open review notes"
     ),
     spec!(
+        SearchNotes,
+        "search-notes",
+        Some("cmd-shift-f"),
+        Some("⇧⌘F"),
+        Some(APP_CONTEXT),
+        "Search notes",
+        "magnifyingglass",
+        "notes find search open archived memo doc"
+    ),
+    spec!(
         NoteVersionHistory,
         "note-version-history",
         None,
@@ -996,7 +1008,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("⌘E"),
         Some(TERMINAL_CONTEXT),
         "Insert path",
-        "doc.text.magnifyingglass",
+        "magnifyingglass",
         "insert path file picker fuzzy terminal"
     ),
     spec!(
@@ -1228,6 +1240,7 @@ impl CommandSpec {
             CommandId::OpenWorktrees => KeyBinding::new(key, OpenWorktrees, context),
             CommandId::NewNote => KeyBinding::new(key, NewNote, context),
             CommandId::ShowTodos => KeyBinding::new(key, ShowTodos, context),
+            CommandId::SearchNotes => KeyBinding::new(key, SearchNotes, context),
             CommandId::NoteVersionHistory => KeyBinding::new(key, NoteVersionHistory, context),
             CommandId::OpenSettings => KeyBinding::new(key, OpenSettings, context),
             CommandId::ToggleSidebar => KeyBinding::new(key, ToggleSidebar, context),
@@ -1664,6 +1677,11 @@ impl CommandId {
                 description: "Every open to-do across your notes",
                 category: Navigation,
             },
+            Self::SearchNotes => ShortcutMetadata {
+                title: "Search notes",
+                description: "Find any note, live or archived",
+                category: Navigation,
+            },
             Self::NewNote => ShortcutMetadata {
                 title: "New note",
                 description: "Start a note in the current project, beside its agents",
@@ -1919,6 +1937,7 @@ impl CommandId {
             Self::OpenWorktrees => Box::new(OpenWorktrees),
             Self::NewNote => Box::new(NewNote),
             Self::ShowTodos => Box::new(ShowTodos),
+            Self::SearchNotes => Box::new(SearchNotes),
             Self::NoteVersionHistory => Box::new(NoteVersionHistory),
             Self::OpenSettings => Box::new(OpenSettings),
             Self::ToggleSidebar => Box::new(ToggleSidebar),
