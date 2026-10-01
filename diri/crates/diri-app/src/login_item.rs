@@ -9,6 +9,8 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LoginItemStatus {
     Enabled,
+    // Only the macOS backend (and tests) reads this from the system.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     NotRegistered,
     /// Registered, but held until the user allows it under System Settings >
     /// General > Login Items. It will not launch at login yet.

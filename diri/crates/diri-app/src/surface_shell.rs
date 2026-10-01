@@ -933,7 +933,8 @@ impl UtilitySurfaces {
         cx.notify();
     }
 
-    #[cfg(test)]
+    // Only the macOS-only login item tests swap the backend.
+    #[cfg(all(test, target_os = "macos"))]
     fn set_login_item_backend(
         &mut self,
         backend: impl crate::login_item::LoginItemBackend + 'static,
