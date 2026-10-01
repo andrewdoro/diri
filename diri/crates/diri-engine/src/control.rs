@@ -4866,6 +4866,13 @@ fn prepare_agent_input(
         if pi {
             accept_pi_project_trust(registry, session_id);
         }
+        let kimi = with_session(registry, session_id, |session| {
+            session.manifest_id() == "kimi"
+        })
+        .unwrap_or(false);
+        if kimi {
+            accept_kimi_workspace_trust(registry, session_id);
+        }
         inject_initial_prompt(registry, session_id, prompt)?;
     }
     Ok(())
@@ -5131,6 +5138,49 @@ fn is_pi_composer_screen(lines: &[String]) -> bool {
         })
         .count();
     rules >= 2 && !bottom.iter().any(|line| line.contains("↑↓ navigate"))
+}
+
+/// Kimi 2.x gates every new workspace before creating its first session.
+/// Pasting into that selector drops the prompt, then the injector's Enter
+/// accepts trust anyway. Handle trust explicitly before delivering the prompt,
+/// as for Pi/Gemini. Without an initial prompt leave this choice to the user.
+fn accept_kimi_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted = false;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_kimi_workspace_trust_screen(&screen) {
+            if !accepted {
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted = true;
+            }
+        } else if crate::detect::bottom_non_empty(&screen, 5)
+            .iter()
+            .any(|line| line.trim_start().starts_with("│ >"))
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn is_kimi_workspace_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 16);
+    bottom
+        .iter()
+        .any(|line| line.contains("Trust this folder?"))
+        && bottom
+            .iter()
+            .any(|line| line.contains("↑↓ navigate · Enter select · Esc exit"))
+        && !crate::detect::bottom_non_empty(lines, 5)
+            .iter()
+            .any(|line| line.trim_start().starts_with("│ >"))
 }
 
 /// Types and submits an initial prompt at most once. Screen observations can
@@ -5510,6 +5560,18 @@ mod tests {
     mod find_capture_tests;
     mod reconnect_tests;
     mod send_key_tests;
+
+    #[test]
+    fn kimi_trust_requires_the_active_selector() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let trust = include_str!("../tests/fixtures/kimi_screens/trust.txt");
+        let idle = include_str!("../tests/fixtures/kimi_screens/idle.txt");
+        assert!(is_kimi_workspace_trust_screen(&lines(trust)));
+        assert!(!is_kimi_workspace_trust_screen(&lines(idle)));
+        assert!(!is_kimi_workspace_trust_screen(&lines(&format!(
+            "{trust}{idle}"
+        ))));
+    }
 
     #[test]
     fn telemetry_upload_now_reports_unavailable_without_an_uploader() {
