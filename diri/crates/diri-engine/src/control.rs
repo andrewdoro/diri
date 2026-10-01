@@ -126,6 +126,14 @@ fn local_session_uses_worktree(record: &diri_proto::SessionRecord, target: &Path
 }
 
 impl ControlServer {
+    /// Configure private power endpoints before starting the scheduler.
+    pub fn with_schedule_power(mut self, config: crate::wake::PowerConfig) -> Self {
+        Arc::get_mut(&mut self.scheduler)
+            .expect("scheduler not started")
+            .power = config;
+        self
+    }
+
     pub fn new(registry: Arc<Mutex<Registry>>, socket_path: impl Into<PathBuf>) -> Self {
         // Capture the bytes this process actually started from before an app
         // updater can replace the bundle path underneath the live daemon.
@@ -997,13 +1005,14 @@ impl ControlServer {
     /// `generic` need an explicit `argv`, since their manifests declare no
     /// binary.
     fn session_spawn(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
-        self.session_spawn_identified(params, None)
+        self.session_spawn_identified(params, None, None)
     }
 
     fn session_spawn_identified(
         &self,
         params: Option<JsonValue>,
         reserved_id: Option<String>,
+        scheduled: Option<diri_proto::schedules::ScheduledRunInfo>,
     ) -> Result<JsonValue, ControlError> {
         let raw = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
         // Validate before any account, worktree, or remote side effect. Missing
@@ -1017,7 +1026,7 @@ impl ControlServer {
             p.host.as_deref(),
         )?;
         if p.host.is_some() {
-            return self.session_spawn_remote(p, argv, account_profile, reserved_id);
+            return self.session_spawn_remote(p, argv, account_profile, reserved_id, scheduled);
         }
         if let Some(profile) = &account_profile
             && profile.agent == "codex"
@@ -1159,6 +1168,7 @@ impl ControlServer {
             crate::accounts::bind_pty(profile, &mut pty)?;
         }
         let mut record = new_record(&id, &kind, &cwd);
+        record.scheduled_run = scheduled;
         record.terminal_cwd = start_directory.map(|path| path.to_string_lossy().into_owned());
         record.account_profile = account_profile;
         record.kind = p.kind.clone();
@@ -1300,6 +1310,7 @@ impl ControlServer {
         caller_argv: Vec<String>,
         mut account_profile: Option<diri_proto::AgentAccountProfile>,
         reserved_id: Option<String>,
+        scheduled: Option<diri_proto::schedules::ScheduledRunInfo>,
     ) -> Result<JsonValue, ControlError> {
         let manager = self
             .remote
@@ -1477,6 +1488,7 @@ impl ControlServer {
         };
 
         let mut record = new_record(&id, &kind, &captured.cwd);
+        record.scheduled_run = scheduled;
         record.account_profile = account_profile;
         record.kind = p.kind.clone();
         record.originating_prompt = p.initial_prompt.clone();

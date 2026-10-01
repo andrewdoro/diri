@@ -147,7 +147,11 @@ impl super::ControlServer {
             // lifecycle guard so remove/resume cannot race this original launch.
             let _operation =
                 super::account_handoff::SessionOperation::for_session(self, &reservation.resource)?;
-            match self.session_spawn_identified(Some(p.spawn), Some(reservation.resource.clone())) {
+            match self.session_spawn_identified(
+                Some(p.spawn),
+                Some(reservation.resource.clone()),
+                None,
+            ) {
                 Ok(record) => {
                     if finish(&path, &reservation.key, "completed").is_ok() {
                         reservation.outcome = "completed".into();

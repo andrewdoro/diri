@@ -75,9 +75,7 @@ impl Cron {
         let dow = self.days_of_week & (1 << wday) != 0;
         match (self.dom_restricted, self.dow_restricted) {
             (true, true) => dom || dow,
-            (true, false) => dom,
-            (false, true) => dow,
-            (false, false) => true,
+            _ => dom && dow,
         }
     }
 
@@ -90,15 +88,29 @@ impl Cron {
                 local::compose(tm.year, tm.month + 1, 1, 0, 0)?
             } else if !self.day_matches(tm.mday, tm.wday) {
                 local::compose(tm.year, tm.month, tm.mday + 1, 0, 0)?
-            } else if self.hours & (1 << tm.hour) == 0 {
-                local::compose(tm.year, tm.month, tm.mday, tm.hour + 1, 0)?
-            } else if self.minutes & (1 << tm.minute) == 0 {
-                local::compose(tm.year, tm.month, tm.mday, tm.hour, tm.minute + 1)?
+            } else if self.hours & (1 << tm.hour) == 0 || self.minutes & (1 << tm.minute) == 0 {
+                t + 60
             } else {
                 return Some(t * 1000);
             };
             // A DST fold can map a later wall time to an earlier instant.
             t = if next > t { next } else { t + 60 };
+        }
+        None
+    }
+    /// Latest occurrence at or before `now_ms`; used after the history count
+    /// saturates so a long outage still catches up the newest occurrence.
+    fn latest_at(&self, now_ms: i64) -> Option<i64> {
+        let mut t = now_ms.div_euclid(60_000) * 60;
+        for _ in 0..MAX_SEARCH_STEPS {
+            let tm = local::break_down(t)?;
+            if self.months & (1 << tm.month) == 0 || !self.day_matches(tm.mday, tm.wday) {
+                t = (local::compose(tm.year, tm.month, tm.mday, 0, 0)? - 60).min(t - 60);
+            } else if self.hours & (1 << tm.hour) != 0 && self.minutes & (1 << tm.minute) != 0 {
+                return Some(t * 1000);
+            } else {
+                t -= 60;
+            }
         }
         None
     }
@@ -133,7 +145,10 @@ fn parse_field(field: &str, min: u32, max: u32, names: &[&str]) -> Result<u64, S
         let mut v = lo;
         while v <= hi {
             bits |= 1 << v;
-            v += step;
+            let Some(next) = v.checked_add(step) else {
+                break;
+            };
+            v = next;
         }
     }
     if bits == 0 {
@@ -210,7 +225,8 @@ pub fn evaluate(
                         collapsed += 1;
                     }
                     Some(next) if next <= now_ms => {
-                        // Too long a backlog to walk: resume from now.
+                        // Count is saturated, but catch-up still uses the newest occurrence.
+                        latest = cron.latest_at(now_ms).unwrap_or(latest);
                         break cron.next_after(now_ms);
                     }
                     other => break other,
@@ -306,6 +322,69 @@ mod tests {
 
     fn cron(expr: &str) -> ScheduleWhen {
         ScheduleWhen::Cron { expr: expr.into() }
+    }
+
+    #[test]
+    fn a_backlog_beyond_the_count_cap_still_fires_the_latest_occurrence() {
+        let due = at(2026, 1, 1, 0, 0);
+        let now = due + (i64::from(MAX_COLLAPSED) + 10) * MINUTE;
+        let result = evaluate(&cron("* * * * *"), due, now, 60_000).unwrap();
+        assert_eq!(result.due_ms, now);
+        assert_eq!(result.outcome, ScheduleOutcome::OnTime);
+        assert_eq!(result.collapsed, MAX_COLLAPSED);
+        assert_eq!(result.next_due_ms, Some(now + MINUTE));
+    }
+
+    #[test]
+    fn wildcard_day_steps_are_not_ignored() {
+        assert_eq!(
+            Cron::parse("0 0 */2 * *")
+                .unwrap()
+                .next_after(at(2026, 10, 1, 0, 0)),
+            Some(at(2026, 10, 3, 0, 0))
+        );
+        assert_eq!(
+            Cron::parse("0 0 * * */2")
+                .unwrap()
+                .next_after(at(2026, 10, 1, 0, 0)),
+            Some(at(2026, 10, 3, 0, 0))
+        );
+    }
+
+    #[test]
+    fn huge_cron_steps_do_not_overflow() {
+        assert!(Cron::parse("1/4294967295 * * * *").is_ok());
+    }
+
+    #[test]
+    fn dst_fold_and_gap_in_an_isolated_timezone() {
+        if std::env::var_os("DIRI_CRON_DST_CHILD").is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "schedule::tests::dst_fold_and_gap_in_an_isolated_timezone",
+                ])
+                .env("TZ", "America/New_York")
+                .env("DIRI_CRON_DST_CHILD", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        // First 01:45 EDT, followed by 01:30 EST during the repeated hour.
+        assert_eq!(
+            Cron::parse("30 1 * * *")
+                .unwrap()
+                .next_after(1_793_511_900_000),
+            Some(1_793_514_600_000)
+        );
+        // Nonexistent 02:30 on spring-forward day is skipped, not shifted to 03:30.
+        assert_eq!(
+            Cron::parse("30 2 * * *")
+                .unwrap()
+                .next_after(at(2026, 3, 8, 0, 0)),
+            Some(at(2026, 3, 9, 2, 30))
+        );
     }
 
     #[test]

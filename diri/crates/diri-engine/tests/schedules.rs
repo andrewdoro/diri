@@ -32,6 +32,10 @@ fn start_server(temp: &Path) -> Arc<ControlServer> {
     let registry = Arc::new(Mutex::new(Registry::new(engine(), temp.join("state.json"))));
     let server = Arc::new(
         ControlServer::new(Arc::clone(&registry), temp.join("daemon.sock"))
+            .with_schedule_power(diri_engine::wake::PowerConfig {
+                socket_path: temp.join("wake.sock"),
+                caffeinate: None,
+            })
             .with_logs_dir(temp.join("logs"))
             .with_holder(HolderConfig {
                 holders_dir: temp.join("holders"),
@@ -192,6 +196,15 @@ fn a_due_one_shot_starts_its_session_on_time() {
     assert_eq!(record["enabled"], false, "a one-shot ends after its run");
     assert!(record.get("nextDue").is_none());
     kill_run(&mut control, &record);
+    let sessions = control.request("session.list", json!({}));
+    let session = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == record["runs"][0]["sessionId"])
+        .unwrap();
+    assert_eq!(session["scheduledRun"]["scheduleId"], id);
+    assert_eq!(session["scheduledRun"]["wokeMac"], false);
 }
 
 #[test]
@@ -349,4 +362,144 @@ fn invalid_schedules_are_rejected_before_storage() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// Auto-acknowledging helper on the fixture socket; no operating-system power APIs.
+fn fake_helper(temp: &Path) -> std::sync::mpsc::Receiver<diri_engine::wake::Request> {
+    let listener = std::os::unix::net::UnixListener::bind(temp.join("wake.sock")).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let line = diri_engine::wake::read_frame(&mut stream).unwrap();
+            let request = serde_json::from_str(&line).unwrap();
+            if tx.send(request).is_err() {
+                break;
+            }
+            stream.write_all(b"{\"ok\":true}\n").unwrap();
+        }
+    });
+    rx
+}
+
+#[test]
+fn engine_syncs_disables_deletes_and_clears_after_restart() {
+    use diri_engine::wake::Request;
+    let temp = tempfile::tempdir().unwrap();
+    let requests = fake_helper(temp.path());
+    let server = start_server(temp.path());
+    server.spawn_scheduler();
+    let mut control = Control::connect(&server);
+    let due = (now_ms() / 1000.0).floor() * 1000.0 + 600_000.0;
+    let mut schedule = spec(
+        &temp.path().join("unused"),
+        json!({"kind":"once", "at":due}),
+        60_000,
+    );
+    schedule["wakeMac"] = json!(true);
+    let created = control.request("schedule.create", schedule.clone());
+    let id = created["id"].clone();
+    let receive = || requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    let expected = Request::SetWakes {
+        times_ms: vec![due as i64 - diri_engine::wake::WAKE_LEAD_MS],
+    };
+    assert_eq!(receive(), expected);
+    schedule["enabled"] = json!(false);
+    control.request("schedule.update", {
+        let mut update = schedule.clone();
+        update["id"] = id.clone();
+        update
+    });
+    assert_eq!(receive(), Request::SetWakes { times_ms: vec![] });
+    schedule["enabled"] = json!(true);
+    control.request("schedule.update", {
+        let mut update = schedule.clone();
+        update["id"] = id.clone();
+        update
+    });
+    assert_eq!(receive(), expected);
+    control.request("schedule.delete", json!({"id":id}));
+    assert_eq!(receive(), Request::SetWakes { times_ms: vec![] });
+
+    // Restore only the journal into a fresh Engine: no schedules remain, but
+    // it must still reconcile power events left by a lost clear acknowledgement.
+    let restarted = tempfile::tempdir().unwrap();
+    let db = rusqlite::Connection::open(temp.path().join("schedules-v1.sqlite")).unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    std::fs::copy(
+        temp.path().join("schedules-v1.sqlite"),
+        restarted.path().join("schedules-v1.sqlite"),
+    )
+    .unwrap();
+    let restart_requests = fake_helper(restarted.path());
+    let restarted_server = start_server(restarted.path());
+    restarted_server.spawn_scheduler();
+    assert_eq!(
+        restart_requests
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap(),
+        Request::SetWakes { times_ms: vec![] }
+    );
+}
+
+#[test]
+fn absent_helper_surfaces_error_without_preventing_schedules() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = start_server(temp.path());
+    server.spawn_scheduler();
+    let mut control = Control::connect(&server);
+    let mut schedule = spec(
+        &temp.path().join("unused"),
+        json!({"kind":"once", "at":now_ms() + 600_000.0}),
+        60_000,
+    );
+    schedule["wakeMac"] = json!(true);
+    let created = control.request("schedule.create", schedule);
+    wait_until("wake helper error", Duration::from_secs(5), || {
+        control.request("schedule.list", json!({}))["wakeHelperError"]
+            .as_str()
+            .is_some_and(|error| error.contains("isn't available"))
+    });
+    assert!(
+        control.schedule(created["id"].as_str().unwrap())["enabled"]
+            .as_bool()
+            .unwrap()
+    );
+    control.request("schedule.delete", json!({"id":created["id"]}));
+}
+
+#[test]
+fn a_failed_prompt_keeps_the_created_session_link_and_schedule_stamp() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = start_server(temp.path());
+    server.spawn_scheduler();
+    let mut control = Control::connect(&server);
+    let mut schedule = spec(
+        &temp.path().join("unused"),
+        json!({"kind":"once", "at":now_ms() + 600_000.0}),
+        60_000,
+    );
+    schedule["spawn"]["kind"] = json!({"generic":{"command":"exit 0"}});
+    let created = control.request("schedule.create", schedule);
+    let id = created["id"].as_str().unwrap();
+    control.request("schedule.run_now", json!({"id":id}));
+    let mut record = control.schedule(id);
+    wait_until("failed initial prompt", Duration::from_secs(20), || {
+        record = control.schedule(id);
+        record["runs"][0]["outcome"] == "failed"
+    });
+    assert!(
+        record["runs"][0]["sessionId"].is_string(),
+        "a created session must remain inspectable: {record}"
+    );
+    let listed = control.request("session.list", json!({}));
+    let sessions = listed["sessions"].as_array().unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "an uncertain prompt must not spawn twice"
+    );
+    assert_eq!(sessions[0]["id"], record["runs"][0]["sessionId"]);
+    assert_eq!(sessions[0]["scheduledRun"]["scheduleId"], id);
+    control.request("schedule.delete", json!({"id":id}));
 }

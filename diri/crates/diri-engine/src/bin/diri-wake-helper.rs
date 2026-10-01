@@ -17,15 +17,15 @@ fn main() {
 #[cfg(target_os = "macos")]
 mod helper {
     use std::ffi::{CString, c_char, c_int, c_void};
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::Write;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use diri_engine::wake::{
-        MAX_REQUEST_BYTES, MIN_SLEEP_IDLE_SECS, Request, Response, owner_tag, reconcile,
-        validate_wakes,
+        MIN_SLEEP_IDLE_SECS, Request, Response, owner_tag, read_frame, reconcile, sleep_allowed,
+        validate_replacement,
     };
 
     /// Exit after this long with no connection; launchd restarts on demand.
@@ -179,7 +179,10 @@ mod helper {
         for time in cancel {
             let date = cf_date(time);
             // SAFETY: all arguments are live CF objects.
-            unsafe { IOPMCancelScheduledPowerEvent(date.0, owner_cf.0, kind.0) };
+            let status = unsafe { IOPMCancelScheduledPowerEvent(date.0, owner_cf.0, kind.0) };
+            if status != 0 {
+                return Err(format!("macOS refused to cancel a wake ({status:#x})"));
+            }
         }
         for time in add {
             let date = cf_date(time);
@@ -219,6 +222,28 @@ mod helper {
         }
     }
 
+    /// Read only: no power APIs are invoked to classify the last wake.
+    fn timer_wake() -> bool {
+        // SAFETY: the matching dictionary is consumed by GetMatchingService;
+        // the returned service/property are released after reading.
+        unsafe {
+            let service =
+                IOServiceGetMatchingService(0, IOServiceMatching(c"IOPMrootDomain".as_ptr()));
+            if service == 0 {
+                return false;
+            }
+            let key = cf_string("Wake Reason");
+            let value = Cf(IORegistryEntryCreateCFProperty(
+                service,
+                key.0,
+                std::ptr::null(),
+                0,
+            ));
+            IOObjectRelease(service);
+            read_string(value.0).is_some_and(|reason| diri_engine::wake::is_timer_wake(&reason))
+        }
+    }
+
     fn console_uid() -> Option<u32> {
         std::fs::metadata("/dev/console")
             .ok()
@@ -232,10 +257,7 @@ mod helper {
             ));
         }
         // Another logged-in user must not put the active user's Mac to sleep.
-        if console_uid() != Some(uid) {
-            return Ok(false);
-        }
-        if hid_idle_secs().is_none_or(|idle| idle < min_idle_secs) {
+        if !timer_wake() || !sleep_allowed(uid, console_uid(), hid_idle_secs(), min_idle_secs) {
             return Ok(false);
         }
         std::process::Command::new("/usr/bin/pmset")
@@ -255,41 +277,46 @@ mod helper {
         (unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0).then_some(uid)
     }
 
-    fn handle(stream: UnixStream) {
+    fn handle(mut stream: UnixStream) {
         let Some(uid) = peer_uid(&stream) else {
             return;
         };
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-        let mut line = String::new();
-        let Ok(reader) = stream.try_clone() else {
+        let Ok(line) = read_frame(&mut stream) else {
             return;
         };
-        if BufReader::new(reader.take(MAX_REQUEST_BYTES as u64))
-            .read_line(&mut line)
-            .is_err()
-        {
-            return;
-        }
         let owner = owner_tag(uid);
         let response = match serde_json::from_str::<Request>(&line) {
             Err(_) => Response::failure("unknown request"),
             Ok(Request::Status) => Response {
                 ok: true,
                 wakes_ms: owned_wakes(&owner),
+                timer_wake: timer_wake(),
                 ..Response::default()
             },
-            Ok(Request::SetWakes { times_ms }) => match validate_wakes(&times_ms, now_ms())
-                .and_then(|desired| set_wakes(&owner, &desired))
+            Ok(Request::SetWakes { times_ms }) => {
+                match validate_replacement(&times_ms, &owned_wakes(&owner), now_ms())
+                    .and_then(|desired| set_wakes(&owner, &desired))
+                {
+                    Ok(wakes_ms) => Response {
+                        ok: true,
+                        wakes_ms,
+                        ..Response::default()
+                    },
+                    Err(error) => Response::failure(error),
+                }
+            }
+            Ok(Request::SleepIfIdle {
+                min_idle_secs,
+                idle_since_ms,
+            }) => match diri_engine::wake::sleep_idle_requirement(
+                min_idle_secs,
+                idle_since_ms,
+                now_ms(),
+            )
+            .and_then(|minimum| sleep_if_idle(uid, minimum))
             {
-                Ok(wakes_ms) => Response {
-                    ok: true,
-                    wakes_ms,
-                    ..Response::default()
-                },
-                Err(error) => Response::failure(error),
-            },
-            Ok(Request::SleepIfIdle { min_idle_secs }) => match sleep_if_idle(uid, min_idle_secs) {
                 Ok(slept) => Response {
                     ok: true,
                     slept,
@@ -314,6 +341,9 @@ mod helper {
                 return None;
             }
             let fd = *fds;
+            for index in 1..count {
+                libc::close(*fds.add(index));
+            }
             libc::free(fds.cast());
             Some(UnixListener::from_raw_fd(fd))
         }
@@ -339,6 +369,7 @@ mod helper {
                     }
                     return;
                 }
+                _ if poll.revents & libc::POLLIN == 0 => return,
                 _ => {
                     if let Ok((stream, _)) = listener.accept() {
                         handle(stream);

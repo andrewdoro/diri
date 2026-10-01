@@ -15,12 +15,12 @@ use diri_proto::schedules::{
     LateReason, MAX_SCHEDULE_RUNS, ScheduleIdParams, ScheduleListResult, ScheduleOutcome,
     ScheduleRecord, ScheduleRun, ScheduleSpec, ScheduleUpdateParams, ScheduleWhen,
 };
-use diri_proto::{ControlError, DateMillis, Method, SessionId, SessionStatus};
+use diri_proto::{ControlError, DateMillis, SessionId, SessionStatus};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -55,7 +55,8 @@ fn database(path: &Path) -> Result<Connection, ControlError> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS schedules_v1 (
         id TEXT PRIMARY KEY, record TEXT NOT NULL
-    );",
+    );
+    CREATE TABLE IF NOT EXISTS schedule_power_v1 (used INTEGER NOT NULL);",
     )
     .map_err(storage_error)?;
     Ok(db)
@@ -94,6 +95,10 @@ fn load_all(db: &Connection) -> Result<Vec<ScheduleRecord>, ControlError> {
 }
 
 fn save(db: &Connection, record: &ScheduleRecord) -> Result<(), ControlError> {
+    if record.spec.wake_mac {
+        db.execute("INSERT INTO schedule_power_v1 SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schedule_power_v1)", [])
+            .map_err(storage_error)?;
+    }
     let raw = serde_json::to_string(record)
         .map_err(|_| ControlError::internal("cannot encode schedule"))?;
     db.execute(
@@ -171,7 +176,17 @@ struct ActiveRun {
     session_id: String,
     fired_ms: i64,
     /// diri woke the Mac for this run, so it may sleep it again afterwards.
-    woke: bool,
+    woke: Option<i64>,
+    idle_since_ms: Option<i64>,
+}
+
+#[derive(Default)]
+struct WakeSync {
+    desired: Vec<i64>,
+    sent: Option<Vec<i64>>,
+    busy: bool,
+    /// Accepted events retained briefly after consumption for wake attribution.
+    accepted: Vec<i64>,
 }
 
 #[derive(Default)]
@@ -195,7 +210,12 @@ pub(super) struct Scheduler {
     keep_awake: Mutex<Option<std::process::Child>>,
     /// Wake times last accepted by the helper; `None` until first asked, so
     /// the helper is never contacted by users who do not use wakes.
-    wakes_sent: Mutex<Option<Vec<i64>>>,
+    wakes: Mutex<WakeSync>,
+    wake_used: AtomicBool,
+    pub(super) power: crate::wake::PowerConfig,
+    spawning: AtomicUsize,
+    asserting_spawns: AtomicUsize,
+    sleep_due: Mutex<Option<i64>>,
     /// Why the last helper request failed, reported by `schedule.list`.
     wake_error: Mutex<Option<String>>,
 }
@@ -210,7 +230,12 @@ impl Default for Scheduler {
             started_ms: now_ms(),
             last_sleep: Mutex::default(),
             keep_awake: Mutex::default(),
-            wakes_sent: Mutex::default(),
+            wakes: Mutex::default(),
+            wake_used: AtomicBool::new(false),
+            power: crate::wake::PowerConfig::default(),
+            spawning: AtomicUsize::new(0),
+            asserting_spawns: AtomicUsize::new(0),
+            sleep_due: Mutex::default(),
             wake_error: Mutex::default(),
         }
     }
@@ -261,62 +286,128 @@ impl Scheduler {
         }
     }
 
-    /// Whether the runner saw the Mac wake within the last few minutes.
-    fn just_woke(&self, now: i64) -> bool {
-        self.last_sleep
+    /// Match an observed sleep to an acknowledged alarm, allowing the 30s
+    /// runner tick and whole-second helper rounding. A manual or unrelated
+    /// wake, including a catch-up hours later, must not grant sleep permission.
+    fn wake_started(&self, now: i64) -> Option<i64> {
+        let (from, observed) = (*self.last_sleep.lock().ok()?)?;
+        if !(0..=WOKEN_RUN_WINDOW_MS).contains(&(now - observed)) {
+            return None;
+        }
+        self.wakes
             .lock()
-            .ok()
-            .and_then(|slept| *slept)
-            .is_some_and(|(_, woke)| now - woke <= WOKEN_RUN_WINDOW_MS)
+            .ok()?
+            .accepted
+            .iter()
+            .copied()
+            .find(|alarm| *alarm >= from && (0..=60_000).contains(&(observed - alarm)))
     }
 
-    /// Hands the helper the wake time for each wake schedule's next run.
-    /// Runs off the runner thread: the helper may take seconds to start.
+    fn attributed_wake(&self, now: i64) -> Option<i64> {
+        let alarm = self.wake_started(now)?;
+        self.power
+            .call(&crate::wake::Request::Status)
+            .ok()
+            .filter(|response| response.timer_wake)
+            .map(|_| alarm)
+    }
+
+    fn promote_observed_wake(&self, now: i64) {
+        if self.attributed_wake(now).is_some()
+            && let Some(mut child) = self.power.command(&["-u", "-t", "5"])
+        {
+            // Promotion must happen at the alarm, not two minutes later at
+            // launch: an idle assertion alone cannot hold a dark wake.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+
+    #[cfg(test)]
+    fn just_woke(&self, now: i64) -> bool {
+        self.wake_started(now).is_some()
+    }
+
+    /// One worker drains the latest desired state. Neither concurrent callers
+    /// nor a late reply can overwrite a newer request. Failed/ambiguous writes
+    /// retain the obligation to clear alarms, including an empty desired set.
     fn sync_wakes(self: &Arc<Self>, now: i64) {
-        let mut desired: Vec<i64> = self
-            .state
-            .lock()
-            .map(|state| {
-                state
-                    .pending
-                    .values()
-                    .filter(|pending| pending.wake_mac)
-                    .map(|pending| pending.next_due_ms - crate::wake::WAKE_LEAD_MS)
-                    .filter(|wake| *wake > now + 60_000)
-                    .collect()
+        let state = self.state.lock().expect("scheduler state");
+        let mut sync = self.wakes.lock().expect("wake sync");
+        let mut desired: Vec<i64> = state
+            .pending
+            .values()
+            .filter(|pending| pending.wake_mac)
+            .map(|pending| {
+                (pending.next_due_ms - crate::wake::WAKE_LEAD_MS).div_euclid(1000) * 1000
             })
-            .unwrap_or_default();
+            .filter(|alarm| {
+                *alarm > now
+                    && *alarm <= now + crate::wake::MAX_WAKE_AHEAD_MS
+                    && (*alarm > now + 60_000 || sync.accepted.contains(alarm))
+            })
+            .collect();
         desired.sort_unstable();
         desired.dedup();
         desired.truncate(crate::wake::MAX_WAKES);
-        {
-            let Ok(sent) = self.wakes_sent.lock() else {
-                return;
-            };
-            match sent.as_ref() {
-                Some(sent) if *sent == desired => return,
-                None if desired.is_empty() => return,
-                _ => {}
-            }
+        sync.desired = desired;
+        if !sync.desired.is_empty() {
+            self.wake_used.store(true, Ordering::Release);
         }
+        if sync.busy
+            || !self.wake_used.load(Ordering::Acquire)
+            || sync.sent.as_ref() == Some(&sync.desired)
+        {
+            return;
+        }
+        sync.busy = true;
+        drop(sync);
+        drop(state);
         let scheduler = Arc::clone(self);
-        let _ = std::thread::Builder::new()
+        if std::thread::Builder::new()
             .name("diri-wake-sync".into())
             .spawn(move || {
-                let result = crate::wake::call(&crate::wake::Request::SetWakes {
-                    times_ms: desired.clone(),
-                });
-                if let Ok(mut error) = scheduler.wake_error.lock() {
-                    *error = result.as_ref().err().cloned();
+                loop {
+                    let desired = scheduler.wakes.lock().unwrap().desired.clone();
+                    let result = scheduler.power.call(&crate::wake::Request::SetWakes {
+                        times_ms: desired.clone(),
+                    });
+                    *scheduler.wake_error.lock().unwrap() = result.as_ref().err().cloned();
+                    let mut sync = scheduler.wakes.lock().unwrap();
+                    match result {
+                        Ok(_) => {
+                            sync.accepted.retain(|time| {
+                                *time <= now_ms() && *time >= now_ms() - WOKEN_RUN_WINDOW_MS
+                            });
+                            sync.accepted.extend(desired.iter().copied());
+                            sync.accepted.sort_unstable();
+                            sync.accepted.dedup();
+                            sync.sent = Some(desired.clone());
+                        }
+                        Err(error) => {
+                            sync.sent = None;
+                            eprintln!("diri-scheduler: wake sync failed: {error}");
+                        }
+                    }
+                    if sync.desired == desired {
+                        sync.busy = false;
+                        break;
+                    }
                 }
-                if let Ok(mut sent) = scheduler.wakes_sent.lock() {
-                    // A failure is retried at the next refresh.
-                    *sent = result.is_ok().then_some(desired);
-                }
-                if let Err(error) = result {
-                    eprintln!("diri-scheduler: wake sync failed: {error}");
-                }
-            });
+            })
+            .is_err()
+        {
+            self.wakes.lock().unwrap().busy = false;
+        }
+    }
+
+    fn wake_retry_needed(&self) -> bool {
+        self.wake_used.load(Ordering::Acquire)
+            && self
+                .wakes
+                .lock()
+                .is_ok_and(|sync| sync.sent.as_ref() != Some(&sync.desired))
     }
 
     fn set_keep_awake(&self, wanted: bool) {
@@ -329,7 +420,9 @@ impl Scheduler {
             {
                 return;
             }
-            *child = spawn_caffeinate();
+            *child = self
+                .power
+                .command(&["-i", "-w", &std::process::id().to_string()]);
         } else if let Some(mut running) = child.take() {
             let _ = running.kill();
             let _ = running.wait();
@@ -337,64 +430,21 @@ impl Scheduler {
     }
 }
 
-/// `caffeinate -i` holds an idle-sleep assertion without privileges, and
-/// `-w` ties it to this Engine so a crash can never leave the Mac awake.
-#[cfg(target_os = "macos")]
-fn spawn_caffeinate() -> Option<std::process::Child> {
-    std::process::Command::new("/usr/bin/caffeinate")
-        .args(["-i", "-w", &std::process::id().to_string()])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()
+/// Unknown or permission-waiting sessions are not proof of completion.
+fn busy_status(status: &SessionStatus) -> bool {
+    !matches!(status, SessionStatus::Idle | SessionStatus::Exited(_))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn spawn_caffeinate() -> Option<std::process::Child> {
-    None
+impl ActiveRun {
+    fn keep(&mut self, status: Option<SessionStatus>, now: i64) -> bool {
+        if status.as_ref().is_some_and(busy_status) {
+            self.idle_since_ms = None;
+            return true;
+        }
+        let idle = *self.idle_since_ms.get_or_insert(now);
+        now - self.fired_ms < KEEP_AWAKE_MIN_HOLD_MS || now - idle < KEEP_AWAKE_MIN_HOLD_MS
+    }
 }
-
-/// Whether a started run still counts as working for keep-awake.
-fn still_working(status: Option<SessionStatus>, held_ms: i64) -> bool {
-    held_ms < KEEP_AWAKE_MIN_HOLD_MS
-        || matches!(
-            status,
-            Some(SessionStatus::Starting | SessionStatus::Working)
-        )
-}
-
-/// A woken run finished: sleep again, unless someone used the Mac since it
-/// started. The helper checks the console owner and input idle time itself.
-fn sleep_after(run: &ActiveRun, now: i64) {
-    let min_idle_secs = ((now - run.fired_ms).max(0) / 1000) as u64;
-    let min_idle_secs = min_idle_secs.max(crate::wake::MIN_SLEEP_IDLE_SECS);
-    let _ = std::thread::Builder::new()
-        .name("diri-wake-sleep".into())
-        .spawn(move || {
-            if let Err(error) =
-                crate::wake::call(&crate::wake::Request::SleepIfIdle { min_idle_secs })
-            {
-                eprintln!("diri-scheduler: sleep after run failed: {error}");
-            }
-        });
-}
-
-/// A scheduled wake can be a dark wake, which idle-sleep assertions do not
-/// hold. Declaring user activity promotes it to a full wake (the screen stays
-/// locked); `caffeinate -i` then keeps it up.
-#[cfg(target_os = "macos")]
-fn declare_user_active() {
-    let _ = std::process::Command::new("/usr/bin/caffeinate")
-        .args(["-u", "-t", "5"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-}
-
-#[cfg(not(target_os = "macos"))]
-fn declare_user_active() {}
 
 impl super::ControlServer {
     fn schedules_path(&self) -> PathBuf {
@@ -532,15 +582,17 @@ impl super::ControlServer {
     }
 
     fn run_scheduler(self: Arc<Self>) {
+        self.recover_scheduled_assertions();
         let mut previous = (now_ms(), Instant::now());
         loop {
             let now = now_ms();
             let instant = Instant::now();
             let monotonic_ms = instant.duration_since(previous.1).as_millis() as i64;
-            if (now - previous.0) - monotonic_ms > SLEEP_GAP_MS
-                && let Ok(mut slept) = self.scheduler.last_sleep.lock()
-            {
-                *slept = Some((previous.0 + monotonic_ms, now));
+            if (now - previous.0) - monotonic_ms > SLEEP_GAP_MS {
+                if let Ok(mut slept) = self.scheduler.last_sleep.lock() {
+                    *slept = Some((previous.0 + monotonic_ms, now));
+                }
+                self.scheduler.promote_observed_wake(now);
             }
             previous = (now, instant);
 
@@ -559,13 +611,7 @@ impl super::ControlServer {
                 self.start_run(record, fired_ms);
             }
             if reload {
-                match database(&self.schedules_path()).and_then(|db| load_all(&db)) {
-                    Ok(records) => {
-                        self.scheduler.refresh(&records);
-                        self.scheduler.sync_wakes(now);
-                    }
-                    Err(error) => eprintln!("diri-scheduler: load failed: {}", error.message),
-                }
+                self.reload_schedules();
             }
 
             let due: Vec<String> = self
@@ -585,15 +631,10 @@ impl super::ControlServer {
                 for id in due {
                     self.claim_due(&id, now);
                 }
-                match database(&self.schedules_path()).and_then(|db| load_all(&db)) {
-                    Ok(records) => {
-                        self.scheduler.refresh(&records);
-                        self.scheduler.sync_wakes(now);
-                    }
-                    Err(error) => eprintln!("diri-scheduler: load failed: {}", error.message),
-                }
+                self.reload_schedules();
             }
 
+            self.scheduler.sync_wakes(now);
             let keep_awake = self.keep_awake_wanted(now);
             self.scheduler.set_keep_awake(keep_awake);
 
@@ -610,12 +651,74 @@ impl super::ControlServer {
                         .min(MAX_WAIT)
                         .max(Duration::from_millis(50)),
                 ),
-                None if keep_awake => Some(MAX_WAIT),
+                None if keep_awake
+                    || self.scheduler.wake_retry_needed()
+                    || self.scheduler.sleep_due.lock().unwrap().is_some()
+                    || !self.scheduler.active.lock().unwrap().is_empty() =>
+                {
+                    Some(MAX_WAIT)
+                }
                 None => None,
             };
             match wait {
                 Some(wait) => drop(self.scheduler.wake.wait_timeout(state, wait)),
                 None => drop(self.scheduler.wake.wait(state)),
+            }
+        }
+    }
+
+    fn reload_schedules(&self) {
+        let loaded = (|| -> Result<_, ControlError> {
+            let db = database(&self.schedules_path())?;
+            // The journal marker and records must come from the same snapshot:
+            // a concurrent first create must not look like a deleted last wake.
+            let tx = db.unchecked_transaction().map_err(storage_error)?;
+            let records = load_all(&tx)?;
+            let used: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM schedule_power_v1)",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            tx.commit().map_err(storage_error)?;
+            Ok((records, used))
+        })();
+        match loaded {
+            Ok((records, used)) => {
+                if used || records.iter().any(|record| record.spec.wake_mac) {
+                    self.scheduler.wake_used.store(true, Ordering::Release);
+                }
+                self.scheduler.refresh(&records);
+            }
+            Err(error) => eprintln!("diri-scheduler: load failed: {}", error.message),
+        }
+    }
+
+    fn recover_scheduled_assertions(&self) {
+        let Ok(registry) = self.registry.lock() else {
+            return;
+        };
+        let schedules = database(&self.schedules_path())
+            .and_then(|db| load_all(&db))
+            .unwrap_or_default();
+        let mut active = self.scheduler.active.lock().unwrap();
+        for record in registry.records() {
+            let Some(info) = &record.scheduled_run else {
+                continue;
+            };
+            let keep = info.wake_mac
+                || schedules
+                    .iter()
+                    .any(|schedule| schedule.id == info.schedule_id && schedule.spec.keep_awake);
+            if keep && !matches!(record.status, SessionStatus::Exited(_)) {
+                active.push(ActiveRun {
+                    session_id: record.id.0,
+                    fired_ms: record.created_at.0 as i64,
+                    // A restart loses evidence of intervening input/sleep.
+                    woke: None,
+                    idle_since_ms: None,
+                });
             }
         }
     }
@@ -634,39 +737,64 @@ impl super::ControlServer {
         let Ok(mut active) = self.scheduler.active.lock() else {
             return upcoming;
         };
-        if !active.is_empty() {
-            let registry = self.registry.lock().ok();
-            let mut finished = Vec::new();
-            active.retain(|run| {
-                let keep = now - run.fired_ms < KEEP_AWAKE_RUN_CAP_MS
-                    && still_working(
-                        registry
-                            .as_ref()
-                            .and_then(|registry| registry.get(&run.session_id))
-                            .map(|session| session.status()),
-                        now - run.fired_ms,
-                    );
-                if !keep && run.woke {
-                    finished.push(run.fired_ms);
-                }
-                keep
-            });
-            drop(registry);
-            // Only once nothing else still needs the Mac awake.
-            if active.is_empty() && !upcoming {
-                for fired_ms in finished {
-                    sleep_after(
-                        &ActiveRun {
-                            session_id: String::new(),
-                            fired_ms,
-                            woke: true,
-                        },
-                        now,
-                    );
+        let Ok(registry) = self.registry.lock() else {
+            return true;
+        };
+        let mut sleep_due = self.scheduler.sleep_due.lock().unwrap();
+        active.retain_mut(|run| {
+            let working = run.keep(registry.record(&run.session_id).map(|s| s.status), now);
+            let capped = now - run.fired_ms >= KEEP_AWAKE_RUN_CAP_MS;
+            if !working && let Some(woke) = run.woke {
+                *sleep_due = Some(sleep_due.map_or(woke, |old| old.min(woke)));
+            }
+            // A cap releases the assertion, not the completion guard. Keep
+            // observing capped runs through the same idle debounce, but revoke
+            // their permission to force sleep.
+            if capped {
+                run.woke = None;
+            }
+            working
+        });
+        let spawning = self.scheduler.spawning.load(Ordering::Acquire) != 0;
+        let wanted = upcoming
+            || self.scheduler.asserting_spawns.load(Ordering::Acquire) != 0
+            || active
+                .iter()
+                .any(|run| now - run.fired_ms < KEEP_AWAKE_RUN_CAP_MS);
+        if !wanted
+            && active.is_empty()
+            && !spawning
+            && let Some(woke) = *sleep_due
+        {
+            // Includes unrelated sessions and capped runs. Keep the registry
+            // locked until the request returns so new PTYs cannot start between
+            // this check and the helper's independent console/HID check.
+            let busy = registry
+                .records()
+                .iter()
+                .any(|record| busy_status(&record.status));
+            if !busy {
+                *sleep_due = None;
+                self.scheduler.set_keep_awake(false);
+                // Round up and include the wake lead, not just run duration.
+                let min_idle_secs = ((now - woke).max(0) as u64)
+                    .div_ceil(1000)
+                    .max(crate::wake::MIN_SLEEP_IDLE_SECS);
+                match self
+                    .scheduler
+                    .power
+                    .call(&crate::wake::Request::SleepIfIdle {
+                        min_idle_secs,
+                        idle_since_ms: Some(woke),
+                    }) {
+                    Ok(response) => {
+                        eprintln!("diri-scheduler: sleep after run: slept={}", response.slept)
+                    }
+                    Err(error) => eprintln!("diri-scheduler: sleep after run failed: {error}"),
                 }
             }
         }
-        upcoming || !active.is_empty()
+        wanted
     }
 
     /// Claims the occurrence that made `id` due, then starts its run.
@@ -734,50 +862,87 @@ impl super::ControlServer {
     /// Spawns the run's session off the runner thread; the spawn can wait on
     /// Git, an account operation, or the agent's first prompt.
     fn start_run(self: &Arc<Self>, record: ScheduleRecord, fired_ms: i64) {
+        self.scheduler.spawning.fetch_add(1, Ordering::AcqRel);
+        let asserting = record.spec.keep_awake || record.spec.wake_mac;
+        if asserting {
+            self.scheduler
+                .asserting_spawns
+                .fetch_add(1, Ordering::AcqRel);
+            self.scheduler.set_keep_awake(true);
+        }
         let server = Arc::clone(self);
-        let _ = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("diri-scheduled-run".into())
             .spawn(move || {
-                let woke_mac = record.spec.wake_mac && server.scheduler.just_woke(fired_ms);
-                if woke_mac {
-                    declare_user_active();
-                }
+                let woke = record
+                    .runs
+                    .last()
+                    .filter(|run| run.outcome != ScheduleOutcome::Manual)
+                    .filter(|_| record.spec.wake_mac)
+                    .and_then(|_| server.scheduler.attributed_wake(fired_ms));
+                let woke_mac = woke.is_some();
                 let mut spawn = record.spec.spawn.clone();
                 if spawn.title.is_none() {
                     spawn.title = Some(record.spec.title.clone());
                 }
                 let params = serde_json::to_value(&spawn).unwrap();
-                let mut result = server.dispatch(Method::SESSION_SPAWN, Some(params.clone()));
+                let reserved_id = super::next_session_id();
+                let info = diri_proto::schedules::ScheduledRunInfo {
+                    schedule_id: record.id.clone(),
+                    title: record.spec.title.clone(),
+                    due_at: record
+                        .runs
+                        .last()
+                        .map_or(DateMillis(fired_ms as f64), |run| run.due_at),
+                    wake_mac: record.spec.wake_mac,
+                    woke_mac,
+                };
+                // Preserve the same account and lifecycle guards as dispatch.
+                // The reserved identity survives an uncertain prompt delivery;
+                // the stamp is part of the very first persisted/published record.
+                let attempt = || {
+                    let _account = server.account_operations.try_read().map_err(|_| {
+                        ControlError::new(
+                            "busy",
+                            "An account switch is in progress. Retry when it finishes.",
+                        )
+                    })?;
+                    let _operation = super::account_handoff::SessionOperation::for_session(
+                        &server,
+                        &reserved_id,
+                    )?;
+                    server.session_spawn_identified(
+                        Some(params.clone()),
+                        Some(reserved_id.clone()),
+                        Some(info.clone()),
+                    )
+                };
+                let mut result = attempt();
                 for _ in 1..SPAWN_ATTEMPTS {
+                    // Never repeat effects after a session has been created.
+                    if server
+                        .registry
+                        .lock()
+                        .unwrap()
+                        .record(&reserved_id)
+                        .is_some()
+                    {
+                        break;
+                    }
                     match &result {
                         Err(error) if error.message.contains("Retry") || error.code == "busy" => {
                             std::thread::sleep(SPAWN_RETRY_DELAY);
-                            result = server.dispatch(Method::SESSION_SPAWN, Some(params.clone()));
+                            result = attempt();
                         }
                         _ => break,
                     }
                 }
-                let session_id = result
-                    .as_ref()
-                    .ok()
-                    .and_then(|value| value.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                if let Some(session_id) = &session_id {
-                    server.stamp_scheduled_run(
-                        session_id,
-                        diri_proto::schedules::ScheduledRunInfo {
-                            schedule_id: record.id.clone(),
-                            title: record.spec.title.clone(),
-                            due_at: record
-                                .runs
-                                .last()
-                                .map_or(DateMillis(fired_ms as f64), |run| run.due_at),
-                            wake_mac: record.spec.wake_mac,
-                            woke_mac,
-                        },
-                    );
-                }
+                let session_id = server
+                    .registry
+                    .lock()
+                    .unwrap()
+                    .record(&reserved_id)
+                    .map(|record| record.id.0);
                 if let Some(session_id) = &session_id
                     && (record.spec.keep_awake || record.spec.wake_mac)
                     && let Ok(mut active) = server.scheduler.active.lock()
@@ -785,9 +950,9 @@ impl super::ControlServer {
                     active.push(ActiveRun {
                         session_id: session_id.clone(),
                         fired_ms,
-                        woke: woke_mac,
+                        woke,
+                        idle_since_ms: None,
                     });
-                    server.scheduler.poke();
                 }
                 if let Err(error) = &result {
                     eprintln!(
@@ -796,17 +961,23 @@ impl super::ControlServer {
                     );
                 }
                 server.record_run_result(&record.id, fired_ms, session_id, result.err());
+                if asserting {
+                    server
+                        .scheduler
+                        .asserting_spawns
+                        .fetch_sub(1, Ordering::AcqRel);
+                }
+                server.scheduler.spawning.fetch_sub(1, Ordering::AcqRel);
+                server.scheduler.poke();
             });
-    }
-
-    /// Marks the session as opened by this schedule, for the sidebar and tab.
-    fn stamp_scheduled_run(&self, session_id: &str, info: diri_proto::schedules::ScheduledRunInfo) {
-        let Ok(mut registry) = self.registry.lock() else {
-            return;
-        };
-        registry.update_record(session_id, |record| record.scheduled_run = Some(info));
-        let _ = registry.persist();
-        self.publish_updated(&registry, session_id);
+        if spawned.is_err() {
+            if asserting {
+                self.scheduler
+                    .asserting_spawns
+                    .fetch_sub(1, Ordering::AcqRel);
+            }
+            self.scheduler.spawning.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 
     fn record_run_result(
@@ -866,6 +1037,14 @@ mod tests {
             wake_mac: false,
             enabled: true,
         }
+    }
+
+    #[test]
+    fn an_unarmed_wake_is_not_ours() {
+        let scheduler = Scheduler::default();
+        *scheduler.last_sleep.lock().unwrap() = Some((100_000, 500_000));
+        assert!(!scheduler.just_woke(530_000));
+        assert!(!scheduler.just_woke(400_000));
     }
 
     #[test]
@@ -975,3 +1154,7 @@ mod tests {
         assert_eq!(all, vec![record]);
     }
 }
+
+#[cfg(test)]
+#[path = "schedules_wake_tests.rs"]
+mod wake_tests;
