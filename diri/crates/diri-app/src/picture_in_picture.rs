@@ -660,7 +660,7 @@ impl Render for PipView {
         }
         self.advance_settle(window, cx);
 
-        let (colors, theme) = {
+        let (colors, theme, font) = {
             let store = self
                 .services
                 .store
@@ -670,6 +670,8 @@ impl Render for PipView {
             (
                 crate::app_theme::colors_in(&store),
                 crate::app_theme::terminal_theme(store.theme_id()),
+                // The user's terminal font, as the panes paint it.
+                crate::fonts::terminal_font(&store.preferences().terminal_font_family),
             )
         };
         let session = self.session();
@@ -681,7 +683,7 @@ impl Render for PipView {
         let grid = if element.grid_cols() > 0 {
             element
                 .clone()
-                .font(gpui::font(crate::fonts::mono_family()))
+                .font(font)
                 .font_size(px(fit_font_size(
                     grid_width,
                     grid_height,
