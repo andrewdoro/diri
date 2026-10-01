@@ -100,39 +100,35 @@
   <link rel="stylesheet" href="guides.css">
   <script src="agent-previews.js" defer></script>
   <script src="app.js" defer></script>
-  <script src="mesh.js" defer></script>
   <script type="module" src="downloads.js"></script>
 </head>
 <body>
-  <div class="mesh-background" aria-hidden="true"><canvas id="mesh"></canvas></div>
+  <div class="page-sky" aria-hidden="true"></div>
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="site-wrap">
     <header class="site-header">
-      <a class="wordmark" href="#" aria-label="Diri home"><span class="brand-mark" aria-hidden="true"></span>diri</a>
-      <nav class="guide-nav" aria-label="Main"><a href="/guides/">Guides</a>
-      <a class="github-link" href="https://github.com/cristicretu/diri" target="_blank" rel="noopener noreferrer" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span></a></nav>
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
     </header>
     <main id="main">
       <section class="intro" aria-labelledby="page-title">
         <div class="intro-heading">
-          <h1 id="page-title">Run fifty agents. Lose track of none.</h1>
-          <p>The best way to work with coding agents. Agents spawn agents, every task gets its own worktree, and you only step in when one needs you.</p>
+          <h1 id="page-title">The best way to work with coding agents</h1>
+          <p>Run Claude Code, Codex, and any terminal agent in parallel. Agents can start other agents, every task gets its own worktree, and you step in only when one needs you.</p>
         </div>
-        <div class="intro-detail">
-          <a id="download-primary" class="button primary" href="https://github.com/cristicretu/diri/releases/latest">Download Diri</a>
-          <div class="download-platforms" aria-label="Available platforms"><span class="platform-mark" role="img" aria-label="macOS" title="macOS"><img src="/assets/brand/apple.svg" width="16" height="16" alt=""></span><span class="platform-mark" role="img" aria-label="Linux beta" title="Linux (beta)"><img src="/assets/brand/linux.svg" width="17" height="18" alt=""></span></div>
-          <div class="release-details">
-            <span id="download-version">macOS 15+ · Linux beta</span>
-            <a id="download-notes" href="https://github.com/cristicretu/diri/releases/latest">Release notes</a>
-            <details class="download-options">
-              <summary>Other downloads</summary>
-              <div class="download-options-list">
-                <div id="download-assets"></div>
-                <a href="https://github.com/cristicretu/diri/releases">All releases</a>
-                <a href="https://github.com/cristicretu/diri/blob/main/diri/LINUX.md">Linux beta installation guide</a>
-              </div>
-            </details>
-          </div>
+        <div class="intro-actions">
+          <a id="download-primary" class="button primary" href="https://github.com/cristicretu/diri/releases/latest"><img class="button-mark" src="/assets/brand/apple.svg" width="15" height="15" alt=""><span class="button-label">Download Diri</span></a>
+          <details class="download-options">
+            <summary class="button secondary"><span class="os-marks" aria-hidden="true"><img src="/assets/brand/linux.svg" width="14" height="15" alt=""><img class="upcoming" src="/assets/brand/windows.svg" width="12" height="12" alt=""></span>Other platforms</summary>
+            <div class="download-menu">
+              <div class="download-menu-head"><span id="download-version">macOS 15+ · Linux beta</span><a id="download-notes" href="https://github.com/cristicretu/diri/releases/latest">Release notes</a></div>
+              <div id="download-assets"></div>
+              <a href="https://github.com/cristicretu/diri/blob/main/diri/LINUX.md">Linux beta installation guide</a>
+              <span class="download-upcoming"><img src="/assets/brand/windows.svg" width="12" height="12" alt="">Windows · in progress</span>
+              <a href="https://github.com/cristicretu/diri/releases">All releases</a>
+            </div>
+          </details>
         </div>
       </section>
 
@@ -144,26 +140,37 @@
             <button class="demo-tab" id="tab-links" role="tab" aria-selected="false" aria-controls="demo-window" tabindex="-1" data-view="links">Links</button>
           </div>
         </div>
+        <div class="desktop-stage">
         <div class="app-window" id="demo-window" role="tabpanel" aria-labelledby="tab-workspace">
-          <aside class="app-sidebar" aria-label="Demo chats">
+          <aside class="app-sidebar" aria-label="Demo agents">
             <div class="sidebar-top"><span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span><button class="icon-button" data-open="command" aria-label="Open commands"><span class="icon" data-icon="settings"></span></button><button class="icon-button" data-open="command" aria-label="Search conversations"><span class="icon" data-icon="search"></span></button><button class="icon-button" id="toggle-sidebar" aria-label="Collapse sidebar"><span class="icon" data-icon="sidebar"></span></button></div>
-            <button class="new-chat" data-open="command"><span class="icon" data-icon="new-agent"></span>New Agent <small>Codex</small></button>
-            <div class="sidebar-group"><span class="icon" data-icon="folder"></span>Diri <span class="icon" data-icon="chevron-down"></span></div>
-            <button class="chat-row selected" data-chat="website" aria-pressed="true"><span class="agent-logo" data-agent="codex"></span><span>Build the Diri website</span><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span></button>
-            <button class="chat-row" data-chat="notes" aria-pressed="false"><span class="agent-logo claude" data-agent="claude"></span><span>Weekly plan</span><span class="chat-state needs-input" aria-label="Needs input"><span class="icon" data-icon="bell"></span></span></button>
-            <button class="chat-row" data-chat="details" aria-pressed="false"><span class="agent-logo" data-agent="cursor"></span><span>Keyboard navigation</span><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="clock"></span></span></button>
-            <div class="sidebar-divider"></div><div class="sidebar-group second"><span class="icon" data-icon="folder"></span>Experiments <span class="icon" data-icon="chevron-down"></span></div>
-            <button class="chat-row" data-chat="weekend" aria-pressed="false"><span class="agent-logo gemini" data-agent="gemini"></span><span>Travel map</span></button>
-            <div class="sidebar-bottom account-summary"><span class="account-avatar" aria-hidden="true">G</span><span class="account-name">giga</span><span class="account-cost" title="Estimated usage cost today" aria-label="Estimated usage cost today: 19 dollars and 41 cents">$19.41</span></div>
+            <button class="new-chat" data-open="command"><span class="icon" data-icon="new-agent"></span>New Agent <span class="agent-logo new-chat-agent" data-agent="claude"></span></button>
+            <div class="sidebar-group"><span class="group-chevron"><span class="icon" data-icon="chevron-down"></span></span>diri</div>
+            <button class="chat-row selected" data-chat="release" aria-pressed="true"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Ship the 0.9 release</span><span class="agent-logo claude" data-agent="claude"></span></button>
+            <div class="chat-children" aria-label="Agents started by Ship the 0.9 release">
+              <div class="chat-row child"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Write the release notes</span><span class="agent-logo" data-agent="codex"></span></div>
+              <div class="chat-row child"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Verify the Linux build</span><span class="agent-logo claude" data-agent="claude"></span></div>
+              <div class="chat-row child"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Test the updater</span><span class="agent-logo gemini" data-agent="gemini"></span></div>
+            </div>
+            <button class="chat-row" data-chat="website" aria-pressed="false"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Build the Diri website</span><span class="agent-logo" data-agent="codex"></span></button>
+            <button class="chat-row" data-chat="notes" aria-pressed="false"><span class="chat-state needs-input" aria-label="Needs input"><span class="icon" data-icon="warning"></span></span><span>Weekly plan</span><span class="agent-logo claude" data-agent="claude"></span></button>
+            <button class="chat-row" data-chat="details" aria-pressed="false"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Keyboard navigation</span><span class="agent-logo" data-agent="cursor"></span></button>
+            <div class="sidebar-group second"><span class="group-chevron"><span class="icon" data-icon="chevron-down"></span></span>Experiments</div>
+            <button class="chat-row" data-chat="weekend" aria-pressed="false"><span class="chat-state idle" aria-label="Hibernated"><span class="icon" data-icon="moon"></span></span><span>Travel map</span><span class="agent-logo gemini" data-agent="gemini"></span></button>
+            <div class="sidebar-bottom">
+              <div class="sidebar-filter"><span class="icon" data-icon="search"></span>Filter agents</div>
+              <div class="account-summary"><span class="account-avatar" aria-hidden="true">G</span><span class="account-name">giga</span><span class="account-cost" title="Estimated usage cost today" aria-label="Estimated usage cost today: 19 dollars and 41 cents">$19.41</span><span class="icon" data-icon="chevron-up-down"></span></div>
+            </div>
           </aside>
           <div class="app-main">
             <div class="app-titlebar"><span class="traffic-lights mobile-traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span class="icon session-icon" data-icon="terminal"></span><span class="session-name" id="session-name">Build the Diri website</span>
+              <span class="current-agent"><span class="agent-logo" data-agent="codex"></span><span id="agent-name" class="sr-only">Codex</span></span><span class="session-name" id="session-name">Build the Diri website</span>
               <div class="app-tools">
-                <button class="app-tool links-trigger" data-open="links" aria-expanded="false" aria-controls="links-panel">Links <span class="link-count">2</span><span class="icon" data-icon="chevron-down"></span></button>
-                <span class="current-agent"><span class="agent-logo" data-agent="codex"></span><span id="agent-name">Codex</span></span>
-                <button class="icon-button" id="toggle-changes" aria-label="Toggle changes" aria-expanded="true"><span class="icon" data-icon="sidebar-right"></span></button>
+                <button class="app-tool links-trigger" data-open="links" aria-expanded="false" aria-controls="links-panel"><span class="icon" data-icon="external-link"></span><span class="link-count">2</span></button>
+                <span class="pane-tool" aria-hidden="true"><span class="icon" data-icon="split"></span></span>
+                <span class="pane-tool" aria-hidden="true"><span class="icon" data-icon="expand"></span></span>
                 <button class="icon-button notification-trigger" data-open="notifications" aria-expanded="false" aria-controls="notifications-panel" aria-label="Open demo notifications"><span class="icon" data-icon="bell"></span></button>
+                <button class="icon-button" id="toggle-changes" aria-label="Toggle changes" aria-expanded="true"><span class="icon" data-icon="sidebar-right"></span></button>
               </div>
             </div>
             <div class="terminal-body">
@@ -193,6 +200,7 @@
             <button class="notification-row" data-chat="notes"><span class="icon orange-icon" data-icon="bell"></span><span><strong>Weekly plan</strong><small>Claude has a question</small></span></button>
           </section>
         </div>
+        </div>
       </section>
 
       <section class="compatible" aria-label="Preview each agent"><div>
@@ -200,6 +208,11 @@
         <button class="agent-switch" data-chat="website" aria-pressed="true"><i class="agent-logo" data-agent="codex"></i>Codex</button>
         <button class="agent-switch" data-chat="details" aria-pressed="false"><i class="agent-logo" data-agent="cursor"></i>Cursor</button>
         <button class="agent-switch" data-chat="weekend" aria-pressed="false"><i class="agent-logo gemini" data-agent="gemini"></i>Gemini</button>
+        <span class="agent-chip"><i class="agent-logo" data-agent="pi"></i>Pi</span>
+        <span class="agent-chip"><i class="agent-logo" data-agent="opencode"></i>OpenCode</span>
+        <span class="agent-chip"><i class="agent-logo" data-agent="copilot"></i>Copilot</span>
+        <span class="agent-chip"><i class="agent-logo" data-agent="kimi"></i>Kimi</span>
+        <a class="agent-more" href="https://github.com/cristicretu/diri/tree/main/diri/crates/diri-engine/manifests">+14 more</a>
       </div></section>
 
       <section class="features" id="features" aria-labelledby="features-title">
@@ -258,22 +271,26 @@
             <div><dt>Free &amp; open source</dt><dd>No Diri account or subscription. Use your own agent accounts, on your computer or a host you control.</dd></div>
           </dl>
         </section>
+        <section class="feature-group" aria-labelledby="feature-group-guides">
+          <h3 id="feature-group-guides"><span class="icon" data-icon="file" aria-hidden="true"></span>Guides</h3>
+          <dl class="feature-list">
+            <div><dt><a href="/guides/parallel-agents/">Run Claude Code and Codex in parallel <span aria-hidden="true">→</span></a></dt><dd>Give two agents separate tasks and Git worktrees, then review each change.</dd></div>
+            <div><dt><a href="/guides/remote-sessions/">Keep agent sessions running over SSH <span aria-hidden="true">→</span></a></dt><dd>Connect a host, start an agent, and understand what survives a disconnect.</dd></div>
+          </dl>
+        </section>
       </section>
-      <section class="home-guides" aria-labelledby="guides-title"><div class="guide-section-heading"><h2 id="guides-title">Put it to work</h2><a href="/guides/">All guides <span aria-hidden="true">→</span></a></div><div class="guide-list"><a class="guide-row" href="/guides/parallel-agents/"><div><h3>Run Claude Code and Codex in parallel</h3><p>Give two agents separate tasks and Git worktrees, then review each change.</p></div><span aria-hidden="true">↗</span></a>
-<a class="guide-row" href="/guides/remote-sessions/"><div><h3>Keep coding-agent sessions running over SSH</h3><p>Connect a host, start an agent, and understand what survives a disconnect.</p></div><span aria-hidden="true">↗</span></a></div></section>
     </main>
     <footer class="site-footer">
       <div class="footer-main">
-        <a class="footer-brand" href="#" aria-label="Diri home"><span class="brand-mark" aria-hidden="true"></span>diri</a>
-        <nav class="footer-nav" aria-label="Resources">
-          <a href="/guides/">Guides</a>
-          <a href="https://github.com/cristicretu/diri/tree/main/docs" target="_blank" rel="noopener noreferrer">Documentation</a>
-          <a href="https://github.com/cristicretu/diri" target="_blank" rel="noopener noreferrer"><span class="icon" data-icon="github" aria-hidden="true"></span>GitHub</a>
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
         </nav>
-      </div>
-      <div class="footer-meta">
-        <a href="https://github.com/cristicretu/diri/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Apache 2.0</a>
-        <button class="background-motion" id="background-motion" aria-label="Pause background animation" title="Pause background animation" aria-pressed="false" hidden><span class="motion-symbol" aria-hidden="true"></span><span>Animation</span></button>
       </div>
     </footer>
   </div>

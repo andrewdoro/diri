@@ -397,17 +397,16 @@ mod tests {
 
         // Every id but the two command-less ones detects state from the
         // screen, and the rules are the substance of that. Counting them is
-        // what catches a manifest that survives as a stub: `pi` alone ships
-        // zero rules, deliberately, because it is process-only.
+        // what catches a manifest that survives as a stub.
         let rules: usize = engine
             .ids()
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 109, "the shipped ruleset lost rules");
+        assert_eq!(rules, 112, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
-            let expected_empty = matches!(id, "shell" | "generic" | "pi");
+            let expected_empty = matches!(id, "shell" | "generic");
             assert_eq!(
                 engine.manifest(id).expect("manifest").rules.is_empty(),
                 expected_empty,
@@ -663,6 +662,126 @@ mod tests {
             assert_eq!(
                 (observation.state, observation.matched_rule_id.as_str()),
                 (state, rule)
+            );
+        }
+    }
+
+    /// Screens captured from Pi 0.99.2 (and 0.73.1, whose loader sits above
+    /// the composer instead of in its border) driven by tests/pi_real.rs.
+    #[test]
+    fn pi_rules_match_the_screens_pi_draws() {
+        let rule = "─".repeat(100);
+        let rule = rule.as_str();
+        let footer = [
+            "/private/var/folders/T/.tmpELAZcH/project",
+            "↑10 ↓5 0.0%/128k (auto)                                       fake-model",
+        ];
+        let header = [
+            " ▀▀█  v0.99.2",
+            " █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more",
+            " Warning: fd not found. Offline mode enabled, skipping download.",
+        ];
+        let screen = |body: &[&str]| {
+            header
+                .iter()
+                .chain(body)
+                .chain(footer.iter())
+                .map(|line| (*line).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let border_working = format!("── ⠙ Working {}", "─".repeat(86));
+        let border_retry = format!(
+            "── ⠼ Retrying (1/3) in 2s... (escape to cancel) {}",
+            "─".repeat(40)
+        );
+        let cases = [
+            (
+                screen(&[
+                    " Reply with the word PINEAPPLE please.",
+                    &border_working,
+                    rule,
+                ]),
+                ManifestState::Working,
+                "working-spinner",
+            ),
+            (
+                screen(&[" SLOW stream something", &border_retry, rule]),
+                ManifestState::Working,
+                "working-spinner",
+            ),
+            (
+                // 0.73: the loader is its own line above the composer.
+                screen(&[" Reply with PINEAPPLE", " ⠙ Working...", rule, rule]),
+                ManifestState::Working,
+                "working-spinner",
+            ),
+            (
+                screen(&[" Reply with PINEAPPLE", " PINEAPPLE", rule, rule]),
+                ManifestState::Idle,
+                "idle-composer",
+            ),
+            (
+                // A draft in the composer is still idle.
+                screen(&[" PINEAPPLE", rule, "half a thought", rule]),
+                ManifestState::Idle,
+                "idle-composer",
+            ),
+            (
+                vec![
+                    rule.to_owned(),
+                    " Trust project folder?".into(),
+                    " /private/var/folders/T/.tmpfi3BJz/project".into(),
+                    " This allows pi to load .pi settings and resources, install missing project packages, and execute".into(),
+                    " project extensions.".into(),
+                    " → Trust".into(),
+                    "   Trust parent folder (/private/var/folders/T/.tmpfi3BJz)".into(),
+                    "   Trust (this session only)".into(),
+                    "   Do not trust".into(),
+                    "   Do not trust (this session only)".into(),
+                    " ↑↓ navigate  enter select  escape/ctrl+c cancel".into(),
+                    rule.to_owned(),
+                ],
+                ManifestState::BlockedQuestion,
+                "question-dialog",
+            ),
+            (
+                // An extension's ctx.ui.select, e.g. a permission gate, with
+                // the footer still below it.
+                screen(&[
+                    rule,
+                    " ⚠️ Dangerous command:",
+                    "   rm -rf build",
+                    " Allow?",
+                    " → Yes",
+                    "   No",
+                    " ↑↓ navigate  enter select  escape/ctrl+c cancel",
+                    rule,
+                ]),
+                ManifestState::BlockedQuestion,
+                "question-dialog",
+            ),
+            (
+                screen(&[
+                    rule,
+                    " Name this session",
+                    " > ",
+                    " enter submit  escape/ctrl+c cancel",
+                    rule,
+                ]),
+                ManifestState::BlockedQuestion,
+                "question-dialog",
+            ),
+        ];
+
+        let engine = engine();
+        for (lines, state, rule_id) in cases {
+            let observation = engine
+                .evaluate(&ScreenSnapshot::from_lines(lines.clone()), "pi")
+                .unwrap_or_else(|| panic!("Pi screen should match: {lines:#?}"));
+            assert_eq!(
+                (observation.state, observation.matched_rule_id.as_str()),
+                (state, rule_id),
+                "{lines:#?}"
             );
         }
     }
