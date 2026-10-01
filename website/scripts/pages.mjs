@@ -231,12 +231,6 @@ async function buildReleases(outputs, cards, entries) {
   outputs.set('whats-new/index.html', index
     .replace(/(<\/header>\n      )<section class="release"[\s\S]*<\/section>(\n    <\/main>)/, `$1${sections}$2`)
     .replace(/(<meta property="og:image" content=")[^"]+(")/, `$1${site}${ogPath('/whats-new/')}$2`));
-  // The home page's release pill always names the newest release.
-  const latest = releases[0];
-  const home = await readFile(resolve(root, 'index.html'), 'utf8');
-  const minor = latest.version.split('.').slice(0, 2).join('.');
-  outputs.set('index.html', home.replace(/<a class="release-pill" href="[^"]*"><span class="release-pill-tag">[^<]*<\/span><span class="release-pill-text">[^<]*<\/span>/,
-    `<a class="release-pill" href="/whats-new/${latest.version}/"><span class="release-pill-tag">New in ${minor}</span><span class="release-pill-text">${esc(latest.headline)}</span>`));
   cards.push({ url: '/whats-new/', eyebrow: "What's new", title: `diri ${releases[0].version}`, subtitle: releases[0].headline });
   return ['/whats-new/', ...urls];
 }

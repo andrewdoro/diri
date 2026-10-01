@@ -1194,3 +1194,26 @@ html { overflow-x: clip; }
 }
 @media (min-width: 601px) { .intro-heading h1 { font-size: 40px !important; letter-spacing: -.014em !important; } }
 @media (max-width: 600px) { .intro-heading h1 { font-size: 30px !important; } }
+
+/* Precise scale: a small, firm headline and compact controls; the product carries the size. */
+@media (min-width: 601px) {
+  .intro { padding-top: 88px !important; padding-bottom: 80px !important; }
+  .release-pill { font-size: 12px; margin-bottom: 22px; padding: 4px 11px; }
+  .intro-heading h1 { font-size: 30px !important; font-weight: 600 !important; letter-spacing: -.01em !important; line-height: 1.2 !important; }
+  .intro-heading > p { margin-top: 10px !important; font-size: 16.5px !important; line-height: 1.6 !important; }
+  .intro-heading .inline-agent .agent-logo { width: 13px; height: 13px; vertical-align: -1.5px; margin-right: 4px; }
+  .intro-actions { margin-top: 28px !important; gap: 20px !important; }
+  .intro-actions .button.primary { height: 36px !important; padding: 0 14px !important; font-size: 13.5px !important; border-radius: 8px !important; }
+  .intro-actions .button.primary .button-mark { width: 13px; height: 13px; }
+  .intro-actions .button.secondary.text-link { font-size: 13.5px !important; }
+}
+
+/* Designer's call: no badge above the headline; one compact block that sits on the window, not floating above it. */
+@media (min-width: 601px) {
+  .intro { padding-top: 112px !important; padding-bottom: 48px !important; }
+  .intro-heading h1 { font-size: 34px !important; font-weight: 600 !important; letter-spacing: -.018em !important; line-height: 1.15 !important; }
+  .intro-heading > p { margin-top: 12px !important; font-size: 17px !important; color: #aea7bf !important; }
+  .intro-heading .inline-agent, .intro-heading .inline-agent .agent-logo { color: #aea7bf !important; }
+  .intro-actions { margin-top: 28px !important; }
+}
+@media (max-width: 600px) { .intro { padding-top: 56px !important; } }
