@@ -876,6 +876,9 @@ pub struct SessionRecord {
     /// still stands. Live state: it is cleared on load and when the job ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_progress: Option<TerminalProgress>,
+    /// Present when a Diri schedule opened this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_run: Option<crate::schedules::ScheduledRunInfo>,
 }
 
 impl SessionRecord {

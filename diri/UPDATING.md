@@ -85,7 +85,9 @@ If the app sits somewhere the user cannot write, the writability check fails
 ## Cutting a release
 
 One-time setup is the Developer ID cert and notary profile described in
-[PACKAGING.md](PACKAGING.md). No Sparkle keys.
+[PACKAGING.md](PACKAGING.md), plus `brew install cosign` to verify the Linux
+signatures. No Sparkle keys, and no Linux signing key: CI signs the Linux
+packages keylessly (see [PACKAGING.md](PACKAGING.md#linux-signatures)).
 
 First open and merge a normal pull request that updates the `diri-app` version
 and lockfile. Then check out the clean, current `main` branch and run:
@@ -109,8 +111,9 @@ CI's clippy + tests to have passed, builds the universal Rust executables, signs
 from that stapled bundle, produces the update zip, rebuilds `appcast.json` from
 the currently published feed, generates `SHA256SUMS` and a reviewed dependency
 license inventory, verifies the Linux manifest and artifact digests against
-that same source commit, and creates one GitHub Release containing the macOS
-and Linux assets.
+that same source commit, verifies the Linux Sigstore signatures against the
+pinned `nightly.yml@refs/heads/main` identity, and creates one GitHub Release
+containing the macOS and Linux assets and the Linux `.sigstore.json` bundles.
 It then updates, commits, **pushes, and reads back** the Homebrew cask;
 the release does not report success until the remote cask checksum matches the
 published DMG.
@@ -200,7 +203,9 @@ latest release.
 - `SKIP_CASK=1` — explicitly publish without offering the release via Homebrew.
 - `SKIP_GATES=1` — skip the CI gate when re-running a failed publish.
 - `DIRI_LOCAL_GATES=1` — run clippy/tests locally instead of waiting on CI.
-- `DIRI_LINUX_DIST` — use an already-downloaded Linux artifact directory.
+- `DIRI_LINUX_DIST` — use an already-downloaded Linux artifact directory. It
+  must include CI's `.sigstore.json` bundles; a Nightly run that predates
+  signing, or a pull-request run, has none and is refused.
 - `DIRI_RELEASE_TARGET_DIR` — release build cache (default `diri/target/release-pipeline`).
 
 ## Verifying a release

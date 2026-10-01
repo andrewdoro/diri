@@ -780,6 +780,13 @@ impl NavigationOverlay {
         self.push_page(Overlay::Themes, window, cx);
     }
 
+    /// Types into the open page's query, as keystrokes would.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn type_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.query.insert(text);
+        self.query_changed(cx);
+    }
+
     #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn arrow_for_test(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.move_highlight(delta, cx);
@@ -1189,7 +1196,7 @@ impl NavigationOverlay {
         match page {
             Overlay::CommandPalette => {
                 // Notes join ⌘K's results as soon as the query finds one.
-                self.refresh_notes(cx);
+                self.reread_notes(cx);
                 self.refresh_command_items();
             }
             Overlay::QuickOpen => {
@@ -1206,7 +1213,7 @@ impl NavigationOverlay {
             }
             Overlay::Notes => {
                 crate::telemetry::notes_event("notes.search.opened", "");
-                self.refresh_notes(cx);
+                self.reread_notes(cx);
                 self.filter_notes();
             }
             Overlay::Settings => {}

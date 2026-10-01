@@ -110,6 +110,59 @@ fn mcp_launch(cli_path: &Path) -> (String, Vec<String>) {
     }
 }
 
+/// Folder of the Claude Code plugin that carries Diri's skills.
+pub const CLAUDE_SKILLS_PLUGIN_DIR: &str = "claude-skills-plugin";
+
+/// Writes `<inject>/claude-skills-plugin/`: a Claude Code plugin named `diri`
+/// whose `skills/<name>/SKILL.md` load as native skills (`diri:scheduling`,
+/// …). Static like the hooks and MCP files, so one copy serves every session.
+/// Staged and swapped whole, so an Engine upgrade never leaves a skill from an
+/// older build behind.
+pub fn write_claude_skills_plugin(inject_dir: &Path) -> io::Result<PathBuf> {
+    let plugin_dir = inject_dir.join(CLAUDE_SKILLS_PLUGIN_DIR);
+    let staging = inject_dir.join(format!(
+        ".{CLAUDE_SKILLS_PLUGIN_DIR}.{}.tmp",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(staging.join(".claude-plugin"))?;
+    write_atomic(
+        &staging.join(".claude-plugin/plugin.json"),
+        &serde_json::to_vec_pretty(&json!({
+            "name": "diri",
+            "version": "0.1.0",
+            "description": "How to use Diri from inside a Diri session: scheduling, notes, and coordinating other agents.",
+            "author": { "name": "Diri" },
+        }))?,
+    )?;
+    for skill in diri_proto::skills::ALL {
+        let folder = staging.join("skills").join(skill.name);
+        std::fs::create_dir_all(&folder)?;
+        write_atomic(&folder.join("SKILL.md"), skill.skill_md().as_bytes())?;
+    }
+    let backup = inject_dir.join(format!(
+        ".{CLAUDE_SKILLS_PLUGIN_DIR}.{}.old",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&backup);
+    if plugin_dir.exists() {
+        std::fs::rename(&plugin_dir, &backup)?;
+    }
+    match std::fs::rename(&staging, &plugin_dir) {
+        Ok(()) => {
+            let _ = std::fs::remove_dir_all(&backup);
+            Ok(plugin_dir)
+        }
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            if backup.exists() {
+                let _ = std::fs::rename(&backup, &plugin_dir);
+            }
+            Err(error)
+        }
+    }
+}
+
 /// Session identity needed to bake Cursor's per-launch plugin (MCP env + hooks).
 pub struct CursorInject<'a> {
     pub session_id: &'a str,
@@ -146,6 +199,12 @@ pub fn injection_args_with_cursor(
         if mcp.exists() {
             argv.push("--mcp-config".into());
             argv.push(mcp.to_string_lossy().into_owned());
+            // The skills explain those tools, so they travel together.
+            let skills = inject_dir.join(CLAUDE_SKILLS_PLUGIN_DIR);
+            if skills.join(".claude-plugin/plugin.json").exists() {
+                argv.push("--plugin-dir".into());
+                argv.push(skills.to_string_lossy().into_owned());
+            }
         }
     }
     if injection.codex_notify {
@@ -398,6 +457,43 @@ mod tests {
         );
     }
 
+    /// Writes the real plugin to `DIRI_SKILLS_OUT` so it can be checked with
+    /// `claude plugin validate` and loaded with `claude --plugin-dir`.
+    #[test]
+    #[ignore = "writes the Claude skills plugin to DIRI_SKILLS_OUT"]
+    fn write_skills_plugin_for_inspection() {
+        let out = std::env::var_os("DIRI_SKILLS_OUT").expect("set DIRI_SKILLS_OUT");
+        let dir = write_claude_skills_plugin(Path::new(&out)).expect("write");
+        eprintln!("{}", dir.display());
+    }
+
+    #[test]
+    fn the_skills_plugin_holds_every_diri_skill_and_replaces_stale_ones() {
+        let temp = tempfile::tempdir().expect("temp");
+        let dir = write_claude_skills_plugin(temp.path()).expect("write");
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.join(".claude-plugin/plugin.json")).expect("manifest"),
+        )
+        .expect("json");
+        assert_eq!(manifest["name"], "diri", "skills load as diri:<name>");
+        for skill in diri_proto::skills::ALL {
+            let md = std::fs::read_to_string(dir.join("skills").join(skill.name).join("SKILL.md"))
+                .expect("skill file");
+            assert!(md.starts_with(&format!("---\nname: {}\n", skill.name)));
+            assert!(md.contains(skill.markdown));
+        }
+        // A skill an older build wrote must not survive an upgrade.
+        std::fs::create_dir_all(dir.join("skills/retired")).expect("stale");
+        write_claude_skills_plugin(temp.path()).expect("rewrite");
+        assert!(!dir.join("skills/retired").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("list")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "staging left behind: {leftovers:?}");
+    }
+
     #[test]
     fn injection_args_cover_all_four_mechanisms() {
         let temp = tempfile::tempdir().expect("temp");
@@ -415,6 +511,12 @@ mod tests {
         assert!(args[1].ends_with("claude-hooks.json"));
         assert_eq!(args[2], "--mcp-config");
         assert!(args[3].ends_with("claude-mcp.json"));
+        // Without the skills plugin on disk, no dangling --plugin-dir.
+        assert_eq!(args.len(), 4, "{args:?}");
+        write_claude_skills_plugin(temp.path()).expect("skills");
+        let args = injection_args(&claude, temp.path(), &cli);
+        assert_eq!(args[4], "--plugin-dir");
+        assert!(args[5].ends_with(CLAUDE_SKILLS_PLUGIN_DIR));
 
         let codex = InjectionSpec {
             codex_notify: true,

@@ -891,3 +891,27 @@ html { overflow-x: clip; }
 .compatible .agent-switch[aria-pressed="true"] { background: #ffffff24; }
 .compatible .agent-more { border-color: #ffffff47; }
 @media (hover: hover) and (pointer: fine) { .compatible .agent-switch:hover, .compatible .agent-more:hover { color: #fff; background: #ffffff1c; } }
+
+/* Swarm scene: lines appear as the lead produces them, helper rows slide in. */
+.scene-hidden { display: none !important; }
+.scene-running [data-step], .scene-running [data-child-row] { animation: scene-line 320ms var(--ease) both; }
+@keyframes scene-line { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.composer-typed { color: #f1edf7; }
+.swarm-state.run { color: #f1edf7a8; }
+@media (prefers-reduced-motion: reduce) { .scene-running [data-step], .scene-running [data-child-row] { animation: none; } }
+.composer-typed { white-space: nowrap; overflow: hidden; text-overflow: clip; min-width: 0; }
+
+/* Live repo signals: stars beside the GitHub mark, commit cadence above the headline. */
+.github-link { width: auto; min-width: 28px; gap: 5px; padding: 0 6px; }
+.star-count { font-size: 12px; font-variant-numeric: tabular-nums; color: #cfc8de; }
+.cadence { display: inline-flex; align-items: center; gap: 8px; margin: 0 auto 22px; padding: 5px 12px 5px 10px; border-radius: 999px; font-size: 13px; color: #cfc8de; background: #ffffff08; border: 1px solid #ffffff14; transition: border-color 140ms ease, color 140ms ease; }
+.cadence-dot { width: 7px; height: 7px; border-radius: 50%; background: #8fd3a3; box-shadow: 0 0 0 3px #8fd3a326; }
+@media (hover: hover) and (pointer: fine) { .cadence:hover { color: var(--rp-text); border-color: #ffffff2e; } }
+@media (max-width: 600px) { .cadence { font-size: 12px; margin-bottom: 16px; } }
+
+/* Live numbers reserve their space and fade in, so nothing moves when they arrive. */
+.cadence { opacity: 0; transition: opacity 260ms ease, border-color 140ms ease, color 140ms ease; }
+.cadence.loaded { opacity: 1; }
+.star-count { display: inline-block; min-width: 3ch; opacity: 0; transition: opacity 260ms ease; }
+.star-count.loaded { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .cadence, .star-count { transition: none; } }

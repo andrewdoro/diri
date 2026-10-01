@@ -43,6 +43,11 @@ Team ID and bundle identifier, validates notarization, and refuses downgrades.
 Published release assets are treated as immutable. Details are in
 [UPDATING.md](../diri/UPDATING.md).
 
+Linux packages do not update in place. Each Linux release file carries a
+Sigstore signature made keylessly by the repository's `nightly.yml` workflow on
+`main`; users verify it with `cosign verify-blob` as described in
+[LINUX.md](../diri/LINUX.md#install).
+
 ## Sensitive data
 
 Terminal replay logs can contain prompts, output, paths, and secrets emitted by
@@ -65,7 +70,8 @@ Diri assumes:
 
 - macOS and the current user account are not already compromised;
 - installed agents, MCP servers, hooks, and shell configuration are trusted;
-- GitHub, Apple code-signing/notarization, Homebrew, SSH, and dependency sources
+- GitHub (including Actions OIDC), Sigstore, Apple code-signing/notarization,
+  Homebrew, SSH, and dependency sources
   provide the guarantees documented by those systems;
 - contributors and release operators protect their GitHub and Apple credentials.
 

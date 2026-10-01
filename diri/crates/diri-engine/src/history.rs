@@ -685,8 +685,9 @@ pub(crate) enum CursorTranscriptTurn {
 }
 
 /// Cursor writes `tool_use` while a turn is in flight and a text-only
-/// assistant line (or `turn_ended`) when it is done. `turn_ended` is the
-/// whole conversation, not each turn, so the last object is the signal.
+/// assistant line (or `turn_ended`) when it is done. The tail can still belong
+/// to the preceding turn while a new response streams; it must not override
+/// a live working spinner.
 pub(crate) fn cursor_transcript_turn(path: &Path) -> Option<CursorTranscriptTurn> {
     classify_cursor_transcript_object(&last_jsonl_object(path)?)
 }
@@ -745,12 +746,13 @@ fn last_jsonl_object(path: &Path) -> Option<Value> {
     newest
 }
 
-/// `~/.cursor/projects/<slug>/` slug for a working directory: leading slash
-/// stripped, remaining `/` replaced by `-`.
+/// Cursor's workspace-paths.js replaces every run of non-ASCII-alphanumeric
+/// characters with one hyphen, then trims leading/trailing hyphens.
 pub(crate) fn cursor_project_slug(cwd: &str) -> String {
-    cwd.trim_end_matches('/')
-        .trim_start_matches('/')
-        .replace('/', "-")
+    cwd.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// Resolve a Cursor conversation and its generated title.
@@ -2228,6 +2230,20 @@ mod tests {
             conversation.title.as_deref(),
             Some("Cursor Integration Fix")
         );
+    }
+
+    #[test]
+    fn cursor_project_paths_use_the_cli_punctuation_normalization() {
+        // Captured from the real CLI's workspace-paths.js and temp project store.
+        assert_eq!(
+            cursor_project_slug("/private/tmp/.tmpGYihgH/project"),
+            "private-tmp-tmpGYihgH-project"
+        );
+        assert_eq!(
+            cursor_project_slug("/Users/test/My project.v2/a__b/"),
+            "Users-test-My-project-v2-a-b"
+        );
+        assert_eq!(cursor_project_slug("/tmp/café/项目"), "tmp-caf");
     }
 
     #[test]

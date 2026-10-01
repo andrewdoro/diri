@@ -85,6 +85,7 @@ actions!(
         DelegateSelectedSession,
         SelectNextAttentionSession,
         CheckForUpdates,
+        ShowWhatsNew,
         SelectPreviousSession,
         SelectNextSession,
         MoveSelectedSessionUp,
@@ -185,6 +186,7 @@ pub enum CommandId {
     DelegateSelectedSession,
     SelectNextAttentionSession,
     CheckForUpdates,
+    ShowWhatsNew,
     SelectPreviousSession,
     SelectNextSession,
     MoveSelectedSessionUp,
@@ -831,6 +833,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         "arrow.triangle.2.circlepath",
         "upgrade version release"
     ),
+    spec!(
+        ShowWhatsNew,
+        "whats-new",
+        None,
+        None,
+        Some(APP_CONTEXT),
+        "What's New",
+        "sparkles",
+        "whats new release highlights features changelog demo video tour"
+    ),
     spec_with_alternates!(
         SelectPreviousSession,
         "select-previous-session",
@@ -1269,6 +1281,7 @@ impl CommandSpec {
                 KeyBinding::new(key, SelectNextAttentionSession, context)
             }
             CommandId::CheckForUpdates => KeyBinding::new(key, CheckForUpdates, context),
+            CommandId::ShowWhatsNew => KeyBinding::new(key, ShowWhatsNew, context),
             CommandId::SelectPreviousSession => {
                 KeyBinding::new(key, SelectPreviousSession, context)
             }
@@ -1861,6 +1874,11 @@ impl CommandId {
                 description: "Look for a newer version of Diri",
                 category: Application,
             },
+            Self::ShowWhatsNew => ShortcutMetadata {
+                title: "What's New",
+                description: "Replay the highlights of recent releases",
+                category: Application,
+            },
             Self::NewWindow => ShortcutMetadata {
                 title: "New window",
                 description: "Open another window for the current workspace",
@@ -1954,6 +1972,7 @@ impl CommandId {
             Self::DelegateSelectedSession => Box::new(DelegateSelectedSession),
             Self::SelectNextAttentionSession => Box::new(SelectNextAttentionSession),
             Self::CheckForUpdates => Box::new(CheckForUpdates),
+            Self::ShowWhatsNew => Box::new(ShowWhatsNew),
             Self::SelectPreviousSession => Box::new(SelectPreviousSession),
             Self::SelectNextSession => Box::new(SelectNextSession),
             Self::MoveSelectedSessionUp => Box::new(MoveSelectedSessionUp),

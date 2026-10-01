@@ -569,7 +569,13 @@ impl StatusReducer {
             }
             StatusSignal::CursorTranscriptIdle => {
                 self.state.last_signal_at = now;
-                if self.status == SessionStatus::Working {
+                // The poll can still see the preceding turn's transcript while
+                // Cursor streams the next one. Its live spinner is stronger
+                // evidence than that tail. Keep the transcript fallback for OSC
+                // titles, which older Cursor versions can leave stale.
+                let live_spinner = self.state.screen_belief == Some(ManifestState::Working)
+                    && self.state.last_matched_rule_id.as_deref() == Some("working-status-line");
+                if self.status == SessionStatus::Working && !live_spinner {
                     self.state.hold_idle_against_screen = true;
                     self.handle_strong_idle(now, &mut outcome);
                 }

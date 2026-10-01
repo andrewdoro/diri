@@ -52,6 +52,17 @@ impl CellMetrics {
         }
     }
 
+    /// Stretch rows to `scale` times the font's own height, the way
+    /// `line-height` works in editors. GPUI centres each shaped line in the
+    /// row it is painted into, so the extra space splits above and below.
+    #[must_use]
+    pub fn with_line_height_scale(mut self, scale: f32) -> Self {
+        if scale.is_finite() && scale > 0.0 && scale != 1.0 {
+            self.line_height = px((f32::from(self.line_height) * scale).round().max(1.0));
+        }
+        self
+    }
+
     #[must_use]
     pub fn cols_for_width(self, width: Pixels) -> u16 {
         cells_that_fit(width, self.cell_width)
@@ -94,6 +105,18 @@ mod tests {
         let metrics = metrics();
         assert_eq!(metrics.line_height, px(14.0));
         assert_eq!(metrics.ascent, px(10.2));
+    }
+
+    #[test]
+    fn line_height_scale_stretches_rows_to_whole_pixels() {
+        assert_eq!(metrics().with_line_height_scale(1.0).line_height, px(14.0));
+        assert_eq!(metrics().with_line_height_scale(1.2).line_height, px(17.0));
+        assert_eq!(metrics().with_line_height_scale(1.5).line_height, px(21.0));
+        assert_eq!(
+            metrics().with_line_height_scale(f32::NAN).line_height,
+            px(14.0)
+        );
+        assert_eq!(metrics().with_line_height_scale(1.2).cell_width, px(7.75));
     }
 
     #[test]

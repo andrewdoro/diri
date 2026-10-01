@@ -76,6 +76,15 @@ impl NavigationOverlay {
         model
     }
 
+    /// Opening search re-reads the notes folder: a note written since the
+    /// last read must be findable even if the directory watcher missed it.
+    /// Unchanged files are reused, so this costs one directory listing.
+    pub(super) fn reread_notes(&mut self, cx: &mut Context<Self>) {
+        let model = self.notes_model(cx);
+        model.update(cx, |model, _| model.invalidate());
+        self.refresh_notes(cx);
+    }
+
     /// Re-reads the index and the store's note Sessions, keeping the
     /// highlight on the note it was on.
     pub(super) fn refresh_notes(&mut self, cx: &mut Context<Self>) {

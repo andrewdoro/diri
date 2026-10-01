@@ -220,6 +220,8 @@ pub(crate) enum SidebarEvent {
     /// The user acted on the update pill. The sidebar holds no updater of its
     /// own; RootView owns the handle and forwards these.
     Update(UpdateCommand),
+    /// The What's New line was clicked: RootView opens the sheet.
+    OpenWhatsNew,
     /// The close confirmation was raised, confirmed, or cancelled. RootView
     /// paints that dialog but only re-renders on our events -- without this it
     /// keeps showing a stale frame until some unrelated update wakes it, which
@@ -3632,6 +3634,7 @@ impl Sidebar {
         let session_is_remote = session.host.is_some();
         let ended = matches!(session.status, diri_proto::SessionStatus::Exited(_)) && !archived;
         let remote_marked = session_is_remote && !host_marked_above;
+        let scheduled_run = session.scheduled_run.clone();
         let title = display_title(session);
         let non_persistent =
             session.remote_persistence == Some(PersistenceCapability::NonPersistent);
@@ -3647,6 +3650,7 @@ impl Sidebar {
             row.pinned,
             !hovered && focused && shortcut.is_some(),
         ) - if loading { 60.0 } else { 0.0 }
+            - if scheduled_run.is_some() { 18.0 } else { 0.0 }
             - if row.has_children {
                 Space::INDENT + 8.0
             } else {
@@ -3994,6 +3998,10 @@ impl Sidebar {
             })
             .when(loading, |element| {
                 element.child(StateChip::new("Loading", colors.secondary, colors))
+            })
+            .when_some(scheduled_run, |element, run| {
+                // A schedule opened this session, perhaps after waking the Mac.
+                element.child(scheduled_mark(&id, &run, colors))
             })
             .when(remote_marked, |element| {
                 // This session's agent runs on another machine.
@@ -4552,6 +4560,101 @@ impl Sidebar {
         Some(pill.into_any_element())
     }
 
+    /// One quiet line after an update with highlights: where the update pill
+    /// sits, never at the same time as it, and gone once opened or dismissed.
+    fn whats_new_pill(&self, colors: SemanticColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.preview {
+            return None;
+        }
+        let seen = self
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .whats_new_seen_version
+            .clone();
+        let release =
+            *crate::whats_new::unseen(&seen, &crate::whats_new::current_version()).first()?;
+        let rest = Fill::hover(colors, false);
+        let lit = Fill::hover(colors, true);
+        let pill = div()
+            .id("whats-new-pill")
+            .debug_selector(|| "whats-new-pill".into())
+            .group("whats-new-pill")
+            .mb(px(3.0))
+            .px(px(Space::ROW_H))
+            .h(px(SIDEBAR_NAV_ROW_HEIGHT))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(SIDEBAR_ROW_RADIUS))
+            .bg(rest)
+            .hover(move |style| style.bg(lit))
+            .cursor_pointer()
+            .child(div().w(px(16.0)).text_center().child(sf_symbol(
+                "sparkles",
+                12.5,
+                diri_ui::Ink::FRESH,
+            )))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .flex()
+                    .gap(px(5.0))
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_size(px(Typo::ROW.size))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(colors.secondary)
+                            .child("What's new ·"),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(colors.text(diri_ui::TextTone::Label))
+                            .child(release.headline),
+                    ),
+            )
+            .child(
+                // Shown while the line is hovered: dismiss without opening.
+                div()
+                    .id("whats-new-dismiss")
+                    .debug_selector(|| "whats-new-dismiss".into())
+                    .flex_none()
+                    .size(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .opacity(0.0)
+                    .group_hover("whats-new-pill", |style| style.opacity(1.0))
+                    .hover(move |style| style.bg(colors.primary.alpha(0.08)))
+                    .child(sf_symbol("xmark", 9.0, colors.tertiary))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.mark_whats_new_seen();
+                        cx.notify();
+                    })),
+            )
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenWhatsNew)));
+        Some(pill.into_any_element())
+    }
+
+    /// Records the running release's highlights as seen.
+    pub(crate) fn mark_whats_new_seen(&self) {
+        let version = crate::whats_new::current_version();
+        let _ = self
+            .store
+            .write()
+            .expect("session store lock poisoned")
+            .update_preferences(|prefs| prefs.whats_new_seen_version = version);
+    }
+
     fn account_footer(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
         let hovered = self.ui.hovered_control == Some("account");
         let account_label = local_account_label(self.preview);
@@ -4570,7 +4673,10 @@ impl Sidebar {
             .pb(px(7.0))
             .border_t_1()
             .border_color(colors.primary.alpha(0.06))
-            .children(self.update_pill(colors, cx))
+            .children(
+                self.update_pill(colors, cx)
+                    .or_else(|| self.whats_new_pill(colors, cx)),
+            )
             .child(
                 div()
                     .id("account")
@@ -8632,6 +8738,36 @@ fn pin_mark(colors: SemanticColors) -> AnyElement {
         .into_any_element()
 }
 
+/// Quiet trailing glyph for a session a schedule opened: a grey clock, or an
+/// indigo one when diri woke the Mac for it (a moon already means Sleeping). Hover names the schedule and what happened,
+/// so the tab explains why it appeared while nobody was at the keyboard.
+fn scheduled_mark(
+    id: &SessionId,
+    run: &diri_proto::schedules::ScheduledRunInfo,
+    colors: SemanticColors,
+) -> AnyElement {
+    let (symbol, color) = if run.woke_mac {
+        ("clock.fill", crate::schedules_page::NIGHT)
+    } else {
+        ("clock.fill", colors.tertiary)
+    };
+    use crate::tooltip_warmth::WarmTooltip;
+    let tooltip = crate::schedules_page::scheduled_run_summary(run);
+    div()
+        .id(format!("scheduled-mark:{}", id.0))
+        .debug_selector(|| "scheduled-mark".to_owned())
+        .aria_label(tooltip.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .child(sf_symbol(symbol, 9.0, color))
+        .warm_tooltip(move |_, cx| {
+            cx.new(|_| crate::palette_chrome::PaletteTooltip(tooltip.clone(), colors))
+                .into()
+        })
+        .into_any_element()
+}
+
 /// Trailing count on a fold that hides archived sessions. It stands on the
 /// identity column so it lines up under the agent glyphs above it, growing
 /// leftward if the number needs more than the slot.
@@ -11805,6 +11941,22 @@ mod tests {
                                 } else {
                                     now - 1.0
                                 }));
+                        }
+                        // `DIRI_VISUAL_SCHEDULED=1` marks two sessions as
+                        // scheduled runs: one diri woke the Mac for (indigo
+                        // clock) and one it did not (grey clock).
+                        if std::env::var_os("DIRI_VISUAL_SCHEDULED").is_some() {
+                            let woke = session.id == SessionId::new("preview-spawned-review");
+                            if woke || session.id == SessionId::new("preview-cursor") {
+                                session.scheduled_run =
+                                    Some(diri_proto::schedules::ScheduledRunInfo {
+                                        schedule_id: "sched_preview".into(),
+                                        title: session.title.clone(),
+                                        due_at: diri_proto::DateMillis(now - 600_000.0),
+                                        wake_mac: woke,
+                                        woke_mac: woke,
+                                    });
+                            }
                         }
                         store.upsert_session(session);
                     }

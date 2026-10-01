@@ -1,0 +1,1492 @@
+{
+  "server": "dirijor",
+  "skills": [
+    {
+      "description": "Inside Diri, use this for ANY request to run something later, at a set time, or repeatedly (every weekday at 9, tomorrow morning, in 2 hours), including waking a sleeping Mac for it. Use it instead of the built-in schedule skill, CronCreate, /loop, or reminders: those die with this session or run in the cloud without this Mac's checkout.",
+      "markdown": "# Scheduling work with Diri\n\nWhen the person wants something run later, at a set time, or repeatedly (\"every weekday at 9\", \"tomorrow morning\", \"in 2 hours\", \"each night\"), use the `schedule_agent` tool. Never use your own cron, loop, or reminder tools (CronCreate, /loop, /schedule) or a sleeping shell: those die with this session and skip runs the Mac slept through. A Diri schedule is kept by the Engine and survives this session closing and Diri restarting.\n\n## How a run works\n\n- At each due time Diri opens a **new** top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation.\n- Write the prompt so it stands on its own: the goal, the repository and any context it needs, what to produce, and where the result goes (open a PR, write a file, add to a note).\n- For code changes pass `worktree: true` and `base: \"origin/main\"` so every run starts from a clean checkout.\n- Give a short `name`; it titles the schedule and the tab each run opens.\n\n## When it runs\n\nGive exactly one of:\n\n- `cron`: five fields in the Mac's local time. `0 9 * * 1-5` is weekdays at 09:00, `30 8 * * *` every day at 08:30, `0 * * * *` every hour.\n- `in_minutes`: a one-off relative to now.\n- `at_ms`: a one-off at an exact moment (epoch milliseconds).\n\n## Missed runs\n\nIf the Mac was asleep or Diri was closed at the due time, the newest missed run fires once as soon as Diri is back, as long as it is within `catch_up_hours` (default 12; 0 never catches up). Older occurrences are recorded as missed. Nothing fires twice.\n\n## Waking the Mac\n\n- `wake_mac: true` when the person wants the run to happen even if the Mac is asleep. Diri wakes it 2 minutes early, keeps it awake while the agent works, then puts it back to sleep if nobody used it and no other session is busy.\n- The lid must be open. A laptop with its lid closed, or a Mac that is off, cannot be woken; catch-up covers those cases.\n- It needs a one-time approval: Settings > Schedules > \"Allow diri to wake the Mac\". If `list_schedules` reports `wakeHelperError`, tell the person to turn it on.\n- `keep_awake: true` only stops an already awake Mac from idle-sleeping around a run.\n\n## After creating\n\nConfirm the schedule back in plain words from the returned `nextDue`, for example: \"Weekdays at 09:00, next run Monday at 09:00. It will wake the Mac.\"\n\n## Checking and removing\n\n- `list_schedules` shows each schedule's next due time and recent runs (`onTime`, `late` with `lateReason` asleep or notRunning, `missed`, `failed`, `manual`) and the session each run opened.\n- `delete_schedule` removes a schedule. Sessions its runs opened stay.\n\n## Limits\n\nDiri only starts the agent. Access to mail, calendars, or other services must come from that agent's own tools or connectors; say so if the task needs them.\n",
+      "name": "scheduling"
+    },
+    {
+      "description": "Work started from a Diri note, or writing to Diri notes: read the brief, record findings and results, tick to-dos, never delete the person's writing.",
+      "markdown": "# Working in Diri Notes\n\nDiri Notes are the person's plans, briefs, and to-do lists. People who are not developers read them, so write plainly.\n\n- If whoami shows origin_note, you were started from a note: read it first with read_note {\"note\":\"origin\"}. It is your brief.\n- As you find important things (a decision, a finding, a blocker, a result, a link), add one short entry with write_note {\"note\":\"origin\",\"entry\":\"...\"}: one or two plain sentences, no progress chatter, no logs or code dumps. It is filed under your to-do, or in the note's Updates.\n- Prefer adding. Change or remove existing text only when the person asks for it, or to keep your own entries current (tick a row, change \"Fix\" to \"Done\"): use edit_note, which works like editing a file (exact old text, new text), or replace_section for everything under a heading. Never silently delete the person's writing; every version is kept and the person can restore one.\n- Tick your own sub-tasks as you finish them (write_note with todo and checked:true). Leave the to-do you were started from unticked: the person reviews your work and ticks it.\n- Finish with a one-paragraph result: report_to_parent {\"status\":\"done\",\"summary\":\"...\"} is added to the note.\n- To explain something or hand over a longer write-up, use create_note: it makes a new note under you in the sidebar, and open:true shows it to the person.\n",
+      "name": "notes"
+    },
+    {
+      "description": "Spawn and coordinate other Diri agents: parallel subtasks in worktrees, tracked tasks you assign or receive, waiting, retries, and reviewing their work.",
+      "markdown": "# Working with other Diri sessions\n\n## Parallel work\n\nPrefer `spawn_agents` with one entry per subtask (`worktree: true`, `prompt`, `task: true`), then `wait_any(task_ids)`. For each ready task: read its result (`read_output` with `mode: \"last_message\"` for detail), `answer_task` if it is blocked, `get_diff` to review, `integrate` to bring its branch into your checkout. Call `wait_any` again with the pending ids, and `release_agent` when done. `wait_any` returns as soon as **any** target needs you; do not wait for all of them at once.\n\n## Agents versus terminals\n\nTo spawn another agent, select its native kind (for example `claude` or `codex`) and pass its task as `prompt`. If no agent is named, use your own native kind when available. Never use `shell` to launch an agent CLI such as `claude`, `codex`, `cursor`, or `gemini`: a child `shell` is a raw terminal in the parent's Cmd+J pane whose prompt runs as shell commands.\n\n## Tasks\n\n- When you receive a Diri task: `report_task` acknowledged before starting, then completed or failed for that exact `task_id` after verifying (JSON matching `result_schema` when the task has one), or blocked with your question.\n- `report_to_parent` is recorded on your open task automatically.\n\n## Delivery\n\nMessages, spawns, and tasks are deduplicated and delivered at most once. Reuse `message_id` / `operation_id` / `request_id` on retries; never resend under a new identity because an agent is slow or its screen is unchanged. A delivery receipt does not mean the work is done. For untracked prompts, pass the returned `since_ms` to `wait_for_agent` / `wait_any` so an agent that was already idle does not count as finished.\n\n## Also\n\n- `get_artifacts` returns PR and preview URLs and ports; PRs include live GitHub status.\n- `fork_agent` branches a conversation to try an alternative.\n- `manage_agent` hibernates idle children instead of killing them.\n- `quick_open_include` edits the folders Cmd+P indexes (for example `**/.worktrees/`).\n",
+      "name": "orchestration"
+    }
+  ],
+  "tools": [
+    {
+      "description": "Read one of Diri's skills: the detailed rules for a Diri capability, as Markdown. Read the matching skill before acting: scheduling (run anything later, at a time, or repeatedly; waking the Mac), notes (work started from or written to a Diri note), orchestration (parallel agents, tasks, waiting, retries). Claude Code sessions also have them as skills named diri:<name>.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "enum": [
+              "scheduling",
+              "notes",
+              "orchestration"
+            ],
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "get_skill"
+    },
+    {
+      "description": "Assign a tracked task to an authorized Agent. Returns a durable task_id and delivery receipt, and tells the Agent to acknowledge and report that exact task. Reuse request_id on retries. Identical target/text defaults to one task; use a new request_id only for intentional additional work. Unknown delivery never permits a fresh copy. Pass result_schema to require a JSON result of that shape. Await it with wait_any (several tasks) or wait_for_task.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "result_schema": {
+            "description": "Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked).",
+            "type": "object"
+          },
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 1048576,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "submit_task"
+    },
+    {
+      "description": "Read the durable receipt for one task you assigned or received. Provide exactly one of task_id or your original request_id; request_id recovers a lost submission reply even after the target disappears. Delivery, Agent acknowledgement, and task result are separate facts. Status survives Engine restarts; terminal idle is not task completion.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "task_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "get_task"
+    },
+    {
+      "description": "Wait for the explicit completed or failed result of this exact task. Already terminal tasks return immediately. timed_out means no terminal result was observed; completed is true only for a reported successful result. Agent idle/exit/removal cannot fabricate completion.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "timeout_s": {
+            "default": 600,
+            "maximum": 600,
+            "minimum": 0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "type": "object"
+      },
+      "name": "wait_for_task"
+    },
+    {
+      "description": "Acknowledge or report the exact Diri task assigned to you. Call acknowledged before starting; report completed only after verifying the requested outcome and include result evidence. Use blocked for a blocker and failed for terminal failure. Only the assigned Agent can report; terminal results are immutable and identical retries are safe.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "maxLength": 16384,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "acknowledged",
+              "blocked",
+              "completed",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "task_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "name": "report_task"
+    },
+    {
+      "description": "Assign several tracked tasks in one call (at most 16). Each entry behaves exactly like submit_task, including request_id deduplication; one failure does not stop the others. Returns one result per entry, in order, and the task_ids to pass to wait_any.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "tasks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "request_id": {
+                  "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "result_schema": {
+                  "description": "Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked).",
+                  "type": "object"
+                },
+                "session_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "text": {
+                  "maxLength": 1048576,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "text"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tasks"
+        ],
+        "type": "object"
+      },
+      "name": "submit_tasks"
+    },
+    {
+      "description": "Answer a task you submitted, typically after it reported blocked with a question. The answer is recorded on the task, delivered to the assigned Agent, and a blocked task returns to acknowledged. Only the submitting session may answer.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "answer_task"
+    },
+    {
+      "description": "Withdraw a task you submitted. It becomes terminal (cancelled) immediately and the assigned Agent is told to stop. Only the submitting session may cancel; finished tasks cannot be cancelled.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 16384,
+            "type": "string"
+          },
+          "task_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "type": "object"
+      },
+      "name": "cancel_task"
+    },
+    {
+      "description": "List tasks you submitted (role sent), were assigned (role assigned), or both, newest first. Open tasks only unless include_terminal is true.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_terminal": {
+            "type": "boolean"
+          },
+          "limit": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "number"
+          },
+          "role": {
+            "enum": [
+              "sent",
+              "assigned",
+              "all"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_tasks"
+    },
+    {
+      "description": "Wait until at least one of the given tasks or sessions needs attention, then return every one that does (ready) and the rest (pending). Tasks are ready when completed, failed, cancelled, or blocked. Sessions are ready per until: settled (default: turn done, needs input, or exited), done, needs_me, or exited. Pass since_ms from the spawn/send/submit result so a session that was already idle before your message does not count as done. Handle the ready items, then call again with only the pending ids. Returns immediately if something is already ready.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "session_ids": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "since_ms": {
+            "description": "Unix time in milliseconds, as returned in since_ms by spawn_agent, send_prompt, and submit_task. A session counts as done only after a turn that finished later.",
+            "minimum": 0,
+            "type": "number"
+          },
+          "task_ids": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "timeout_s": {
+            "default": 600,
+            "maximum": 600,
+            "minimum": 0,
+            "type": "number"
+          },
+          "until": {
+            "enum": [
+              "settled",
+              "done",
+              "needs_me",
+              "exited"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "wait_any"
+    },
+    {
+      "description": "Open a new Diri session running an agent or shell, locally or on a configured remote host. Use this whenever the user asks to spawn another agent, session, or terminal. Identical arguments are deduplicated for this caller; reuse operation_id on retries and supply a new operation_id only for an intentional additional session. Inspect spawn_receipt: unknown/failed must never be retried under a new identity blindly.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "description": "Starting ref for a new worktree, e.g. main. Omitted preserves HEAD behavior.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "branch": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "cwd": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "host": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "aider",
+              "amp",
+              "antigravity",
+              "claude",
+              "cline",
+              "codex",
+              "copilot",
+              "cursor",
+              "devin",
+              "droid",
+              "gemini",
+              "grok",
+              "hermes",
+              "kilo",
+              "kimi",
+              "kiro",
+              "maki",
+              "opencode",
+              "pi",
+              "qoder",
+              "shell"
+            ],
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "operation_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "result_schema": {
+            "description": "Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked).",
+            "type": "object"
+          },
+          "task": {
+            "description": "Deliver prompt as a tracked Diri task instead of an untracked initial prompt. The result then includes task.task_id for wait_any or wait_for_task.",
+            "type": "boolean"
+          },
+          "worktree": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "cwd"
+        ],
+        "type": "object"
+      },
+      "name": "spawn_agent"
+    },
+    {
+      "description": "Schedule an agent run owned by Diri, not by this session: it survives this session closing and Diri restarting. Use it whenever the user wants something done later, at a time, or repeatedly, instead of your own cron/loop tools. How runs work: at each due time Diri opens a NEW top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation, so write a self-contained prompt: the goal, the repo and relevant context, what to produce, and where the result goes (open a PR, write a file, post a summary). For code changes pass worktree:true and base \"origin/main\" so each run starts clean. Give a short `name`. When: exactly one of cron (five fields, the Mac's local time, e.g. \"0 9 * * 1-5\" weekdays 09:00), in_minutes (relative one-off), or at_ms (epoch ms). Missed runs: if the Mac was asleep or Diri was closed, the newest missed run fires once when it is back, within catch_up_hours (default 12); older ones are recorded as missed. wake_mac:true (use when the user wants it to run even if the Mac is asleep): Diri wakes the Mac 2 minutes early (lid must be open), keeps it awake while the agent works, then puts it back to sleep if nobody used it. It needs the one-time \"Allow diri to wake the Mac\" approval in Settings > Schedules; if list_schedules reports wakeHelperError, tell the user to turn it on. After creating, confirm in words from the returned nextDue, e.g. \"weekdays at 09:00, next run Monday; it will wake the Mac\".",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "at_ms": {
+            "type": "number"
+          },
+          "base": {
+            "description": "Starting ref for each run's worktree, e.g. origin/main.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "branch": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "catch_up_hours": {
+            "description": "A run missed by up to this long still fires late; 0 never catches up. Default 12.",
+            "maximum": 168,
+            "minimum": 0,
+            "type": "number"
+          },
+          "cron": {
+            "type": "string"
+          },
+          "cwd": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "in_minutes": {
+            "minimum": 0,
+            "type": "number"
+          },
+          "keep_awake": {
+            "description": "Keep an awake Mac from idle-sleeping shortly before each run and while it works. Cannot wake a sleeping Mac.",
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "aider",
+              "amp",
+              "antigravity",
+              "claude",
+              "cline",
+              "codex",
+              "copilot",
+              "cursor",
+              "devin",
+              "droid",
+              "gemini",
+              "grok",
+              "hermes",
+              "kilo",
+              "kimi",
+              "kiro",
+              "maki",
+              "opencode",
+              "pi",
+              "qoder",
+              "shell"
+            ],
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "prompt": {
+            "maxLength": 1048576,
+            "minLength": 1,
+            "type": "string"
+          },
+          "wake_mac": {
+            "description": "Wake a sleeping Mac (lid open) 2 minutes before each run, keep it awake while the run works, then let it sleep again. Needs the one-time wake approval in Settings > Schedules; list_schedules reports if it is missing.",
+            "type": "boolean"
+          },
+          "worktree": {
+            "description": "Start each run in a fresh worktree.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "cwd",
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "name": "schedule_agent"
+    },
+    {
+      "description": "List every Diri schedule with its next due time and recent runs (onTime, late with lateReason asleep/notRunning, missed, failed, manual) and the session each run opened.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "list_schedules"
+    },
+    {
+      "description": "Delete a Diri schedule. Sessions its earlier runs opened are left alone.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "schedule_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id"
+        ],
+        "type": "object"
+      },
+      "name": "delete_schedule"
+    },
+    {
+      "description": "Fan out: open several sessions in one call (at most 8), concurrently. Each entry takes the same fields as spawn_agent (kind, cwd, worktree, branch, base, host, prompt, name, operation_id, task, result_schema) and is deduplicated the same way. Use worktree:true per entry for parallel edits. Returns one result per entry in order, plus the session_ids and task_ids to pass to wait_any.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "agents": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "base": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "branch": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "cwd": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "host": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "kind": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "name": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "operation_id": {
+                  "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prompt": {
+                  "type": "string"
+                },
+                "result_schema": {
+                  "description": "Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked).",
+                  "type": "object"
+                },
+                "task": {
+                  "type": "boolean"
+                },
+                "worktree": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "cwd"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agents"
+        ],
+        "type": "object"
+      },
+      "name": "spawn_agents"
+    },
+    {
+      "description": "Fork an authorized session's conversation into a new child of yours, keeping its context, for example to try an alternative approach. Optionally send the fork a prompt (as a tracked task with task:true). Supported for agents whose conversations can be forked (Claude Code, Codex).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "prompt": {
+            "type": "string"
+          },
+          "result_schema": {
+            "description": "Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked).",
+            "type": "object"
+          },
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "task": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "fork_agent"
+    },
+    {
+      "description": "Park or revive an authorized session without losing it: hibernate freezes its whole process tree (no CPU) while keeping the conversation and terminal, wake resumes it, and resume restarts an exited Agent in its saved conversation. Same authorization as release_agent.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "hibernate",
+              "wake",
+              "resume"
+            ],
+            "type": "string"
+          },
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "manage_agent"
+    },
+    {
+      "description": "List every agent session with its id, kind, title, status, parent, host, and working directory.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "list_agents"
+    },
+    {
+      "description": "Read the current status, title, and working directory of one session.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_status"
+    },
+    {
+      "description": "Type into an authorized session and optionally press Enter. Delegated agents may message their parent or direct children; root agents may coordinate their project and message direct children on any host. Cross-lineage messages are attributed to their sender. Identical messages from the same sender to the same target are delivered at most once, including across retries and restarts. Reuse message_id on retries; use a new message_id only to intentionally repeat identical text. A receipt acknowledges input delivery, not agent completion. Inspect an unknown outcome; never resend it under a new identity.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "submit": {
+            "description": "Press Enter after typing; defaults to true.",
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "send_prompt"
+    },
+    {
+      "description": "Wait for a session status without model polling. Already matching states return immediately unless since_ms is given: then done/idle require a turn that finished after that time (pass since_ms from your send_prompt/spawn result). This does not acknowledge completion of a particular message. Exit or removal also ends the wait; inspect matched, removed, and session before assuming success.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "since_ms": {
+            "description": "Unix time in milliseconds, as returned in since_ms by spawn_agent, send_prompt, and submit_task. A session counts as done only after a turn that finished later.",
+            "minimum": 0,
+            "type": "number"
+          },
+          "timeout_s": {
+            "default": 600,
+            "maximum": 600,
+            "minimum": 0,
+            "type": "number"
+          },
+          "until": {
+            "enum": [
+              "done",
+              "needs_me",
+              "idle",
+              "exited"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "wait_for_agent"
+    },
+    {
+      "description": "Read what a session produced. last_message (best for results) returns the Agent's final answer from its transcript; transcript returns the last N turns; since returns only terminal lines added after cursor (pass back the returned cursor next time); screen/tail return the rendered screen. Transcript modes fall back to the screen tail when a session has no readable transcript (remote, shells, other agents).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "minimum": 0,
+            "type": "number"
+          },
+          "lines": {
+            "default": 50,
+            "type": "number"
+          },
+          "mode": {
+            "enum": [
+              "screen",
+              "tail",
+              "last_message",
+              "transcript",
+              "since"
+            ],
+            "type": "string"
+          },
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "turns": {
+            "default": 6,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "read_output"
+    },
+    {
+      "description": "Return PRs, issues, preview URLs, and listening ports discovered for a session.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_artifacts"
+    },
+    {
+      "description": "Summarize a session's code changes: changed files with +/- counts against its base (default branch merge-base, or HEAD for uncommitted work only), whether it is committed, and overlaps: files also changed by its live sibling sessions, which would conflict on integration. Set patch:true to include the unified diff (bounded by max_patch_bytes).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "enum": [
+              "default_branch",
+              "head"
+            ],
+            "minLength": 1,
+            "type": "string"
+          },
+          "max_patch_bytes": {
+            "default": 32768,
+            "maximum": 1048576,
+            "minimum": 0,
+            "type": "number"
+          },
+          "overlaps": {
+            "default": true,
+            "type": "boolean"
+          },
+          "patch": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_diff"
+    },
+    {
+      "description": "Bring an authorized child session's committed branch into your own checkout (merge, squash, or cherry_pick). Both checkouts must have no uncommitted tracked changes. Conflicts abort cleanly, change nothing, and are returned as paths. Local sessions in the same project only.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "strategy": {
+            "enum": [
+              "merge",
+              "squash",
+              "cherry_pick"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "integrate"
+    },
+    {
+      "description": "Create a git worktree in the calling session's project so parallel work does not collide in one checkout.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "branch": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "repo": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "type": "object"
+      },
+      "name": "create_worktree"
+    },
+    {
+      "description": "List a repository's worktrees with their paths and branches.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "repo": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "type": "object"
+      },
+      "name": "list_worktrees"
+    },
+    {
+      "description": "Remove a git worktree from the calling session's project.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "force": {
+            "type": "boolean"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "repo": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "remove_worktree"
+    },
+    {
+      "description": "Terminate an authorized agent session. Delegated agents may release direct children; root agents may release sessions in their project. The caller and its ancestors are protected.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "release_agent"
+    },
+    {
+      "description": "Drive a real browser isolated to this Diri session. Open a URL, inspect snapshot refs, act on those refs, and request a new snapshot after page changes.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "open",
+              "snapshot",
+              "click",
+              "fill",
+              "type",
+              "press",
+              "hover",
+              "select",
+              "check",
+              "scroll",
+              "get",
+              "wait",
+              "screenshot",
+              "console",
+              "back",
+              "close",
+              "list"
+            ],
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          },
+          "annotate": {
+            "type": "boolean"
+          },
+          "button": {
+            "enum": [
+              "left",
+              "right",
+              "middle"
+            ],
+            "type": "string"
+          },
+          "direction": {
+            "enum": [
+              "up",
+              "down",
+              "left",
+              "right"
+            ],
+            "type": "string"
+          },
+          "double": {
+            "type": "boolean"
+          },
+          "engine": {
+            "enum": [
+              "chromium",
+              "webkit",
+              "firefox"
+            ],
+            "type": "string"
+          },
+          "full": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ms": {
+            "type": "number"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "what": {
+            "enum": [
+              "url",
+              "title",
+              "text",
+              "html",
+              "value",
+              "count"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "browser"
+    },
+    {
+      "description": "Read or change ~/.diri-include, the gitignore-style extra folders Quick Open (Cmd+P) indexes even when hidden or skipped. action get returns the path, text, and patterns; add appends unique patterns (e.g. **/.worktrees/); set replaces the whole file with text (empty clears it).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "get",
+              "add",
+              "set"
+            ],
+            "type": "string"
+          },
+          "patterns": {
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 65536,
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "quick_open_include"
+    },
+    {
+      "description": "Describe this session's identity, parent, ancestors, children, worktree, and cross-session write policy. origin_note, when present, is the note you were started from: read it first with read_note {\"note\":\"origin\"}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "whoami"
+    },
+    {
+      "description": "Find the person's Diri Notes (briefs, plans, to-do lists). Notes are kept by Diri, not in the project folder, so use this rather than searching files. Defaults to notes for your project; project:\"all\" lists every note, or pass a project folder. mentions:\"me\" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body. session_id is the note's sidebar Session.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_archived": {
+            "type": "boolean"
+          },
+          "limit": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mentions": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "project": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_notes"
+    },
+    {
+      "description": "Read one Diri note as Markdown. If you were started from a note, read note \"origin\" first: it is your brief. markdown is the note's canonical text (title first as a # line, tidy tables, normalised list markers): exactly what edit_note matches, so copy old_string from it. path is the note's .md file, which you may also edit with your own file tools; Diri keeps the change, a version before it, and the note's identity. Returns the text, its to-dos (block index, checked, linked sessions and their live status) and its @-mentions resolved to sessions or notes. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, part of a title, a note Session id, or \"origin\": the note you were started from (whoami shows it as origin_note).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "note"
+        ],
+        "type": "object"
+      },
+      "name": "read_note"
+    },
+    {
+      "description": "Add to a Diri note without rewriting it; never deletes the person's text. entry: one short line when something matters (a decision, a finding, a blocker, a result, a link), filed under your to-do (or the one you name) or in the note's Updates; keep entries sparing, no progress chatter. checked: tick a to-do, e.g. your own sub-tasks as you finish them (the to-do you were started from is the person's to tick). link_session: put a session's chip on a to-do. append: longer Markdown at the end, rarely needed. Pick the to-do by todo (its text or part of it) or todo_index (from read_note). Delegated agents may write only to the note they were started from or notes that mention them.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "append": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "checked": {
+            "type": "boolean"
+          },
+          "entry": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "link_session": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "note": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "todo": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "todo_index": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "note"
+        ],
+        "type": "object"
+      },
+      "name": "write_note"
+    },
+    {
+      "description": "Change a Diri note in place, like editing a Markdown file: old_string is exact text from read_note's markdown (title line included), new_string replaces it; an empty new_string deletes it. old_string must appear once unless replace_all. Use it when the person asks for a change, or to keep your own entries current (tick a table row, change \"Fix\" to \"Done\"); otherwise prefer write_note. Every version is kept, so the person can restore one. Returns the changed lines and the new version. Diri tidies the text after each change (tables are re-aligned); a table row still matches if only its spacing differs, and the reply says so. For anything else, copy the next old_string from the changed lines or a fresh read_note.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "new_string": {
+            "type": "string"
+          },
+          "note": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "old_string": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "replace_all": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "note",
+          "old_string",
+          "new_string"
+        ],
+        "type": "object"
+      },
+      "name": "edit_note"
+    },
+    {
+      "description": "Replace everything under one heading of a Diri note, up to the next heading of the same or a higher level; the heading itself stays. heading is its text, optionally with its # marks (\"## Status\") when two headings share a name. markdown is the new content. Same rules as edit_note: change the person's writing only when asked.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "heading": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "markdown": {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "note": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "note",
+          "heading",
+          "markdown"
+        ],
+        "type": "object"
+      },
+      "name": "replace_section"
+    },
+    {
+      "description": "Write a new Diri note for the person, e.g. an explanation (\"how sign-in works\") or a write-up. markdown is rich Markdown: headings, lists, to-dos, links, quotes, code. It appears under you in the sidebar, in your project (or project, a folder); open:true shows it to the person right away. Use this for anything longer than a write_note entry.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "markdown": {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "open": {
+            "type": "boolean"
+          },
+          "project": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "name": "create_note"
+    },
+    {
+      "description": "Start an agent on a Diri note or one of its to-dos. The note becomes the agent's parent in the sidebar, the agent gets the note as its brief (plus the sessions it mentions), and its chip is added to the to-do. kind defaults to your own kind. separate_copy gives it its own copy of the project folder (projects under git only) so its changes stay apart until merged. prompt adds your own instructions. task:true tracks it like submit_task.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "note": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "operation_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "prompt": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "result_schema": {
+            "description": "Optional JSON Schema (object) for the completed result. The Agent must then report result as JSON matching it (type, required, properties, enum, items are checked).",
+            "type": "object"
+          },
+          "separate_copy": {
+            "type": "boolean"
+          },
+          "task": {
+            "type": "boolean"
+          },
+          "todo": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "todo_index": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "note"
+        ],
+        "type": "object"
+      },
+      "name": "start_from_note"
+    },
+    {
+      "description": "Earlier versions of a Diri note: when, by whom, and what changed, newest first. Pass version to read that version's text. Read-only: only the person restores a version.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "version": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "note"
+        ],
+        "type": "object"
+      },
+      "name": "note_history"
+    },
+    {
+      "description": "List the sessions spawned by this one, optionally including the whole descendant tree.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_exited": {
+            "default": true,
+            "type": "boolean"
+          },
+          "recursive": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_children"
+    },
+    {
+      "description": "Wait until ALL selected child sessions settle, finish, or exit (use wait_any to handle each as soon as it is ready). Already matching states return immediately. Removed children are reported separately and cannot settle other working children. Omit session_ids for all direct children; an explicit empty array selects none.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "session_ids": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "since_ms": {
+            "description": "Unix time in milliseconds, as returned in since_ms by spawn_agent, send_prompt, and submit_task. A session counts as done only after a turn that finished later.",
+            "minimum": 0,
+            "type": "number"
+          },
+          "timeout_s": {
+            "default": 600,
+            "maximum": 600,
+            "minimum": 0,
+            "type": "number"
+          },
+          "until": {
+            "enum": [
+              "settled",
+              "done",
+              "exited"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "wait_for_children"
+    },
+    {
+      "description": "Collect compact screen tails, each child's last agent message (when its transcript is readable), status, and artifacts for this session's children without interpreting their output.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "rows": {
+            "default": 14,
+            "type": "number"
+          },
+          "session_ids": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "name": "summarize_children"
+    },
+    {
+      "description": "If your parent is a note, the report is added to the note: finish with status done and a one-paragraph result in summary (what you did, what changed, what is left), in plain words. Otherwise: deliver a structured update, result, blocker, or question to the session that delegated this work at most once. If your parent assigned you an open Diri task, the report is recorded on that task instead (update→progress, blocked→blocked, done→completed, failed→failed) and reaches the parent through wait_any/wait_for_task; set deliver:true to also type it into the parent's terminal. Identical reports are deduplicated. Reuse message_id on retries; choose a new one only for an intentional repeat. Inspect unknown outcomes without resending.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "changed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "deliver": {
+            "type": "boolean"
+          },
+          "details": {
+            "type": "string"
+          },
+          "message_id": {
+            "description": "Stable identity for this logical message. Reuse on retries. If omitted, identical content is deduplicated for this sender/target. Use a new value only for an intentional repeat.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "next_steps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "proof": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "questions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "update",
+              "done",
+              "blocked",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "submit": {
+            "type": "boolean"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary"
+        ],
+        "type": "object"
+      },
+      "name": "report_to_parent"
+    }
+  ]
+}

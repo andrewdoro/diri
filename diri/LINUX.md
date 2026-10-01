@@ -11,8 +11,45 @@ Download both the artifact and `SHA256SUMS` from the same GitHub release, then
 verify the download:
 
 ```sh
-sha256sum --check SHA256SUMS
+sha256sum --ignore-missing --check SHA256SUMS
 ```
+
+A checksum only proves the download matches the list next to it. To prove the
+files were built by this repository's CI, verify their Sigstore signatures.
+Every Linux release file has a `<file>.sigstore.json` bundle beside it. Install
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/) (3.x
+is tested), download the artifact and its bundle, then run:
+
+```sh
+cosign verify-blob \
+  --bundle diri_<version>_amd64.AppImage.sigstore.json \
+  --certificate-identity https://github.com/cristicretu/diri/.github/workflows/nightly.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  diri_<version>_amd64.AppImage
+```
+
+`Verified OK` means the file is byte-for-byte what the `nightly.yml` workflow
+on `main` signed, and that the signature is recorded in the public Sigstore
+transparency log. Any other signer, a modified file, or a missing bundle
+fails. Use the same command for `diri_<version>_amd64.deb`.
+
+To check every Linux file at once, verify the signed Linux checksum list and
+then check against it:
+
+```sh
+cosign verify-blob \
+  --bundle SHA256SUMS-linux.sigstore.json \
+  --certificate-identity https://github.com/cristicretu/diri/.github/workflows/nightly.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS-linux
+sha256sum --ignore-missing --check SHA256SUMS-linux
+```
+
+There is no long-lived signing key or fingerprint to import: Sigstore issues a
+short-lived certificate to the CI job, and the identity above is the trust
+anchor. The Debian package is not `dpkg-sig` signed and there is no APT
+repository yet, so `apt` itself does not check a signature; verify the `.deb`
+with cosign before installing it.
 
 For Ubuntu or another Debian-based system, install the package with APT so its
 runtime dependencies are resolved:

@@ -16,6 +16,10 @@ mod theme_fade_frames;
 #[cfg(all(test, target_os = "macos"))]
 mod title_settle_frames;
 #[cfg(all(test, target_os = "macos"))]
+mod whats_new_clips;
+#[cfg(test)]
+mod whats_new_tests;
+#[cfg(all(test, target_os = "macos"))]
 mod window_navigation_tests;
 mod workspace_launches;
 #[cfg(all(test, target_os = "macos"))]
@@ -49,8 +53,8 @@ use crate::commands::{
     SESSION_NAVIGATION_CONTEXT, SearchNotes, SelectLastSession, SelectNextAttentionSession,
     SelectNextSession, SelectPreviousSession, SelectSession1, SelectSession2, SelectSession3,
     SelectSession4, SelectSession5, SelectSession6, SelectSession7, SelectSession8, ShowTodos,
-    ToggleAuxiliaryTerminal, ToggleCommandPalette, ToggleHistory, ToggleInspector, ToggleOverview,
-    ToggleQuickOpen, ToggleSidebar, ToggleTabPeek,
+    ShowWhatsNew, ToggleAuxiliaryTerminal, ToggleCommandPalette, ToggleHistory, ToggleInspector,
+    ToggleOverview, ToggleQuickOpen, ToggleSidebar, ToggleTabPeek,
 };
 use crate::external_drop::ExternalDropAction;
 use crate::haptics::{self, Haptic};
@@ -318,6 +322,8 @@ pub struct RootView {
     notification_panel_open: bool,
     /// The system alert asking whether to close sessions, while it is up.
     close_prompt: Option<Task<()>>,
+    /// The What's New sheet, while open.
+    whats_new: Option<Entity<crate::whats_new::WhatsNewSheet>>,
     /// The main window's viewport, for content that sizes to it while a
     /// panel paints it elsewhere.
     main_viewport: gpui::Size<gpui::Pixels>,
@@ -703,6 +709,9 @@ impl RootView {
             if let SidebarEvent::Update(command) = event {
                 this.services.updates.send(command.clone());
             }
+            if matches!(event, SidebarEvent::OpenWhatsNew) {
+                this.open_whats_new(window, cx);
+            }
             if let SidebarEvent::OpenAgentSettings(host) = event
                 && let Some(surfaces) = &this.utility_surfaces
             {
@@ -799,6 +808,16 @@ impl RootView {
             {
                 subscription.detach();
             }
+            cx.subscribe_in(
+                surfaces,
+                window,
+                |this, _, event: &crate::surface_shell::UtilitySurfacesEvent, window, cx| {
+                    if let crate::surface_shell::UtilitySurfacesEvent::ShowWhatsNew(page) = event {
+                        this.open_whats_new_at(*page, window, cx);
+                    }
+                },
+            )
+            .detach();
         }
         cx.subscribe_in(
             &launcher,
@@ -1409,6 +1428,7 @@ impl RootView {
             quote_target_picker: None,
             notification_panel_open: false,
             close_prompt: None,
+            whats_new: None,
             main_viewport: gpui::Size::default(),
             notification_filter_unread: true,
             notification_selected: 0,
@@ -2399,6 +2419,7 @@ impl RootView {
                     .update(cx, |sidebar, cx| sidebar.select_next_needing_input(cx));
             }
             CommandId::CheckForUpdates => self.services.updates.check(true),
+            CommandId::ShowWhatsNew => self.open_whats_new_at(0, window, cx),
             CommandId::SelectPreviousSession if !self.arrow_surface_visible() => {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.select_relative(-1, cx));
@@ -2487,6 +2508,78 @@ impl RootView {
             .expect("session store lock poisoned")
             .spawn_kind(AgentKind::NOTE, SpawnOptions::default());
         true
+    }
+
+    /// Opens the What's New sheet on the releases not seen yet, or on the
+    /// newest one when opened with nothing new, and marks them seen.
+    pub(crate) fn open_whats_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_whats_new_at(0, window, cx);
+    }
+
+    /// [`Self::open_whats_new`] on highlight `page` (Settings' thumbnails).
+    pub(crate) fn open_whats_new_at(
+        &mut self,
+        page: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::whats_new::{WhatsNewEvent, WhatsNewSheet, current_version, latest, unseen};
+        if self.whats_new.is_some() {
+            return;
+        }
+        let current = current_version();
+        let runtime = Arc::clone(&self.services.store);
+        let releases = {
+            let store = runtime.store.read().expect("session store lock poisoned");
+            let unseen = unseen(&store.preferences().whats_new_seen_version, &current);
+            if unseen.is_empty() {
+                latest(&current)
+            } else {
+                unseen
+            }
+        };
+        self.sidebar.read(cx).mark_whats_new_seen();
+        if releases.is_empty() {
+            return;
+        }
+        let sheet = cx.new(|cx| WhatsNewSheet::new(&releases, runtime, cx));
+        if page > 0 {
+            sheet.update(cx, |sheet, cx| sheet.go(page, window, cx));
+        }
+        cx.subscribe_in(
+            &sheet,
+            window,
+            |this, _, event: &WhatsNewEvent, window, cx| {
+                this.close_whats_new(window, cx);
+                match event {
+                    WhatsNewEvent::Close => {}
+                    WhatsNewEvent::Run(command) => this.run_command(*command, window, cx),
+                    WhatsNewEvent::ReleaseNotes => {
+                        if let Some(surfaces) = &this.utility_surfaces {
+                            surfaces.update(cx, |surfaces, cx| {
+                                surfaces.open_settings(cx);
+                                surfaces
+                                    .open_settings_tab(crate::settings::SettingsTab::WhatsNew, cx);
+                                surfaces.focus_handle(cx).focus(window, cx);
+                            });
+                        }
+                    }
+                }
+            },
+        )
+        .detach();
+        sheet.read(cx).focus_handle(cx).focus(window, cx);
+        self.whats_new = Some(sheet);
+        self.sidebar.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    fn close_whats_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sheet) = self.whats_new.take() {
+            sheet.update(cx, |sheet, cx| sheet.release(window, cx));
+            self.focus_active_terminal(window, cx);
+            cx.notify();
+        }
     }
 
     fn open_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5125,6 +5218,9 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
                 this.run_command(CommandId::CheckForUpdates, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ShowWhatsNew, window, cx| {
+                this.run_command(CommandId::ShowWhatsNew, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &SelectPreviousSession, window, cx| {
                 this.run_command(CommandId::SelectPreviousSession, window, cx);
             }))
@@ -5336,6 +5432,10 @@ impl Render for RootView {
         }
         if let Some(navigation) = &self.navigation {
             root = root.child(cached_window_overlay(navigation.clone()));
+        }
+        // Above Settings too: Settings › What's New opens it.
+        if let Some(sheet) = &self.whats_new {
+            root = root.child(div().absolute().inset_0().child(sheet.clone()));
         }
         if let Some(picker) = self.quote_target_picker(colors, sidebar_width, cx) {
             root = root.child(deferred(picker));

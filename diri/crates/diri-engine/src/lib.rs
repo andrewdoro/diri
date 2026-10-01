@@ -61,6 +61,7 @@ mod preview_mux;
 pub mod pty;
 pub mod registry;
 pub mod remote;
+pub mod schedule;
 pub mod screen;
 pub mod session;
 pub mod session_files;
@@ -68,6 +69,8 @@ mod state_file;
 pub mod status;
 pub mod telemetry;
 pub mod transcript;
+#[cfg(unix)]
+pub mod wake;
 pub mod workspace;
 mod worktree_health;
 mod worktree_scan;
