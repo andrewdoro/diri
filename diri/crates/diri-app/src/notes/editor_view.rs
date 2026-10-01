@@ -1772,6 +1772,12 @@ impl NoteEditorView {
     /// Folds or unfolds the children of the list item at `index`. View
     /// state only: nothing is saved and undo is untouched. Other note
     /// features (a to-do's work context) build on this.
+    /// Starts this editor is waiting on, for fixtures that answer them.
+    #[cfg(test)]
+    pub(crate) fn work_tickets_for_test(&self) -> Vec<(diri_notes::doc::BlockId, u64)> {
+        self.work.pending_tickets()
+    }
+
     pub(crate) fn set_folded(&mut self, index: usize, folded: bool, cx: &mut Context<Self>) {
         self.editor.set_collapsed(index, folded);
         self.slash = None;

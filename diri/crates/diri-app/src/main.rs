@@ -78,6 +78,7 @@ mod tooltip_warmth;
 pub mod transcript;
 pub mod updates;
 pub mod usage;
+mod whats_new;
 mod window_restore;
 mod workbench;
 #[cfg(all(test, target_os = "macos"))]

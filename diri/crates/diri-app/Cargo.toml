@@ -53,7 +53,7 @@ diri-updater.workspace = true
 diri-usage.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
-image = { workspace = true, features = ["ico", "png"] }
+image = { workspace = true, features = ["ico", "png", "webp"] }
 libc = "0.2"
 nucleo-matcher.workspace = true
 notify.workspace = true

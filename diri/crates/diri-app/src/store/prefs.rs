@@ -317,6 +317,12 @@ pub struct Prefs {
     /// herdr panes and conversations already brought over, so importing
     /// again only offers what is new. See `crate::herdr_import`.
     pub herdr_imported: std::collections::BTreeSet<String>,
+    /// The newest release whose What's New highlights were shown or
+    /// dismissed. A new install starts at the running version, so it never
+    /// sees highlights; a file written before this field existed reads as
+    /// empty, so an update from those versions shows them once.
+    #[serde(default)]
+    pub whats_new_seen_version: String,
 }
 
 impl Default for Prefs {
@@ -373,6 +379,7 @@ impl Default for Prefs {
             shortcut_overrides: BTreeMap::new(),
             last_selected_session: None,
             herdr_imported: Default::default(),
+            whats_new_seen_version: crate::updates::CURRENT_VERSION.to_owned(),
         }
     }
 }

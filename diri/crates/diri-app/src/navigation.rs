@@ -780,6 +780,13 @@ impl NavigationOverlay {
         self.push_page(Overlay::Themes, window, cx);
     }
 
+    /// Types into the open page's query, as keystrokes would.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn type_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.query.insert(text);
+        self.query_changed(cx);
+    }
+
     #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn arrow_for_test(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.move_highlight(delta, cx);

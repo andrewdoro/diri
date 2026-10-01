@@ -220,6 +220,8 @@ pub(crate) enum SidebarEvent {
     /// The user acted on the update pill. The sidebar holds no updater of its
     /// own; RootView owns the handle and forwards these.
     Update(UpdateCommand),
+    /// The What's New line was clicked: RootView opens the sheet.
+    OpenWhatsNew,
     /// The close confirmation was raised, confirmed, or cancelled. RootView
     /// paints that dialog but only re-renders on our events -- without this it
     /// keeps showing a stale frame until some unrelated update wakes it, which
@@ -4552,6 +4554,101 @@ impl Sidebar {
         Some(pill.into_any_element())
     }
 
+    /// One quiet line after an update with highlights: where the update pill
+    /// sits, never at the same time as it, and gone once opened or dismissed.
+    fn whats_new_pill(&self, colors: SemanticColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.preview {
+            return None;
+        }
+        let seen = self
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .whats_new_seen_version
+            .clone();
+        let release =
+            *crate::whats_new::unseen(&seen, &crate::whats_new::current_version()).first()?;
+        let rest = Fill::hover(colors, false);
+        let lit = Fill::hover(colors, true);
+        let pill = div()
+            .id("whats-new-pill")
+            .debug_selector(|| "whats-new-pill".into())
+            .group("whats-new-pill")
+            .mb(px(3.0))
+            .px(px(Space::ROW_H))
+            .h(px(SIDEBAR_NAV_ROW_HEIGHT))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(SIDEBAR_ROW_RADIUS))
+            .bg(rest)
+            .hover(move |style| style.bg(lit))
+            .cursor_pointer()
+            .child(div().w(px(16.0)).text_center().child(sf_symbol(
+                "sparkles",
+                12.5,
+                diri_ui::Ink::FRESH,
+            )))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .flex()
+                    .gap(px(5.0))
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_size(px(Typo::ROW.size))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(colors.secondary)
+                            .child("What's new ·"),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(colors.text(diri_ui::TextTone::Label))
+                            .child(release.headline),
+                    ),
+            )
+            .child(
+                // Shown while the line is hovered: dismiss without opening.
+                div()
+                    .id("whats-new-dismiss")
+                    .debug_selector(|| "whats-new-dismiss".into())
+                    .flex_none()
+                    .size(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .opacity(0.0)
+                    .group_hover("whats-new-pill", |style| style.opacity(1.0))
+                    .hover(move |style| style.bg(colors.primary.alpha(0.08)))
+                    .child(sf_symbol("xmark", 9.0, colors.tertiary))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.mark_whats_new_seen();
+                        cx.notify();
+                    })),
+            )
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenWhatsNew)));
+        Some(pill.into_any_element())
+    }
+
+    /// Records the running release's highlights as seen.
+    pub(crate) fn mark_whats_new_seen(&self) {
+        let version = crate::whats_new::current_version();
+        let _ = self
+            .store
+            .write()
+            .expect("session store lock poisoned")
+            .update_preferences(|prefs| prefs.whats_new_seen_version = version);
+    }
+
     fn account_footer(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
         let hovered = self.ui.hovered_control == Some("account");
         let account_label = local_account_label(self.preview);
@@ -4570,7 +4667,10 @@ impl Sidebar {
             .pb(px(7.0))
             .border_t_1()
             .border_color(colors.primary.alpha(0.06))
-            .children(self.update_pill(colors, cx))
+            .children(
+                self.update_pill(colors, cx)
+                    .or_else(|| self.whats_new_pill(colors, cx)),
+            )
             .child(
                 div()
                     .id("account")
