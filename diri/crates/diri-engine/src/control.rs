@@ -7635,10 +7635,18 @@ mod tests {
             Arc::clone(&registry),
             temp.path().join("daemon.sock"),
         ));
+        // Only SessionStart may move the tab to another conversation, so the
+        // later reports switch with it; applied out of order, the first
+        // prompt would arrive for a foreign conversation and lose its title.
         fn prompt(uuid: &str, prompt: &str) -> Option<JsonValue> {
+            let event = if uuid == "uuid-1" {
+                "UserPromptSubmit"
+            } else {
+                "SessionStart"
+            };
             Some(json!({
-                "kind": "claude-hook", "dirijorSessionID": "s_hook", "event": "UserPromptSubmit",
-                "payload": {"session_id": uuid, "hook_event_name": "UserPromptSubmit", "prompt": prompt},
+                "kind": "claude-hook", "dirijorSessionID": "s_hook", "event": event,
+                "payload": {"session_id": uuid, "hook_event_name": event, "prompt": prompt},
             }))
         }
         let busy = registry.lock().expect("registry");
