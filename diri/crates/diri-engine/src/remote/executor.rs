@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::ssh::CommandSpec;
+use super::ssh_error::{SshFailure, SshFailureClass};
 
 const DIAGNOSTIC_LIMIT: usize = 64 * 1024;
 
@@ -57,7 +58,29 @@ impl ProcessExecutor {
         stdout_limit: usize,
     ) -> io::Result<CommandOutput> {
         spec.program.clone_from(&self.ssh_executable);
-        let mut command = self.command(&spec);
+        let input = Arc::new(input);
+        let output = self.run_once(&spec, Arc::clone(&input), timeout, stdout_limit)?;
+        // A multiplexing master that is exiting (ControlPersist expiry, a
+        // previous Engine's master) refuses the request before the remote
+        // command starts. The master is an optimisation only, so one retry,
+        // which connects directly or starts a fresh master, is safe.
+        if output.status.code() == Some(255)
+            && SshFailureClass::classify(&output.stderr) == SshFailureClass::ControlMaster
+        {
+            diri_telemetry::warn_event!("ssh.control_master_retry");
+            return self.run_once(&spec, input, timeout, stdout_limit);
+        }
+        Ok(output)
+    }
+
+    fn run_once(
+        &self,
+        spec: &CommandSpec,
+        input: Arc<Vec<u8>>,
+        timeout: Duration,
+        stdout_limit: usize,
+    ) -> io::Result<CommandOutput> {
+        let mut command = self.command(spec);
         diri_telemetry::count("ssh.commands", 1);
         let started = Instant::now();
         let mut child = command.spawn()?;
@@ -214,14 +237,21 @@ impl CommandOutput {
         } else {
             use std::os::unix::process::ExitStatusExt;
             // 255 is OpenSSH's own failure (connect, auth, host key); any
-            // other status came from the remote command.
+            // other status came from the remote command. Only the class of
+            // OpenSSH's stderr is recorded, never the text.
+            let ssh_class =
+                (self.status.code() == Some(255)).then(|| SshFailureClass::classify(&self.stderr));
             diri_telemetry::warn_event!(
                 "ssh.command_failed",
                 phase = phase,
                 exit = self.status.code(),
                 signal = self.status.signal(),
-                ssh_failure = self.status.code() == Some(255),
+                ssh_failure = ssh_class.is_some(),
+                class = ssh_class.map(SshFailureClass::code),
             );
+            if let Some(class) = ssh_class {
+                return Err(SshFailure::new(class, phase, &self.stderr).into_io_error());
+            }
             Err(io::Error::other(format!(
                 "{phase} failed with {}: {}",
                 self.status,

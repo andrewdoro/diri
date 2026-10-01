@@ -199,11 +199,12 @@ recorded by the Engine, not the Holder.
 | `remote.connection_fatal` | error | `session, reconnects` | protocol violations that fail the transport closed |
 | `remote.uncertain_input` | error | `session` | input whose delivery could not be proven; the session fails closed |
 | `remote.helper_ready` | info | `host, path: cached\|fused\|bootstrap\|reinstall, target, protocol, ms` | bootstrap and probe latency, artifact selection |
-| `remote.helper_failed` | incident | `host, forced, io, ms` | bootstrap failures (only structured I/O facts; never remote output) |
+| `remote.helper_failed` | incident | `host, forced, io, ssh, ms` | bootstrap failures (only structured I/O facts and `ssh`, the OpenSSH failure class such as `ssh_auth_failed`; never remote output) |
 | `remote.helper_upload` | info | `host, target, bytes, ok, ms` | Helper uploads |
 | `remote.persistence` | info | `host, capability: native-detach\|user-supervisor\|non-persistent` | persistence probe outcome |
 | `remote.restore_skipped` | warn | `session, host, reason: helper_unavailable\|inspect_failed, io` | remote sessions left behind at Engine start |
-| `ssh.command_failed` | warn | `phase, exit, signal, ssh_failure` | SSH exit codes per bootstrap/RPC phase (255 = OpenSSH itself: connect, auth, host key) |
+| `ssh.command_failed` | warn | `phase, exit, signal, ssh_failure, class` | SSH exit codes per bootstrap/RPC phase (255 = OpenSSH itself: connect, auth, host key); `class` is OpenSSH's stderr classified on the Mac (`ssh_unresolved_host`, `ssh_refused`, `ssh_unreachable`, `ssh_timeout`, `ssh_auth_failed`, `ssh_host_key`, `ssh_host_key_changed`, `ssh_connection_closed`, `ssh_config`, `ssh_control_master`, `ssh_failed`), never the text |
+| `ssh.control_master_retry` | warn | | a request refused by an exiting multiplexing master, retried once on a fresh connection |
 | `ssh.command_timeout` | warn | `timeout` | SSH commands killed at their deadline |
 
 ### Accounts

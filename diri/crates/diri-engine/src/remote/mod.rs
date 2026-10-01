@@ -15,6 +15,7 @@ mod effect;
 pub mod executor;
 pub mod manager;
 pub mod ssh;
+pub mod ssh_error;
 pub(crate) mod stream;
 
 pub const TRANSPORT_UNAVAILABLE_CODE: &str = "remote_transport_unavailable";

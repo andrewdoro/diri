@@ -4863,6 +4863,9 @@ fn io_control_error(error: std::io::Error) -> ControlError {
             "Remote transport failed; the Agent's last state is preserved.",
         );
     }
+    if let Some(failure) = crate::remote::ssh_error::SshFailure::from_io(&error) {
+        return ControlError::new(failure.class.code(), failure.user_message());
+    }
     match error.kind() {
         std::io::ErrorKind::NotFound => ControlError::not_found(error.to_string()),
         _ => ControlError::internal(error.to_string()),
@@ -8742,6 +8745,30 @@ mod tests {
         assert!(!watch.observe(0, 0, at(1000), grace));
         assert!(!watch.observe(0, 0, at(1599), grace));
         assert!(watch.observe(0, 0, at(1600), grace));
+    }
+
+    #[test]
+    fn openssh_failures_become_structured_codes_not_internal() {
+        use crate::remote::ssh_error::{SshFailure, SshFailureClass};
+        let error = io_control_error(
+            SshFailure::new(
+                SshFailureClass::UnresolvedHost,
+                "remote platform probe",
+                b"ssh: Could not resolve hostname hogwarts: nodename nor servname provided, or not known\n",
+            )
+            .into_io_error(),
+        );
+        assert_eq!(error.code, "ssh_unresolved_host");
+        assert!(
+            error
+                .message
+                .starts_with("SSH could not resolve the host name.")
+        );
+        assert!(
+            error
+                .message
+                .contains("Could not resolve hostname hogwarts")
+        );
     }
 
     #[test]

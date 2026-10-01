@@ -1072,6 +1072,7 @@ fn record_helper_outcome(
             host = diri_telemetry::id(&host.id),
             forced = forced,
             io = diri_telemetry::io_error(error),
+            ssh = super::ssh_error::SshFailure::from_io(error).map(|failure| failure.class.code()),
             ms = elapsed,
         ),
     }
@@ -1888,5 +1889,147 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect()
+    }
+
+    fn failing_ssh_manager(script: &str, askpass: bool) -> (tempfile::TempDir, RemoteManager) {
+        let temporary = tempfile::tempdir().expect("temp");
+        let fake_ssh = temporary.path().join("ssh");
+        fs::write(
+            &fake_ssh,
+            script.replace("$TMP", &temporary.path().display().to_string()),
+        )
+        .expect("fake ssh");
+        fs::set_permissions(&fake_ssh, fs::Permissions::from_mode(0o700)).expect("mode");
+        let mut executor = ProcessExecutor::new(&fake_ssh);
+        if askpass {
+            executor = executor.with_askpass("/fixture/diri-ssh-askpass");
+        }
+        let manager = RemoteManager::new(
+            executor,
+            ArtifactCatalog {
+                artifacts: HashMap::new(),
+            },
+            temporary.path().join("control"),
+        )
+        .expect("manager");
+        (temporary, manager)
+    }
+
+    fn fixture_host() -> HostEntry {
+        HostEntry {
+            id: "hogwarts".into(),
+            name: None,
+            ssh: "hogwarts".into(),
+            default_cwd: None,
+            node: None,
+        }
+    }
+
+    #[test]
+    fn openssh_setup_failures_surface_as_classified_errors() {
+        use super::super::ssh_error::{SshFailure, SshFailureClass};
+        let cases = [
+            (
+                "ssh: Could not resolve hostname hogwarts: nodename nor servname provided, or not known",
+                SshFailureClass::UnresolvedHost,
+            ),
+            (
+                "ssh: connect to host 192.0.2.7 port 22: Connection refused",
+                SshFailureClass::Refused,
+            ),
+            (
+                "ssh: connect to host 192.0.2.7 port 22: Operation timed out",
+                SshFailureClass::Timeout,
+            ),
+            (
+                "u@hogwarts: Permission denied (publickey).",
+                SshFailureClass::AuthFailed,
+            ),
+            ("Host key verification failed.", SshFailureClass::HostKey),
+        ];
+        for (stderr, class) in cases {
+            let (_temporary, manager) = failing_ssh_manager(
+                &format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{stderr}' >&2\nexit 255\n"),
+                false,
+            );
+            let error = manager
+                .ensure_helper(&fixture_host())
+                .expect_err("ssh fails before the platform probe runs");
+            let failure = SshFailure::from_io(&error).expect("classified OpenSSH failure");
+            assert_eq!(failure.class, class, "{stderr}");
+            assert!(error.to_string().contains("remote platform probe"));
+            assert!(failure.user_message().starts_with(class.advice()));
+        }
+    }
+
+    #[test]
+    fn interactive_probe_uses_ssh_config_and_the_askpass_broker() {
+        use super::super::ssh_error::{SshFailure, SshFailureClass};
+        let (temporary, manager) = failing_ssh_manager(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '$TMP/args'\nprintf '%s|%s' \"$SSH_ASKPASS\" \"$SSH_ASKPASS_REQUIRE\" > '$TMP/env'\nprintf 'Host key verification failed.\\n' >&2\nexit 255\n",
+            true,
+        );
+        let error = manager
+            .ensure_helper(&fixture_host())
+            .expect_err("host key refused");
+        assert_eq!(
+            SshFailure::from_io(&error).map(|failure| failure.class),
+            Some(SshFailureClass::HostKey)
+        );
+        let args = fs::read_to_string(temporary.path().join("args")).expect("args");
+        let args = args.lines().collect::<Vec<_>>();
+        // The destination is the user's alias, resolved by their own
+        // ~/.ssh/config; nothing overrides that config or forbids prompts.
+        assert!(args.windows(2).any(|pair| pair == ["--", "hogwarts"]));
+        assert!(!args.contains(&"-F"));
+        assert!(!args.iter().any(|arg| arg.starts_with("BatchMode")));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("StrictHostKeyChecking"))
+        );
+        assert_eq!(
+            fs::read_to_string(temporary.path().join("env")).expect("env"),
+            "/fixture/diri-ssh-askpass|force"
+        );
+    }
+
+    #[test]
+    fn an_exiting_control_master_is_retried_once_on_a_fresh_connection() {
+        use super::super::ssh_error::{SshFailure, SshFailureClass};
+        // First attempt: the shared master refuses. Second attempt reaches
+        // OpenSSH's own resolution, proving the retry ran exactly once.
+        let (temporary, manager) = failing_ssh_manager(
+            "#!/bin/sh\ncat >/dev/null\nprintf x >> '$TMP/calls'\nif [ \"$(cat '$TMP/calls')\" = x ]; then\n  printf 'mux_client_request_session: session request failed: Session open refused by peer\\n' >&2\nelse\n  printf 'ssh: Could not resolve hostname hogwarts: nodename nor servname provided, or not known\\n' >&2\nfi\nexit 255\n",
+            false,
+        );
+        let error = manager
+            .ensure_helper(&fixture_host())
+            .expect_err("unresolved");
+        assert_eq!(
+            SshFailure::from_io(&error).map(|failure| failure.class),
+            Some(SshFailureClass::UnresolvedHost)
+        );
+        assert_eq!(
+            fs::read_to_string(temporary.path().join("calls")).expect("calls"),
+            "xx"
+        );
+
+        let (temporary, manager) = failing_ssh_manager(
+            "#!/bin/sh\ncat >/dev/null\nprintf x >> '$TMP/calls'\nprintf 'mux_client_request_session: read from master failed: Broken pipe\\n' >&2\nexit 255\n",
+            false,
+        );
+        let error = manager
+            .ensure_helper(&fixture_host())
+            .expect_err("master keeps failing");
+        assert_eq!(
+            SshFailure::from_io(&error).map(|failure| failure.class),
+            Some(SshFailureClass::ControlMaster)
+        );
+        assert_eq!(
+            fs::read_to_string(temporary.path().join("calls")).expect("calls"),
+            "xx",
+            "never more than one retry"
+        );
     }
 }

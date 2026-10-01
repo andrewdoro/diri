@@ -320,7 +320,16 @@ exclusive use of protocol stdin/stdout.
 
 OpenSSH configuration is reused. A finite-lived ControlMaster may reduce repeat
 authentication and handshake cost, but it is only a performance optimization.
-Session survival never depends on the ControlMaster.
+Session survival never depends on the ControlMaster. A request refused by an
+exiting master (`mux_client_*`) is retried exactly once, which connects directly
+or starts a fresh master; the remote command never ran on the refused attempt.
+
+OpenSSH's own failures (exit 255) are classified locally from its stderr into
+structured control errors: `ssh_unresolved_host`, `ssh_refused`,
+`ssh_unreachable`, `ssh_timeout`, `ssh_auth_failed`, `ssh_host_key`,
+`ssh_host_key_changed`, `ssh_connection_closed`, `ssh_config`,
+`ssh_control_master` and `ssh_failed`. The message tells the user what to check;
+telemetry records only the class, never the stderr text.
 
 All internal remote commands invoke a fixed, internally generated POSIX shell
 entry point. User-controlled Agent arguments are never interpolated into shell

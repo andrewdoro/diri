@@ -268,7 +268,36 @@ enum HostInitialization {
         kind: HostPreparationKind,
         operation: u64,
         message: String,
+        /// SSH itself failed (resolve, connect, auth, host key), so nothing
+        /// on the host was touched.
+        connect: bool,
     },
+}
+
+struct HostPreparationFailure {
+    message: String,
+    connect: bool,
+}
+
+/// The Engine classifies OpenSSH failures into `ssh_*` codes whose message
+/// says what to check; show that advice, naming the user's own destination,
+/// instead of a raw `code: message` string.
+fn host_preparation_failure(
+    error: &diri_client::ClientError,
+    destination: &str,
+) -> HostPreparationFailure {
+    match error {
+        diri_client::ClientError::Control(error) if error.code.starts_with("ssh_") => {
+            HostPreparationFailure {
+                message: error.message.replace("<host>", destination),
+                connect: true,
+            }
+        }
+        error => HostPreparationFailure {
+            message: error.to_string(),
+            connect: false,
+        },
+    }
 }
 
 struct HostInitializationCardModel {
@@ -1235,9 +1264,15 @@ impl UtilitySurfaces {
                     HostPreparationKind::Reinstall => client.reinstall_host(&id).await,
                 }
             });
+            let destination = host.ssh.clone();
             let outcome = match task.await {
-                Ok(result) => result.map_err(|error| error.to_string()),
-                Err(error) => Err(error.to_string()),
+                Ok(result) => {
+                    result.map_err(|error| host_preparation_failure(&error, &destination))
+                }
+                Err(error) => Err(HostPreparationFailure {
+                    message: error.to_string(),
+                    connect: false,
+                }),
             };
             let expire_success = outcome.is_ok() && kind == HostPreparationKind::Reinstall;
             let expiration_id = host.id.clone();
@@ -1271,8 +1306,11 @@ impl UtilitySurfaces {
                             result,
                         });
                     }
-                    Err(message) => {
+                    Err(HostPreparationFailure { message, connect }) => {
                         this.activity = match kind {
+                            HostPreparationKind::Initialize if connect => {
+                                format!("Could not connect to {}", host.display_name())
+                            }
                             HostPreparationKind::Initialize => {
                                 format!("Could not initialize {}", host.display_name())
                             }
@@ -1287,6 +1325,7 @@ impl UtilitySurfaces {
                             kind,
                             operation,
                             message,
+                            connect,
                         });
                     }
                 }
@@ -5139,9 +5178,13 @@ impl UtilitySurfaces {
                 name,
                 kind,
                 message,
+                connect,
                 ..
             } => {
                 let title = match kind {
+                    HostPreparationKind::Initialize if connect => {
+                        format!("Could not connect to {name}")
+                    }
                     HostPreparationKind::Initialize => {
                         format!("Could not initialize {name}")
                     }
@@ -8672,6 +8715,32 @@ mod tests {
                 )
                 .child(self.surfaces.clone())
         }
+    }
+
+    #[test]
+    fn ssh_failures_show_advice_for_the_users_destination() {
+        let failure = host_preparation_failure(
+            &diri_client::ClientError::Control(diri_proto::ControlError::new(
+                "ssh_host_key",
+                "The host key could not be verified. Connect once with `ssh <host>` in a terminal to review and accept the host key, then retry.",
+            )),
+            "me@hogwarts",
+        );
+        assert!(failure.connect);
+        assert!(
+            failure
+                .message
+                .starts_with("The host key could not be verified.")
+        );
+        assert!(failure.message.contains("`ssh me@hogwarts`"));
+        assert!(!failure.message.contains("ssh_host_key"));
+
+        let failure = host_preparation_failure(
+            &diri_client::ClientError::Control(diri_proto::ControlError::internal("boom")),
+            "hogwarts",
+        );
+        assert!(!failure.connect);
+        assert_eq!(failure.message, "internal: boom");
     }
 
     #[test]
