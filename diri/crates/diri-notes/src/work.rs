@@ -316,14 +316,40 @@ pub fn append_todo_update(
     session_id: &str,
     text: &str,
 ) -> Option<usize> {
-    let block = note.doc.blocks.get(todo)?;
+    let doc = &mut note.doc;
+    let mut blocks = std::mem::take(&mut doc.blocks);
+    let at = insert_todo_update(
+        &mut blocks,
+        todo,
+        date,
+        label,
+        session_id,
+        text,
+        &mut || doc.fresh_id(),
+    );
+    doc.blocks = blocks;
+    at
+}
+
+/// [`append_todo_update`] on any run of blocks (the editor's starts with the
+/// title), with `fresh` handing out block ids.
+pub fn insert_todo_update(
+    blocks: &mut Vec<Block>,
+    todo: usize,
+    date: &str,
+    label: &str,
+    session_id: &str,
+    text: &str,
+    fresh: &mut dyn FnMut() -> u64,
+) -> Option<usize> {
+    let block = blocks.get(todo)?;
     if !matches!(block.kind, BlockKind::Todo { .. }) {
         return None;
     }
     // Under its own to-do the agent's name is enough; the to-do is its title.
     let label = label.split(':').next().unwrap_or(label).trim();
     let indent = (block.indent + 1).min(MAX_INDENT);
-    let at = children(&note.doc.blocks, todo).end;
+    let at = children(blocks, todo).end;
     let (head, details) = update_lines(text);
     let mut line = Block::new(0, BlockKind::Bullet, "");
     let target = MentionTarget::Session(session_id.to_owned());
@@ -337,18 +363,27 @@ pub fn append_todo_update(
     };
     line.replace(start..start, &format!("{stamp} — {head}"), &[]);
     line.indent = indent;
-    line.id = note.doc.fresh_id();
-    note.doc.blocks.insert(at, line);
+    line.id = fresh();
+    blocks.insert(at, line);
     for (offset, detail) in details.iter().enumerate() {
         let (text, marks) = crate::markdown::parse_inline(detail);
         let mut child = Block::new(0, BlockKind::Bullet, text);
         child.marks = marks;
         child.normalize();
         child.indent = (indent + 1).min(MAX_INDENT);
-        child.id = note.doc.fresh_id();
-        note.doc.blocks.insert(at + 1 + offset, child);
+        child.id = fresh();
+        blocks.insert(at + 1 + offset, child);
     }
     Some(at)
+}
+
+/// Whether the to-do at `todo` already holds an update from `session_id`:
+/// a child line that starts with that session's chip.
+pub fn has_update_from(blocks: &[Block], todo: usize, session_id: &str) -> bool {
+    let own = [session_id.to_owned()];
+    blocks[children(blocks, todo)]
+        .iter()
+        .any(|child| is_update(child, &own))
 }
 
 #[cfg(test)]

@@ -116,7 +116,7 @@ fn a_missing_file_shows_an_explanation_not_a_crash(cx: &mut gpui::TestAppContext
 /// Sessions and a note a fixture editor can mention, one session per status
 /// a chip draws.
 pub(crate) fn fixture_mentions() -> Vec<editor_view::MentionEntry> {
-    use diri_notes::mention::{Candidate, MentionTarget, note_label, session_label};
+    use diri_notes::mention::{Candidate, MentionTarget, note_label};
     use diri_ui::{AgentKind, StatusState};
     let mut entries: Vec<editor_view::MentionEntry> = [
         (
@@ -157,7 +157,7 @@ pub(crate) fn fixture_mentions() -> Vec<editor_view::MentionEntry> {
         |(id, agent, name, title, status, detail)| editor_view::MentionEntry {
             candidate: Candidate {
                 target: MentionTarget::Session(id.into()),
-                label: session_label(name, title),
+                label: super::mention_label(name, title),
                 keywords: name.to_lowercase(),
             },
             agent: Some(agent),
@@ -217,7 +217,7 @@ fn at_mentions_insert_session_and_note_links(cx: &mut gpui::TestAppContext) {
         assert_eq!(
             view.mention_matches().len(),
             2,
-            "codex resize + gemini release"
+            "gemini release + codex resize"
         );
         view.vertical(true, false, cx);
         view.indent(&editor_view::Indent, window, cx);
@@ -231,7 +231,7 @@ fn at_mentions_insert_session_and_note_links(cx: &mut gpui::TestAppContext) {
     let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
     assert!(
         text.contains(
-            "wait for [@Gemini: release notes draft](diri://session/s_gemini) then [@Groceries](diri://note/n-groceries) mail me@x"
+            "wait for [@fix resize flicker](diri://session/s_codex) then [@Groceries](diri://note/n-groceries) mail me@x"
         ),
         "{text}"
     );
@@ -239,7 +239,7 @@ fn at_mentions_insert_session_and_note_links(cx: &mut gpui::TestAppContext) {
     assert_eq!(
         doc.mentions(),
         vec![
-            diri_notes::mention::MentionTarget::Session("s_gemini".into()),
+            diri_notes::mention::MentionTarget::Session("s_codex".into()),
             diri_notes::mention::MentionTarget::Note("n-groceries".into()),
         ]
     );
@@ -557,7 +557,7 @@ fn the_session_chip_api_reads_live_status_and_inserts_links(cx: &mut gpui::TestA
     pane.update(cx, |pane, cx| pane.save(cx));
     let text = std::fs::read_to_string(store.path_for(&id).unwrap()).unwrap();
     assert!(
-        text.contains("[@Codex: fix resize flicker](diri://session/s_codex)"),
+        text.contains("[@fix resize flicker](diri://session/s_codex)"),
         "{text}"
     );
 }

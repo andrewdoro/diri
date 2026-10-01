@@ -741,6 +741,16 @@ impl NoteEditorView {
         .flatten()
     }
 
+    /// Where block `index`'s reserved tail room starts, relative to its text.
+    /// Reads the last frame's layout and text, which agree with each other
+    /// even while typing changes this one: the room trails the words by a
+    /// frame instead of vanishing on every keystroke.
+    pub(super) fn tail_point(&self, index: usize) -> Option<Point<Pixels>> {
+        let tail = self.shown.get(index)?.tail?;
+        let layout = self.layouts.get(index)?.as_ref()?;
+        Some(layout.position_for_index(tail)? - layout.bounds().origin)
+    }
+
     fn text_len(&self, index: usize) -> usize {
         self.editor.block(index).text.len()
     }
@@ -2326,7 +2336,8 @@ fn highlights(
     colors: SemanticColors,
     faded: bool,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    if block.marks.is_empty() && !faded {
+    // Inserts without marks are still drawn faded: a to-do's Start room.
+    if block.marks.is_empty() && !faded && shown.inserts.is_empty() {
         return Vec::new();
     }
     let text = &shown.text;
@@ -2514,7 +2525,7 @@ impl Render for NoteEditorView {
             let shown = if block.kind.is_atomic() {
                 Shown::default()
             } else {
-                Shown::of(block)
+                Shown::with_tail(block, self.wants_start(block).then_some(START_ROOM))
             };
             let text: SharedString = if block.text.is_empty() || block.kind.is_atomic() {
                 "\u{200B}".into()
@@ -2566,6 +2577,17 @@ impl Render for NoteEditorView {
                     ui
                 })
                 .child(styled);
+            // Start follows the to-do's last word, placed from the last
+            // frame's layout of the room reserved for it.
+            content = content.children(self.work_accessory(
+                index,
+                block,
+                focused && head.block == index,
+                format!("note-row-{}", block.id).into(),
+                look.line,
+                colors,
+                cx,
+            ));
             if show_placeholder {
                 content = content.child(
                     div()
@@ -2699,14 +2721,6 @@ impl Render for NoteEditorView {
                 }
                 _ => row.child(content),
             };
-            let row = row.children(self.work_accessory(
-                block,
-                focused && head.block == index,
-                group.clone(),
-                look.line,
-                colors,
-                cx,
-            ));
             let id = block.id;
             let heights = Rc::clone(&heights);
             let row = row.child(
@@ -3997,6 +4011,9 @@ struct Shown {
     text: String,
     /// Ascending by model offset, a trailing insert before a leading one.
     inserts: Vec<Insert>,
+    /// Where the room reserved for an inline accessory starts in the layout,
+    /// past its breakable space: the to-do's Start sits there.
+    tail: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4017,9 +4034,19 @@ const CHIP_EDGE: &str = ".";
 const CHIP_ICON_ROOM: &str = "00";
 /// What leads a tool chip: its edge, then its glyph room.
 const CHIP_LEAD: &str = ".00";
+/// Room after a to-do's last word for its Start button, so the button
+/// follows the words and wraps with them instead of hanging off the column.
+/// The space lets the wrapper move the room to its own line; the digits keep
+/// it whole.
+const START_ROOM: &str = " 000000000000";
 
 impl Shown {
     fn of(block: &Block) -> Self {
+        Self::with_tail(block, None)
+    }
+
+    /// The block's layout text, with `room` reserved after its last word.
+    fn with_tail(block: &Block, room: Option<&'static str>) -> Self {
         let mut inserts = Vec::new();
         for chip in mention::in_block(block) {
             inserts.push(Insert {
@@ -4045,14 +4072,23 @@ impl Shown {
                 trailing: true,
             });
         }
-        if inserts.is_empty() {
+        if inserts.is_empty() && room.is_none() {
             return Self {
                 text: block.text.clone(),
                 inserts,
+                tail: None,
             };
         }
         inserts.sort_by_key(|i| (i.at, !i.trailing));
         inserts.dedup();
+        // Leading, so a caret at the end of the words stays before it.
+        if let Some(room) = room {
+            inserts.push(Insert {
+                at: block.text.len(),
+                text: room,
+                trailing: false,
+            });
+        }
         let extra: usize = inserts.iter().map(|i| i.text.len()).sum();
         let mut text = String::with_capacity(block.text.len() + extra);
         let mut last = 0;
@@ -4062,7 +4098,12 @@ impl Shown {
             last = insert.at;
         }
         text.push_str(&block.text[last..]);
-        Self { text, inserts }
+        let tail = room.map(|room| text.len() - room.len() + 1);
+        Self {
+            text,
+            inserts,
+            tail,
+        }
     }
 
     fn to_display(&self, model: usize) -> usize {

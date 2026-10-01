@@ -9834,8 +9834,22 @@ mod tests {
         let notes_dir = tempfile::tempdir().unwrap();
         let note_store =
             Arc::new(diri_notes::store::NoteStore::open(notes_dir.path().join("notes")).unwrap());
-        let (_, doc) = diri_notes::markdown::parse(crate::notes::work_item_tests::TRACKING);
+        // `long`: a to-do that wraps, to show Start following its last word.
+        let markdown = if scene == "long" {
+            crate::notes::work_item_tests::TRACKING.replace(
+                "Book the venue for the meetup",
+                "Book the venue for the meetup: somewhere near Union Square that holds sixty \
+                 people on a Thursday evening, has a projector, and stays under budget.",
+            )
+        } else {
+            crate::notes::work_item_tests::TRACKING.to_owned()
+        };
+        let (_, doc) = diri_notes::markdown::parse(&markdown);
         let (note_id, _) = note_store.create(doc, None).unwrap();
+        let work_width: f32 = std::env::var("DIRI_VISUAL_WIDTH")
+            .ok()
+            .and_then(|w| w.parse().ok())
+            .unwrap_or(1240.0);
 
         let services = test_services();
         let mut fixture = SidebarPreviewFixture::make(PreviewScenario::from_env(None));
@@ -9930,7 +9944,7 @@ mod tests {
         let runtime = Arc::clone(&services.store);
         let note_pane = std::rc::Rc::new(std::cell::RefCell::new(None));
         let window = cx
-            .open_window(size(px(1240.0), px(780.0)), {
+            .open_window(size(px(work_width), px(780.0)), {
                 let note_pane = note_pane.clone();
                 move |window, cx| {
                     cx.new(|cx| {

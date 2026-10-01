@@ -1374,6 +1374,40 @@ impl Editor {
         true
     }
 
+    /// Writes `text` from `session_id` as an update line under the to-do at
+    /// `index`, the way an agent's report lands in the file: one undo step.
+    pub fn add_update(
+        &mut self,
+        index: usize,
+        date: &str,
+        label: &str,
+        session_id: &str,
+        text: &str,
+        now_ms: u64,
+    ) -> bool {
+        if !self
+            .blocks
+            .get(index)
+            .is_some_and(|block| matches!(block.kind, BlockKind::Todo { .. }))
+        {
+            return false;
+        }
+        self.checkpoint(EditKind::Other, now_ms);
+        let mut blocks = std::mem::take(&mut self.blocks);
+        let added = crate::work::insert_todo_update(
+            &mut blocks,
+            index,
+            date,
+            label,
+            session_id,
+            text,
+            &mut || self.fresh_id(),
+        );
+        self.blocks = blocks;
+        self.changed();
+        added.is_some()
+    }
+
     /// ⌘B / ⌘I / ⌘E / ⌘⇧X, and ⌘K with a URL.
     pub fn toggle_style(&mut self, style: Style, now_ms: u64) {
         if self.selection.is_collapsed() {

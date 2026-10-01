@@ -371,6 +371,7 @@ fn a_failed_start_says_why_and_links_nothing(cx: &mut gpui::TestAppContext) {
             block,
             kind: AgentKind::CODEX,
             agent_name: "Codex".into(),
+            session: None,
         }))
     });
     cx.run_until_parked();
@@ -407,4 +408,83 @@ fn a_session_opens_its_note_at_the_todo_it_works_on(cx: &mut gpui::TestAppContex
     let venue = todo_index(&editor, cx, "Book the venue");
     let caret = editor.read_with(cx, |view, _| view.editor.selection.head.block);
     assert_eq!(caret, venue);
+}
+
+/// Mentioning an existing session in a to-do and pressing Start asks that
+/// session to take it on instead of spawning a new agent; the note records
+/// the ask, and the to-do then tracks the session like any started work.
+#[gpui::test]
+fn start_on_a_todo_that_mentions_a_session_prompts_that_session(cx: &mut gpui::TestAppContext) {
+    let mentioned = LAUNCH.replace(
+        "- [ ] Book the venue for the meetup",
+        "- [ ] Book the venue for the meetup [@Meeting Notes Review](diri://session/s_review)",
+    );
+    let fixture = launch_loop(&mentioned);
+    {
+        let mut review = record("s_review", AgentKind::new("cursor"));
+        review.title = "Meeting Notes Review".into();
+        review.title_source = TitleSource::DirijorAssigned;
+        review.last_turn_completed_at = Some(DateMillis(1.0));
+        fixture
+            .runtime
+            .store
+            .write()
+            .unwrap()
+            .upsert_session(review);
+    }
+    let (pane, editor, cx) = open(cx, &fixture);
+    pane.update(cx, |pane, cx| pane.push_work(cx));
+    let venue = todo_index(&editor, cx, "Book the venue");
+    assert_eq!(
+        state(&editor, cx, venue),
+        WorkState::Ready,
+        "Start is offered"
+    );
+
+    editor.update(cx, |view, cx| {
+        let end = view.editor.block(venue).text.len();
+        view.editor
+            .set_caret(diri_notes::edit::Pos::new(venue, end));
+        view.start_work_at_caret(cx);
+    });
+    cx.run_until_parked();
+    let agents = editor.read_with(cx, |view, _| view.work.start_panel_agents());
+    assert_eq!(agents[0].session.as_deref(), Some("s_review"));
+    assert_eq!(agents[0].name, "Meeting Notes Review");
+    assert!(agents[0].is_default && agents.iter().filter(|a| a.is_default).count() == 1);
+
+    editor.update(cx, |view, cx| {
+        assert!(view.work_panel_key(super::work_item::PanelKey::Enter, cx));
+    });
+    cx.run_until_parked();
+    let sent = pane.read_with(cx, |pane, _| pane.sent_for_test.clone());
+    assert_eq!(sent.len(), 1, "one prompt, to the mentioned session");
+    assert_eq!(sent[0].session_id, SessionId::new("s_review"));
+    assert!(sent[0].submit);
+    assert!(sent[0].text.contains("Book the venue for the meetup"));
+    let spawned = fixture
+        .runtime
+        .store
+        .read()
+        .unwrap()
+        .sessions()
+        .values()
+        .filter(|s| !s.is_note())
+        .count();
+    assert_eq!(spawned, 1, "no new agent");
+
+    editor.read_with(cx, |view, _| {
+        let update = view.editor.block(venue + 1);
+        assert!(
+            update.text.starts_with("@Meeting Notes Review"),
+            "{}",
+            update.text
+        );
+        assert!(update.text.ends_with("Asked to take this on"));
+    });
+    assert_ne!(
+        state(&editor, cx, venue),
+        WorkState::Ready,
+        "the to-do now tracks the session it asked"
+    );
 }

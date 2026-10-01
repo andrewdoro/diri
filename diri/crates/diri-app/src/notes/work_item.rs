@@ -33,8 +33,8 @@ const PREVIEW_LINE: f32 = 16.0;
 /// panel reserves before it is measured.
 const PREVIEW_CHARS_PER_LINE: usize = 62;
 const LABEL_HEIGHT: f32 = 24.0;
-/// The Start affordance sits in the margin right of the text column.
-const ACCESSORY_GAP: f32 = 12.0;
+/// Start's height; it sits centred on the line holding the to-do's last word.
+const ACCESSORY_HEIGHT: f32 = 24.0;
 
 /// What the editor asks its host to do for a work item.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +47,9 @@ pub(crate) enum WorkRequest {
         block: BlockId,
         kind: AgentKind,
         agent_name: String,
+        /// The existing session the to-do mentions, asked instead of a new
+        /// agent being spawned.
+        session: Option<String>,
     },
     /// Show this session (the sidebar selects it).
     Open { session: String },
@@ -60,6 +63,8 @@ pub(crate) struct AgentChoice {
     pub kind: AgentKind,
     pub name: String,
     pub is_default: bool,
+    /// Set for the session the to-do mentions: Start prompts it.
+    pub session: Option<String>,
 }
 
 pub(crate) struct StartPanel {
@@ -88,6 +93,9 @@ enum Pending {
 #[derive(Default)]
 pub(crate) struct WorkView {
     facts: HashMap<String, SessionFacts>,
+    /// To-dos that mention a session nobody has asked to take them on yet:
+    /// Start prompts that session instead of spawning one.
+    handoff: HashMap<BlockId, String>,
     pending: HashMap<BlockId, Pending>,
     start: Option<StartPanel>,
     tick: Option<TickPanel>,
@@ -98,6 +106,17 @@ impl WorkView {
     /// linked session missing here is unknown to the Engine.
     pub(crate) fn set_facts(&mut self, facts: HashMap<String, SessionFacts>) {
         self.facts = facts;
+    }
+
+    /// The to-dos whose mentioned session Start would prompt.
+    pub(crate) fn set_handoff(&mut self, handoff: HashMap<BlockId, String>) -> bool {
+        let changed = self.handoff != handoff;
+        self.handoff = handoff;
+        changed
+    }
+
+    pub(crate) fn handoff(&self, block: BlockId) -> Option<&str> {
+        self.handoff.get(&block).map(String::as_str)
     }
 
     /// Tickets of starts still waiting on the Engine.
@@ -116,6 +135,10 @@ impl WorkView {
             return WorkState::Starting;
         }
         let checked = block.kind == BlockKind::Todo { checked: true };
+        // A mention is where the work should go, not work under way.
+        if !checked && self.handoff.contains_key(&block.id) {
+            return WorkState::Ready;
+        }
         let session = work::current_session(block);
         work::state(
             checked,
@@ -160,6 +183,14 @@ impl WorkView {
                 None => self.tick = None,
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_panel_agents(&self) -> Vec<AgentChoice> {
+        self.start
+            .as_ref()
+            .map(|panel| panel.agents.clone())
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -231,6 +262,7 @@ impl NoteEditorView {
             block: panel.block,
             kind: agent.kind.clone(),
             agent_name: agent.name.clone(),
+            session: agent.session.clone(),
         }));
         cx.notify();
     }
@@ -388,10 +420,21 @@ impl NoteEditorView {
     // -----------------------------------------------------------------------
     // Pixels
 
-    /// The quiet Start affordance in the margin right of an unstarted to-do.
+    /// Whether an unstarted to-do offers Start, so its text keeps room for it.
+    pub(super) fn wants_start(&self, block: &Block) -> bool {
+        block.kind == (BlockKind::Todo { checked: false })
+            && !block.text.trim().is_empty()
+            && self.work.state(block) == WorkState::Ready
+            && self.work.failure(block.id).is_none()
+    }
+
+    /// The quiet Start affordance right after an unstarted to-do's last word,
+    /// so a narrow window wraps it with the words instead of cutting it off.
     /// It shows while the row is hovered or holds the caret.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn work_accessory(
         &self,
+        index: usize,
         block: &Block,
         caret_here: bool,
         group: SharedString,
@@ -399,27 +442,20 @@ impl NoteEditorView {
         colors: SemanticColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if block.kind != (BlockKind::Todo { checked: false })
-            || block.text.trim().is_empty()
-            || self.work.state(block) != WorkState::Ready
-            || self.work.failure(block.id).is_some()
-        {
+        if !self.wants_start(block) {
             return None;
         }
+        let at = self.tail_point(index)?;
         let id = block.id;
         Some(
             div()
                 .absolute()
-                .top_0()
-                .left_full()
-                .h(px(line))
-                .pl(px(ACCESSORY_GAP))
-                .flex()
-                .items_center()
+                .left(at.x)
+                .top(at.y + px((line - ACCESSORY_HEIGHT) / 2.0))
                 .child(
                     div()
                         .id(("todo-start", id))
-                        .h(px(24.0))
+                        .h(px(ACCESSORY_HEIGHT))
                         .px(px(8.0))
                         .flex()
                         .items_center()
@@ -709,9 +745,13 @@ impl NoteEditorView {
             .when(index == panel.selected, |row| {
                 row.child(floating::menu_shortcut("↩", colors))
             })
-            .when(agent.is_default && index != panel.selected, |row| {
-                row.child(floating::menu_shortcut("Default", colors))
-            });
+            .when(agent.session.is_some() && index != panel.selected, |row| {
+                row.child(floating::menu_shortcut("Mentioned", colors))
+            })
+            .when(
+                agent.is_default && agent.session.is_none() && index != panel.selected,
+                |row| row.child(floating::menu_shortcut("Default", colors)),
+            );
             list = list.child(row);
         }
         let brief = &panel.brief;
@@ -950,12 +990,113 @@ impl super::NotePane {
                 })
                 .collect()
         };
+        let handoff = self.handoff_targets(&editor, cx);
         editor.update(cx, |view, cx| {
+            let handoff_changed = view.work.set_handoff(handoff);
             if view.work.facts != facts {
                 view.work.set_facts(facts);
                 cx.notify();
+            } else if handoff_changed {
+                cx.notify();
             }
         });
+    }
+
+    /// Unticked to-dos whose newest session chip names an agent the user
+    /// mentioned rather than one Start made: not this note's child, and not
+    /// yet reporting under the to-do. Start asks that session to take it on.
+    fn handoff_targets(
+        &self,
+        editor: &gpui::Entity<super::editor_view::NoteEditorView>,
+        cx: &Context<Self>,
+    ) -> HashMap<BlockId, String> {
+        let super::PaneState::Open(open) = &self.state else {
+            return HashMap::new();
+        };
+        let view = editor.read(cx);
+        let blocks = view.editor.blocks();
+        let store = self.runtime.store.read().expect("store");
+        let mut out = HashMap::new();
+        for (index, block) in blocks.iter().enumerate() {
+            if block.kind != (BlockKind::Todo { checked: false }) {
+                continue;
+            }
+            let Some(session) = work::current_session(block) else {
+                continue;
+            };
+            let Some(record) = store.sessions().get(&SessionId::new(session.clone())) else {
+                continue;
+            };
+            let askable = !record.is_note()
+                && !record.is_archived()
+                && !record.effective_kind().is_terminal()
+                && record.parent.as_ref() != Some(&open.session)
+                && !work::has_update_from(blocks, index, &session);
+            if askable {
+                out.insert(block.id, session);
+            }
+        }
+        out
+    }
+
+    /// The Start panel row for the session a to-do mentions.
+    fn mentioned_choice(&self, session: &str) -> Option<AgentChoice> {
+        let store = self.runtime.store.read().expect("store");
+        let record = store.sessions().get(&SessionId::new(session.to_owned()))?;
+        Some(AgentChoice {
+            kind: record.effective_kind().clone(),
+            name: crate::switcher::display_title_str(record).to_owned(),
+            is_default: true,
+            session: Some(session.to_owned()),
+        })
+    }
+
+    /// Start on a to-do that mentions a session: send that session the
+    /// brief, and note under the to-do that it was asked, which is also what
+    /// turns the to-do from "Start" into tracked work.
+    fn hand_off_work(&mut self, block: BlockId, session: &str, cx: &mut Context<Self>) {
+        let Some((note, todo)) = self.work_note(block, cx) else {
+            return;
+        };
+        let brief = self.brief_for(&note, todo);
+        let label = {
+            let store = self.runtime.store.read().expect("store");
+            let Some(record) = store.sessions().get(&SessionId::new(session.to_owned())) else {
+                return;
+            };
+            diri_notes::mention::session_label("", crate::switcher::display_title_str(record))
+        };
+        let command = crate::notifications::SendTextCommand {
+            session_id: SessionId::new(session.to_owned()),
+            text: brief.prompt,
+            submit: true,
+        };
+        #[cfg(test)]
+        self.sent_for_test.push(command.clone());
+        let _ = self.runtime.notification_action_sender().send(command);
+        let super::PaneState::Open(open) = &self.state else {
+            return;
+        };
+        open.editor.update(cx, |view, cx| {
+            let Some(index) = view.block_index(block) else {
+                return;
+            };
+            if view.editor.add_update(
+                index,
+                &diri_notes::handoff::entry_stamp(),
+                &label,
+                session,
+                "Asked to take this on",
+                super::editor_view_now_ms(),
+            ) {
+                cx.emit(EditorEvent::Changed);
+            }
+            if view.editor.has_children(index) {
+                view.set_folded(index, true, cx);
+            }
+        });
+        self.save(cx);
+        self.push_work(cx);
     }
 
     pub(crate) fn on_work(&mut self, request: &WorkRequest, cx: &mut Context<Self>) {
@@ -963,8 +1104,14 @@ impl super::NotePane {
             WorkRequest::Prepare { block } => self.prepare_work(*block, cx),
             WorkRequest::Start {
                 block,
+                session: Some(session),
+                ..
+            } => self.hand_off_work(*block, session, cx),
+            WorkRequest::Start {
+                block,
                 kind,
                 agent_name,
+                session: None,
             } => self.start_work(*block, kind.clone(), agent_name, cx),
             WorkRequest::Open { session } => {
                 let id = SessionId::new(session.clone());
@@ -1064,6 +1211,7 @@ impl super::NotePane {
                 is_default: option.kind == default,
                 kind: option.kind,
                 name: option.display_name,
+                session: None,
             })
             .collect();
         if !agents.iter().any(|a| a.is_default)
@@ -1080,10 +1228,17 @@ impl super::NotePane {
             return;
         };
         let brief = self.brief_for(&note, todo);
-        let agents = self.work_agents();
+        let mut agents = self.work_agents();
         let super::PaneState::Open(open) = &self.state else {
             return;
         };
+        let mentioned = open.editor.read(cx).work.handoff(block).map(str::to_owned);
+        if let Some(choice) = mentioned.and_then(|id| self.mentioned_choice(&id)) {
+            for agent in &mut agents {
+                agent.is_default = false;
+            }
+            agents.insert(0, choice);
+        }
         open.editor.update(cx, |view, cx| {
             if let Some(index) = view.editor.blocks().iter().position(|b| b.id == block) {
                 let end = view.editor.block(index).text.len();

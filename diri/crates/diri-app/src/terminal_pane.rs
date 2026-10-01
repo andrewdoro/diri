@@ -8710,11 +8710,20 @@ mod tests {
             let mut store = runtime.store.write().unwrap();
             store.upsert_session(note);
             store.upsert_session(agent);
-            store.select(note_id.clone());
+            store.select(agent_id.clone());
         }
         let store_runtime = Arc::clone(&runtime);
-        let (pane, cx) =
-            cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
+        let (pane, cx) = cx.add_window_view({
+            let runtime = Arc::clone(&runtime);
+            move |window, cx| TerminalPane::new(runtime, tokio, window, cx)
+        });
+        // No file watcher and no real notes folder under the test scheduler.
+        pane.update(cx, |pane, cx| {
+            let notes = cx.new(|cx| crate::notes::NotePane::with_store(runtime, None, false, cx));
+            pane.set_note_pane_for_test(notes);
+        });
+        let select = |id: &SessionId| store_runtime.store.write().unwrap().select(id.clone());
+        select(&note_id);
         pane.update_in(cx, |pane, window, cx| {
             pane.reconcile_store_change(window, cx);
             assert!(
@@ -8722,43 +8731,11 @@ mod tests {
                 "a note has no terminal to attach"
             );
         });
-        store_runtime
-            .store
-            .write()
-            .unwrap()
-            .select(agent_id.clone());
+        select(&agent_id);
         pane.update_in(cx, |pane, window, cx| {
             pane.reconcile_store_change(window, cx);
             assert!(pane.residents.contains_key(&agent_id));
             assert!(!pane.residents.contains_key(&note_id));
-        });
-    }
-
-    #[gpui::test]
-    fn a_selected_note_mounts_no_terminal_controller(cx: &mut TestAppContext) {
-        let runtime = Arc::new(StoreRuntime::inert());
-        let tokio = Arc::new(
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap(),
-        );
-        let mut note = fixture_session();
-        note.kind = ProtoAgentKind::NOTE;
-        note.note_id = Some("20261001-000000-beef".into());
-        let id = note.id.clone();
-        {
-            let mut store = runtime.store.write().unwrap();
-            store.upsert_session(note);
-            store.select(id.clone());
-        }
-        let (pane, cx) =
-            cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
-        pane.update_in(cx, |pane, window, cx| {
-            pane.reconcile_store_change(window, cx);
-            // A resident note attached, was refused, and retried every 500 ms.
-            assert!(!pane.residents.contains_key(&id));
-            assert!(pane.residents.is_empty());
         });
     }
 

@@ -83,6 +83,9 @@ pub(crate) struct NotePane {
     versions: Option<versions::VersionPanel>,
     /// Fixture palette; live panes follow the store's theme.
     colors_override: Option<SemanticColors>,
+    /// Prompts Start sent to mentioned sessions, for tests.
+    #[cfg(test)]
+    pub(crate) sent_for_test: Vec<crate::notifications::SendTextCommand>,
 }
 
 impl Focusable for NotePane {
@@ -148,6 +151,8 @@ impl NotePane {
             error: None,
             versions: None,
             colors_override: None,
+            #[cfg(test)]
+            sent_for_test: Vec::new(),
         }
     }
 
@@ -699,6 +704,17 @@ impl Render for NotePane {
     }
 }
 
+/// A session mention's text. The row and chip already wear the agent's
+/// logo, so its name only steals width from the title; a session with no
+/// title yet still needs a word, so it says the agent.
+pub(crate) fn mention_label(agent: &str, title: &str) -> String {
+    if title.trim().is_empty() {
+        mentions::session_label(agent, "")
+    } else {
+        mentions::session_label("", title)
+    }
+}
+
 /// Live sessions first (most recently active), then notes, each as the
 /// `@` menu offers it. Notes are Sessions too; they are mentioned by their
 /// file id so the link survives the Session being archived and restored.
@@ -738,7 +754,7 @@ fn mention_entries(
             MentionEntry {
                 candidate: Candidate {
                     target: MentionTarget::Session(session.id.0.clone()),
-                    label: mentions::session_label(agent, title),
+                    label: mention_label(agent, title),
                     keywords: format!(
                         "{agent} {project} {}",
                         session.git_branch.as_deref().unwrap_or("")
