@@ -218,7 +218,7 @@ async function buildReleases(outputs, cards, entries) {
     outputs.set(`whats-new/${release.version}/index.html`, article({
       url, title, docTitle: `${title} · Diri`, description: release.summary, eyebrow: `What's new · ${release.date}`, eyebrowHref: '/whats-new/',
       lead: release.summary, html, cta: `Get diri ${release.version}`, after: pager,
-      ld: { '@context': 'https://schema.org', '@type': 'TechArticle', headline: title, description: release.summary, url: site + url, inLanguage: 'en', datePublished: new Date(release.date).toISOString().slice(0, 10), publisher },
+      ld: { '@context': 'https://schema.org', '@type': 'TechArticle', headline: title, description: release.summary, url: site + url, inLanguage: 'en', datePublished: new Date(`${release.date} 00:00 UTC`).toISOString().slice(0, 10), publisher },
     }));
     cards.push({ url, eyebrow: `Release · ${release.date}`, title: `diri ${release.version}`, subtitle: release.headline });
     entries.push({ group: 'Releases', url, title, description: release.summary });
