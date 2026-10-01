@@ -16,6 +16,7 @@ mod diagnostics;
 pub mod diff;
 mod empty_workbench;
 mod external_drop;
+mod file_links;
 mod floating;
 pub mod fonts;
 pub mod fuzzy;
@@ -37,6 +38,7 @@ mod markdown_view;
 #[cfg(any(target_os = "macos", test))]
 mod menu_inbox;
 pub mod navigation;
+mod notes;
 mod notification_feed;
 pub mod notifications;
 mod number_flow;
@@ -47,6 +49,7 @@ mod path_picker;
 mod peek_settle;
 mod phone_access;
 mod platform;
+mod progress_mark;
 mod project_hue;
 pub mod query_editor;
 pub mod quick_open;
@@ -76,6 +79,7 @@ mod tooltip_warmth;
 pub mod transcript;
 pub mod updates;
 pub mod usage;
+mod whats_new;
 mod window_restore;
 mod workbench;
 #[cfg(all(test, target_os = "macos"))]
@@ -177,10 +181,11 @@ pub(crate) fn refresh_app_menus(cx: &mut App) {
             MenuItem::action("Reopen Closed Session", ReopenSession),
             MenuItem::action("Close Window", CloseWindow),
         ]),
-        Menu::new("Help").items([MenuItem::action(
-            "Report a Problem…",
-            commands::ReportProblem,
-        )]),
+        Menu::new("Help").items([
+            MenuItem::action("What's New", commands::ShowWhatsNew),
+            MenuItem::separator(),
+            MenuItem::action("Report a Problem…", commands::ReportProblem),
+        ]),
     ]);
     #[cfg(not(target_os = "macos"))]
     cx.set_menus([
@@ -199,10 +204,11 @@ pub(crate) fn refresh_app_menus(cx: &mut App) {
             MenuItem::action("Reopen Closed Session", ReopenSession),
             MenuItem::action("Close Window", CloseWindow),
         ]),
-        Menu::new("Help").items([MenuItem::action(
-            "Report a Problem…",
-            commands::ReportProblem,
-        )]),
+        Menu::new("Help").items([
+            MenuItem::action("What's New", commands::ShowWhatsNew),
+            MenuItem::separator(),
+            MenuItem::action("Report a Problem…", commands::ReportProblem),
+        ]),
     ]);
 }
 

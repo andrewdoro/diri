@@ -126,9 +126,18 @@ impl super::ControlServer {
         }
         let mut p: Request = super::decode(params)?;
         let typed: diri_proto::SessionSpawnParams = super::decode(Some(p.spawn.clone()))?;
-        if typed.parent.as_ref().map(|id| id.0.as_str()) != Some(p.sender_id.as_str()) {
+        // A tracked spawn is the sender's own child, or work started from a
+        // note (whose Session has no process to send anything itself). Who
+        // may start work from which note is the MCP policy's decision.
+        let parent = typed.parent.as_ref().map(|id| id.0.as_str());
+        let from_note = parent.is_some_and(|parent| {
+            self.registry
+                .lock()
+                .is_ok_and(|registry| registry.is_note(parent))
+        });
+        if parent != Some(p.sender_id.as_str()) && !from_note {
             return Err(ControlError::bad_request(
-                "tracked spawn must belong to its sender",
+                "tracked spawn must belong to its sender or to a note",
             ));
         }
         let path = self.socket_path.with_file_name("operations-v1.sqlite");

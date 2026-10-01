@@ -30,13 +30,13 @@ assert.match(html, /<script type="module" src="downloads\.[a-f0-9]{12}\.js"><\/s
 assert.match(html, /id="download-primary"[^>]+href="https:\/\/github\.com\/cristicretu\/diri\/releases\/latest"/);
 assert.match(headers, /https:\/\/:project\.pages\.dev\/\*\n  X-Robots-Tag: noindex/);
 assert.match(headers, /https:\/\/:version\.:project\.pages\.dev\/\*\n  X-Robots-Tag: noindex/);
-const pagePaths = ['index.html', '404.html', 'guides/index.html', 'guides/parallel-agents/index.html', 'guides/remote-sessions/index.html'];
+const pagePaths = ['index.html', '404.html', 'guides/index.html', 'guides/first-agent/index.html', 'guides/never-lose-work/index.html', 'guides/parallel-agents/index.html', 'guides/agent-teams/index.html', 'guides/review-changes/index.html', 'guides/remote-sessions/index.html', 'guides/shortcuts/index.html', 'whats-new/index.html'];
 const sitemap = await read('sitemap.xml');
 const titles = new Set();
 for (const page of pagePaths) {
   const content = await read(page);
   assert.equal((content.match(/<h1\b/g) || []).length, 1, `${page}: one heading`);
-  if (page.startsWith('guides/')) {
+  if (page.startsWith('guides/') || page.startsWith('whats-new/')) {
     const url = 'https://diri.sh/' + page.replace(/index\.html$/, '');
     assert.ok(content.includes(`rel="canonical" href="${url}"`), `${page}: canonical`);
     assert.ok(sitemap.includes(`<loc>${url}</loc>`), `${page}: sitemap`);

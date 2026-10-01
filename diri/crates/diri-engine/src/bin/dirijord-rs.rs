@@ -240,6 +240,7 @@ fn main() {
     let cli_path = install_cli_helpers(&exe_dir, &app_support);
     let mut server = ControlServer::new(Arc::clone(&registry), DirijorPaths::socket(&home))
         .with_logs_dir(&logs_dir)
+        .with_notes_dir(app_support.join("notes"))
         .with_holder(holder)
         .with_injection(InjectionConfig {
             inject_dir: DirijorPaths::inject_dir(&home),
@@ -285,6 +286,10 @@ fn main() {
     // Only once the socket is accepting: remote adoption is SSH-bound and must
     // never be what a client waits behind.
     server.spawn_remote_restore();
+    // Notes written while no Engine ran (or before notes were Sessions) get
+    // their sidebar Session. Only this singleton, now bound, may adopt.
+    server.spawn_note_adoption();
+    server.spawn_agent_relaunch();
     server.spawn_scheduler();
 
     // One-shot, off the accept path: reclaim per-session files no record,

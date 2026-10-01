@@ -339,6 +339,7 @@ pub struct HeadlessScreen {
     title: Option<String>,
     progress_state: Option<i64>,
     progress_value: Option<i64>,
+    progress_reports: u64,
 
     content_seq: u64,
     filled_cells: usize,
@@ -432,6 +433,7 @@ impl HeadlessScreen {
             title: None,
             progress_state: None,
             progress_value: None,
+            progress_reports: 0,
             content_seq: 0,
             filled_cells: 0,
             row_digests: Vec::new(),
@@ -541,6 +543,18 @@ impl HeadlessScreen {
         }
         self.parser.advance(&mut self.term, bytes);
         self.settle();
+    }
+
+    /// Synchronized updates (DECSET 2026) the child has closed with its ESU,
+    /// so far. A feed that raises it, and leaves no update open, ended on a
+    /// frame the child declared complete.
+    pub fn synchronized_updates_completed(&self) -> u64 {
+        self.parser.synchronized_updates_completed()
+    }
+
+    /// Whether a synchronized update is open (its bytes are held back).
+    pub fn in_synchronized_update(&self) -> bool {
+        self.parser.sync_timeout().sync_timeout().is_some()
     }
 
     /// Ends a synchronized update (DECSET 2026) whose deadline has passed.
@@ -1425,32 +1439,38 @@ impl HeadlessScreen {
 
     /// The visible grid as plain text, trailing blank lines removed.
     pub fn lines(&self) -> Vec<String> {
-        let grid = self.term.grid();
-        let mut lines: Vec<String> = Vec::with_capacity(self.geometry.rows);
-        for row in 0..self.geometry.rows {
-            let line = Line(row as i32);
-            let mut text = String::with_capacity(self.geometry.cols);
-            let source = &grid[line];
-            for column in 0..self.geometry.cols {
-                let cell = &source[Column(column)];
-                // These occupy terminal columns but are not textual spaces.
-                if cell
-                    .flags
-                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    continue;
-                }
-                text.push(cell.c);
-                if let Some(combining) = cell.zerowidth() {
-                    text.extend(combining.iter().copied());
-                }
-            }
-            lines.push(text.trim_end().to_string());
-        }
+        let mut lines: Vec<String> = (0..self.geometry.rows)
+            .map(|row| self.row_text(row))
+            .collect();
         while lines.last().is_some_and(|line| line.trim().is_empty()) {
             lines.pop();
         }
         lines
+    }
+
+    /// One visible row as plain text, trailing blanks removed; empty past
+    /// the bottom of the screen.
+    pub fn row_text(&self, row: usize) -> String {
+        if row >= self.geometry.rows {
+            return String::new();
+        }
+        let source = &self.term.grid()[Line(row as i32)];
+        let mut text = String::with_capacity(self.geometry.cols);
+        for column in 0..self.geometry.cols {
+            let cell = &source[Column(column)];
+            // These occupy terminal columns but are not textual spaces.
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            text.push(cell.c);
+            if let Some(combining) = cell.zerowidth() {
+                text.extend(combining.iter().copied());
+            }
+        }
+        text.trim_end().to_string()
     }
 
     /// What a link scanner needs from the screen and the newest `history_rows`
@@ -1518,6 +1538,13 @@ impl HeadlessScreen {
 
     pub fn progress(&self) -> Option<(i64, i64)> {
         Some((self.progress_state?, self.progress_value.unwrap_or(0)))
+    }
+
+    /// Counts valid `OSC 9;4` reports, including repeats of the same value,
+    /// so a consumer can tell a program still reporting from one that went
+    /// quiet without clearing its progress. Wraps.
+    pub fn progress_reports(&self) -> u64 {
+        self.progress_reports
     }
 
     fn drain_events(&mut self) {
@@ -1657,6 +1684,42 @@ impl HeadlessScreen {
         }
     }
 
+    /// Applies one `state;percent` payload. A state outside ConEmu's 0–4 or a
+    /// payload that is not two small numbers is ignored whole, so junk cannot
+    /// clear or invent progress. The percent is clamped to 0–100; an error or
+    /// pause without one keeps the percent it interrupts.
+    fn take_progress_report(&mut self, payload: &[u8]) {
+        let Ok(payload) = std::str::from_utf8(payload) else {
+            return;
+        };
+        let mut parts = payload.split(';');
+        let Some(Ok(state)) = parts.next().map(|value| value.trim().parse::<u8>()) else {
+            return;
+        };
+        if state > 4 {
+            return;
+        }
+        let value = match parts.next().map(str::trim) {
+            None | Some("") => None,
+            Some(value) => match value.parse::<u32>() {
+                Ok(value) => Some(i64::from(value.min(100))),
+                Err(_) => return,
+            },
+        };
+        if parts.next().is_some() {
+            return;
+        }
+        self.progress_value = match state {
+            1 => Some(value.unwrap_or(0)),
+            2 | 4 => value.or(self
+                .progress_value
+                .filter(|_| self.progress_state.is_some())),
+            _ => None,
+        };
+        self.progress_state = Some(i64::from(state));
+        self.progress_reports = self.progress_reports.wrapping_add(1);
+    }
+
     /// Scans one buffer for progress reports, returning where a carry for the
     /// next chunk should begin if the buffer ends mid-sequence.
     fn scan_progress_within(&mut self, haystack: &[u8]) -> Option<usize> {
@@ -1677,10 +1740,7 @@ impl HeadlessScreen {
                 incomplete = Some(prefix_start);
                 break;
             };
-            let payload = String::from_utf8_lossy(&haystack[start..end]);
-            let mut parts = payload.split(';');
-            self.progress_state = parts.next().and_then(|value| value.trim().parse().ok());
-            self.progress_value = parts.next().and_then(|value| value.trim().parse().ok());
+            self.take_progress_report(&haystack[start..end]);
             search_from = end;
         }
 
@@ -2270,6 +2330,68 @@ mod tests {
         screen.feed(b"\x1b]9;4;1");
         screen.feed(b";75\x07");
         assert_eq!(screen.progress(), Some((1, 75)));
+    }
+
+    #[test]
+    fn progress_states_percent_and_junk() {
+        let mut screen = HeadlessScreen::new(80, 24);
+        // ST-terminated, whitespace tolerated, percent clamped to 100.
+        screen.feed(b"\x1b]9;4;1; 250 \x1b\\");
+        assert_eq!(screen.progress(), Some((1, 100)));
+        // An error or pause without a percent stops where the bar was.
+        screen.feed(b"\x1b]9;4;1;35\x07\x1b]9;4;2\x07");
+        assert_eq!(screen.progress(), Some((2, 35)));
+        screen.feed(b"\x1b]9;4;4;\x07");
+        assert_eq!(screen.progress(), Some((4, 35)));
+        // Indeterminate carries no percent; 0 clears.
+        screen.feed(b"\x1b]9;4;3;90\x07");
+        assert_eq!(screen.progress(), Some((3, 0)));
+        screen.feed(b"\x1b]9;4;0\x07");
+        assert_eq!(screen.progress(), Some((0, 0)));
+        screen.feed(b"\x1b]9;4;1\x07");
+        assert_eq!(screen.progress(), Some((1, 0)));
+
+        let reports = screen.progress_reports();
+        for junk in [
+            &b"\x1b]9;4;5;10\x07"[..],
+            b"\x1b]9;4;x;10\x07",
+            b"\x1b]9;4;1;-4\x07",
+            b"\x1b]9;4;1;12.5\x07",
+            b"\x1b]9;4;1;10;extra\x07",
+            b"\x1b]9;4;\x07",
+            b"\x1b]9;4;1;99999999999999999999\x07",
+        ] {
+            screen.feed(junk);
+            assert_eq!(screen.progress(), Some((1, 0)), "{junk:?}");
+        }
+        assert_eq!(screen.progress_reports(), reports, "junk is not a report");
+        // A repeat of the same value still counts as a report.
+        screen.feed(b"\x1b]9;4;1\x07");
+        assert_eq!(screen.progress_reports(), reports + 1);
+    }
+
+    #[test]
+    fn progress_and_osc_9_notifications_never_cross() {
+        let mut screen = HeadlessScreen::new(80, 24).with_notifications();
+        screen.feed(b"\x1b]9;4;1;40\x07");
+        assert!(!screen.has_notifications());
+        assert_eq!(screen.progress(), Some((1, 40)));
+        // `9;` followed by anything but `4;` is a notification, even one
+        // whose text starts with a 4.
+        screen.feed(b"\x1b]9;42 tests passed\x07\x1b]9;4\x07");
+        let bodies: Vec<_> = screen
+            .take_notifications()
+            .into_iter()
+            .map(|message| message.body)
+            .collect();
+        assert_eq!(bodies, ["42 tests passed", "4"]);
+        assert_eq!(screen.progress(), Some((1, 40)));
+        // Progress is parsed on screens that never opted into notifications
+        // (the remote Holder), and drawn nowhere.
+        let mut holder = HeadlessScreen::new(20, 2);
+        holder.feed(b"a\x1b]9;4;1;7\x07b");
+        assert_eq!(holder.progress(), Some((1, 7)));
+        assert!(holder.lines()[0].starts_with("ab"));
     }
 
     #[test]

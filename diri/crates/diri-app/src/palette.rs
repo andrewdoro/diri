@@ -38,6 +38,12 @@ pub enum PaletteCommand {
     SyncPrefs {
         host: String,
     },
+    /// Show a note (from the notes ⌘K finds while typing), with the caret
+    /// on the block that matched.
+    OpenNote {
+        note_id: String,
+        block: Option<usize>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -312,6 +318,9 @@ fn append_management_actions(
                     | PaletteCommand::SyncPrefs { .. }
                     | PaletteCommand::Action(
                         CommandId::OpenWorktrees
+                            | CommandId::NewNote
+                            | CommandId::ShowTodos
+                            | CommandId::SearchNotes
                             | CommandId::ToggleSidebar
                             | CommandId::HorizontalTabs
                             | CommandId::VerticalTabs
@@ -319,6 +328,7 @@ fn append_management_actions(
                             | CommandId::ToggleHistory
                             | CommandId::ToggleNotifications
                             | CommandId::CheckForUpdates
+                            | CommandId::ShowWhatsNew
                     )
             )
         }),
@@ -456,6 +466,13 @@ pub fn actions_for_default_host(
         }
     }
 
+    // The open note's earlier versions.
+    if let Some(session) = selected
+        && session.is_note()
+    {
+        result.push(registered_action(CommandId::NoteVersionHistory));
+    }
+
     // Session handoff: move the SELECTED Claude session across hosts (v1 is
     // Claude-only — other kinds have no reliable resume, so no entries).
     if let Some(session) = selected
@@ -515,6 +532,9 @@ pub fn actions_for_default_host(
 
     result.extend([
         registered_action(CommandId::OpenWorktrees),
+        registered_action(CommandId::NewNote),
+        registered_action(CommandId::ShowTodos),
+        registered_action(CommandId::SearchNotes),
         registered_action(CommandId::ToggleSidebar),
         registered_action(CommandId::HorizontalTabs),
         registered_action(CommandId::VerticalTabs),
@@ -533,6 +553,7 @@ pub fn actions_for_default_host(
             keywords: "settings appearance dark light preferences".into(),
         },
         registered_action(CommandId::CheckForUpdates),
+        registered_action(CommandId::ShowWhatsNew),
     ]);
     result
 }
@@ -1101,6 +1122,9 @@ mod tests {
                 "move-pane-down",
                 "new-default-in-/work/diri",
                 "worktrees",
+                "new-note",
+                "todos",
+                "search-notes",
                 "toggle-sidebar",
                 "horizontal-tabs",
                 "vertical-tabs",
@@ -1109,6 +1133,7 @@ mod tests {
                 "toggle-notifications",
                 "color-theme",
                 "check-for-updates",
+                "whats-new",
             ]
         );
         assert_eq!(result[0].title, "New Codex Session");
@@ -1260,6 +1285,9 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
             scheduled_run: None,
         }
     }

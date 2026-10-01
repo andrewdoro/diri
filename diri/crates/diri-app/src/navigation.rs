@@ -1,4 +1,5 @@
 mod history_page;
+mod notes_page;
 #[cfg(test)]
 mod page_tests;
 
@@ -12,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::commands::{
-    CommandId, NAVIGATION_CONTEXT, ToggleCommandPalette, ToggleHistory, ToggleQuickOpen,
+    CommandId, NAVIGATION_CONTEXT, SearchNotes, ToggleCommandPalette, ToggleHistory,
+    ToggleQuickOpen,
 };
 use crate::fuzzy::{FuzzyMatcher, FuzzyQuery};
 use crate::icons::sf_symbol;
@@ -39,6 +41,7 @@ use gpui::{
     StatefulInteractiveElement, StyledText, Task, UniformListScrollHandle, Window, div,
     ease_out_quint, prelude::*, px, rgba, uniform_list,
 };
+pub(crate) use notes_page::NoteOpened;
 
 /// The search field above the results, and the gap the surface keeps from the
 /// window edges. Everything else is measured against the live viewport so the
@@ -91,6 +94,7 @@ enum Overlay {
     CommandPalette,
     QuickOpen,
     History,
+    Notes,
     Settings,
     Themes,
 }
@@ -148,6 +152,7 @@ pub struct NavigationOverlay {
     history_search: crate::history::HistorySearch,
     history_matches: Vec<usize>,
     history_resuming: Option<String>,
+    notes: notes_page::NotesPage,
     back_stack: Vec<PageState>,
     page_generation: u64,
     page_direction: f32,
@@ -279,6 +284,7 @@ impl NavigationOverlay {
             history_search: crate::history::HistorySearch::default(),
             history_matches: Vec::new(),
             history_resuming: None,
+            notes: notes_page::NotesPage::default(),
             back_stack: Vec::new(),
             page_generation: 0,
             page_direction: 1.0,
@@ -338,6 +344,7 @@ impl NavigationOverlay {
             history_search: crate::history::HistorySearch::default(),
             history_matches: Vec::new(),
             history_resuming: None,
+            notes: notes_page::NotesPage::default(),
             back_stack: Vec::new(),
             page_generation: 0,
             page_direction: 1.0,
@@ -492,6 +499,7 @@ impl NavigationOverlay {
         self.history = Vec::new();
         self.history_matches = Vec::new();
         self.history_search = crate::history::HistorySearch::default();
+        self.notes.hits = Vec::new();
         self.ranked_items = Vec::new();
         self.quick_snapshot = QuickOpenSnapshot::default();
         self.directory_index.release_entries();
@@ -754,6 +762,7 @@ impl NavigationOverlay {
                 self.schedule_rank(cx);
             }
             Some(Overlay::History) => self.filter_history(),
+            Some(Overlay::Notes) => self.filter_notes(),
             Some(Overlay::Themes) => {
                 self.filter_themes();
                 self.preview_highlighted_theme(cx);
@@ -769,6 +778,13 @@ impl NavigationOverlay {
     pub(crate) fn open_themes_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_overlay(Overlay::Settings, window, cx);
         self.push_page(Overlay::Themes, window, cx);
+    }
+
+    /// Types into the open page's query, as keystrokes would.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn type_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.query.insert(text);
+        self.query_changed(cx);
     }
 
     #[cfg(all(test, target_os = "macos"))]
@@ -802,6 +818,7 @@ impl NavigationOverlay {
                 self.ranked_items.len() + usize::from(self.quick_create.is_some())
             }
             Some(Overlay::History) => self.history_matches.len(),
+            Some(Overlay::Notes) => self.notes.hits.len(),
             Some(Overlay::Settings) => self.settings_items().len(),
             Some(Overlay::Themes) => self.theme_matches.len(),
             None => 0,
@@ -866,6 +883,7 @@ impl NavigationOverlay {
                     self.resume_history(entry, window, cx);
                 }
             }
+            Some(Overlay::Notes) => self.open_highlighted_note(secondary, window, cx),
             Some(Overlay::Settings) => match self.settings_items().get(self.highlight).copied() {
                 Some(0) => self.push_page(Overlay::Themes, window, cx),
                 Some(_) => {
@@ -926,6 +944,12 @@ impl NavigationOverlay {
             }
             PaletteCommand::Action(CommandId::ToggleHistory) => {
                 self.push_page(Overlay::History, window, cx)
+            }
+            PaletteCommand::Action(CommandId::SearchNotes) => {
+                self.push_page(Overlay::Notes, window, cx)
+            }
+            PaletteCommand::OpenNote { note_id, block } => {
+                self.open_note(note_id, block, window, cx)
             }
             PaletteCommand::Action(CommandId::OpenSettings) => {
                 self.push_page(Overlay::Settings, window, cx)
@@ -1064,6 +1088,10 @@ impl NavigationOverlay {
         if !searching {
             self.ranked_sessions.truncate(CHAT_PREVIEW_LIMIT);
         }
+        // Notes the query finds, above the commands: their Sessions (when
+        // live and matched by title) are already in the chat rows.
+        let notes = self.palette_note_actions(&self.ranked_sessions.clone());
+        self.ranked_actions.splice(0..0, notes);
     }
 
     fn current_quick_item(&self) -> Option<QuickOpenItem> {
@@ -1131,6 +1159,19 @@ impl NavigationOverlay {
         }
     }
 
+    pub(crate) fn toggle_search_notes(
+        &mut self,
+        _: &SearchNotes,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.overlay == Some(Overlay::Notes) {
+            self.close_overlay(window, cx);
+        } else {
+            self.open_overlay(Overlay::Notes, window, cx);
+        }
+    }
+
     fn cancel_theme_preview(&mut self) {
         if self
             .store
@@ -1153,7 +1194,11 @@ impl NavigationOverlay {
         self.ranked_items.clear();
         self.quick_create = None;
         match page {
-            Overlay::CommandPalette => self.refresh_command_items(),
+            Overlay::CommandPalette => {
+                // Notes join ⌘K's results as soon as the query finds one.
+                self.reread_notes(cx);
+                self.refresh_command_items();
+            }
             Overlay::QuickOpen => {
                 // Closing released the index. The disk cache repopulates it
                 // in one file read while any due rescan runs behind it.
@@ -1165,6 +1210,11 @@ impl NavigationOverlay {
             Overlay::History => {
                 self.filter_history();
                 self.refresh_history(cx);
+            }
+            Overlay::Notes => {
+                crate::telemetry::notes_event("notes.search.opened", "");
+                self.reread_notes(cx);
+                self.filter_notes();
             }
             Overlay::Settings => {}
             Overlay::Themes => {
@@ -1303,6 +1353,8 @@ impl NavigationOverlay {
             Some(Overlay::CommandPalette) => self.visible_count().clamp(1, 9),
             Some(Overlay::Settings) => 2,
             Some(Overlay::History) => 7,
+            // Six two-line note rows.
+            Some(Overlay::Notes) => 9,
             _ => 9,
         }
     }
@@ -1331,6 +1383,7 @@ impl NavigationOverlay {
             Overlay::CommandPalette => "Search chats or run a command…",
             Overlay::QuickOpen => "Open project…",
             Overlay::History => "Search chats…",
+            Overlay::Notes => "Search notes…",
             Overlay::Settings => "Settings…",
             Overlay::Themes => "Color theme…",
         };
@@ -1495,6 +1548,8 @@ impl NavigationOverlay {
                                 .text_color(colors.secondary)
                                 .child(if page == Overlay::History && self.history_loading {
                                     "Finding chats…"
+                                } else if page == Overlay::Notes {
+                                    self.notes_empty_label(cx)
                                 } else if page == Overlay::QuickOpen
                                     && self.directory_index.is_scanning()
                                 {
@@ -1654,6 +1709,9 @@ impl NavigationOverlay {
         if self.overlay == Some(Overlay::History) {
             return self.render_history_row(index, cx);
         }
+        if self.overlay == Some(Overlay::Notes) {
+            return self.render_note_row(index, cx);
+        }
         let row = match self.overlay {
             Some(Overlay::CommandPalette) => {
                 if index < self.ranked_sessions.len() {
@@ -1802,7 +1860,10 @@ impl NavigationOverlay {
             command,
             PaletteCommand::Themes
                 | PaletteCommand::Action(
-                    CommandId::ToggleQuickOpen | CommandId::ToggleHistory | CommandId::OpenSettings
+                    CommandId::ToggleQuickOpen
+                        | CommandId::ToggleHistory
+                        | CommandId::SearchNotes
+                        | CommandId::OpenSettings
                 )
         );
         let trailing = if matches!(command, PaletteCommand::Workspace(_)) {
@@ -2057,6 +2118,7 @@ impl Render for NavigationOverlay {
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_quick_open))
             .on_action(cx.listener(Self::toggle_history))
+            .on_action(cx.listener(Self::toggle_search_notes))
             .on_key_down(cx.listener(Self::on_key_down))
             .absolute()
             // Cached entity roots are laid out independently, so insets alone
@@ -2594,6 +2656,10 @@ mod tests {
                     overlay.refresh_command_items();
                     match std::env::var("DIRI_VISUAL_PAGE").as_deref() {
                         Ok("history") => super::page_tests::seed_history(&mut overlay),
+                        Ok("notes") => {
+                            super::page_tests::seed_notes(&mut overlay, cx);
+                            overlay.prepare_page(Overlay::Notes, cx);
+                        }
                         Ok("projects") => {
                             overlay.overlay = Some(Overlay::QuickOpen);
                             overlay.quick_snapshot.recent = [

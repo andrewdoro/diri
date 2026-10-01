@@ -2,7 +2,7 @@
   "_notice": "Screen-detection predicates adapted from the herdr project (https://github.com/herdrdev/herdr, src/detect/manifests/*.toml), licensed Apache-2.0. Translated from herdr's TOML rule schema into Dirijor's JSON predicate schema and re-prioritised for this engine; the agent capability block is Dirijor's own.",
   "schemaVersion": 2,
   "id": "kimi",
-  "version": "2026.07.31.1",
+  "version": "2026.10.01.1",
   "statusModel": "full",
   "agent": {
     "id": "kimi",
@@ -35,7 +35,11 @@
     "envScrubPrefixes": [
       "DIRI_",
       "DIRIJOR_"
-    ]
+    ],
+    "approve": {
+      "text": "",
+      "submit": true
+    }
   },
   "rules": [
     {
@@ -150,15 +154,6 @@
       }
     },
     {
-      "id": "working-thinking",
-      "state": "working",
-      "priority": 120,
-      "region": "whole_recent",
-      "when": {
-        "regex": "(?i)\\bkimi[-\\w.]*\\s+thinking\\b"
-      }
-    },
-    {
       "id": "working-moon-spinner",
       "state": "working",
       "priority": 100,
@@ -173,22 +168,62 @@
       "priority": 90,
       "region": "whole_recent",
       "when": {
+        "lineRegex": "^\\s*[\\u2800-\\u28FF]\\s+(?i:thinking|working|using)(?:\u2026|\\.\\.\\.|\\s)"
+      }
+    },
+    {
+      "id": "workspace-trust-dialog",
+      "state": "blockedQuestion",
+      "priority": 390,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 16,
+      "when": {
         "all": [
           {
-            "lineRegex": "^\\s*[\\u2800-\\u28FF]"
+            "contains": "Trust this folder?"
           },
           {
-            "any": [
-              {
-                "contains": "thinking..."
-              },
-              {
-                "contains": "working..."
-              },
-              {
-                "contains": "using "
-              }
-            ]
+            "contains": "\u2191\u2193 navigate \u00b7 Enter select \u00b7 Esc exit"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ]
+    },
+    {
+      "id": "login-platform-dialog",
+      "state": "blockedQuestion",
+      "priority": 390,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 12,
+      "when": {
+        "all": [
+          {
+            "contains": "Select a platform"
+          },
+          {
+            "contains": "\u2191\u2193 navigate \u00b7 Enter select \u00b7 Esc cancel"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ]
+    },
+    {
+      "id": "idle-composer",
+      "state": "idle",
+      "priority": 50,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 5,
+      "when": {
+        "all": [
+          {
+            "lineRegex": "^\\s*\u2502 >.*\u2502\\s*$"
+          },
+          {
+            "lineRegex": "^\\s*context:.*$"
           }
         ]
       }

@@ -335,6 +335,12 @@ jobs:
     needs: app-linux
     runs-on: ubuntu-22.04
     timeout-minutes: 75
+    # id-token lets cosign sign the packages keylessly: Sigstore issues a
+    # certificate naming this workflow and ref, so there is no private key to
+    # keep. Only main-branch runs sign (see "Sign Linux release artifacts").
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -400,6 +406,19 @@ jobs:
           appimage="$(find diri/dist/linux -maxdepth 1 -name '*.AppImage' -print -quit)"
           xvfb-run -a env -u WAYLAND_DISPLAY APPIMAGE_EXTRACT_AND_RUN=1 \
             DIRI_UI_SMOKE_TEST=1 "${appimage}"
+      # Release signatures are made only for main, where the certificate
+      # identity is ".../nightly.yml@refs/heads/main" — the identity users and
+      # release.sh pin. Pull-request runs would carry a refs/pull identity that
+      # verification rejects anyway, and every signature is a public
+      # transparency-log entry, so they are not signed at all.
+      - name: Install cosign
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign Linux release artifacts
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: diri/scripts/linux-signatures.sh sign diri/dist/linux
       - name: Upload Linux release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -410,6 +429,7 @@ jobs:
             diri/dist/linux/SHA256SUMS
             diri/dist/linux/linux-release.json
             diri/dist/linux/THIRD-PARTY-LICENSES.json
+            diri/dist/linux/*.sigstore.json
           if-no-files-found: error
           retention-days: 14
 
@@ -429,6 +449,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes jq libvulkan1 \
             mesa-vulkan-drivers xvfb
+      # The user-facing check from LINUX.md, on a machine that did not sign.
+      - name: Install cosign
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Verify Linux signatures
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: diri/scripts/linux-signatures.sh verify diri/dist/linux
       - name: Install, launch, recover a session, and uninstall
         run: |
           deb="$(find "${PWD}/diri/dist/linux" -maxdepth 1 -name '*.deb' -print -quit)"

@@ -71,6 +71,8 @@ struct ControlState {
     /// When the owner last queued typed input whose echo has not yet been
     /// seen; see [`AttachmentControl::take_echo`].
     echo_due: Option<Instant>,
+    /// The session's keystroke probe, shared with its transport task.
+    echo: Arc<crate::telemetry::EchoProbe>,
     #[cfg(test)]
     resize_sends: u64,
 }
@@ -270,6 +272,11 @@ impl AttachmentControl {
         self.report("input", result);
     }
 
+    /// The session's grid was painted; closes a pending echo's timing.
+    pub(super) fn echo_painted(&self, agent: &str) {
+        self.echo.painted(agent);
+    }
+
     /// Whether a screen change landing now answers input this attachment
     /// queued within [`diri_term::cursor_motion::KEYSTROKE_WINDOW`] (long enough for a remote echo).
     /// True at most once per input, so a keystroke buys one echo frame and
@@ -381,6 +388,7 @@ impl ControllerLease {
         let session = existing.unwrap_or_else(|| {
             let (tx, mut rx) = pane_event_channel();
             let (shutdown, shutdown_rx) = oneshot::channel();
+            let echo = Arc::<crate::telemetry::EchoProbe>::default();
             let control = Arc::new(Mutex::new(ControlState {
                 owner: 0,
                 ownership_revision: 0,
@@ -392,6 +400,7 @@ impl ControllerLease {
                 resize_storm: crate::telemetry::ResizeStorm::default(),
                 rejection_recorded: None,
                 echo_due: None,
+                echo: echo.clone(),
                 #[cfg(test)]
                 resize_sends: 0,
             }));
@@ -406,7 +415,7 @@ impl ControllerLease {
                 hold: None,
                 _events: None,
                 shutdown: Some(shutdown),
-                echo: Arc::default(),
+                echo,
                 _live: crate::telemetry::Live::attached_session(),
             }));
             let weak = Rc::downgrade(&session);
@@ -669,6 +678,7 @@ fn spawn_transport(
             if cancelled { return; }
         }
         let mut trace = crate::telemetry::TransportTrace::new(&id);
+        let echo = control.lock().unwrap().echo.clone();
         loop {
             trace.connecting();
             let connect = SessionAttachment::connect(&socket, id.clone());
@@ -729,6 +739,9 @@ fn spawn_transport(
                             Some(chunk) => {
                                 trace.chunk(&chunk);
                                 let grid = matches!(chunk, TerminalChunk::Grid(_));
+                                if grid {
+                                    echo.frame_received();
+                                }
                                 let _ = events.send(PaneEvent::Chunk(id.clone(), 0, chunk));
                                 if grid {
                                     diri_client::latency_trace::mark(
@@ -919,6 +932,7 @@ mod tests {
                 resize_storm: crate::telemetry::ResizeStorm::default(),
                 rejection_recorded: None,
                 echo_due: None,
+                echo: Arc::default(),
                 #[cfg(test)]
                 resize_sends: 0,
             }))
@@ -983,6 +997,7 @@ mod tests {
                 resize_storm: crate::telemetry::ResizeStorm::default(),
                 rejection_recorded: None,
                 echo_due: None,
+                echo: Arc::default(),
                 #[cfg(test)]
                 resize_sends: 0,
             })),

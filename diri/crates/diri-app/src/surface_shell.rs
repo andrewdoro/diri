@@ -119,8 +119,33 @@ const HIBERNATE_OPTIONS: [(u32, &str); 6] = [
 enum SettingsMenu {
     DefaultAgent,
     TerminalTheme,
+    TerminalFont,
     HibernateAfter,
     MemoryLimit,
+    FileEditor,
+}
+
+/// Choices for where terminal file links open, in menu order.
+const FILE_EDITOR_OPTIONS: [crate::store::FileEditor; 5] = [
+    crate::store::FileEditor::Automatic,
+    crate::store::FileEditor::Cursor,
+    crate::store::FileEditor::VsCode,
+    crate::store::FileEditor::Zed,
+    crate::store::FileEditor::DefaultApp,
+];
+
+fn file_editor_label(choice: crate::store::FileEditor) -> String {
+    use crate::store::FileEditor;
+    match choice {
+        FileEditor::Automatic => match crate::file_links::editor_for(FileEditor::Automatic) {
+            Some(editor) => format!("Automatic ({})", editor.name()),
+            None => "Automatic (default app)".to_owned(),
+        },
+        FileEditor::Cursor => "Cursor".to_owned(),
+        FileEditor::VsCode => "VS Code".to_owned(),
+        FileEditor::Zed => "Zed".to_owned(),
+        FileEditor::DefaultApp => "Default app".to_owned(),
+    }
 }
 
 /// The open settings select as a panel target (see `crate::floating::Target`).
@@ -334,10 +359,14 @@ impl HostEditor {
 
 pub(crate) enum UtilitySurfacesEvent {
     AccountLoginOpened,
+    /// A What's New thumbnail was clicked: open the sheet on that highlight.
+    ShowWhatsNew(usize),
 }
 impl gpui::EventEmitter<UtilitySurfacesEvent> for UtilitySurfaces {}
 
 pub struct UtilitySurfaces {
+    /// Installed monospace families, read when the font picker opens.
+    terminal_font_families: Vec<String>,
     skills: gpui::Entity<crate::skills_page::SkillsPage>,
     schedules: gpui::Entity<crate::schedules_page::SchedulesPage>,
     accounts: AccountsState,
@@ -370,6 +399,12 @@ pub struct UtilitySurfaces {
     usage_chart_frame_pending: bool,
     usage_numbers: crate::number_flow::Bank,
     release_notes: ReleaseNotesState,
+    /// Finished-state stills of the newest release's What's New clips, for
+    /// the thumbnails on the What's New page, in the appearance they match.
+    whats_new_posters: Option<(
+        diri_ui::Appearance,
+        Vec<gpui::Entity<crate::whats_new::ClipPlayer>>,
+    )>,
     settings_scroll: ScrollHandle,
     settings_scroller: diri_ui::ScrollerState,
     settings_search: QueryEditor,
@@ -576,6 +611,7 @@ impl UtilitySurfaces {
             usage_chart_frame_pending: false,
             usage_numbers: crate::number_flow::Bank::default(),
             release_notes: ReleaseNotesState::default(),
+            whats_new_posters: None,
             settings_scroll: ScrollHandle::new(),
             settings_scroller: diri_ui::ScrollerState::new(),
             settings_search: QueryEditor::default(),
@@ -610,6 +646,7 @@ impl UtilitySurfaces {
             runtime,
             updates,
             show_version_picker: false,
+            terminal_font_families: Vec::new(),
             activity: "Connected client · shared daemon remains untouched".to_owned(),
             diagnostics_report,
             privacy: Default::default(),
@@ -1591,6 +1628,7 @@ impl UtilitySurfaces {
         }
         if self.settings_tab == SettingsTab::WhatsNew {
             self.refresh_release_notes(cx);
+            self.load_whats_new_posters(cx);
         }
         cx.notify();
     }
@@ -1674,6 +1712,7 @@ impl UtilitySurfaces {
         self.settings_tab = tab;
         if tab == SettingsTab::WhatsNew {
             self.refresh_release_notes(cx);
+            self.load_whats_new_posters(cx);
         }
         if tab == SettingsTab::Worktrees {
             self.load_worktrees(cx);
@@ -2722,8 +2761,109 @@ impl UtilitySurfaces {
         settings_page("Phone access", content, colors)
     }
 
+    /// Decodes the thumbnails' stills once per appearance, off the main thread.
+    fn load_whats_new_posters(&mut self, cx: &mut Context<Self>) {
+        let appearance = self.settings_colors().appearance;
+        if self
+            .whats_new_posters
+            .as_ref()
+            .is_some_and(|(loaded, _)| *loaded == appearance)
+        {
+            return;
+        }
+        let posters = crate::whats_new::latest(&crate::whats_new::current_version())
+            .into_iter()
+            .flat_map(|release| release.highlights)
+            .map(|highlight| {
+                let clip = highlight.clip.for_appearance(appearance);
+                cx.new(|cx| crate::whats_new::ClipPlayer::new(clip, true, cx))
+            })
+            .collect();
+        self.whats_new_posters = Some((appearance, posters));
+    }
+
+    /// The newest release's highlights as thumbnails; each opens the sheet on
+    /// its clip.
+    fn whats_new_highlights(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let colors = self.settings_colors();
+        let release = *crate::whats_new::latest(&crate::whats_new::current_version()).first()?;
+        let posters = self
+            .whats_new_posters
+            .as_ref()
+            .map(|(_, posters)| posters.clone())
+            .unwrap_or_default();
+        let cards = release
+            .highlights
+            .iter()
+            .enumerate()
+            .map(|(index, highlight)| {
+                div()
+                    .id(("whats-new-highlight", index))
+                    .debug_selector(move || format!("whats-new-highlight-{index}"))
+                    .w(px(176.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .cursor_pointer()
+                    .group("whats-new-highlight")
+                    .child(
+                        div()
+                            .w(px(176.0))
+                            .h(px(110.0))
+                            .rounded(px(Radius::ROW))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(colors.primary.alpha(0.08))
+                            .bg(colors.background)
+                            .hover(move |style| style.border_color(colors.primary.alpha(0.22)))
+                            .children(posters.get(index).cloned()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(Typo::ROW.size))
+                            .text_color(colors.primary)
+                            .child(highlight.title),
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(UtilitySurfacesEvent::ShowWhatsNew(index));
+                    }))
+            })
+            .collect::<Vec<_>>();
+        Some(
+            div()
+                .p(px(16.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .text_size(px(Typo::TITLE.size))
+                                .font_weight(Typo::TITLE.weight)
+                                .text_color(colors.primary)
+                                .child(format!("New in diri {}", release.version)),
+                        )
+                        .child(surface_button(
+                            "Watch",
+                            "whats-new-watch",
+                            colors,
+                            cx,
+                            |_, cx| cx.emit(UtilitySurfacesEvent::ShowWhatsNew(0)),
+                        )),
+                )
+                .child(div().flex().flex_wrap().gap(px(12.0)).children(cards))
+                .into_any_element(),
+        )
+    }
+
     fn whats_new_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
+        let highlights = self.whats_new_highlights(cx);
         let content = match &self.release_notes {
             ReleaseNotesState::Idle | ReleaseNotesState::Loading => div()
                 .id("release-notes-loading")
@@ -2826,7 +2966,14 @@ impl UtilitySurfaces {
 
         settings_page(
             "What's New",
-            setting_section("LATEST RELEASE", content, colors),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(SETTINGS_SECTION_GAP))
+                .when_some(highlights, |page, highlights| {
+                    page.child(setting_section("HIGHLIGHTS", highlights, colors))
+                })
+                .child(setting_section("LATEST RELEASE", content, colors)),
             colors,
         )
     }
@@ -3908,8 +4055,10 @@ impl UtilitySurfaces {
         Some(match self.settings_menu.as_ref()? {
             SettingsMenu::DefaultAgent => (self.default_agent_options(colors, cx), 204.0),
             SettingsMenu::TerminalTheme => (self.terminal_theme_options(colors, cx), 252.0),
+            SettingsMenu::TerminalFont => (self.terminal_font_options(colors, cx), 252.0),
             SettingsMenu::HibernateAfter => (self.hibernate_options(colors, cx), 172.0),
             SettingsMenu::MemoryLimit => (self.memory_options(colors, cx), 132.0),
+            SettingsMenu::FileEditor => (self.file_editor_options(colors, cx), 204.0),
         })
     }
 
@@ -4106,6 +4255,46 @@ impl UtilitySurfaces {
             ));
         }
         options.into_any_element()
+    }
+
+    fn file_editor_options(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let mut options = div().p(px(4.0)).flex().flex_col();
+        for (index, choice) in FILE_EDITOR_OPTIONS.into_iter().enumerate() {
+            let is_selected = choice == self.prefs.terminal_file_editor;
+            options = options.child(settings_choice_row(
+                format!("file-editor-option-{index}"),
+                file_editor_label(choice),
+                is_selected,
+                colors,
+                cx,
+                move |this, cx| {
+                    this.settings_menu = None;
+                    this.update_prefs(move |prefs| prefs.terminal_file_editor = choice);
+                    cx.notify();
+                },
+            ));
+        }
+        options.into_any_element()
+    }
+
+    fn file_editor_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = self.settings_colors();
+        let open = self.settings_menu == Some(SettingsMenu::FileEditor);
+        let mut control = div()
+            .relative()
+            .min_w(px(132.0))
+            .child(settings_select_button(
+                file_editor_label(self.prefs.terminal_file_editor),
+                "file-editor-dropdown",
+                open,
+                SettingsMenu::FileEditor,
+                colors,
+                cx,
+            ));
+        if open {
+            control = control.child(self.settings_menu_host(cx));
+        }
+        control.into_any_element()
     }
 
     fn memory_options(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
@@ -4357,83 +4546,24 @@ impl UtilitySurfaces {
     fn terminal_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
         let selected = theme(&self.prefs.terminal_theme);
-        let can_make_smaller = self.prefs.terminal_font_size > 10.0;
-        let can_make_larger = self.prefs.terminal_font_size < 20.0;
-        let font_control = div()
-            .h(px(32.0))
-            .rounded(px(Radius::ROW))
-            .border_1()
-            .border_color(colors.primary.alpha(0.12))
-            .bg(colors.primary.alpha(0.04))
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .child(
-                div()
-                    .id("font-smaller")
-                    .w(px(34.0))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(16.0))
-                    .text_color(if can_make_smaller {
-                        colors.primary
-                    } else {
-                        colors.tertiary
-                    })
-                    .when(can_make_smaller, |button| {
-                        button
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(colors.primary.alpha(0.08)))
-                            .active(move |style| style.bg(colors.primary.alpha(0.12)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_prefs(|prefs| prefs.zoom_terminal(-1.0));
-                                cx.notify();
-                            }))
-                    })
-                    .child("−"),
-            )
-            .child(HairlineDivider::vertical(colors))
-            .child(
-                div()
-                    .w(px(58.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .font_family(crate::fonts::mono_family())
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.primary)
-                    .child(format!("{:.0} pt", self.prefs.terminal_font_size)),
-            )
-            .child(HairlineDivider::vertical(colors))
-            .child(
-                div()
-                    .id("font-larger")
-                    .w(px(34.0))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(16.0))
-                    .text_color(if can_make_larger {
-                        colors.primary
-                    } else {
-                        colors.tertiary
-                    })
-                    .when(can_make_larger, |button| {
-                        button
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(colors.primary.alpha(0.08)))
-                            .active(move |style| style.bg(colors.primary.alpha(0.12)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_prefs(|prefs| prefs.zoom_terminal(1.0));
-                                cx.notify();
-                            }))
-                    })
-                    .child("+"),
-            );
+        let font_control = settings_stepper(
+            "font",
+            format!("{:.0} pt", self.prefs.terminal_font_size),
+            self.prefs.terminal_font_size > Prefs::MIN_TERMINAL_FONT_SIZE,
+            self.prefs.terminal_font_size < Prefs::MAX_TERMINAL_FONT_SIZE,
+            colors,
+            cx,
+            |prefs, step| prefs.zoom_terminal(step),
+        );
+        let line_height_control = settings_stepper(
+            "line-height",
+            format!("{:.1}", self.prefs.terminal_line_height),
+            self.prefs.terminal_line_height > Prefs::MIN_TERMINAL_LINE_HEIGHT,
+            self.prefs.terminal_line_height < Prefs::MAX_TERMINAL_LINE_HEIGHT,
+            colors,
+            cx,
+            |prefs, step| prefs.terminal_line_height += step * 0.1,
+        );
 
         let choices = div().w_full().flex().gap(px(12.0)).children(
             [(0, "System"), (1, "Light"), (2, "Dark")]
@@ -4496,7 +4626,9 @@ impl UtilitySurfaces {
                 .child(choices)
                 .child(appearance_diff_preview(
                     selected,
+                    crate::fonts::terminal_family(&self.prefs.terminal_font_family),
                     self.prefs.terminal_font_size,
+                    self.prefs.terminal_line_height,
                 ))
                 .child(
                     div()
@@ -4547,17 +4679,20 @@ impl UtilitySurfaces {
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Code font",
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(colors.secondary)
-                                .child(crate::fonts::mono_family()),
+                            "Terminal font",
+                            self.terminal_font_dropdown(cx),
                             colors,
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Code font size",
+                            "Font size",
                             font_control,
+                            colors,
+                        ))
+                        .child(appearance_divider(colors))
+                        .child(appearance_setting_row(
+                            "Line height",
+                            line_height_control,
                             colors,
                         ))
                         .child(appearance_divider(colors))
@@ -4570,6 +4705,12 @@ impl UtilitySurfaces {
                             let enabled = !this.prefs.terminal_open_links_on_click;
                             this.update_prefs(move |prefs| prefs.terminal_open_links_on_click = enabled); cx.notify();
                         }))
+                        .child(appearance_divider(colors))
+                        .child(appearance_setting_row(
+                            "Open file links in",
+                            self.file_editor_dropdown(cx),
+                            colors,
+                        ))
                         .child(appearance_divider(colors))
                         .child(toggle_row("Hide pointer while typing", "Show it again when you use the mouse.", self.prefs.terminal_hide_pointer, "terminal_hide_pointer", colors, cx, |this,cx| {
                             let enabled = !this.prefs.terminal_hide_pointer;
@@ -5383,6 +5524,88 @@ impl UtilitySurfaces {
                     }))
                     .child(value)
             })
+    }
+
+    fn terminal_font_options(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let configured = self.prefs.terminal_font_family.clone();
+        let mut options = div()
+            .id("terminal-font-options")
+            .max_h(px(300.0))
+            .overflow_y_scroll()
+            .p(px(4.0))
+            .flex()
+            .flex_col();
+        let choices = std::iter::once(None).chain(self.terminal_font_families.iter().map(Some));
+        for (index, family) in choices.enumerate() {
+            let is_selected = family.map_or(configured.is_empty(), |family| *family == configured);
+            let stored = family.cloned().unwrap_or_default();
+            let label = family.map_or_else(
+                || format!("Default ({})", crate::fonts::mono_family()),
+                Clone::clone,
+            );
+            // Each family is named in its own face, so the list is the preview.
+            let face = family.map_or(crate::fonts::mono_family(), String::as_str);
+            options = options.child(
+                div()
+                    .id(SharedString::from(format!("terminal-font-option-{index}")))
+                    .h(px(Metrics::ROW_HEIGHT))
+                    .px(px(8.0))
+                    .rounded(px(Radius::inner(crate::floating::MENU_RADIUS, 4.0)))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .bg(Fill::selected(colors, is_selected))
+                    .cursor_pointer()
+                    .glass_menu_row(colors, false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_menu = None;
+                        let family = stored.clone();
+                        this.update_prefs(move |prefs| prefs.terminal_font_family = family);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(SharedString::from(face.to_owned()))
+                            .text_size(px(Typo::ROW.size))
+                            .child(label),
+                    )
+                    .when(is_selected, |row| {
+                        row.child(sf_symbol("checkmark", 10.0, colors.secondary))
+                    }),
+            );
+        }
+        options.into_any_element()
+    }
+
+    fn terminal_font_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = self.settings_colors();
+        let configured = &self.prefs.terminal_font_family;
+        let label = if configured.is_empty() {
+            format!("Default ({})", crate::fonts::mono_family())
+        } else if crate::fonts::terminal_family(configured) == configured {
+            configured.clone()
+        } else {
+            format!("{configured} (not installed)")
+        };
+        let open = self.settings_menu == Some(SettingsMenu::TerminalFont);
+        let mut control = div()
+            .relative()
+            .min_w(px(158.0))
+            .child(settings_select_button(
+                label,
+                "terminal-font-dropdown",
+                open,
+                SettingsMenu::TerminalFont,
+                colors,
+                cx,
+            ));
+        if open {
+            control = control.child(self.settings_menu_host(cx));
+        }
+        control.into_any_element()
     }
 
     fn terminal_theme_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -6802,6 +7025,71 @@ fn setting_divider(colors: SemanticColors) -> impl IntoElement {
         .bg(colors.primary.alpha(0.055))
 }
 
+/// A `−  value  +` control. `change` receives -1.0 or 1.0 and edits the
+/// preferences; each end is disabled once its bound is reached.
+fn settings_stepper(
+    id: &'static str,
+    value: String,
+    can_decrease: bool,
+    can_increase: bool,
+    colors: SemanticColors,
+    cx: &mut Context<UtilitySurfaces>,
+    change: fn(&mut Prefs, f32),
+) -> AnyElement {
+    let step_button = |suffix: &str, glyph: &'static str, enabled: bool, step: f32| {
+        div()
+            .id(SharedString::from(format!("{id}-{suffix}")))
+            .w(px(34.0))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(16.0))
+            .text_color(if enabled {
+                colors.primary
+            } else {
+                colors.tertiary
+            })
+            .when(enabled, |button| {
+                button
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(colors.primary.alpha(0.08)))
+                    .active(move |style| style.bg(colors.primary.alpha(0.12)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.update_prefs(|prefs| change(prefs, step));
+                        cx.notify();
+                    }))
+            })
+            .child(glyph)
+    };
+    div()
+        .h(px(32.0))
+        .rounded(px(Radius::ROW))
+        .border_1()
+        .border_color(colors.primary.alpha(0.12))
+        .bg(colors.primary.alpha(0.04))
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .child(step_button("smaller", "−", can_decrease, -1.0))
+        .child(HairlineDivider::vertical(colors))
+        .child(
+            div()
+                .w(px(58.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_family(crate::fonts::mono_family())
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(colors.primary)
+                .child(value),
+        )
+        .child(HairlineDivider::vertical(colors))
+        .child(step_button("larger", "+", can_increase, 1.0))
+        .into_any_element()
+}
+
 fn settings_select_button(
     label: impl Into<SharedString>,
     id: impl Into<SharedString>,
@@ -6830,6 +7118,10 @@ fn settings_select_button(
             } else {
                 Some(menu)
             };
+            if this.settings_menu == Some(SettingsMenu::TerminalFont) {
+                // Read on open, so a font installed while diri runs shows up.
+                this.terminal_font_families = crate::fonts::monospace_families(cx);
+            }
             cx.notify();
         }))
         .child(
@@ -7063,8 +7355,14 @@ fn appearance_mode_card(
         )
 }
 
-fn appearance_diff_preview(theme: TermTheme, font_size: f32) -> impl IntoElement {
-    let line_height = (font_size * 1.5).ceil();
+fn appearance_diff_preview(
+    theme: TermTheme,
+    family: &str,
+    font_size: f32,
+    line_height_scale: f32,
+) -> impl IntoElement {
+    // Roughly a monospace face's natural row, stretched like the terminal's.
+    let line_height = (font_size * 1.2 * line_height_scale).ceil();
     let column = |added: bool| {
         let tint = if added { theme.ansi[2] } else { theme.ansi[1] };
         div()
@@ -7154,7 +7452,7 @@ fn appearance_diff_preview(theme: TermTheme, font_size: f32) -> impl IntoElement
         .border_1()
         .border_color(theme.foreground.alpha(0.09))
         .bg(theme.background)
-        .font_family(crate::fonts::mono_family())
+        .font_family(SharedString::from(family.to_owned()))
         .font_weight(FontWeight::NORMAL)
         .text_size(px(font_size))
         .flex()
@@ -7453,6 +7751,16 @@ mod tests {
                 window.refresh();
             })
             .expect("scroll to privacy settings");
+            cx.run_until_parked();
+        }
+        if std::env::var("DIRI_VISUAL_SETTINGS_TAB").as_deref() == Ok("whats-new") {
+            // The thumbnails decode on their own threads.
+            for _ in 0..40 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                cx.run_until_parked();
+            }
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
             cx.run_until_parked();
         }
         let screenshot = cx
@@ -8116,6 +8424,10 @@ mod tests {
         let transparency = std::env::var("DIRI_APPEARANCE_TRANSPARENCY")
             .ok()
             .and_then(|value| value.parse::<f32>().ok());
+        let height = std::env::var("DIRI_APPEARANCE_HEIGHT")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(900.0);
         let platform = gpui_platform::current_platform(true);
         let mut cx = HeadlessAppContext::with_platform(
             platform.text_system(),
@@ -8128,7 +8440,7 @@ mod tests {
         });
 
         let window = cx
-            .open_window(size(px(1200.0), px(900.0)), move |window, cx| {
+            .open_window(size(px(1200.0), px(height)), move |window, cx| {
                 let harness = cx
                     .new(|cx| SettingsWorkbenchHarness::open_at(SettingsTab::Terminal, window, cx));
                 harness.update(cx, |harness, cx| {
@@ -8145,6 +8457,41 @@ mod tests {
                     if let Some(value) = transparency {
                         harness.surfaces.update(cx, |surfaces, cx| {
                             surfaces.set_window_transparency(value, cx);
+                        });
+                    }
+                    let family = std::env::var("DIRI_APPEARANCE_FONT").ok();
+                    let line_height = std::env::var("DIRI_APPEARANCE_LINE_HEIGHT")
+                        .ok()
+                        .and_then(|value| value.parse::<f32>().ok());
+                    if family.is_some() || line_height.is_some() {
+                        harness.surfaces.update(cx, |surfaces, cx| {
+                            surfaces.update_prefs(move |prefs| {
+                                if let Some(family) = family {
+                                    prefs.terminal_font_family = family;
+                                }
+                                if let Some(line_height) = line_height {
+                                    prefs.terminal_line_height = line_height;
+                                }
+                            });
+                            cx.notify();
+                        });
+                    }
+                    if std::env::var_os("DIRI_APPEARANCE_FONT_MENU").is_some() {
+                        harness.surfaces.update(cx, |surfaces, cx| {
+                            // The live listing needs the main thread; the
+                            // fixture names families every Mac ships.
+                            surfaces.terminal_font_families =
+                                ["Andale Mono", "Courier New", "Menlo", "Monaco", "PT Mono"]
+                                    .map(str::to_owned)
+                                    .to_vec();
+                            surfaces.settings_menu = Some(SettingsMenu::TerminalFont);
+                            cx.notify();
+                        });
+                    }
+                    if std::env::var_os("DIRI_APPEARANCE_FILE_EDITOR_MENU").is_some() {
+                        harness.surfaces.update(cx, |surfaces, cx| {
+                            surfaces.settings_menu = Some(SettingsMenu::FileEditor);
+                            cx.notify();
                         });
                     }
                 });
@@ -8310,6 +8657,7 @@ mod tests {
                     };
                     let document = Arc::new(crate::markdown::MarkdownDocument::parse(&release.body));
                     surfaces.release_notes = ReleaseNotesState::Loaded { release, document };
+                    surfaces.load_whats_new_posters(cx);
                 }
                 if tab == SettingsTab::Worktrees {
                     surfaces.worktrees.entries = worktree_settings::preview_entries();

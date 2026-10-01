@@ -53,7 +53,7 @@ use gpui::{
     AnyElement, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter, ExternalPaths,
     FocusHandle, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, Role,
     ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, Window, div,
-    font, prelude::*, px,
+    prelude::*, px,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -120,11 +120,6 @@ const PARKED_GRID_CAP: usize = 12;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalPaneEvent {
     ContinueAccount(SessionId),
-    OpenFileReference {
-        reference: String,
-        cwd: String,
-        session_id: SessionId,
-    },
     /// Transient terminal feedback belongs in the window's standard toast.
     Feedback {
         message: String,
@@ -133,6 +128,8 @@ pub enum TerminalPaneEvent {
     ExternalDropFeedback {
         message: String,
     },
+    /// A note's mention chip asked to show another Session.
+    RevealSession(SessionId),
 }
 
 #[path = "session_links.rs"]
@@ -772,6 +769,13 @@ pub struct TerminalViewport {
 pub struct TerminalPane {
     #[cfg(test)]
     pub(crate) render_count: usize,
+    /// Hosts the note when this pane's session is a note Session: a note has
+    /// no PTY, so the pane shows the editor and never attaches.
+    note: Option<Entity<crate::notes::NotePane>>,
+    /// A block to put the caret on, for the next note shown or (when the
+    /// note id is set) only for that note: an adopted note file has no
+    /// Session yet, and the note still showing must not take its caret.
+    pending_note_block: Option<(Option<String>, usize)>,
     qol: QolState,
     /// The open Insert Path picker, bound to the session it was opened on.
     path_picker: Option<path_picker::PathPickerState>,
@@ -1051,6 +1055,8 @@ impl TerminalPane {
         let mut pane = Self {
             #[cfg(test)]
             render_count: 0,
+            note: None,
+            pending_note_block: None,
             window_store,
             runtime,
             _tokio_owner: tokio_owner,
@@ -1169,7 +1175,15 @@ impl TerminalPane {
             if self.residents.contains_key(&id) {
                 continue;
             }
-            let mono = crate::fonts::terminal_font();
+            let mono = crate::fonts::terminal_font(
+                &self
+                    .runtime
+                    .store
+                    .read()
+                    .expect("session store lock poisoned")
+                    .preferences()
+                    .terminal_font_family,
+            );
             let generation = self.next_attachment_generation;
             self.next_attachment_generation = self.next_attachment_generation.wrapping_add(1);
             let parked = self
@@ -1350,6 +1364,12 @@ impl TerminalPane {
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.displayed_note().is_some() {
+            let pane = self.note_pane(window, cx);
+            pane.update(cx, |pane, _| pane.request_focus());
+            cx.notify();
+            return;
+        }
         if matches!(self.session_source, SessionSource::FollowSelection)
             && self.selected_id() != self.observed_selected_id
         {
@@ -1459,6 +1479,55 @@ impl TerminalPane {
             changed_rows: vec![diri_proto::grid::ChangedRow::new(row, cells)],
         };
         self.apply_grid_updates(id, [update], window, cx);
+    }
+
+    /// Lands changed rows on the selected grid the way a grid frame does,
+    /// for frame-cost fixtures that replay an agent's redraws.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn land_rows_for_test(
+        &mut self,
+        rows: Vec<(u16, Vec<diri_proto::grid::GridCell>)>,
+        cursor: (u16, u16),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        let Some((cols, grid_rows)) = self.residents.get(&id).map(|resident| {
+            let buffer = resident.element.buffer();
+            let buffer = buffer.read().unwrap();
+            (buffer.cols, buffer.rows)
+        }) else {
+            return;
+        };
+        let update = GridUpdate {
+            cols,
+            rows: grid_rows,
+            cursor_col: cursor.0,
+            cursor_row: cursor.1,
+            cursor_visible: true,
+            is_full_snapshot: false,
+            changed_rows: rows
+                .into_iter()
+                .filter(|(row, _)| *row < grid_rows)
+                .map(|(row, mut cells)| {
+                    cells.resize(usize::from(cols), diri_proto::grid::GridCell::BLANK);
+                    diri_proto::grid::ChangedRow::new(row, cells)
+                })
+                .collect(),
+        };
+        self.apply_grid_updates(id, [update], window, cx);
+    }
+
+    /// The selected grid's size, for fixtures.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn selected_grid_size_for_test(&self) -> Option<(u16, u16)> {
+        let id = self.selected_id()?;
+        let resident = self.residents.get(&id)?;
+        let buffer = resident.element.buffer();
+        let buffer = buffer.read().unwrap();
+        Some((buffer.cols, buffer.rows))
     }
 
     #[cfg(test)]
@@ -2498,7 +2567,8 @@ impl TerminalPane {
         )
     }
 
-    fn selected_id(&self) -> Option<SessionId> {
+    /// The session this pane displays, note or not.
+    fn displayed_id(&self) -> Option<SessionId> {
         match &self.session_source {
             SessionSource::FollowSelection => self.window_store.as_ref().map_or_else(
                 || {
@@ -2513,6 +2583,73 @@ impl TerminalPane {
             ),
             SessionSource::Fixed(id) => Some(id.clone()),
         }
+    }
+
+    /// The displayed session when it is a note: (session, note file id).
+    fn displayed_note(&self) -> Option<(SessionId, String)> {
+        let id = self.displayed_id()?;
+        let store = self.runtime.store.read().expect("store");
+        let record = store.sessions().get(&id)?;
+        record
+            .is_note()
+            .then(|| (id.clone(), record.note_id.clone().unwrap_or_default()))
+    }
+
+    /// The terminal session this pane drives. A note has no terminal, so
+    /// every attach, input, and residency path sees nothing selected.
+    fn selected_id(&self) -> Option<SessionId> {
+        let id = self.displayed_id()?;
+        let note = self
+            .runtime
+            .store
+            .read()
+            .expect("store")
+            .sessions()
+            .get(&id)
+            .is_some_and(|record| record.is_note());
+        (!note).then_some(id)
+    }
+
+    fn note_pane(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::notes::NotePane> {
+        if let Some(pane) = &self.note {
+            return pane.clone();
+        }
+        let runtime = Arc::clone(&self.runtime);
+        let pane = cx.new(|cx| crate::notes::NotePane::new(runtime, cx));
+        cx.subscribe_in(&pane, window, |_, _, event, window, cx| match event {
+            // Escape with nothing left to dismiss hands the keyboard to the
+            // sidebar, where ↑/↓ move between notes and sessions alike.
+            crate::notes::NotePaneEvent::Dismiss => {
+                window.dispatch_action(Box::new(crate::commands::FocusSidebar), cx);
+            }
+            crate::notes::NotePaneEvent::Reveal(id) => {
+                cx.emit(TerminalPaneEvent::RevealSession(id.clone()));
+            }
+        })
+        .detach();
+        self.note = Some(pane.clone());
+        pane
+    }
+
+    /// Put the caret on a note block (from the To-dos page) once the note
+    /// is shown.
+    pub(crate) fn reveal_note_block(&mut self, block: usize) {
+        self.pending_note_block = Some((None, block));
+    }
+
+    /// Put the caret on a block of note `note_id` once that note is shown.
+    pub(crate) fn reveal_block_in_note(&mut self, note_id: String, block: usize) {
+        self.pending_note_block = Some((Some(note_id), block));
+    }
+
+    /// Only the macOS window screenshots host a fixture note pane.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn set_note_pane_for_test(&mut self, pane: Entity<crate::notes::NotePane>) {
+        self.note = Some(pane);
     }
 
     fn open_account_continuation(&self, cx: &mut Context<Self>) {
@@ -2752,13 +2889,9 @@ impl TerminalPane {
             .store
             .read()
             .expect("session store lock poisoned");
-        let font_size = store.preferences().terminal_font_size;
+        let typeface = TerminalType::from_prefs(store.preferences());
         drop(store);
-        let metrics = CellMetrics::measure(
-            window.text_system(),
-            &font(crate::fonts::mono_family()),
-            px(font_size),
-        );
+        let metrics = typeface.metrics(window);
         let viewport = self.viewport.unwrap_or_default();
         let grid_x = viewport.x + GRID_HORIZONTAL_PADDING / 2.0;
         // An overflowing grid is bottom-anchored (see render_grid_and_overlays),
@@ -2769,7 +2902,7 @@ impl TerminalPane {
             .and_then(|id| self.residents.get(&id))
             .map_or(0, |resident| resident.element.grid_rows());
         let anchor = self
-            .grid_row_overflow(grid_rows, font_size, window)
+            .grid_row_overflow(grid_rows, &typeface, window)
             .map_or(0.0, |grid_height| self.grid_inner_height() - grid_height);
         let grid_y = viewport.y + self.header_height() + 2.0 + anchor;
         let col = ((f32::from(position.x) - grid_x) / f32::from(metrics.cell_width))
@@ -2854,16 +2987,18 @@ impl TerminalPane {
 
         match owner {
             PointerOwner::LocalSelection => {
-                // A plain press on a URL arms it like a Command-press; the
+                // A plain press on a link arms it like a Command-press; the
                 // release opens it only if the pointer never left that cell,
                 // so dragging out of a link still selects.
-                self.qol.pressed = (open_links_on_click
+                let hit = (open_links_on_click
                     && event.click_count == 1
                     && is_plain_click(&event.modifiers))
                 .then(|| resident.element.reference_hit_at(col, row))
-                .flatten()
-                .filter(|hit| matches!(hit.reference, TerminalReference::Url(_)))
-                .map(|hit| (hit, (col, row)));
+                .flatten();
+                self.qol.pressed = self.linkable(hit).map(|hit| (hit, (col, row)));
+                let Some(resident) = self.residents.get_mut(&id) else {
+                    return;
+                };
                 match event.click_count {
                     1 if event.modifiers.alt && event.modifiers.shift => {
                         resident.element.begin_rectangle_selection(col, row)
@@ -2875,10 +3010,8 @@ impl TerminalPane {
                 cx.notify();
             }
             PointerOwner::LocalReference => {
-                self.qol.pressed = resident
-                    .element
-                    .reference_hit_at(col, row)
-                    .map(|hit| (hit, (col, row)));
+                let hit = resident.element.reference_hit_at(col, row);
+                self.qol.pressed = self.linkable(hit).map(|hit| (hit, (col, row)));
                 cx.stop_propagation();
             }
             PointerOwner::Terminal => {
@@ -3129,17 +3262,13 @@ impl TerminalPane {
     fn grid_row_overflow(
         &self,
         grid_rows: u16,
-        font_size: f32,
+        typeface: &TerminalType,
         window: &mut Window,
     ) -> Option<f32> {
         if grid_rows == 0 || self.viewport.is_none() {
             return None;
         }
-        let metrics = CellMetrics::measure(
-            window.text_system(),
-            &font(crate::fonts::mono_family()),
-            px(font_size),
-        );
+        let metrics = typeface.metrics(window);
         // A pixel of slack on top of the exact row height: the element derives
         // its row count back out with `floor(height / line_height)`, and an
         // exactly-sized box loses its last row to float error or to layout
@@ -3688,15 +3817,14 @@ impl TerminalPane {
         let Some(id) = self.selected_id() else {
             return;
         };
-        let font_size = self
-            .runtime
-            .store
-            .read()
-            .expect("session store lock poisoned")
-            .preferences()
-            .terminal_font_size;
-        let font = font(crate::fonts::mono_family());
-        let metrics = CellMetrics::measure(window.text_system(), &font, px(font_size));
+        let typeface = TerminalType::from_prefs(
+            self.runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .preferences(),
+        );
+        let metrics = typeface.metrics(window);
         let viewport = self.viewport.unwrap_or_default();
         let grid_x = viewport.x + GRID_HORIZONTAL_PADDING / 2.0;
         let grid_y = viewport.y + self.header_height() + 2.0;
@@ -3741,13 +3869,13 @@ impl TerminalPane {
         let Some(session) = self.selected_session() else {
             return;
         };
-        let font_size = self
-            .runtime
-            .store
-            .read()
-            .expect("session store lock poisoned")
-            .preferences()
-            .terminal_font_size;
+        let typeface = TerminalType::from_prefs(
+            self.runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .preferences(),
+        );
         let already_sized = self
             .residents
             .get(&session.id)
@@ -3769,11 +3897,7 @@ impl TerminalPane {
         }) else {
             return;
         };
-        let metrics = CellMetrics::measure(
-            window.text_system(),
-            &font(crate::fonts::mono_family()),
-            px(font_size),
-        );
+        let metrics = typeface.metrics(window);
         let size = estimated_grid_size(
             viewport.width,
             viewport.height,
@@ -3971,6 +4095,11 @@ impl TerminalPane {
                                 .child(glyph),
                         )
                     })
+                    .children(
+                        (header_width >= 420.0)
+                            .then(|| self.render_origin_note(session, colors))
+                            .flatten(),
+                    )
                     .child(
                         div()
                             .min_w(px(0.0))
@@ -4001,6 +4130,52 @@ impl TerminalPane {
                     }),
             )
             .into_any_element()
+    }
+
+    /// A session started from a note shows that note before its title; a
+    /// click goes back to the note, scrolled to the to-do it works on.
+    fn render_origin_note(
+        &self,
+        session: &SessionRecord,
+        colors: SemanticColors,
+    ) -> Option<AnyElement> {
+        let parent = session.parent.clone()?;
+        let title = {
+            let store = self.runtime.store.read().expect("store");
+            let note = store.sessions().get(&parent).filter(|p| p.is_note())?;
+            let title = note.title.trim();
+            if title.is_empty() {
+                "Untitled".to_owned()
+            } else {
+                title.to_owned()
+            }
+        };
+        let child = session.id.clone();
+        let runtime = Arc::clone(&self.runtime);
+        Some(
+            div()
+                .id("session-origin-note")
+                .flex_none()
+                .max_w(px(200.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(Typo::TITLE.size))
+                .text_color(colors.tertiary)
+                .cursor_pointer()
+                .hover(|el| el.text_color(colors.secondary))
+                .child(sf_symbol("doc.text", 12.0, colors.tertiary))
+                .child(div().min_w(px(0.0)).text_ellipsis().child(title))
+                .child(sf_symbol("chevron.right", 9.0, colors.tertiary))
+                .on_click(move |_, _, _| {
+                    runtime
+                        .store
+                        .write()
+                        .expect("store")
+                        .reveal_in_note(parent.clone(), child.clone());
+                })
+                .into_any_element(),
+        )
     }
 
     fn render_inspector_toggle(
@@ -4142,7 +4317,7 @@ impl TerminalPane {
         session: &SessionRecord,
         theme: TermTheme,
         colors: SemanticColors,
-        font_size: f32,
+        typeface: &TerminalType,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -4186,7 +4361,9 @@ impl TerminalPane {
                 diri_ui::Material::Opaque => 1.0,
                 diri_ui::Material::Glass => 0.0,
             })
-            .font_size(px(font_size))
+            .font(typeface.font.clone())
+            .font_size(px(typeface.size))
+            .line_height_scale(typeface.line_height)
             .focus_handle(self.focus.clone())
             .reduce_motion(cx.reduce_motion())
             .hovered_reference(self.qol.hit.clone());
@@ -4203,18 +4380,11 @@ impl TerminalPane {
         let show_attaching =
             attachment_state == AttachmentState::Attaching && !resident.element.has_content();
         let secret_input = resident.secret_input && attachment_state == AttachmentState::Live;
-        let overflow = self.grid_row_overflow(resident.element.grid_rows(), font_size, window);
+        let overflow = self.grid_row_overflow(resident.element.grid_rows(), typeface, window);
         let scroll_target = TerminalScrollTarget {
             element: resident.element.clone(),
             visible_rows: usize::from(resident.last_size.1.max(1)),
-            line_height: f32::from(
-                CellMetrics::measure(
-                    window.text_system(),
-                    &font(crate::fonts::mono_family()),
-                    px(font_size),
-                )
-                .line_height,
-            ),
+            line_height: f32::from(typeface.metrics(window).line_height),
             session: session.id.clone(),
             pane_tx: self.pane_tx.clone(),
         };
@@ -4441,7 +4611,11 @@ impl TerminalPane {
                     .hover(move |style| style.bg(colors.primary.alpha(0.14)))
                     .cursor_pointer()
                     .text_color(colors.primary)
-                    .child("Resume")
+                    .child(if is_local_shell(session) {
+                        "Restart"
+                    } else {
+                        "Resume"
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.runtime
                             .store
@@ -4642,9 +4816,12 @@ impl TerminalPane {
             return Some(centered_message("◌", "Moving session…", colors).into_any_element());
         }
         if auto_resuming {
-            return Some(
-                centered_message("◌", "Resuming conversation…", colors).into_any_element(),
-            );
+            let message = if is_local_shell(session) {
+                "Restarting terminal…"
+            } else {
+                "Resuming conversation…"
+            };
+            return Some(centered_message("◌", message, colors).into_any_element());
         }
         if self
             .residents
@@ -4668,7 +4845,11 @@ impl TerminalPane {
             content
                 .child(primary_button(
                     "resume-conversation",
-                    "Resume Conversation",
+                    if is_local_shell(session) {
+                        "Restart Terminal"
+                    } else {
+                        "Resume Conversation"
+                    },
                     colors,
                     cx,
                     move |this, cx| {
@@ -4740,6 +4921,27 @@ impl TerminalPane {
     }
 }
 
+impl TerminalPane {
+    /// A zero-size element painted after the grid: closes the timing of a
+    /// keystroke whose echo this render shows (`input.echo.paint`).
+    fn echo_paint_probe(&self, session: &SessionRecord) -> Option<AnyElement> {
+        if !diri_telemetry::is_enabled() {
+            return None;
+        }
+        let attachment = self.residents.get(&session.id)?.attachment.clone();
+        let agent = session.kind.id().to_owned();
+        Some(
+            gpui::canvas(
+                |_, _, _| {},
+                move |_, _, _, _| attachment.echo_painted(&agent),
+            )
+            .absolute()
+            .size_0()
+            .into_any_element(),
+        )
+    }
+}
+
 fn quote_from_terminal_element(session_id: SessionId, element: &TerminalElement) -> Option<Quote> {
     let range = element.selection_range()?;
     Quote::new(
@@ -4758,6 +4960,31 @@ impl Render for TerminalPane {
         {
             self.render_count += 1;
         }
+        if let Some((session, note_id)) = self.displayed_note() {
+            let pane = self.note_pane(window, cx);
+            let reveal = match &self.pending_note_block {
+                Some((Some(wanted), _)) if *wanted != note_id => None,
+                _ => self.pending_note_block.take().map(|(_, block)| block),
+            };
+            pane.update(cx, |pane, cx| {
+                pane.show(&session, &note_id, window, cx);
+                if let Some(block) = reveal {
+                    pane.reveal_block(block, window, cx);
+                }
+            });
+            return div()
+                .id("terminal-note")
+                .track_focus(&self.focus)
+                .size_full()
+                .child(pane)
+                .into_any_element();
+        }
+        self.render_terminal(window, cx).into_any_element()
+    }
+}
+
+impl TerminalPane {
+    fn render_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.reconcile_residency(cx);
         if window.is_window_active() && self.focus.is_focused(window) {
             self.claim_selected_control();
@@ -4766,7 +4993,7 @@ impl Render for TerminalPane {
         if crate::alerts::enabled(cx) {
             self.sync_paste_prompt(window, cx);
         }
-        let (theme, colors, sidebar_colors, font_size) = {
+        let (theme, colors, sidebar_colors, typeface) = {
             let store = self
                 .runtime
                 .store
@@ -4776,7 +5003,7 @@ impl Render for TerminalPane {
                 crate::app_theme::terminal_theme_in(&store),
                 crate::app_theme::colors_in(&store),
                 crate::app_theme::sidebar_colors_in(&store),
-                store.preferences().terminal_font_size,
+                TerminalType::from_prefs(store.preferences()),
             )
         };
         self.sync_status_glyphs(colors, window, cx);
@@ -4814,7 +5041,7 @@ impl Render for TerminalPane {
                 .overflow_hidden()
                 .bg(colors.work_surface_nested())
                 .child(
-                    self.render_grid_and_overlays(&session, theme, colors, font_size, window, cx),
+                    self.render_grid_and_overlays(&session, theme, colors, &typeface, window, cx),
                 );
             if let Some(find) = self.render_find_bar(&session, colors, cx) {
                 terminal_surface = terminal_surface.child(find);
@@ -4825,6 +5052,9 @@ impl Render for TerminalPane {
             pane = pane.child(terminal_surface);
             if let Some(summary) = self.render_session_links(&session, sidebar_colors, window, cx) {
                 pane = pane.child(summary);
+            }
+            if let Some(probe) = self.echo_paint_probe(&session) {
+                pane = pane.child(probe);
             }
             pane.into_any_element()
         } else {
@@ -5343,6 +5573,12 @@ fn clipboard_image(item: &ClipboardItem) -> Option<(&[u8], &'static str)> {
     })
 }
 
+/// A local terminal has no conversation to resume: the Engine restarts it
+/// as a fresh shell in the directory it had `cd`'d to.
+fn is_local_shell(session: &SessionRecord) -> bool {
+    session.kind == ProtoAgentKind::SHELL && session.host.is_none()
+}
+
 fn exit_description(session: &SessionRecord) -> String {
     let SessionStatus::Exited(info) = &session.status else {
         return "Session ended".to_owned();
@@ -5355,6 +5591,29 @@ fn exit_description(session: &SessionRecord) -> String {
         ExitReason::External => "Imported session — not started yet".to_owned(),
         ExitReason::Archived => "Archived".to_owned(),
         ExitReason::Unknown => "Session ended".to_owned(),
+    }
+}
+
+/// The terminal typography preferences, resolved once per use so sizing,
+/// painting and hit-testing measure the same cell.
+struct TerminalType {
+    font: gpui::Font,
+    size: f32,
+    line_height: f32,
+}
+
+impl TerminalType {
+    fn from_prefs(prefs: &crate::store::Prefs) -> Self {
+        Self {
+            font: crate::fonts::terminal_font(&prefs.terminal_font_family),
+            size: prefs.terminal_font_size,
+            line_height: prefs.terminal_line_height,
+        }
+    }
+
+    fn metrics(&self, window: &Window) -> CellMetrics {
+        CellMetrics::measure(window.text_system(), &self.font, px(self.size))
+            .with_line_height_scale(self.line_height)
     }
 }
 
@@ -6662,7 +6921,17 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let session = fixture_session();
+        let mut session = fixture_session();
+        // "file-link*": a compiler error whose `src/app.rs` really exists
+        // under the session's directory, so it passes the existence check.
+        let file_link_root = scene.starts_with("file-link").then(|| {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("src")).unwrap();
+            std::fs::write(root.path().join("src/app.rs"), "fn main() {}\n").unwrap();
+            session.host = None;
+            session.cwd = root.path().display().to_string();
+            root
+        });
         let id = session.id.clone();
         {
             let mut store = runtime.store.write().unwrap();
@@ -6671,6 +6940,16 @@ mod tests {
                     prefs.terminal_paste_protection = true;
                     if let Ok(theme) = std::env::var("DIRI_QOL_THEME") {
                         prefs.terminal_theme = theme;
+                    }
+                    prefs.terminal_file_editor = crate::store::FileEditor::Cursor;
+                    if let Ok(family) = std::env::var("DIRI_QOL_FONT") {
+                        prefs.terminal_font_family = family;
+                    }
+                    if let Some(scale) = std::env::var("DIRI_QOL_LINE_HEIGHT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                    {
+                        prefs.terminal_line_height = scale;
                     }
                 })
                 .unwrap();
@@ -6713,6 +6992,60 @@ mod tests {
                             });
                         }
                         grid.changed_rows.push(row);
+                    }
+                    if scene.starts_with("file-link") {
+                        grid.changed_rows.clear();
+                        for (y, text) in [
+                            "$ cargo build",
+                            "   Compiling diri v0.8.2 (/work/diri)",
+                            "error[E0308]: mismatched types",
+                            "  --> src/app.rs:42:9",
+                            "   |",
+                            "42 |     let count: u32 = \"three\";",
+                            "   |                ---   ^^^^^^^ expected `u32`, found `&str`",
+                            "   |",
+                            "  ::: src/missing.rs:7:1",
+                            "",
+                            "error: could not compile `diri` (bin \"diri\") due to 1 previous error",
+                            "$ ",
+                        ]
+                        .iter()
+                        .enumerate()
+                        {
+                            let mut cells = vec![GridCell::BLANK; 80];
+                            for (cell, ch) in cells.iter_mut().zip(text.chars()) {
+                                cell.scalar = ch as u32;
+                            }
+                            grid.changed_rows.push(ChangedRow::new(y as u16, cells));
+                        }
+                        grid.cursor_row = 11;
+                        grid.cursor_col = 2;
+                    }
+                    if scene == "typography" {
+                        // An agent transcript with box drawing, shades and
+                        // colour: what a font or line-height change touches.
+                        let mut screen = diri_engine::HeadlessScreen::new(80, 18);
+                        screen.feed(concat!(
+                            "\x1b[38;5;173m╭────────────────────────────────────────────╮\x1b[0m\r\n",
+                            "\x1b[38;5;173m│\x1b[0m \x1b[38;5;173m✻\x1b[0m Welcome to \x1b[1mClaude Code\x1b[0m                   \x1b[38;5;173m│\x1b[0m\r\n",
+                            "\x1b[38;5;173m│\x1b[0m   \x1b[2mcwd: ~/work/diri\x1b[0m                         \x1b[38;5;173m│\x1b[0m\r\n",
+                            "\x1b[38;5;173m╰────────────────────────────────────────────╯\x1b[0m\r\n",
+                            "\r\n",
+                            "\x1b[2m>\x1b[0m Let me pick the terminal font in Settings\r\n",
+                            "\r\n",
+                            "\x1b[32m●\x1b[0m \x1b[1mRead\x1b[0m(crates/diri-app/src/fonts.rs)\r\n",
+                            "  ⎿  Read 196 lines\r\n",
+                            "\x1b[32m●\x1b[0m \x1b[1mUpdate\x1b[0m(crates/diri-term/src/metrics.rs)\r\n",
+                            "  ⎿  \x1b[32m+ pub fn with_line_height_scale(self, scale: f32)\x1b[0m\r\n",
+                            "     \x1b[31m- line_height: px(raw_height.round())\x1b[0m\r\n",
+                            "\r\n",
+                            "┌──────┬──────────┬────────┐  \x1b[36m█▓▒░\x1b[0m 0O 1lI {}[]() => != ->\r\n",
+                            "│ size │ 13 pt    │ \x1b[33mok\x1b[0m     │  \x1b[7m inverse \x1b[0m \x1b[4munderline\x1b[0m \x1b[3mitalic\x1b[0m\r\n",
+                            "└──────┴──────────┴────────┘\r\n",
+                            "\x1b[32m$\x1b[0m cargo test -p diri-term\r\n",
+                            "test result: \x1b[32mok\x1b[0m. 278 passed; 0 failed",
+                        ).as_bytes());
+                        grid = screen.full_snapshot();
                     }
                     let find_fixture = if scene == "find-unicode" {
                         let mut screen = diri_engine::HeadlessScreen::new(80, 28);
@@ -6799,7 +7132,27 @@ mod tests {
                     pane.focus(window, cx);
                     pane.reset_qol_session(&id);
                     pane.qol.hover = Some((2, 1));
+                    // "col,row" of the cell the pointer rests on.
+                    if let Some((col, row)) = std::env::var("DIRI_QOL_HOVER")
+                        .ok()
+                        .and_then(|cell| {
+                            let (col, row) = cell.split_once(',')?;
+                            Some((col.parse().ok()?, row.parse().ok()?))
+                        })
+                    {
+                        pane.qol.hover = Some((col, row));
+                    }
                     match scene.as_str() {
+                        "file-link-menu" => {
+                            let (col, row) = pane.qol.hover.unwrap();
+                            pane.open_terminal_menu(
+                                gpui::point(px(col as f32 * 8.0 + 120.0), px(row as f32 * 15.0 + 70.0)),
+                                col,
+                                row,
+                                window,
+                                cx,
+                            );
+                        }
                         "menu" => pane.open_terminal_menu(
                             gpui::point(px(260.0), px(180.0)),
                             2,
@@ -6875,6 +7228,7 @@ mod tests {
         cx.update_window(window.into(), |_, window, _| window.remove_window())
             .unwrap();
         cx.run_until_parked();
+        drop(file_link_root);
     }
 
     #[gpui::test]
@@ -7556,7 +7910,22 @@ mod tests {
     }
 
     #[gpui::test]
-    fn terminal_local_file_links_open_in_the_default_app(cx: &mut TestAppContext) {
+    fn terminal_file_links_open_the_editor_at_the_line(cx: &mut TestAppContext) {
+        // Real files, so the existence check has something to find. The
+        // opener is GPUI's test platform: it records the URL and launches
+        // nothing.
+        let launch = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(launch.path().join("src")).unwrap();
+        std::fs::write(launch.path().join("src/app.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(launch.path().join("preview.html"), "<p>").unwrap();
+        std::fs::write(live.path().join("notes.md"), "# notes").unwrap();
+        let encoded =
+            |path: std::path::PathBuf| url::Url::from_file_path(path).unwrap().path().to_owned();
+        let app_rs = encoded(launch.path().join("src/app.rs"));
+        let notes = encoded(live.path().join("notes.md"));
+        let preview = encoded(launch.path().join("preview.html"));
+
         let runtime = Arc::new(StoreRuntime::inert());
         let tokio = Arc::new(
             tokio::runtime::Builder::new_current_thread()
@@ -7566,63 +7935,73 @@ mod tests {
         );
         let mut session = fixture_session();
         session.host = None;
-        session.cwd = "/tmp/workspace".into();
+        session.kind = ProtoAgentKind::SHELL;
+        session.cwd = launch.path().display().to_string();
+        session.terminal_cwd = Some(live.path().display().to_string());
         {
             let mut store = runtime.store.write().unwrap();
             store.upsert_session(session.clone());
             store.select(session.id);
+            store
+                .update_preferences(|prefs| {
+                    prefs.terminal_file_editor = crate::store::FileEditor::Cursor;
+                })
+                .unwrap();
         }
         let (pane, cx) =
             cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
-        let mut events = cx.events(&pane);
         for (reference, expected) in [
-            (
-                "/Users/giga/Desktop/pr6037-current-tool-ui.png",
-                "file:///Users/giga/Desktop/pr6037-current-tool-ui.png",
-            ),
-            ("./preview.html", "file:///tmp/workspace/preview.html"),
-            (
-                "file:///tmp/my%20preview.html",
-                "file:///tmp/my%20preview.html",
-            ),
-            ("src/main.rs:42:7", "file:///tmp/workspace/src/main.rs"),
+            // From the launch directory, which an Agent prints relative to.
+            ("src/app.rs:42:9", format!("cursor://file{app_rs}:42:9")),
+            ("src/app.rs(7,3)", format!("cursor://file{app_rs}:7:3")),
+            ("src/app.rs", format!("cursor://file{app_rs}")),
+            // From the shell's live directory after a `cd`.
+            ("notes.md:4", format!("cursor://file{notes}:4:1")),
+            // A page with no line keeps its viewer, as before.
+            ("preview.html", format!("file://{preview}")),
         ] {
             pane.update_in(cx, |pane, window, cx| {
                 pane.open_reference(TerminalReference::File(reference.into()), window, cx);
             });
-            assert_eq!(cx.opened_url().as_deref(), Some(expected), "{reference}");
-            assert!(
-                events.try_recv().is_err(),
-                "local files must not reveal the inspector"
-            );
+            assert_eq!(cx.opened_url(), Some(expected), "{reference}");
         }
+
         pane.update_in(cx, |pane, window, cx| {
+            pane.runtime
+                .store
+                .write()
+                .unwrap()
+                .update_preferences(|prefs| {
+                    prefs.terminal_file_editor = crate::store::FileEditor::Zed;
+                })
+                .unwrap();
             pane.open_reference(
-                TerminalReference::Url("https://example.com".into()),
+                TerminalReference::File("src/app.rs:42:9".into()),
                 window,
                 cx,
             );
         });
-        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+        assert_eq!(cx.opened_url(), Some(format!("zed://file{app_rs}:42:9")));
+
+        // A path that is not there opens nothing and says so.
+        let mut events = cx.events(&pane);
         pane.update_in(cx, |pane, window, cx| {
-            pane.open_reference(
-                TerminalReference::File("file://remote/tmp/preview.html".into()),
-                window,
-                cx,
-            );
+            pane.open_reference(TerminalReference::File("src/gone.rs:1".into()), window, cx);
             assert_eq!(
                 pane.qol.feedback.as_deref(),
-                Some("Could not open this local file link")
+                Some("That file is not on this Mac")
             );
         });
-        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+        assert_eq!(cx.opened_url(), Some(format!("zed://file{app_rs}:42:9")));
         assert_eq!(
             events.try_recv().ok(),
             Some(TerminalPaneEvent::Feedback {
-                message: "Could not open this local file link".into(),
+                message: "That file is not on this Mac".into(),
             })
         );
 
+        // A remote session's paths name the remote host: even one that also
+        // exists here is never linked or opened.
         pane.update_in(cx, |pane, window, cx| {
             let mut session = (*pane.selected_session().unwrap()).clone();
             session.host = Some("remote-host".into());
@@ -7631,21 +8010,28 @@ mod tests {
                 .write()
                 .unwrap()
                 .upsert_session(session.clone());
+            let absolute = format!("{}:3", launch.path().join("src/app.rs").display());
+            let hit = diri_term::element::ReferenceHit {
+                reference: TerminalReference::File(absolute.clone()),
+                spans: vec![(0, 0, 4)],
+            };
+            assert_eq!(pane.linkable(Some(hit)), None);
+            pane.open_reference(TerminalReference::File(absolute), window, cx);
+        });
+        assert_eq!(
+            cx.opened_url(),
+            Some(format!("zed://file{app_rs}:42:9")),
+            "remote paths must not open local files"
+        );
+
+        pane.update_in(cx, |pane, window, cx| {
             pane.open_reference(
-                TerminalReference::File("/tmp/preview.html".into()),
+                TerminalReference::Url("https://example.com".into()),
                 window,
                 cx,
             );
         });
-        assert!(matches!(
-            events.try_recv(),
-            Ok(TerminalPaneEvent::OpenFileReference { .. })
-        ));
-        assert_eq!(
-            cx.opened_url().as_deref(),
-            Some("https://example.com"),
-            "remote paths must not open local files"
-        );
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
     }
 
     #[gpui::test]
@@ -9453,6 +9839,7 @@ mod tests {
             prompt_excerpt: None,
             options: None,
             risk_hint: RiskHint::Destructive,
+            secret: false,
             occurred_at: DateMillis(2.0),
         });
         assert_eq!(

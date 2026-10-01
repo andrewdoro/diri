@@ -603,6 +603,7 @@ pub(crate) mod plan {
                 host: None,
                 same_repo_as: None,
                 start_directory: None,
+                note_id: None,
             },
             catch_up_window_ms: if catch_up {
                 DEFAULT_CATCH_UP_WINDOW_MS

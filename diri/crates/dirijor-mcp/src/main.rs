@@ -82,8 +82,9 @@ fn instructions(browser: &str) -> String {
          9\", \"in 2 hours\"), ALWAYS use schedule_agent, never your own cron/loop/reminder \
          tools (CronCreate, /loop, /schedule) or a sleeping shell: those die with this \
          session and skip runs the Mac slept through. Pass wake_mac:true to wake a sleeping \
-         Mac for the run and let it sleep again after. Read schedule_agent's description \
-         before calling it.\n\n\
+         Mac for the run and let it sleep again after.\n\n\
+         Notes: if whoami shows origin_note, read_note {{\"note\":\"origin\"}} first (your \
+         brief) and record results with write_note; full rules below.\n\n\
          Parallel work: spawn_agents (worktree:true, prompt, task:true per subtask) → \
          wait_any(task_ids) → per ready task: read_output mode:last_message, answer_task if \
          blocked, get_diff, integrate → wait_any on the pending ids → release_agent. \
@@ -98,9 +99,15 @@ fn instructions(browser: &str) -> String {
          pass since_ms to wait_for_agent/wait_any for untracked prompts.\n\n\
          Also: get_artifacts gives PR/preview URLs and ports; fork_agent branches a \
          conversation; manage_agent hibernates idle children; quick_open_include edits \
-         Cmd+P folders.{browser}"
+         Cmd+P folders.{browser}{NOTES_MARKER}{notes}",
+        notes = dirijor_mcp::tools::NOTES_CONTRACT,
     )
 }
+
+/// Everything after this marker is the full Notes contract. Claude Code drops
+/// it (it cuts at [`INSTRUCTIONS_LIMIT`]), so the core above must stand on its
+/// own and already carries the one notes rule that matters most.
+const NOTES_MARKER: &str = "\n\nFull Notes rules: ";
 
 fn initialize(params: &Value) -> Value {
     let version = params
@@ -192,15 +199,20 @@ mod tests {
         let longest = instructions(
             " To test a web feature, use test_run with a preview URL from get_artifacts.",
         );
+        // Only the core must fit: the full Notes contract after the marker is
+        // for clients that keep long instructions.
+        let core = &longest[..longest.find(NOTES_MARKER).expect("notes marker")];
         assert!(
-            longest.chars().count() <= INSTRUCTIONS_LIMIT,
+            core.chars().count() <= INSTRUCTIONS_LIMIT,
             "{} chars: Claude Code drops everything past {INSTRUCTIONS_LIMIT}",
-            longest.chars().count()
+            core.chars().count()
         );
-        // The scheduling rule must sit well inside the kept prefix.
-        assert!(longest.find("schedule_agent").unwrap() < 1024);
-        assert!(longest.contains("wake_mac"));
-        assert!(longest.ends_with("get_artifacts."));
+        // The scheduling rule must sit well inside the kept prefix, and the
+        // kept prefix must still route a note-started agent to its brief.
+        assert!(core.find("schedule_agent").unwrap() < 1024);
+        assert!(core.contains("wake_mac"));
+        assert!(core.contains("read_note"));
+        assert!(core.ends_with("get_artifacts."));
     }
 
     struct Fake;
@@ -250,5 +262,27 @@ mod tests {
         assert!(instructions.contains("native kind"));
         assert!(instructions.contains("Never use `shell` to launch an agent CLI"));
         assert!(instructions.contains("Cmd+J"));
+    }
+
+    #[test]
+    fn instructions_teach_the_notes_contract() {
+        let initialized = initialize(&json!({}));
+        let instructions = initialized["instructions"].as_str().expect("instructions");
+        for step in [
+            "read it first with read_note {\"note\":\"origin\"}",
+            "a decision, a finding, a blocker, a result, a link",
+            "no progress chatter",
+            "Prefer adding",
+            "Never silently delete the person's writing",
+            "edit_note",
+            "replace_section",
+            "Tick your own sub-tasks",
+            "the person reviews your work and ticks it",
+            "Finish with a one-paragraph result",
+            "create_note",
+            "open:true",
+        ] {
+            assert!(instructions.contains(step), "missing: {step}");
+        }
     }
 }

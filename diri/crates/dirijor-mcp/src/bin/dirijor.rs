@@ -1,3 +1,5 @@
+#[path = "dirijor/notes.rs"]
+mod notes;
 #[path = "dirijor/organization.rs"]
 mod organization;
 
@@ -78,6 +80,7 @@ fn run(arguments: &[String]) -> Result<(), CliError> {
         "artifacts" => artifacts(arguments.get(1..).unwrap_or_default()),
         "events" => events(arguments.get(1..).unwrap_or_default()),
         "ports" => ports(arguments.get(1..).unwrap_or_default()),
+        "note" | "notes" => notes::run(arguments.get(1..).unwrap_or_default()),
         "doctor" => doctor(),
         "forward" => Err(CliError::failure(
             "companion TCP forwarding is not part of the Rust Engine",
@@ -105,7 +108,9 @@ fn print_help() {
          Reads the current local terminal OSC title, not the conversation name. Remote titles are unsupported.\n\n\
          dirijor session reset-terminal ID\n  \
          Resets the emulator (screen, history, modes, title) without touching the process.\n\n\
-         Deferred on Linux: companion forwarding (dirijor forward)."
+         Deferred on Linux: companion forwarding (dirijor forward).\n\n\
+         Notes (Markdown files; new notes appear in the sidebar when Diri is running):\n  {}",
+        notes::HELP
     );
 }
 
@@ -1834,6 +1839,9 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
             scheduled_run: None,
         }
     }

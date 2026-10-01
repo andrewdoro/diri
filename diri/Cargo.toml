@@ -4,6 +4,7 @@ members = [
     "crates/diri-client",
     "crates/diri-engine",
     "crates/diri-node",
+    "crates/diri-notes",
     "crates/dirijor-mcp",
     "crates/diri-proto",
     "crates/diri-pty",
@@ -30,6 +31,7 @@ base64 = "0.23"
 diri-client = { path = "crates/diri-client" }
 diri-engine = { path = "crates/diri-engine" }
 diri-node = { path = "crates/diri-node" }
+diri-notes = { path = "crates/diri-notes" }
 diri-proto = { path = "crates/diri-proto" }
 diri-pty = { path = "crates/diri-pty" }
 diri-telemetry = { path = "crates/diri-telemetry" }

@@ -15,6 +15,8 @@ use crate::tools::{ToolDefinition, tool_definitions_for};
 
 #[cfg(test)]
 mod audit_tests;
+mod notes;
+pub use notes::NoteSpawn;
 mod orchestration;
 mod policy;
 mod schedules;
@@ -33,6 +35,8 @@ pub struct Bridge {
     socket_path: PathBuf,
     caller: Option<String>,
     cancellation: crate::cancellation::Cancellation,
+    /// Overrides where Diri Notes live (tests); `None` resolves it per call.
+    notes_dir: Option<PathBuf>,
 }
 
 impl Default for Bridge {
@@ -50,7 +54,13 @@ impl Bridge {
             socket_path,
             caller,
             cancellation: Default::default(),
+            notes_dir: None,
         }
+    }
+
+    pub fn with_notes_dir(mut self, dir: PathBuf) -> Self {
+        self.notes_dir = Some(dir);
+        self
     }
 
     pub fn with_cancellation(mut self, cancellation: crate::cancellation::Cancellation) -> Self {
@@ -135,6 +145,14 @@ impl Bridge {
             "wait_for_children" => self.wait_for_children(arguments),
             "summarize_children" => self.summarize_children(arguments),
             "report_to_parent" => self.report_to_parent(arguments),
+            "list_notes" => self.list_notes(arguments),
+            "read_note" => self.read_note(arguments),
+            "write_note" => self.write_note(arguments),
+            "edit_note" => self.edit_note(arguments),
+            "replace_section" => self.replace_section(arguments),
+            "create_note" => self.create_note(arguments),
+            "start_from_note" => self.start_from_note(arguments),
+            "note_history" => self.note_history(arguments),
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -234,6 +252,7 @@ impl Bridge {
             account_profile_id: None,
             same_repo_as: None,
             start_directory: None,
+            note_id: None,
         };
         let params = serde_json::to_value(params).map_err(|error| error.to_string())?;
         if !tracked {
@@ -665,6 +684,21 @@ impl Bridge {
         if let Some(parent) = record.parent.as_ref().and_then(|id| lineage.record(&id.0)) {
             result.insert("parent".into(), detailed(parent, Relation::Parent));
         }
+        if let Some(note) = lineage
+            .ancestors(caller)
+            .into_iter()
+            .find(|record| record.is_note())
+        {
+            result.insert(
+                "origin_note".into(),
+                json!({
+                    "session_id": note.id.0,
+                    "note_id": note.note_id,
+                    "title": note.title,
+                    "read_with": "read_note {\"note\":\"origin\"}",
+                }),
+            );
+        }
         let ancestors = lineage.ancestors(caller);
         if !ancestors.is_empty() {
             result.insert(
@@ -875,6 +909,15 @@ impl Bridge {
         let status = optional_string(arguments, "status").unwrap_or_else(|| "update".into());
         if !matches!(status.as_str(), "update" | "done" | "blocked" | "failed") {
             return Err(format!("invalid report status: {status}"));
+        }
+        if let Some(note) = lineage.record(&parent).filter(|parent| parent.is_note()) {
+            return self.report_into_note(
+                note,
+                record,
+                &status,
+                &required_string(arguments, "summary")?,
+                &optional_strings(arguments, "artifacts"),
+            );
         }
         let open_task = self.open_task_from(&parent)?;
         let mut lines = vec![
@@ -1344,6 +1387,9 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
             scheduled_run: None,
         }
     }

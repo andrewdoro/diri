@@ -177,6 +177,14 @@ pub struct AgentDescriptor {
     pub binary: Option<String>,
     #[serde(default)]
     pub return_to_login_shell: bool,
+    /// What the agent prints when it exits only to be started again: Codex,
+    /// after updating itself, says "Please restart Codex." and quits. When a
+    /// `returnToLoginShell` wrapper reports a clean exit with this text at
+    /// the bottom of the screen, the Engine relaunches the tab with its full
+    /// launch (injected MCP and notify included) instead of leaving a bare
+    /// shell whose hand-typed `codex` would run without them.
+    #[serde(default)]
+    pub relaunch_notice: Option<String>,
     /// Swift Codable spelling: capital ID, which `rename_all = "camelCase"`
     /// would miss (`sessionIdFlag`) — and a silently-unparsed flag means no
     /// caller-minted conversation UUID and therefore no resume.
@@ -429,8 +437,10 @@ impl AgentDescriptor {
         }
         if self.return_to_login_shell {
             // Keep the shell as the PTY's session leader. When the agent exits
-            // (notably after Codex updates itself), the command re-enters that
-            // shell and leaves a usable prompt instead of ending the session.
+            // the command re-enters that shell and leaves a usable prompt
+            // instead of ending the session. (An exit that only asks to be
+            // started again, Codex's self-update, is relaunched by the Engine:
+            // see `relaunch_notice`.)
             // The agent binary deliberately stays bare: the fresh interactive
             // login shell re-sources nvm/mise/Homebrew config and resolves the
             // version selected *now*, not when the daemon started.
@@ -562,7 +572,15 @@ pub(crate) fn assert_color_environment(env: &mut Vec<(String, String)>) {
     });
     env.push(("TERM".into(), "xterm-256color".into()));
     env.push(("COLORTERM".into(), "truecolor".into()));
+    // Diri shows `OSC 9;4` progress on the session's tab, but cargo only
+    // sends it to terminals it recognises by name (Windows Terminal, ConEmu,
+    // iTerm2). A value the user chose, `false` included, is kept.
+    if !env.iter().any(|(key, _)| key == CARGO_PROGRESS_ENV) {
+        env.push((CARGO_PROGRESS_ENV.into(), "true".into()));
+    }
 }
+
+const CARGO_PROGRESS_ENV: &str = "CARGO_TERM_PROGRESS_TERM_INTEGRATION";
 
 /// Terminal modes an agent may leave on, turned off after it exits and
 /// before the login shell takes the PTY, written for the shell's `printf`
@@ -782,6 +800,13 @@ mod tests {
         // `returnToLoginShell` from the manifests silently reverts that.
         let codex = descriptor("codex");
         assert!(codex.return_to_login_shell);
+        // ...and the line it prints before that exit has the Engine relaunch
+        // the tab, so its MCP server and notify hook come back with it. Codex
+        // prints it from `run_update_action` in codex-rs/cli/src/main.rs.
+        assert_eq!(
+            codex.relaunch_notice.as_deref(),
+            Some("Please restart Codex.")
+        );
         let spec = codex
             .spawn_spec(
                 Path::new("/tmp"),
@@ -1119,6 +1144,16 @@ mod tests {
         assert_eq!(get("TERM"), Some("xterm-256color"));
         assert_eq!(get("COLORTERM"), Some("truecolor"));
         assert_eq!(get("NO_COLOR"), None);
+        assert_eq!(get(super::CARGO_PROGRESS_ENV), Some("true"));
+
+        let mut chosen = vec![(super::CARGO_PROGRESS_ENV.to_owned(), "false".to_owned())];
+        super::assert_color_environment(&mut chosen);
+        let values: Vec<_> = chosen
+            .iter()
+            .filter(|(key, _)| key == super::CARGO_PROGRESS_ENV)
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(values, ["false"], "the user's own choice stands");
     }
 
     #[test]
@@ -1160,6 +1195,12 @@ mod tests {
         assert_eq!(
             gemini.resume_args(Some("uuid-1")),
             Some(vec!["--resume".to_string(), "uuid-1".to_string()])
+        );
+
+        // Cursor's resume subcommand takes no id. An exact native id uses --resume.
+        assert_eq!(
+            descriptor("cursor").resume_args(Some("native-id")),
+            Some(vec!["--resume".into(), "native-id".into()])
         );
 
         // The latest-session agents: no id anywhere, so the bare token is the

@@ -115,6 +115,17 @@ pub struct HolderStat {
         skip_serializing_if = "Option::is_none"
     )]
     pub secret_input: Option<bool>,
+    /// Whether the shell's foreground job is blocked reading a line (see
+    /// `Pty::job_awaits_line`). Only answered when the stat asked for it with
+    /// `lineProbe`, since it walks the job's processes; `None` otherwise and
+    /// from a holder built before this field existed, which consumers read
+    /// as "not known to be waiting".
+    #[serde(
+        rename = "awaitingLine",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub awaiting_line: Option<bool>,
 }
 
 impl HolderStat {
@@ -187,6 +198,9 @@ pub struct HolderRequest {
     pub rows: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig: Option<i32>,
+    /// On `stat`: also report `awaitingLine`. Older holders ignore it.
+    #[serde(rename = "lineProbe", default, skip_serializing_if = "Option::is_none")]
+    pub line_probe: Option<bool>,
 }
 
 impl HolderRequest {
@@ -198,6 +212,7 @@ impl HolderRequest {
             cols: None,
             rows: None,
             sig: None,
+            line_probe: None,
         }
     }
 }

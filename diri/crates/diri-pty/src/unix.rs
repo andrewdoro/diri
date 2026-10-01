@@ -155,6 +155,43 @@ impl Pty {
         foreground_pgid(self.master.as_raw_fd()).or_else(|| proc_tpgid(self.child.id()))
     }
 
+    /// Whether a job the shell started, not the shell itself, is stopped at
+    /// a question: the line discipline assembles lines and a member of the
+    /// foreground group is blocked reading the terminal. See
+    /// [`crate::line_wait`] for how that read is told from any other wait.
+    ///
+    /// Raw-mode readers (editors, pagers, agent TUIs) are excluded by
+    /// construction, and so is the shell at its own prompt. A group with a
+    /// member that cannot be inspected (a setuid `sudo`) counts as waiting
+    /// when echo is off, which is how `sudo` asks for its password.
+    #[must_use]
+    pub fn job_awaits_line(&self) -> bool {
+        // SAFETY: zero is a valid initialization for `termios`; the kernel
+        // fills it through the valid, owned master fd.
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: `termios` is writable for the duration of the call.
+        if unsafe { libc::tcgetattr(self.master.as_raw_fd(), &mut termios) } != 0
+            || termios.c_lflag & libc::ICANON == 0
+        {
+            return false;
+        }
+        let Some(job) = self
+            .foreground_pgid()
+            .filter(|pgid| u32::try_from(*pgid).ok() != Some(self.child.id()))
+        else {
+            return false;
+        };
+        match crate::line_wait::group_reads_terminal(job) {
+            crate::line_wait::GroupRead::Reading => true,
+            crate::line_wait::GroupRead::NotReading => false,
+            // Echo off in line mode is a password prompt, and the one read
+            // a job cannot hide by being unreadable. It is only trusted
+            // there: a job that inherits a terminal left silenced (a prompt
+            // killed before `stty echo`) is otherwise just quiet.
+            crate::line_wait::GroupRead::Uninspectable => lflag_reads_secret(termios.c_lflag),
+        }
+    }
+
     /// Whether the line discipline is collecting a secret: echo is off while
     /// the kernel still assembles lines. `sudo`, `ssh`, `read -s` and
     /// `getpass` all read this way.
@@ -929,6 +966,69 @@ mod tests {
         wait_for(&mut reader, &mut seen, b"raw");
         assert!(!pty.secret_input(), "raw mode without echo is a TUI");
         writer.write_all(b"\n").expect("finish");
+        let _ = pty.terminate(Duration::from_secs(1));
+    }
+
+    /// A job at a line prompt is told from one that is only quiet, from a
+    /// full-screen reader, and from the shell at its own prompt.
+    #[test]
+    fn a_job_waiting_on_a_line_is_told_from_one_that_is_only_quiet() {
+        use std::time::{Duration, Instant};
+
+        let spec = PtySpec::new(vec!["/bin/sh".into(), "-i".into()], "/")
+            .env("PATH", "/usr/bin:/bin")
+            .env("PS1", "$ ");
+        let mut pty = Pty::spawn(&spec).expect("spawn");
+        let mut reader = pty.reader().expect("reader");
+        reader.set_nonblocking(true).expect("nonblocking");
+        let mut writer = pty.writer().expect("writer");
+        let mut chunk = [0u8; 4096];
+        let mut settle = |pty: &Pty, want: bool, what: &str| {
+            // Drain, then give the job time to reach its read.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                while reader
+                    .wait_readable(Duration::from_millis(20))
+                    .unwrap_or(false)
+                    && reader.read(&mut chunk).is_ok_and(|count| count > 0)
+                {}
+                if pty.job_awaits_line() == want {
+                    // Held for a moment, not a passing sample.
+                    std::thread::sleep(Duration::from_millis(150));
+                    if pty.job_awaits_line() == want {
+                        return;
+                    }
+                }
+                assert!(Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+
+        settle(&pty, false, "the shell at its own prompt is not a job");
+        // A script's `read`; the builtin typed at the prompt is the shell.
+        writer
+            .write_all(b"sh -c 'printf \"Proceed? \"; read answer'\n")
+            .expect("read");
+        settle(&pty, true, "a script's `read` waits on a line");
+        writer.write_all(b"yes\n").expect("answer");
+        settle(&pty, false, "answering ends the wait");
+
+        writer.write_all(b"sleep 30\n").expect("sleep");
+        std::thread::sleep(Duration::from_millis(400));
+        settle(&pty, false, "`sleep` is quiet, not waiting");
+        writer.write_all(b"\x03").expect("interrupt");
+
+        writer.write_all(b"x=$(sleep 30)\n").expect("substitution");
+        std::thread::sleep(Duration::from_millis(400));
+        settle(&pty, false, "a subshell's pipe is not the terminal");
+        writer.write_all(b"\x03").expect("interrupt");
+
+        writer
+            .write_all(b"stty raw -echo; dd bs=1 count=1 2>/dev/null; stty sane\n")
+            .expect("raw reader");
+        std::thread::sleep(Duration::from_millis(400));
+        settle(&pty, false, "a raw-mode reader is a TUI");
+        writer.write_all(b"q").expect("finish");
         let _ = pty.terminate(Duration::from_secs(1));
     }
 

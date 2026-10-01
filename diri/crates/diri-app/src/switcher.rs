@@ -542,6 +542,23 @@ pub fn display_title_str(session: &SessionRecord) -> &str {
     }
 }
 
+/// The port a session's local preview is on: what its terminal's foreground
+/// job serves, else the lowest the session listens on. Ports the kernel hands
+/// out (a debugger's, a worker's) are not a page anyone opens.
+pub fn served_port(session: &SessionRecord) -> Option<i64> {
+    const EPHEMERAL_PORTS: i64 = 32768;
+    if session.host.is_some() {
+        return None;
+    }
+    let first = |ports: Option<&[diri_proto::PortInfo]>| {
+        ports?
+            .iter()
+            .map(|info| info.port)
+            .find(|port| (1..EPHEMERAL_PORTS).contains(port))
+    };
+    first(session.foreground_ports.as_deref()).or_else(|| first(session.listening_ports.as_deref()))
+}
+
 /// Where a terminal is, for the hover on its row and tab: the directory its
 /// prompt is in (`~/fun/diri/web`), or where a remote one was opened
 /// (`forge: ~/code`). `None` for Agents, whose title already says enough.
@@ -616,8 +633,35 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
             scheduled_run: None,
         }
+    }
+
+    #[test]
+    fn a_served_port_is_the_foreground_jobs_before_the_trees() {
+        let port = |port: i64| diri_proto::PortInfo {
+            port,
+            process_name: "node".into(),
+        };
+        let mut session = session("web", SessionStatus::Idle);
+        assert_eq!(served_port(&session), None);
+        session.listening_ports = Some(vec![port(6006), port(9229)]);
+        assert_eq!(served_port(&session), Some(6006));
+        session.foreground_ports = Some(vec![port(50123), port(8080)]);
+        assert_eq!(
+            served_port(&session),
+            Some(8080),
+            "ephemeral ports are skipped"
+        );
+        session.host = Some("forge".into());
+        assert_eq!(
+            served_port(&session),
+            None,
+            "localhost is not the remote host"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Diri VTE patch
 
 Source: crates.io `vte` 0.15.0, copied from the Cargo registry. Original
-Apache-2.0/MIT licenses and upstream tests are retained. There are three
+Apache-2.0/MIT licenses and upstream tests are retained. There are four
 production changes. The first is `SyncState::default`: its byte buffer starts empty instead of reserving
 the 2 MiB synchronization limit for every terminal, including idle shells.
 
@@ -59,3 +59,12 @@ non-ASCII character still take `execute`/`print` individually.
 This lets the terminal write a row segment at a time (see the alacritty patch
 notes). Test: `ascii_runs_print_every_character_in_order_and_feed_repeat`.
 
+## Completed synchronized updates
+
+`Processor::synchronized_updates_completed` counts synchronized updates
+(DECSET 2026) the child closed with its ESU. Updates that end by timeout or
+by the 2 MiB limit are not counted. Diri's Engine uses the count to tell a
+complete redraw from a half-drawn one: a keystroke answered by a closed
+synchronized update is published at once even when the redraw removed cells.
+Parsing is unchanged; the counter is one field and one increment per ESU.
+Test: `completed_synchronized_updates_are_counted`.

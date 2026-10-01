@@ -8,6 +8,8 @@ pub mod checkpoint;
 #[cfg(unix)]
 pub mod foreground;
 #[cfg(unix)]
+pub mod line_wait;
+#[cfg(unix)]
 pub mod process_facts;
 #[cfg(unix)]
 pub mod process_identity;

@@ -1539,12 +1539,13 @@ dependencies = [
 
 [[package]]
 name = "diri-app"
-version = "0.8.10"
+version = "0.9.0"
 dependencies = [
  "base64 0.23.1",
  "block2 0.6.2",
  "diri-client",
  "diri-engine",
+ "diri-notes",
  "diri-proto",
  "diri-telemetry",
  "diri-term",
@@ -1597,6 +1598,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "base64 0.23.1",
+ "diri-notes",
  "diri-proto",
  "diri-pty",
  "diri-telemetry",
@@ -1631,6 +1633,18 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "diri-notes"
+version = "0.1.0"
+dependencies = [
+ "diri-proto",
+ "getrandom 0.4.3",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -1751,6 +1765,7 @@ name = "dirijor-mcp"
 version = "0.1.0"
 dependencies = [
  "diri-engine",
+ "diri-notes",
  "diri-proto",
  "libc",
  "serde",

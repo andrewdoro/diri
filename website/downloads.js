@@ -51,7 +51,7 @@ export async function initDownloads(document, fetchRelease) {
   const mac = release.downloads.find(asset => asset.primary);
   if (mac) {
     primary.href = mac.url;
-    primary.textContent = 'Download for macOS';
+    (primary.querySelector('.button-label') ?? primary).textContent = 'Download for macOS';
     primary.setAttribute('aria-label', `Download Diri ${release.version} for macOS, universal DMG`);
   }
   document.querySelector('#download-version').textContent = mac

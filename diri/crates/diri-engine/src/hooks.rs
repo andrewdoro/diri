@@ -19,6 +19,12 @@ use crate::status::{ClaudeHook, StatusSignal, classify_risk};
 pub struct HookMetadata {
     pub identity: crate::attention::SignalIdentity,
     pub agent_session_id: Option<String>,
+    /// Whether this payload may move the session to a *different*
+    /// conversation. Claude only switches conversation through SessionStart
+    /// (startup, `/resume`, `/clear`); any other hook naming another
+    /// conversation came from a different Claude process that inherited this
+    /// session's environment, and must not rename or re-point the tab.
+    pub binds_conversation: bool,
     pub transcript_path: Option<String>,
     pub first_prompt_title: Option<String>,
     pub needs_input: Option<NeedsInputDetail>,
@@ -59,6 +65,8 @@ pub fn parse_claude_hook(
     // pre-worktree path forever.
     meta.agent_session_id =
         string(payload, "session_id").or_else(|| string(payload, "conversation_id"));
+    // Cursor reports `conversation_id` and has no SessionStart of its own.
+    meta.binds_conversation = event == "SessionStart" || string(payload, "session_id").is_none();
     meta.transcript_path = string(payload, "transcript_path");
 
     let hook = match event {
@@ -85,6 +93,7 @@ pub fn parse_claude_hook(
                     prompt_excerpt: summary.clone(),
                     options: None,
                     risk_hint: classify_risk(summary.as_deref().unwrap_or_default()),
+                    secret: false,
                     occurred_at: now.into(),
                 });
             }
@@ -108,6 +117,7 @@ pub fn parse_claude_hook(
                     prompt_excerpt: None,
                     options: None,
                     risk_hint: classify_risk(&text),
+                    secret: false,
                     occurred_at: now.into(),
                 });
             }
@@ -155,6 +165,8 @@ pub fn parse_codex_notify(payload: &Value) -> Option<(StatusSignal, HookMetadata
             ..Default::default()
         },
         agent_session_id: string(payload, "thread-id"),
+        // Codex learns and changes threads only through notify.
+        binds_conversation: true,
         ..Default::default()
     };
     if let Some(first) = payload

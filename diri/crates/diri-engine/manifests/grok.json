@@ -2,7 +2,7 @@
   "_notice": "Screen-detection predicates adapted from the herdr project (https://github.com/herdrdev/herdr, src/detect/manifests/*.toml), licensed Apache-2.0. Translated from herdr's TOML rule schema into Dirijor's JSON predicate schema and re-prioritised for this engine; the agent capability block is Dirijor's own.",
   "schemaVersion": 2,
   "id": "grok",
-  "version": "2026.07.31.1",
+  "version": "2026.10.01.1",
   "statusModel": "full",
   "agent": {
     "id": "grok",
@@ -35,9 +35,38 @@
     "envScrubPrefixes": [
       "DIRI_",
       "DIRIJOR_"
-    ]
+    ],
+    "approve": {
+      "text": "",
+      "submit": true
+    }
   },
   "rules": [
+    {
+      "id": "blocked-login",
+      "state": "blockedQuestion",
+      "priority": 1400,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 8,
+      "when": {
+        "all": [
+          {
+            "lineRegex": "^\\s*Login with Grok\\s+l\\s*$"
+          },
+          {
+            "lineRegex": "^\\s*Quit\\s+q\\s*$"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 8,
+        "maxChars": 400
+      }
+    },
     {
       "id": "blocked-osc-title",
       "state": "blockedPermission",
@@ -75,18 +104,32 @@
     {
       "id": "blocked-footer-select",
       "state": "blockedPermission",
-      "priority": 1190,
-      "region": "whole_recent",
+      "priority": 1210,
+      "region": "bottom_non_empty_lines",
       "when": {
-        "all": [
+        "any": [
           {
-            "contains": ":select"
+            "all": [
+              {
+                "contains": ":select"
+              },
+              {
+                "contains": "ctrl+o:yolo"
+              },
+              {
+                "contains": "ctrl+c:cancel"
+              }
+            ]
           },
           {
-            "contains": "ctrl+o:yolo"
-          },
-          {
-            "contains": "ctrl+c:cancel"
+            "all": [
+              {
+                "contains": ":select"
+              },
+              {
+                "contains": "ctrl+o:always-approve"
+              }
+            ]
           }
         ]
       },
@@ -97,7 +140,8 @@
         "region": "bottom_non_empty_lines",
         "regionLines": 12,
         "maxChars": 400
-      }
+      },
+      "regionLines": 4
     },
     {
       "id": "blocked-question-dialog",

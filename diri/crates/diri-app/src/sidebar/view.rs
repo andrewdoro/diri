@@ -81,7 +81,6 @@ const PREVIEW_USAGE: f64 = 4.82;
 // or disclosure control out from under the pointer.
 const SIDEBAR_NAV_ROW_HEIGHT: f32 = 30.0;
 const SIDEBAR_ROW_RADIUS: f32 = 10.0;
-const SIDEBAR_MENU_ROW_RADIUS: f32 = 12.0;
 const SIDEBAR_ACTION_SLOT: f32 = 24.0;
 /// How long a project section takes to slide into its new slot after a live
 /// reorder. Short enough that a fast drag never feels held back, long enough
@@ -212,6 +211,8 @@ pub(crate) enum SidebarEvent {
     /// A plain click (or shortcut) selected a session: hand keyboard focus
     /// to its terminal surface so the user can type immediately.
     SessionActivated,
+    /// The To-dos row: RootView shows every open to-do across notes.
+    OpenTodos,
     ProjectLayoutUnavailable,
     /// Escape left keyboard-navigation mode without changing the active
     /// session. Root owns the terminal entity, so it completes the handoff.
@@ -219,6 +220,8 @@ pub(crate) enum SidebarEvent {
     /// The user acted on the update pill. The sidebar holds no updater of its
     /// own; RootView owns the handle and forwards these.
     Update(UpdateCommand),
+    /// The What's New line was clicked: RootView opens the sheet.
+    OpenWhatsNew,
     /// The close confirmation was raised, confirmed, or cancelled. RootView
     /// paints that dialog but only re-renders on our events -- without this it
     /// keeps showing a stale frame until some unrelated update wakes it, which
@@ -570,6 +573,10 @@ fn section_shift_deltas(
 }
 
 pub struct Sidebar {
+    /// Open to-dos across notes; set by RootView. The To-dos row appears
+    /// only while some note has one.
+    todos: Option<Entity<crate::notes::todos::TodosModel>>,
+    todos_active: bool,
     workspace_nav: workspaces::WorkspaceNavigation,
     project_picker: project_picker::ProjectPicker,
     strip_menu: tabs::StripMenu,
@@ -798,6 +805,8 @@ impl Sidebar {
         ui.visible = visible;
         let mut sidebar = Self {
             store,
+            todos: None,
+            todos_active: false,
             _preview_effects: preview_effects,
             _store_changes: store_changes,
             ui,
@@ -1838,6 +1847,81 @@ impl Sidebar {
         )
         .absolute()
         .size_full()
+    }
+
+    pub(crate) fn set_todos(
+        &mut self,
+        model: Entity<crate::notes::todos::TodosModel>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.observe(&model, |_, _, cx| cx.notify()).detach();
+        self.todos = Some(model);
+        cx.notify();
+    }
+
+    pub(crate) fn set_todos_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.todos_active != active {
+            self.todos_active = active;
+            cx.notify();
+        }
+    }
+
+    /// "To-dos" under New Agent: every open to-do across notes, shown while
+    /// at least one exists (or while its page is open).
+    fn todos_row(&mut self, colors: SemanticColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let model = self.todos.clone()?;
+        model.update(cx, |model, cx| model.sync(cx));
+        let count = model.read(cx).open_count();
+        if count == 0 && !self.todos_active {
+            return None;
+        }
+        let hovering = self.ui.hovered_control == Some("todos");
+        let active = self.todos_active;
+        Some(
+            div()
+                .id("todos-row")
+                .debug_selector(|| "todos-row".into())
+                .mx(px(Space::INSET))
+                .px(px(Space::ROW_H))
+                .h(px(SIDEBAR_NAV_ROW_HEIGHT))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .rounded(px(SIDEBAR_ROW_RADIUS))
+                .when(active, |row| row.bg(Fill::selected(colors, true)))
+                .when(!active, |row| row.bg(Fill::hover(colors, hovering)))
+                .cursor_pointer()
+                .text_size(px(Typo::ROW.size))
+                .text_color(colors.text(diri_ui::TextTone::Label))
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    this.ui.hovered_control = hovered.then_some("todos");
+                    cx.notify();
+                }))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.commit_rename();
+                    cx.emit(SidebarEvent::OpenTodos);
+                }))
+                .child(
+                    div()
+                        .size(px(18.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(sf_symbol("checklist", 13.0, colors.secondary)),
+                )
+                .child(div().min_w(px(0.0)).flex_1().child("To-dos"))
+                .when(count > 0, |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(Typo::META.size))
+                            .text_color(colors.tertiary)
+                            .child(count.to_string()),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     fn new_agent_row(
@@ -3529,6 +3613,7 @@ impl Sidebar {
             migrating,
             activity_state,
             activity_frame,
+            progress,
             marked,
             hovered,
             focused,
@@ -3637,7 +3722,12 @@ impl Sidebar {
                     }
                 }))
                 .children(indent_rails(row, colors))
-                .child(activity_mark(activity_state, activity_frame, colors))
+                .child(crate::progress_mark::leading_mark(
+                    activity_state,
+                    activity_frame,
+                    progress,
+                    colors,
+                ))
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -3838,7 +3928,12 @@ impl Sidebar {
             // Activity shares the project's icon column. Leaf rows reserve
             // no empty disclosure column; only parents get a trailing fold.
             // Hover keeps activity visible and swaps identity for the close action.
-            .child(activity_mark(activity_state, activity_frame, colors))
+            .child(crate::progress_mark::leading_mark(
+                activity_state,
+                activity_frame,
+                progress,
+                colors,
+            ))
             .child(
                 if let Some(range) = super::filter::label_match(&title, filter) {
                     div()
@@ -4465,6 +4560,101 @@ impl Sidebar {
         Some(pill.into_any_element())
     }
 
+    /// One quiet line after an update with highlights: where the update pill
+    /// sits, never at the same time as it, and gone once opened or dismissed.
+    fn whats_new_pill(&self, colors: SemanticColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.preview {
+            return None;
+        }
+        let seen = self
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .whats_new_seen_version
+            .clone();
+        let release =
+            *crate::whats_new::unseen(&seen, &crate::whats_new::current_version()).first()?;
+        let rest = Fill::hover(colors, false);
+        let lit = Fill::hover(colors, true);
+        let pill = div()
+            .id("whats-new-pill")
+            .debug_selector(|| "whats-new-pill".into())
+            .group("whats-new-pill")
+            .mb(px(3.0))
+            .px(px(Space::ROW_H))
+            .h(px(SIDEBAR_NAV_ROW_HEIGHT))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(SIDEBAR_ROW_RADIUS))
+            .bg(rest)
+            .hover(move |style| style.bg(lit))
+            .cursor_pointer()
+            .child(div().w(px(16.0)).text_center().child(sf_symbol(
+                "sparkles",
+                12.5,
+                diri_ui::Ink::FRESH,
+            )))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .flex()
+                    .gap(px(5.0))
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_size(px(Typo::ROW.size))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(colors.secondary)
+                            .child("What's new ·"),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(colors.text(diri_ui::TextTone::Label))
+                            .child(release.headline),
+                    ),
+            )
+            .child(
+                // Shown while the line is hovered: dismiss without opening.
+                div()
+                    .id("whats-new-dismiss")
+                    .debug_selector(|| "whats-new-dismiss".into())
+                    .flex_none()
+                    .size(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .opacity(0.0)
+                    .group_hover("whats-new-pill", |style| style.opacity(1.0))
+                    .hover(move |style| style.bg(colors.primary.alpha(0.08)))
+                    .child(sf_symbol("xmark", 9.0, colors.tertiary))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.mark_whats_new_seen();
+                        cx.notify();
+                    })),
+            )
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenWhatsNew)));
+        Some(pill.into_any_element())
+    }
+
+    /// Records the running release's highlights as seen.
+    pub(crate) fn mark_whats_new_seen(&self) {
+        let version = crate::whats_new::current_version();
+        let _ = self
+            .store
+            .write()
+            .expect("session store lock poisoned")
+            .update_preferences(|prefs| prefs.whats_new_seen_version = version);
+    }
+
     fn account_footer(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
         let hovered = self.ui.hovered_control == Some("account");
         let account_label = local_account_label(self.preview);
@@ -4483,7 +4673,10 @@ impl Sidebar {
             .pb(px(7.0))
             .border_t_1()
             .border_color(colors.primary.alpha(0.06))
-            .children(self.update_pill(colors, cx))
+            .children(
+                self.update_pill(colors, cx)
+                    .or_else(|| self.whats_new_pill(colors, cx)),
+            )
             .child(
                 div()
                     .id("account")
@@ -5316,16 +5509,20 @@ impl Sidebar {
                 row.cursor_pointer()
                     .glass_menu_row(colors, false)
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        // Notes live on this Mac: a remote target falls back
+                        // to the local project directory.
+                        let note = spawn_kind == ProtoAgentKind::NOTE;
+                        let remote = note && spawn_host.is_some();
                         this.store
                             .write()
                             .expect("session store lock poisoned")
                             .spawn_kind(
                                 spawn_kind.clone(),
                                 SpawnOptions {
-                                    cwd: Some(target.clone()),
-                                    host: spawn_host.clone(),
+                                    cwd: (!remote).then(|| target.clone()),
+                                    host: if note { None } else { spawn_host.clone() },
                                     account_profile_id: None,
-                                    same_repo_as: same_repo_as.clone(),
+                                    same_repo_as: if note { None } else { same_repo_as.clone() },
                                     ..SpawnOptions::default()
                                 },
                             );
@@ -6218,6 +6415,22 @@ impl Sidebar {
                 .child(copy_session_id_row(id, colors, cx));
         } else {
             let running = !matches!(session.status, diri_proto::SessionStatus::Exited(_));
+            // A dev server opens where its tab says it is, as the links
+            // menu's Local preview row does, without opening that menu.
+            if running && let Some(port) = crate::switcher::served_port(&session) {
+                let url = format!("http://localhost:{port}");
+                content = content
+                    .child(menu_row(
+                        format!("Open localhost:{port}"),
+                        colors,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.open_url(&url);
+                            this.ui.popover = None;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(menu_divider(colors));
+            }
             if session.kind == ProtoAgentKind::CLAUDE_CODE
                 || (session.kind == ProtoAgentKind::CODEX && session.host.is_none())
             {
@@ -6239,8 +6452,14 @@ impl Sidebar {
                 ));
             }
             if !running && session.can_resume() {
+                // A local terminal comes back as a fresh shell where it was.
+                let label = if session.kind == ProtoAgentKind::SHELL && session.host.is_none() {
+                    "Restart"
+                } else {
+                    "Resume"
+                };
                 content = content.child(menu_row(
-                    "Resume",
+                    label,
                     colors,
                     cx.listener({
                         let id = id.clone();
@@ -8225,7 +8444,8 @@ impl Sidebar {
                 .min_h(px(0.0))
                 .flex()
                 .flex_col()
-                .child(self.new_agent_row(crate::held_hints::opacity(window, cx), colors, cx));
+                .child(self.new_agent_row(crate::held_hints::opacity(window, cx), colors, cx))
+                .children(self.todos_row(colors, cx));
             if projection.projects.is_empty() && !self.filter_query.text().trim().is_empty() {
                 body = body.child(
                     div()
@@ -9128,6 +9348,19 @@ fn agent_picker_options(
         setup_url: None,
         unavailable_detail: None,
     });
+    // A note sits beside agents and terminals in the sidebar, so it starts
+    // from the same menu.
+    options.push(AgentPickerOption {
+        title: "Note".to_owned(),
+        kind: ProtoAgentKind::NOTE,
+        shortcut: crate::commands::command(CommandId::NewNote)
+            .shortcut_label()
+            .unwrap_or_default(),
+        binary: "note".to_owned(),
+        available: true,
+        setup_url: None,
+        unavailable_detail: None,
+    });
     options
 }
 
@@ -9173,13 +9406,13 @@ struct WherePanel<'a> {
     syncing: &'a HashSet<String>,
 }
 
-/// One row shape for everything in the New Agent menu and its panels: the
-/// Agents, the location, Manage Agents, machines and folders all share it,
-/// so the menu reads as one column of rows rather than a form above a list.
-const MENU_ROW_HEIGHT: f32 = 32.0;
-const MENU_ROW_INSET: f32 = 10.0;
-const MENU_ROW_GAP: f32 = 10.0;
-const MENU_ROW_ICON_SLOT: f32 = 22.0;
+// One row shape for everything in the New Agent menu and its panels (the
+// Agents, the location, Manage Agents, machines and folders) and for every
+// other diri menu: see `crate::floating::MENU_ROW_HEIGHT`.
+use crate::floating::{
+    MENU_ROW_GAP, MENU_ROW_HEIGHT, MENU_ROW_ICON_SLOT, MENU_ROW_INSET,
+    MENU_ROW_RADIUS as SIDEBAR_MENU_ROW_RADIUS, menu_separator,
+};
 
 /// A secondary row of the menu: glyph in the icon slot, then whatever the
 /// caller adds (a label, a location, a trailing chevron).
@@ -9209,11 +9442,6 @@ fn menu_action_row(
                 .justify_center()
                 .child(sf_symbol(symbol, 13.0, colors.secondary)),
         )
-}
-
-/// Menu separator with the breathing room a native menu gives one.
-fn menu_separator(colors: SemanticColors) -> Div {
-    div().py(px(4.0)).child(HairlineDivider::horizontal(colors))
 }
 
 /// Secondary-panel header: a back chevron and the panel's title or path.
@@ -11628,6 +11856,11 @@ mod tests {
                 id: SessionId::new("preview-codex"),
                 position: point(px(48.0), px(210.0)),
             }),
+            // The fixture's dev-server terminal, which offers its address.
+            "server" => Some(Popover::SessionActions {
+                id: SessionId::new("preview-shell"),
+                position: point(px(48.0), px(210.0)),
+            }),
             _ => Some(Popover::SidebarLayout),
         };
         // First row of a right-click menu, for `DIRI_VISUAL_MENU_HOVER`.
@@ -11771,6 +12004,31 @@ mod tests {
                             terminal.updated_at = diri_proto::DateMillis(now);
                             store.upsert_session(terminal);
                         }
+                        // And one whose script stopped at a question, which
+                        // the Engine flags as it flags an Agent's prompt.
+                        let mut asking = base.clone();
+                        asking.id = SessionId::new("preview-term-deploy");
+                        asking.title = "deploy".into();
+                        asking.title_source = diri_proto::TitleSource::TerminalTitle;
+                        asking.terminal_cwd = Some(format!("{root}/infra"));
+                        asking.status = diri_proto::SessionStatus::NeedsInput(
+                            diri_proto::NeedsInputKind::Question,
+                        );
+                        asking.needs_input = Some(diri_proto::NeedsInputDetail {
+                            kind: diri_proto::NeedsInputKind::Question,
+                            source: diri_proto::NeedsInputSource::TerminalLine,
+                            tool_name: None,
+                            summary: "Deploy to production? [y/N]".into(),
+                            prompt_excerpt: Some("Deploy to production? [y/N]".into()),
+                            options: None,
+                            risk_hint: diri_proto::RiskHint::Neutral,
+                            occurred_at: diri_proto::DateMillis(now),
+                            secret: false,
+                        });
+                        asking.foreground_agent = None;
+                        asking.listening_ports = None;
+                        asking.updated_at = diri_proto::DateMillis(now);
+                        store.upsert_session(asking);
                     }
                     store
                         .update_preferences(|prefs| {

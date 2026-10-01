@@ -1,6 +1,7 @@
-//! Session titles that settle. A title an agent or Diri changed crossfades
-//! from the text on screen to the new text; one the user typed, a row's first
-//! appearance and anything under Reduce Motion are immediate.
+//! Session titles that settle. A title an agent, a terminal or Diri changed
+//! hands over from the text on screen to the new text: the old one lifts away
+//! and clears, then the new one rises into place. One the user typed, a row's
+//! first appearance and anything under Reduce Motion are immediate.
 //!
 //! The model is pure: titles and a clock go in, layers and opacities come
 //! out. It schedules nothing. A surface asks [`TitleSettles::is_settling`]
@@ -21,6 +22,15 @@ pub(super) const SETTLE: Duration = Duration::from_millis(180);
 const MAX_LEAVING: usize = 2;
 /// A layer this faint is dropped on retarget; it is not worth a text element.
 const FAINT: f32 = 0.02;
+/// How far a title travels as it hands over, in pixels: the old one leaves
+/// upward by this much and the new one arrives from this far below. Enough
+/// that the two never share a baseline, small enough to stay inside the row.
+const RISE: f32 = 4.0;
+/// The share of a settle by which the old text has cleared.
+const OUT_BY: f32 = 0.45;
+/// The share of a settle that passes before new text starts to show. The two
+/// overlap only while the old one is already faint.
+const IN_FROM: f32 = 0.2;
 /// Width kept clear for the ellipsis when deciding whether a shared prefix
 /// sits wholly inside the truncated box.
 const ELLIPSIS_ROOM: f32 = 14.0;
@@ -29,6 +39,8 @@ const ELLIPSIS_ROOM: f32 = 14.0;
 pub(super) struct Layer {
     pub text: SharedString,
     pub opacity: f32,
+    /// Vertical offset from the resting baseline, in pixels; negative is up.
+    pub offset: f32,
 }
 
 /// What one title paints at one instant.
@@ -41,7 +53,9 @@ pub(super) struct Frame {
 struct Fade {
     /// Layers and their opacities at the moment this fade started.
     leaving: Vec<Layer>,
-    arriving_from: f32,
+    /// Where the arriving text starts: out of sight below, or wherever a
+    /// title turned back mid-flight stands.
+    arriving_from: Layer,
     started: Instant,
 }
 
@@ -63,19 +77,33 @@ impl Entry {
         if elapsed >= SETTLE {
             return None;
         }
-        let progress = ease_out(elapsed.as_secs_f32() / SETTLE.as_secs_f32());
+        let progress = elapsed.as_secs_f32() / SETTLE.as_secs_f32();
+        let out = (progress / OUT_BY).min(1.0);
+        let from = &fade.arriving_from;
+        // A title already on screen turns around at once; one that was not
+        // waits for the old text to thin out first.
+        let arriving = if from.opacity > 0.0 {
+            ease_out(progress)
+        } else {
+            ease_out((progress - IN_FROM) / (1.0 - IN_FROM))
+        };
         Some(Frame {
             leaving: fade
                 .leaving
                 .iter()
                 .map(|layer| Layer {
                     text: layer.text.clone(),
-                    opacity: layer.opacity * leaving_opacity(progress),
+                    opacity: layer.opacity * leaving_opacity(out),
+                    offset: layer.offset + (-RISE - layer.offset) * ease_out(out),
                 })
+                // Kept once cleared: whether a refinement paints its shared
+                // words once is decided per frame from the layers, and must
+                // not change its mind halfway through.
                 .collect(),
             arriving: Layer {
                 text: self.title.clone(),
-                opacity: fade.arriving_from + (1.0 - fade.arriving_from) * progress,
+                opacity: from.opacity + (1.0 - from.opacity) * arriving,
+                offset: from.offset * (1.0 - arriving),
             },
         })
     }
@@ -84,6 +112,8 @@ impl Entry {
 /// Decelerating quadratic. The cubic the theme fade uses spends two thirds of
 /// so short a fade above 90%, where opacity no longer reads as motion, and
 /// leaves three frames of visible change: a snap with a tail.
+///
+/// Clamped, so a phase that has not started or has finished stands still.
 fn ease_out(progress: f32) -> f32 {
     let remaining = 1.0 - progress.clamp(0.0, 1.0);
     1.0 - remaining * remaining
@@ -91,9 +121,10 @@ fn ease_out(progress: f32) -> f32 {
 
 /// The old text clears out ahead of the new one arriving. A symmetric
 /// crossfade holds two different strings at half strength in one box, which
-/// reads as a smudge rather than as a change.
+/// reads as a smudge rather than as a change: `web` to `npm` painted `wepb`
+/// for three frames. `progress` runs over the leaving phase only.
 fn leaving_opacity(progress: f32) -> f32 {
-    let remaining = 1.0 - progress;
+    let remaining = 1.0 - progress.clamp(0.0, 1.0);
     remaining * remaining
 }
 
@@ -140,14 +171,22 @@ impl TitleSettles {
             None => vec![Layer {
                 text: entry.title.clone(),
                 opacity: 1.0,
+                offset: 0.0,
             }],
         };
-        // Renamed back to a title still fading out: it turns around from its
-        // current opacity instead of being painted twice.
+        // Renamed back to a title still fading out: it turns around from
+        // where it stands instead of being painted twice.
         let arriving_from = leaving
             .iter()
             .position(|layer| layer.text == title)
-            .map_or(0.0, |index| leaving.remove(index).opacity);
+            .map_or_else(
+                || Layer {
+                    text: title.clone(),
+                    opacity: 0.0,
+                    offset: RISE,
+                },
+                |index| leaving.remove(index),
+            );
         leaving.retain(|layer| layer.opacity > FAINT);
         leaving.sort_by(|a, b| b.opacity.total_cmp(&a.opacity));
         leaving.truncate(MAX_LEAVING);
@@ -207,9 +246,13 @@ pub(super) fn shared_prefix(from: &str, to: &str) -> usize {
 }
 
 /// The label for a title that is settling. Every layer is laid out in the
-/// same box with the same truncation, so nothing shifts; only opacity moves.
-/// A rise of a pixel or two on the arriving text was tried and dropped: two
-/// strings on different baselines read as one blurred string, not as motion.
+/// same box with the same truncation and only painted offset, so the row or
+/// tab around it never moves.
+///
+/// A rise of a pixel or two on a symmetric crossfade was tried and dropped:
+/// two strings at equal strength on nearby baselines read as one blurred
+/// string. Handed over in sequence, the old text is faint before the new one
+/// shows, and the travel says which way the change went.
 ///
 /// The caller's container supplies font, size and clipping exactly as it does
 /// for the label at rest. `available_width` is that container's width.
@@ -288,15 +331,22 @@ fn settling_label(
                     .child(tail(&leaving.text, 0.0, leaving.opacity)),
             );
     }
+    // Offsets move paint, not layout: the arriving layer keeps its place in
+    // the flow, and leaving layers pin their top only, so a shifted layer is
+    // never shortened and clipped by its own box.
     root.child(
         layer()
+            .relative()
+            .top(px(frame.arriving.offset))
             .opacity(frame.arriving.opacity)
             .child(frame.arriving.text.clone()),
     )
     .children(frame.leaving.iter().map(|leaving| {
         layer()
             .absolute()
-            .inset_0()
+            .left_0()
+            .right_0()
+            .top(px(leaving.offset))
             .opacity(leaving.opacity)
             .child(leaving.text.clone())
     }))
@@ -367,21 +417,31 @@ mod tests {
         let first = titles.frame(&id("a"), now).unwrap();
         assert_eq!(first.leaving[0].text.as_ref(), "Untitled");
         assert_eq!(first.leaving[0].opacity, 1.0);
+        assert_eq!(first.leaving[0].offset, 0.0);
         assert_eq!(first.arriving.text.as_ref(), "Fix login");
         assert_eq!(first.arriving.opacity, 0.0);
+        assert_eq!(first.arriving.offset, RISE);
 
         let mut last = first;
-        for millis in (16..180).step_by(16) {
+        for millis in (8..180).step_by(8) {
             let frame = titles.frame(&id("a"), at(now, millis)).unwrap();
-            assert!(frame.arriving.opacity > last.arriving.opacity);
-            assert!(frame.leaving[0].opacity < last.leaving[0].opacity);
+            let (old, new) = (&frame.leaving[0], &frame.arriving);
+            // Each moves one way only: the old text up and out, the new
+            // text up into place.
+            assert!(new.opacity >= last.arriving.opacity);
+            assert!(new.offset <= last.arriving.offset && new.offset >= 0.0);
+            assert!(old.opacity <= last.leaving[0].opacity);
+            assert!(old.offset <= last.leaving[0].offset && old.offset >= -RISE);
+            // Never two strings at once: whenever both show, one is faint.
+            assert!(old.opacity.min(new.opacity) < 0.2, "{millis} ms: {frame:?}");
             last = frame;
         }
-        // Ease-out: most of the way there by the halfway mark, and the old
-        // text is nearly gone by then.
+        // The old text has cleared by the halfway mark, and the new one is
+        // most of the way in.
         let halfway = titles.frame(&id("a"), now + SETTLE / 2).unwrap();
-        assert!(halfway.arriving.opacity > 0.7);
-        assert!(halfway.leaving[0].opacity < 0.1);
+        assert!(halfway.arriving.opacity > 0.5);
+        assert_eq!(halfway.leaving[0].opacity, 0.0);
+        assert_eq!(halfway.leaving[0].offset, -RISE);
 
         assert!(titles.is_settling(at(now, 179)));
         assert_eq!(titles.frame(&id("a"), now + SETTLE), None);
@@ -435,13 +495,21 @@ mod tests {
         let mut titles = TitleSettles::default();
         titles.observe(&id("a"), "Fix login", true, now);
         titles.observe(&id("a"), "Renaming", true, now);
-        let midway = at(now, 32);
+        let midway = at(now, 48);
         let before = titles.frame(&id("a"), midway).unwrap();
         titles.observe(&id("a"), "Fix login", true, midway);
         let after = titles.frame(&id("a"), midway).unwrap();
         assert_eq!(after.arriving.text.as_ref(), "Fix login");
         assert_eq!(after.arriving.opacity, before.leaving[0].opacity);
+        assert_eq!(after.arriving.offset, before.leaving[0].offset);
         assert_eq!(after.leaving, vec![before.arriving]);
+        // It heads home at once rather than waiting out the old text, and
+        // lands on the baseline.
+        let next = titles.frame(&id("a"), at(midway, 8)).unwrap();
+        assert!(next.arriving.opacity > after.arriving.opacity);
+        assert!(next.arriving.offset > after.arriving.offset);
+        let late = titles.frame(&id("a"), at(midway, 176)).unwrap();
+        assert!(late.arriving.offset.abs() < 0.01);
     }
 
     #[test]

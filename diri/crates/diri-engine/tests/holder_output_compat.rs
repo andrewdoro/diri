@@ -65,6 +65,7 @@ fn exercise_old_holder(fail_first: bool) {
         rows: Some(24),
         epoch_offset: Some(0),
         secret_input: None,
+        awaiting_line: None,
     };
     let stop = Arc::new(AtomicBool::new(false));
     let attempts = Arc::new(AtomicUsize::new(0));

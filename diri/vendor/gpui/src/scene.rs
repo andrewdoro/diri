@@ -53,6 +53,8 @@ pub struct Scene {
     /// Consecutive clears that found the vectors mostly empty; see
     /// [`Scene::release_idle_capacity`].
     sparse_clears: u32,
+    /// DIRI PATCH (sprite sort): `(key, index)` scratch for [`sort_sprites`].
+    sort_keys: Vec<(u64, u32)>,
 }
 
 /// Below this much reserved primitive storage a scene keeps whatever it grew.
@@ -104,6 +106,7 @@ impl Scene {
             bytes(&self.subpixel_sprites),
             bytes(&self.polychrome_sprites),
             bytes(&self.surfaces),
+            bytes(&self.sort_keys),
         ];
         let used: usize = parts.iter().map(|part| part.0).sum();
         let reserved: usize = parts.iter().map(|part| part.1).sum();
@@ -129,6 +132,8 @@ impl Scene {
         shrink(&mut self.subpixel_sprites);
         shrink(&mut self.polychrome_sprites);
         shrink(&mut self.surfaces);
+        self.sort_keys.clear();
+        shrink(&mut self.sort_keys);
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
@@ -212,12 +217,22 @@ impl Scene {
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
         self.underlines.sort_by_key(|underline| underline.order);
-        self.monochrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.subpixel_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.polychrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+        let key = |order: DrawOrder, tile: &AtlasTile| {
+            (u64::from(order) << 32) | u64::from(tile.tile_id.0)
+        };
+        sort_sprites(
+            &mut self.monochrome_sprites,
+            &mut self.sort_keys,
+            |sprite| key(sprite.order, &sprite.tile),
+        );
+        sort_sprites(&mut self.subpixel_sprites, &mut self.sort_keys, |sprite| {
+            key(sprite.order, &sprite.tile)
+        });
+        sort_sprites(
+            &mut self.polychrome_sprites,
+            &mut self.sort_keys,
+            |sprite| key(sprite.order, &sprite.tile),
+        );
         self.surfaces.sort_by_key(|surface| surface.order);
     }
 
@@ -1005,4 +1020,56 @@ impl PathVertex<Pixels> {
             content_mask: self.content_mask.scale(factor),
         }
     }
+}
+
+/// DIRI PATCH (sprite sort): the same order as a stable sort of `items` by
+/// `key`, without moving each sprite (over 100 bytes) through every pass of
+/// a merge sort. Sorts `(key, index)` pairs, which breaks ties by position
+/// exactly as a stable sort does, then moves every sprite once, along the
+/// permutation's cycles. A frame already in order moves nothing.
+fn sort_sprites<T: Copy>(items: &mut [T], keys: &mut Vec<(u64, u32)>, key: impl Fn(&T) -> u64) {
+    const DONE: u32 = u32::MAX;
+    if items.len() < 32 || items.len() >= DONE as usize {
+        items.sort_by_key(key);
+        return;
+    }
+    keys.clear();
+    keys.extend(
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (key(item), index as u32)),
+    );
+    if keys.is_sorted() {
+        return;
+    }
+    keys.sort_unstable();
+    // `keys[destination].1` is the source index for `destination`.
+    for start in 0..items.len() {
+        let source = keys[start].1;
+        if source == DONE {
+            continue;
+        }
+        keys[start].1 = DONE;
+        if source as usize == start {
+            continue;
+        }
+        let first = items[start];
+        let mut destination = start;
+        let mut source = source as usize;
+        while source != start {
+            items[destination] = items[source];
+            destination = source;
+            source = keys[destination].1 as usize;
+            keys[destination].1 = DONE;
+        }
+        items[destination] = first;
+    }
+}
+
+/// DIRI PATCH (sprite sort): exposed for `gpui_view_cache_tests`, which
+/// checks it against the standard library's stable sort.
+#[doc(hidden)]
+pub fn sort_sprites_for_test<T: Copy>(items: &mut [T], key: impl Fn(&T) -> u64) {
+    sort_sprites(items, &mut Vec::new(), key);
 }

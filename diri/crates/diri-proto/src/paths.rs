@@ -35,6 +35,10 @@ pub const ENV_APP_SUPPORT: &str = "DIRIJOR_APP_SUPPORT";
 /// The directory is chosen by the Engine rather than reconstructed by the CLI,
 /// so macOS and XDG layouts share one contract and tests never need HOME.
 pub const ENV_SESSION_RECOVERY_DIR: &str = "DIRIJOR_SESSION_RECOVERY_DIR";
+/// The notes directory, exported by the Engine to every Agent it starts so
+/// the MCP bridge and CLI read and write the notes the Engine serves, not a
+/// directory they reconstruct from their own environment.
+pub const ENV_NOTES_DIR: &str = "DIRI_NOTES_DIR";
 
 /// Passed by a launcher that spawns the Engine detached and expects to ask it
 /// to leave when it quits. With it, an Engine left with no live session and no

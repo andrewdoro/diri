@@ -5,32 +5,49 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#191724">
   <title>Guides · Diri</title>
-  <meta name="description" content="Practical Diri guides for running coding agents in parallel, reviewing separate Git worktrees, and keeping remote sessions running over SSH.">
+  <meta name="description" content="Friendly guides to diri: start your first AI agent, never lose work, run several agents at once, and let agents work as a team. No coding needed.">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://diri.sh/guides/">
-  <meta property="og:type" content="website">
+  <meta property="og:type" content="article">
   <meta property="og:site_name" content="Diri">
   <meta property="og:title" content="Guides">
-  <meta property="og:description" content="Practical Diri guides for running coding agents in parallel, reviewing separate Git worktrees, and keeping remote sessions running over SSH.">
+  <meta property="og:description" content="Friendly guides to diri: start your first AI agent, never lose work, run several agents at once, and let agents work as a team. No coding needed.">
   <meta property="og:url" content="https://diri.sh/guides/">
   <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
-  <meta property="og:image:alt" content="Diri, a workspace for coding agents.">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/guides.css">
-  <script type="application/ld+json">{"@context": "https://schema.org", "@type": "CollectionPage", "headline": "Guides", "description": "Practical Diri guides for running coding agents in parallel, reviewing separate Git worktrees, and keeping remote sessions running over SSH.", "url": "https://diri.sh/guides/", "inLanguage": "en", "publisher": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}}</script>
+  <script src="/guides.js" defer></script>
+  <script type="application/ld+json">{"@context": "https://schema.org", "@type": "CollectionPage", "headline": "Guides", "description": "Friendly guides to diri: start your first AI agent, never lose work, run several agents at once, and let agents work as a team. No coding needed.", "url": "https://diri.sh/guides/", "inLanguage": "en", "publisher": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
 </head>
 <body class="guide-page">
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="site-wrap">
     <header class="site-header">
-      <a class="wordmark" href="/" aria-label="Diri home"><span class="brand-mark" aria-hidden="true"></span>diri</a>
-      <nav class="guide-nav" aria-label="Main"><a href="/guides/" aria-current="page">Guides</a><a href="https://github.com/cristicretu/diri">GitHub ↗</a></nav>
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/" aria-current="page">Guides</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
     </header>
-    <main id="main" class="guide-index"><div class="guide-heading"><span class="eyebrow">Working with Diri</span><h1>A few useful workflows.</h1><p>From a first parallel task to a session on your own server.</p></div><div class="guide-list"><a class="guide-row" href="/guides/parallel-agents/"><div><h3>Run Claude Code and Codex in parallel</h3><p>Give two agents separate tasks and Git worktrees, then review each change.</p></div><span aria-hidden="true">↗</span></a>
-<a class="guide-row" href="/guides/remote-sessions/"><div><h3>Keep coding-agent sessions running over SSH</h3><p>Connect a host, start an agent, and understand what survives a disconnect.</p></div><span aria-hidden="true">↗</span></a></div></main>
-    <footer class="site-footer guide-footer"><a href="/">diri</a><nav aria-label="Resources"><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a></nav></footer>
+    <main id="main" class="guide-index">
+      <header class="guide-heading"><span class="eyebrow">Guides</span><h1>Learn diri in an afternoon</h1><p>Short walkthroughs with real screens. You do not need to write code to follow them, unless a guide says it is for developers.</p></header>
+      <section class="guide-group"><h2>Start here</h2><ol class="guide-rows"><li><a class="guide-row" href="/guides/first-agent/"><span class="guide-n">01</span><span class="guide-text"><strong>Your first agent</strong><span>Install diri, give an agent a task in plain English, and see what it made. About ten minutes.</span></span><span class="guide-row-meta">8 min · Everyone</span></a></li><li><a class="guide-row" href="/guides/never-lose-work/"><span class="guide-n">02</span><span class="guide-text"><strong>Never lose your work</strong><span>Agents keep working when you close diri. Here is what survives, what does not, and how to get any conversation back.</span></span><span class="guide-row-meta">6 min · Everyone</span></a></li></ol></section><section class="guide-group"><h2>Work with many agents</h2><ol class="guide-rows"><li><a class="guide-row" href="/guides/parallel-agents/"><span class="guide-n">03</span><span class="guide-text"><strong>Run several agents at once</strong><span>Start a second agent while the first one works, see every status at a glance, and give each task its own copy of the project.</span></span><span class="guide-row-meta">6 min · Everyone</span></a></li><li><a class="guide-row" href="/guides/agent-teams/"><span class="guide-n">04</span><span class="guide-text"><strong>Let agents work as a team</strong><span>Ask one agent to split a big job, start helpers, keep them on track and bring you the result. You just describe the goal.</span></span><span class="guide-row-meta">7 min · Everyone</span></a></li><li><a class="guide-row" href="/guides/review-changes/"><span class="guide-n">05</span><span class="guide-text"><strong>Review what changed</strong><span>See every change an agent made before you keep it. Accept what you like, throw away what you do not, and ask the agent to check its own work.</span></span><span class="guide-row-meta">6 min · Everyone · Git projects</span></a></li></ol></section><section class="guide-group"><h2>Go further</h2><ol class="guide-rows"><li><a class="guide-row" href="/guides/remote-sessions/"><span class="guide-n">06</span><span class="guide-text"><strong>Run agents on your own server</strong><span>Run agents on a machine you reach over SSH, from the same diri window, and know what survives a dropped connection.</span></span><span class="guide-row-meta">7 min · Developers</span></a></li><li><a class="guide-row" href="/guides/shortcuts/"><span class="guide-n">07</span><span class="guide-text"><strong>Shortcuts worth learning</strong><span>Eight shortcuts cover almost everything. The rest are here when you want them.</span></span><span class="guide-row-meta">3 min · Everyone</span></a></li></ol></section>
+    </main>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
   </div>
 </body>
 </html>

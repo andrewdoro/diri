@@ -1,5 +1,289 @@
 # diri performance record
 
+## Resource growth over a long session: explained, not leaked (2026-09-30)
+
+Local telemetry from one 0.8.10 install (4.7 h, one `health` sample a
+minute) showed the App footprint 394 → 446 MB, Engine footprint 62 → 105 MB,
+Engine threads 47 → 59 and descriptors 176 → 204. Only aggregates were read.
+
+### What the telemetry says
+
+Engine threads and descriptors track the live gauges exactly. A least-squares
+fit over all 282 samples:
+
+- threads = 10.2 + 1.00 × records + 1.83 × clients + 0.23 × attached
+- fds = −22.6 + 6.05 × records + 2.46 × clients + 1.55 × attached
+
+Residuals stay within ±0.8 for the whole run apart from single-minute
+transients (worst 3.7, gone the next minute). They do not drift with time or
+with the ~2,770 `client.hello` connections, 57 Helper probes, 14 freezes or 8
+wakes. Start: 31 records, 3 clients, 2 attachments. End: 32 records, 8 clients,
+7 attachments. That accounts for all of +12 threads and +28 fds. Each warm
+terminal pane is one attachment: roughly 2 Engine threads and 4 descriptors.
+
+Engine footprint swings from 80 to 175 MB within minutes. Its 10th
+percentile per half hour rises 62 → 80 MB over the first 2.5 h and then stays
+at 80–82 MB. That is caches filling to their bounds (below), not a slope.
+
+App threads (12–17) and descriptors (16–22) are flat. Its footprint median
+per half hour goes 384 → 414–473 MB as `terminal_panes` goes 4 → 8, while RSS
+falls (median 130 → ~100 MB) and the floor twice drops to ~150–200 MB when the
+system reclaims. The growth follows warm workspace panes, which are capped.
+
+### Reproduction: every churn path, private Engines
+
+Release `dirijord-rs`, `diri-holder` and `dirijor` from origin/main
+(`ab2b715e`), each run with its own `HOME` under `/private/tmp` and uploads off.
+Threads from `ps -M`, descriptors from `lsof`, live heap from `heap -s`, and
+growth attributed by diffing `malloc_history -allByCount` snapshots under
+`MallocStackLogging=1`. Counts are after a warm-up. "Heap" is live
+allocations added per cycle.
+
+| Churn | Cycles | Threads | fds | Heap per cycle | Where the heap went |
+| --- | ---: | --- | --- | ---: | --- |
+| Connect, Hello, `hook.report`, close | 1,000 | 9 → 9 | 8 → 8 | 0 | — |
+| `dirijor hook` processes | 500 | 9 → 9 | 8 → 8 | 0 | — |
+| `events.subscribe`, close | 500 | 9 → 9 | 8 → 8 | ~0 | — |
+| Spawn, exit, remove | 100 | 10 → 10 | 9 → 9 | ~1 KB | event ring |
+| Spawn, kill, remove | 1,000 | 9 → 9 | 9 → 9 | ~1.2 KB | event ring (all 5,399 net allocations) |
+| Attach/detach, producing session | 500 | 14 → 14 | 29 → 29 | ~1 KB | event ring, terminal history |
+| Attach/detach, idle / hibernated session | 250 each | 14 → 14 | 29 → 29 | ~0.2 KB | event ring (`mark_seen` update) |
+| Preview + preview-set open/close | 500 | 14 → 14 | 30 → 30 | ~0.6 KB | terminal history only |
+| Hibernate + wake | 500 | 14 → 14 | 30 → 30 | ~2 KB | event ring (all 2,432 net allocations) |
+| Real-session hooks (`dirijor hook`) | 1,000 | 11 → 11 | 15 → 15 | up to 10 KB | event ring; each `session.updated` grows with the record's attention history |
+| List + workspace snapshot + history per connection | 500 | 18 → 18 | 50 → 50 | none (fluctuates) | — |
+| Remote spawn/exit over a fake `ssh` + Helper re-probe (in-process) | 100 | 1 → 1 | 4 → 4 | — | — |
+| Holder manager over 150 spawn/exit | 150 | 3 → 3 | 6 → 6 | 0 | — |
+
+No path left a thread or descriptor behind. All heap growth was attributed to
+bounded structures.
+
+### Bounds (what the growth converges to)
+
+| Structure | Bound | Notes |
+| --- | --- | --- |
+| Engine event replay ring | 4,096 events / 8 MiB | Every `session.updated` is retained until evicted, so the ring's resident size depends on record size |
+| Engine terminal history per session | 4 MiB compressed | `HISTORY_STORAGE_BUDGET_BYTES` |
+| Attention history per record | 200 events (~125 B JSON each, ~25 KB) | Serialized into `state.json` and into every `session.updated` for that session |
+| Warm workspace panes per window | 16 | Each is an App pane plus an Engine attachment (~2 threads, ~4 fds) that keeps streaming |
+| App parked grids / resident terminals | 12 / 1 | `PARKED_GRID_CAP`, `TerminalResidency` |
+| Engine per live record | 1 thread, ~5–6 fds | pump thread; output log (2), attention SQLite, holder socket, kqueue |
+| Message receipts | 100,000 rows | SQLite, on disk |
+
+### Guard
+
+`cargo test -p diri-engine --test resource_growth` runs 40 cycles of hook
+connections, attach/detach on an idle and a producing session, subscriptions,
+hibernate/wake and spawn/kill/remove against a holder-backed control server.
+It requires threads and descriptors to return to their post-warm-up baseline.
+It passes on main because nothing leaks there. As a check that it can fail, one
+leaked descriptor per connection (`mem::forget` of a stream clone in `serve`)
+fails it with "descriptors grew from 32 to 152". A forwarder that ignores its
+stop flag does not fail it, because the next published event's failed write
+ends that thread anyway.
+
+Not claimed: anything about GPU/IOSurface memory in the App footprint (the
+test platform has none). There is no heap assertion in the guard, because the
+event ring legitimately grows for its first 4,096 events. Not done: shrinking
+the bounds above. The warm-pane cap and the attention history size are product
+decisions.
+Related observation, by design: in the remote probe, dropping an exited
+remote Session without terminating it left its Holder running with the final
+grid (100 cycles, 100 idle Holders on the loopback host). A Holder is meant to
+outlive a detach. The Engine's `session.kill`/`session.remove` path
+(`Session::terminate`) stops it explicitly, including when the Agent already
+exited. The user's run had no remote sessions (`sessions.remote` = 0
+throughout).
+## Real-use frames and keystroke echo, from telemetry (2026-09-30)
+
+**What the telemetry says.** 4.7 hours of the author's installed 0.8.10
+(local spool, aggregates only):
+
+- `ui.frame`: 264,441 frames, mean 4.3 ms weighted by frames. In busy
+  minutes p50 is in the ≤ 4 ms bucket and p90 in ≤ 8–12 ms. About 2,000
+  frames a minute arrive steadily, GPUI's 30 fps cap for a window that is not
+  key, fed by busy terminals (`term.paint` 0.8 per frame, 0.9 ms mean). The
+  worst per-minute p90, 22 ms, was a minute with 3 frames. Two frames
+  reached 50 ms (70 and 229 ms). The mean is the same frontmost (4.15 ms) and
+  not (4.26 ms).
+- `input.echo`: 2,419 keys, mean 7.2 ms weighted by keys. Minutes with 20 or
+  more keys have means of 4.7–12.5 ms and p90 ≤ 8–16 ms. The minutes with
+  p90 of 45–123 ms had 1–8 keys each: an agent answering after a pause, not
+  typing. (17 ms is the unweighted mean of per-minute means.)
+
+Neither metric could say how much was Diri: `input.echo` ran from input to
+grid applied, through the agent, and `ui.frame` was one number.
+
+**Where the installed app's frame time goes.** A 10 s, 1 ms `sample` of the
+installed app (read-only, drawing about 33 fps with 8 panes mounted): the
+main thread spent 1.29 s in GPUI's `Window::draw`, plus 0.37 s presenting,
+0.28 s of it waiting in `-[CAMetalLayer nextDrawable]` (outside `ui.frame`).
+Within `Window::draw`:
+
+| | share |
+| --- | ---: |
+| terminal element prepaint + paint | 20% |
+| Taffy layout of the root tree | 14% |
+| `Scene::finish` sorting glyph sprites | 11% |
+| `SidebarRow::eq`, walking pull requests field by field | 8% |
+| accessibility tree (AccessKit) | < 1% |
+
+AccessKit frames in the sample mean assistive technology is attached: any
+app that reads other windows (window managers, dictation tools) turns it on.
+Then GPUI re-renders every cached view nested in one that re-renders, so
+each sidebar tick rebuilds all 51 rows, not just the working ones.
+
+**A fixture that looks like that.** `real_use_frame_distribution` (root.rs,
+ignored, macOS) mounts the real RootView under headless Metal at 1728×1080
+(2×). It has 51 sessions, four working, every third with one to three pull
+requests (description, 10 checks, 40 comments). A workspace tab is split into
+three busy agent panes: one streaming a scrolling screen at 30 Hz, two
+spinners at 10 and 8 Hz. The sidebar ticks its 125 ms activity mark, and the
+store publishes every 200 ms. Everything is due on a 120 Hz tick, and each
+tick with work draws one frame. `DIRI_BENCH_A11Y=1` attaches pretend
+assistive technology through a new vendored-GPUI test hook;
+`DIRI_BENCH_TABS=horizontal` uses the strip. GPUI's new `FrameStats` splits
+each frame by phase.
+
+The fixture's frames cost what the live frames cost in composition, but not
+in time. On the performance cores it draws in about 1 ms. Under
+`taskpolicy -c background`, which confines it to the efficiency cores, it
+reproduces the live distribution's shape: p50 6.6–8.4 ms, p90 17–19 ms, p99
+27–39 ms, max 50–104 ms. The author's Mac runs at load average 30–120 from
+agents and builds. So the likely explanation for the rest of the gap is
+where and when the main thread runs, not a structure the fixture lacks. This
+is a hypothesis. The new `ui.frame.cpu` tests it (below).
+
+With pretend assistive technology, views rendered per frame rise from 6.8 to
+39.0, CPU per frame by 16–22% and p90 by 29–43% (base binary).
+
+**Frame changes.** Both leave every comparison result and draw order as they
+were.
+
+- `SidebarRow` equality tests the record's `Arc` pointer first. Every
+  sidebar render compares each row's props with the last ones, and an
+  unchanged session keeps its `Arc`. Before, each comparison walked the
+  record, including every pull request's description, checks and review
+  threads.
+- `Scene::finish` sorts `(key, index)` pairs and moves each sprite once
+  along the permutation's cycles, instead of stable-sorting the 100+ byte
+  sprites themselves. Ties keep their paint order, as the stable sort did. A
+  frame already in order moves nothing.
+
+Base is this branch's instrumentation commit, so the benches are identical.
+Base and branch alternated three times each. Release builds, load average
+78–120 (unrelated builds). Draw time is GPUI's whole `Window::draw` per
+frame, 1,440 frames per run:
+
+| Real-use fixture | Base | Branch |
+| --- | ---: | ---: |
+| Sidebar, draw p50 / p90 | 1.11–1.39 / 1.82–2.53 ms | 0.98–1.42 / 1.65–2.80 ms |
+| Sidebar, CPU per frame | 1.27–1.53 ms | 1.13–1.57 ms |
+| Sidebar + a11y, draw p50 / p90 / p99 | 1.16–1.40 / 2.57–3.26 / 3.19–7.25 ms | 1.01–1.12 / 2.38–2.62 / 2.83–3.41 ms |
+| Sidebar + a11y, CPU per frame | 1.56–1.87 ms | 1.40–1.52 ms |
+| Horizontal strip, CPU per frame | 0.94–1.02 ms | 0.86–1.01 ms |
+| `finish` phase (scene sort) per frame, all three | 0.24–0.40 ms | 0.15–0.29 ms |
+| Efficiency cores + a11y, draw p90 / p99 (720 frames) | 17.0–19.3 / 26.5–39.1 ms | 15.7–16.5 / 25.1–36.2 ms |
+| Whole-process user CPU, sidebar + a11y run | 2.49–3.05 s | 2.26–2.46 s |
+
+In stack samples of the fixture, `Scene::finish` fell from 13.6% to 8.3% of
+the draw. The fixture's pull requests are illustrative: there, row comparison
+was 0.6% of the draw, where the live sample put it at 8%.
+
+Final frames of all three modes are pixel-identical between base and branch
+(3456×2160). `the_sprite_sort_matches_a_stable_sort_by_key` checks the sort
+against the standard library's stable sort over 36 size and key mixes.
+`a_row_holding_the_same_record_is_equal_without_walking_it` uses a record
+that is not equal to itself field by field (a NaN timestamp) to show the
+walk is skipped.
+
+**Keystroke echo: a TUI answers in parts.** Claude Code and Codex both wrap
+each redraw in a synchronized update (DECSET 2026). Both binaries contain
+`\e[?2026h`. The held Session pump published only output that answered a
+keystroke without losing cells, and only its first write. So:
+
+- A synchronized redraw that removed cells (the placeholder and "? for
+  shortcuts" vanish as typing starts, a completion menu closes) looked like
+  a half-erased repaint and waited out the 8 ms output batch.
+- A redraw in several writes (erase, redraw, status row) published its first
+  answering write at once. The rest waited out the batch, and then the
+  attach pump's two-publication interactive budget.
+
+Now output that closes a synchronized update, and leaves none open, answers
+the keystroke whatever it erased. (The vendored vte counts updates ended by
+their ESU; see `vendor/vte/DIRI-PATCH.md`.) The direct-PTY batch stops
+settling on such output too. A keystroke buys up to four immediate
+publications within its 100 ms window instead of one, and the attach pump's
+interactive budget grows to five. Streaming output after those is batched as
+before.
+
+`multi_chunk_redraw_timing` (tests/attach.rs, ignored) types into a fake
+TUI in a real Holder, from key to the frame that completes the redraw.
+Release, base and branch alternated six times each, load 24–80:
+
+| Fake TUI answer | Base median | Branch median |
+| --- | ---: | ---: |
+| One synchronized redraw that removes 1 cell net | 9.15–9.30 ms | 0.17–0.30 ms |
+| Three writes 0.5 ms apart (last lands ≈ 1.0 ms) | 10.31–10.50 ms | 1.36–1.58 ms |
+| Three writes 2 ms apart (last lands ≈ 4.1 ms) | 14.01–14.25 ms | 5.13–6.12 ms |
+| Three writes back to back | 0.19–0.33 ms | 0.21–0.64 ms |
+
+The "last lands" times include Perl's `usleep` overshoot.
+`a_synchronized_redraw_that_removes_cells_answers_a_keystroke_at_once`
+asserts a median of 5 ms or less (base: 9.2 ms).
+
+**New telemetry** (details in `TELEMETRY.md`). App: `input.echo.transport`,
+`.apply`, `.paint` and `input.echo.<agent class>`; `ui.frame.cpu`,
+`.layout`, `.prepaint`, `.paint`, `.terminals`, `.a11y`; counters
+`ui.frame.views_rendered`, `.views_reused`, `.terminal_paints`,
+`.shape_misses`, `.a11y_frames`. `ui.slow_frame` carries the breakdown, and
+one over-budget frame (≥ 8.3 ms) is recorded every 30 s at debug severity.
+Engine: `input.echo.engine`, `input.echo.engine.<agent class>`,
+`input.echo.publish`.
+
+**How to confirm after upgrading.** Read the `metrics` events in
+`~/Library/Application Support/Dirijor/telemetry/spool` (`app-*` and
+`engine-*`), or run `diri-debug local --since 1h`:
+
+- The agent's share: `input.echo.engine.claude` / `.codex` (Engine wrote
+  the key → the agent answered). Diri's share: `input.echo.publish` (expect
+  a p50 in the ≤ 1 ms bucket), plus `input.echo.apply` and
+  `input.echo.paint`, plus the sockets and the Holder
+  (`input.echo.transport` minus `input.echo.engine` minus
+  `input.echo.publish`).
+- `ui.frame.cpu` against `ui.frame`. If they are close at about 4 ms, the
+  main thread is doing the work on slower cores. If CPU is well below wall
+  time, it is waiting behind other work.
+- `ui.frame.a11y_frames / ui.frame.n` is the share of frames drawn with
+  assistive technology attached. `ui.frame.views_rendered / ui.frame.n`
+  shows what that costs.
+- `ui.slow_frame` events name the phase (`layout_ms`, `prepaint_ms`,
+  `paint_ms`), `terminals`, `views` and `a11y` of any frame over 50 ms.
+
+**Not claimed:**
+
+- any change measured on the installed app;
+- GPU or present time, including the `nextDrawable` waits;
+- the efficiency-core explanation (it is a hypothesis for `ui.frame.cpu` to
+  test);
+- a fix for assistive-technology frames. Keeping nested views cached then
+  needs GPUI to replay their accessibility nodes; forcing the re-render
+  (upstream's rule) is what keeps rows in the accessibility tree;
+- Taffy layout and terminal paint, the two largest shares, which are
+  unchanged;
+- Engine echo timing for remote sessions (their grid path records none).
+
+Reproduce from `diri/`:
+
+```sh
+cargo test --release -p diri-app --bin diri real_use_frame_distribution -- --ignored --nocapture
+DIRI_BENCH_A11Y=1 cargo test --release -p diri-app --bin diri real_use_frame_distribution -- --ignored --nocapture
+DIRI_BENCH_TABS=horizontal cargo test --release -p diri-app --bin diri real_use_frame_distribution -- --ignored --nocapture
+cargo test --release -p diri-engine --test attach multi_chunk_redraw_timing -- --ignored --nocapture
+```
+
+`DIRI_BENCH_TICKS`, `DIRI_BENCH_PRS=0` and `DIRI_BENCH_SCREENSHOT=<png>`
+tune the fixture.
 ## Remote usage polls only while the Usage page is open (2026-09-30)
 
 `rpc.slow method=host.usage` was the author's most frequent slow RPC: 161 in

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Let agents work as a team · Diri</title>
+  <meta name="description" content="Let one AI agent in diri start and direct other agents: split a big job across helpers, watch them work, step in any time, and get one combined result back.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/guides/agent-teams/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Let agents work as a team">
+  <meta property="og:description" content="Let one AI agent in diri start and direct other agents: split a big job across helpers, watch them work, step in any time, and get one combined result back.">
+  <meta property="og:url" content="https://diri.sh/guides/agent-teams/">
+  <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <script src="/guides.js" defer></script>
+  <script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Let agents work as a team", "description": "Let one AI agent in diri start and direct other agents: split a big job across helpers, watch them work, step in any time, and get one combined result back.", "url": "https://diri.sh/guides/agent-teams/", "inLanguage": "en", "publisher": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}, "datePublished": "2026-10-01", "dateModified": "2026-10-01", "image": "https://diri.sh/assets/social-card.jpg", "author": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}, "isPartOf": {"@type": "CollectionPage", "url": "https://diri.sh/guides/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/" aria-current="page">Guides</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <main id="main">
+      <header class="guide-heading"><a class="eyebrow" href="/guides/">Guides · Work with many agents</a><h1>Let agents work as a team</h1><p>Ask one agent to split a big job, start helpers, keep them on track and bring you the result. You just describe the goal.</p>
+        <div class="guide-meta"><span>7 min read</span><span>Everyone</span></div></header>
+      <div class="guide-layout"><nav class="guide-toc" aria-label="On this page"><span>On this page</span><a href="#how-it-works">1. How it works</a><a href="#ask-for-a-team">2. Ask for a team</a><a href="#watch-them-work">3. Watch them work</a><a href="#step-in">4. Step in any time</a><a href="#tips">5. Tips for good teams</a><a href="#clean-up">6. Clean up</a></nav>
+        <article class="guide-content"><div class="learn"><strong>You will learn</strong><ul><li>How one agent can start and direct others</li><li>What to ask for, with examples</li><li>How to step in and keep the team on track</li></ul></div><section id="how-it-works" class="step"><h2><span class="step-n">1</span>How it works</h2>
+<p>Claude Code, Codex and Cursor sessions started in diri come with a set of team tools built in. With them, an agent can start other agents, hand them tasks, read what they write, answer their questions, and collect their results. There is nothing to set up.</p>
+<p>You talk to one agent, the <strong>lead</strong>. The lead talks to its <strong>helpers</strong>.</p></section><section id="ask-for-a-team" class="step"><h2><span class="step-n">2</span>Ask for a team</h2>
+<p>Describe the goal, how to split it, and what “done” looks like. Start with <strong>“Use diri to…”</strong> so the agent reaches for its team tools instead of trying to do everything itself.</p>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Use diri to start three agents. One researches our top five competitors’ pricing pages, one collects customer quotes from the interviews folder, and one drafts a positioning one-pager. Wait for all three, then combine their work into launch-brief.md and tell me what is still missing.</p><button class="prompt-copy" type="button">Copy</button></div>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Use diri to split this release checklist across three agents: one writes the release notes, one checks every link in the docs, one tests the sign-up flow. Report back with a short status for each.</p><button class="prompt-copy" type="button">Copy</button></div>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Use diri to refactor the settings module. Give each sub-task its own agent in a separate worktree, review their changes, and merge only the ones whose tests pass.</p><button class="prompt-copy" type="button">Copy</button></div></section><section id="watch-them-work" class="step"><h2><span class="step-n">3</span>Watch them work</h2>
+<p>Each helper appears in the sidebar as its own session, nested under the lead. Selecting a session highlights its lead and helpers so you can see who belongs to which team.</p>
+<figure class="shot"><img src="/assets/guides/sidebar.webp" width="248" height="370" alt="The diri sidebar: a project with sessions, one needing input, one working with two helper agents nested under it." loading="lazy" decoding="async"><figcaption>Every session is a row. The logo on the right shows which agent it is; the mark on the left shows what it is doing.</figcaption></figure>
+<p>The lead waits for helpers to finish, reads their output, sends follow-ups, and answers their questions for you when it can. When something truly needs a human, the helper turns <span class="tone amber">amber</span> like any other session.</p></section><section id="step-in" class="step"><h2><span class="step-n">4</span>Step in any time</h2>
+<p>Helpers are normal sessions. Click one to read exactly what it is doing, or type to it directly to correct course. You can also tell the lead:</p>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Use diri to tell the agent working on quotes that the interviews folder is out of date. It should use interviews-2026 instead.</p><button class="prompt-copy" type="button">Copy</button></div></section><section id="tips" class="step"><h2><span class="step-n">5</span>Tips for good teams</h2>
+<ul>
+<li><strong>Split by output, not by step.</strong> “One agent per section of the report” works better than “one agent researches, then another writes”.</li>
+<li><strong>Say where results go.</strong> A file name per helper avoids two agents writing the same file.</li>
+<li><strong>Ask for a report.</strong> “Report back with one line per helper” gives you a quick summary to read.</li>
+<li><strong>Keep it small at first.</strong> Two or three helpers is plenty. A lead can run up to 16 helpers, and helpers can start their own, up to three levels deep.</li>
+</ul>
+<aside class="note"><strong>If the agent asks for permission</strong><p>Depending on its settings, the lead may ask you to approve diri’s team tools the first time it uses them. Approve them once and it carries on.</p></aside></section><section id="clean-up" class="step"><h2><span class="step-n">6</span>Clean up</h2>
+<p>When the work is done, ask the lead to release its helpers, or archive them yourself: select several rows, right-click, and choose <strong>Archive</strong>. The files they made stay in your folder.</p></section><nav class="guide-pager" aria-label="More guides"><a class="prev" href="/guides/parallel-agents/"><span>Previous</span>Run several agents at once</a><a class="next" href="/guides/review-changes/"><span>Next</span>Review what changed</a></nav></article>
+      </div>
+    </main>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

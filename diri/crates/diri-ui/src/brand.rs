@@ -20,16 +20,19 @@ pub enum AgentKind {
     Gemini,
     Shell,
     Generic,
+    /// A Diri note: a Session with no process.
+    Note,
 }
 
 impl AgentKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ClaudeCode,
         Self::Codex,
         Self::Cursor,
         Self::Gemini,
         Self::Shell,
         Self::Generic,
+        Self::Note,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -40,6 +43,7 @@ impl AgentKind {
             Self::Gemini => "Gemini",
             Self::Shell => "Shell",
             Self::Generic => "Generic",
+            Self::Note => "Note",
         }
     }
 
@@ -49,7 +53,7 @@ impl AgentKind {
             Self::Codex => Some(BrandMarkKind::OpenAi),
             Self::Cursor => Some(BrandMarkKind::Cursor),
             Self::Gemini => Some(BrandMarkKind::Gemini),
-            Self::Shell | Self::Generic => None,
+            Self::Shell | Self::Generic | Self::Note => None,
         }
     }
 }
@@ -269,9 +273,10 @@ impl RenderOnce for AgentLogo {
             AgentKind::Codex | AgentKind::Cursor => self.colors.primary.alpha(0.82),
             AgentKind::Gemini => Palette::GEMINI_BLUE,
             AgentKind::Shell | AgentKind::Generic => self.colors.secondary,
+            AgentKind::Note => Palette::CLAY,
         };
         let badge_fill = match self.kind {
-            AgentKind::ClaudeCode => Palette::CLAY.alpha(0.14),
+            AgentKind::ClaudeCode | AgentKind::Note => Palette::CLAY.alpha(0.14),
             _ => Fill::subtle(self.colors),
         };
 
@@ -290,7 +295,11 @@ impl RenderOnce for AgentLogo {
             container.child(BrandMark::solid(mark, mark_size, fill))
         } else {
             container.child(Icon::new(
-                IconName::Terminal,
+                if self.kind == AgentKind::Note {
+                    IconName::File
+                } else {
+                    IconName::Terminal
+                },
                 mark_size.max(self.size * 0.54),
                 fill,
             ))

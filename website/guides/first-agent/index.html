@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Your first agent · Diri</title>
+  <meta name="description" content="Start your first AI agent in diri: install an agent with one click, pick a folder, describe a task in plain English, and answer it when it asks.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/guides/first-agent/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Your first agent">
+  <meta property="og:description" content="Start your first AI agent in diri: install an agent with one click, pick a folder, describe a task in plain English, and answer it when it asks.">
+  <meta property="og:url" content="https://diri.sh/guides/first-agent/">
+  <meta property="og:image" content="https://diri.sh/assets/social-card.jpg">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <script src="/guides.js" defer></script>
+  <script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Your first agent", "description": "Start your first AI agent in diri: install an agent with one click, pick a folder, describe a task in plain English, and answer it when it asks.", "url": "https://diri.sh/guides/first-agent/", "inLanguage": "en", "publisher": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}, "datePublished": "2026-10-01", "dateModified": "2026-10-01", "image": "https://diri.sh/assets/social-card.jpg", "author": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}, "isPartOf": {"@type": "CollectionPage", "url": "https://diri.sh/guides/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/" aria-current="page">Guides</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <main id="main">
+      <header class="guide-heading"><a class="eyebrow" href="/guides/">Guides · Start here</a><h1>Your first agent</h1><p>Install diri, give an agent a task in plain English, and see what it made. About ten minutes.</p>
+        <div class="guide-meta"><span>8 min read</span><span>Everyone</span></div></header>
+      <div class="guide-layout"><nav class="guide-toc" aria-label="On this page"><span>On this page</span><a href="#what-is-an-agent">1. What an agent is</a><a href="#install">2. Install diri</a><a href="#add-an-agent">3. Add an agent</a><a href="#pick-a-folder">4. Pick a folder</a><a href="#start">5. Start the agent</a><a href="#give-it-a-task">6. Give it a task</a><a href="#when-it-asks">7. When it asks you something</a><a href="#when-its-done">8. When it is done</a></nav>
+        <article class="guide-content"><div class="learn"><strong>You will learn</strong><ul><li>What an agent is, and what it can touch</li><li>How to start one and give it a task</li><li>What to do when it asks you something</li></ul></div><section id="what-is-an-agent" class="step"><h2><span class="step-n">1</span>What an agent is</h2>
+<p>An <strong>agent</strong> is an AI assistant that works directly on files on your computer. Claude Code, Codex, Cursor and Gemini are agents. You describe what you want, and the agent reads files, writes new ones, and runs the steps itself. It asks you before anything risky.</p>
+<p>diri is where you run them. Each conversation with an agent is a <strong>session</strong>, and every session gets a row in the sidebar so you can see at a glance which ones are working and which need you.</p></section><section id="install" class="step"><h2><span class="step-n">2</span>Install diri</h2>
+<p><a href="https://github.com/cristicretu/diri/releases/latest">Download diri</a>, open the file, and drag diri into Applications. You need macOS 15 or newer. diri keeps itself up to date after that.</p>
+<p>If you use Homebrew, this does the same thing:</p>
+<pre><code>brew install --cask cristicretu/diri/diri</code></pre></section><section id="add-an-agent" class="step"><h2><span class="step-n">3</span>Add an agent</h2>
+<p>The first time you open diri, it checks which agents are already on your Mac. If there are none, it shows a short list with an <strong>Install</strong> button next to each.</p>
+<ol>
+<li>Click <strong>Install</strong> next to the agent you want. Claude Code is a good first choice.</li>
+<li>diri shows the official install command it is about to run. Click <strong>Install</strong> to confirm.</li>
+<li>When it finishes, start the agent once and follow its sign-in steps. Each agent uses its own account, for example a Claude plan for Claude Code or a ChatGPT plan for Codex.</li>
+</ol>
+<aside class="note"><strong>Good to know</strong><p>diri never asks for your agent passwords. Each agent signs in on its own, and diri uses the accounts that are already on your Mac.</p></aside></section><section id="pick-a-folder" class="step"><h2><span class="step-n">4</span>Pick a folder</h2>
+<p>An agent works inside one folder. It can read and change the files in that folder, so choose it on purpose.</p>
+<p>Click <strong>Choose a folder…</strong> on the welcome screen, or open <strong>New Agent</strong> in the sidebar, click the folder row at the bottom, and choose <strong>Choose Folder…</strong>. diri remembers every folder you use, so next time it is one click.</p>
+<figure class="shot"><img src="/assets/guides/where.webp" width="248" height="295" alt="The Where panel listing project folders and Choose Folder." loading="lazy" decoding="async"><figcaption>The <strong>Where</strong> panel: pick a folder you used before, or <strong>Choose Folder…</strong></figcaption></figure>
+<aside class="note"><strong>First time?</strong><p>Make a new empty folder called something like <em>Agent playground</em> and practise there. Nothing you care about can change by accident.</p></aside></section><section id="start" class="step"><h2><span class="step-n">5</span>Start the agent</h2>
+<p>Open <strong>New Agent</strong> at the top of the sidebar and pick an agent. Or press <kbd>⌘</kbd><kbd>T</kbd> to start your default agent straight away.</p>
+<figure class="shot"><img src="/assets/guides/new-agent.webp" width="248" height="385" alt="The New Agent menu listing Claude Code, Codex, Cursor, OpenCode and Terminal." loading="lazy" decoding="async"><figcaption><strong>New Agent</strong> lists the agents installed on your Mac. The folder row at the bottom changes where it starts.</figcaption></figure>
+<p>A new session opens on the right with the agent's own screen, and a new row appears in the sidebar. You can rename it any time: double-click the row, or press <kbd>⌘</kbd><kbd>R</kbd>.</p></section><section id="give-it-a-task" class="step"><h2><span class="step-n">6</span>Give it a task</h2>
+<p>Type what you want in plain English and press <kbd>Return</kbd>. Be as specific as you would be with a new colleague: what to make, where the inputs are, and where to put the result.</p>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Read every file in this folder and write a one-page summary called summary.md. Use short headings and list any open questions at the end.</p><button class="prompt-copy" type="button">Copy</button></div>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Draft three LinkedIn posts announcing our new pricing. Keep each under 120 words and save them in posts.md.</p><button class="prompt-copy" type="button">Copy</button></div>
+<p>The agent shows each step as it goes: which files it read, what it is writing, what it plans next.</p></section><section id="when-it-asks" class="step"><h2><span class="step-n">7</span>When it asks you something</h2>
+<p>Before anything risky, like running a command or deleting a file, the agent stops and asks. Its row turns <span class="tone amber">amber</span> and diri sends a notification.</p>
+<ol>
+<li>Click the session, or press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>J</kbd> to jump to the next one that needs you.</li>
+<li>Read the question. Agents usually offer choices you pick with the arrow keys and <kbd>Return</kbd>.</li>
+<li>If you are not sure, say no and ask the agent to explain first. It will.</li>
+</ol>
+<p>For a plain question (not a permission prompt), you can also answer straight from the notification banner with <strong>Reply</strong>.</p></section><section id="when-its-done" class="step"><h2><span class="step-n">8</span>When it is done</h2>
+<p>A finished session turns <span class="tone green">green</span> until you look at it. The agent tells you what it did, and the files are already in your folder. Open them in Finder or your usual apps.</p>
+<p>Not happy with the result? Keep talking. "Make it shorter", "use a friendlier tone" and "undo the last change" all work.</p>
+<p>Next, learn how diri keeps your work safe in <a href="/guides/never-lose-work/">Never lose your work</a>.</p></section><nav class="guide-pager" aria-label="More guides"><span></span><a class="next" href="/guides/never-lose-work/"><span>Next</span>Never lose your work</a></nav></article>
+      </div>
+    </main>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="https://github.com/cristicretu/diri/tree/main/docs">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>
