@@ -596,6 +596,16 @@ impl Registry {
         }
     }
 
+    /// Local sessions whose wrapped agent exited asking to be started again
+    /// (Codex after updating itself). Each request is returned once.
+    pub fn take_relaunch_requests(&self) -> Vec<String> {
+        self.sessions
+            .iter()
+            .filter(|(_, session)| session.take_relaunch_request())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Final terminals of held children that exited since the last call, with
     /// everything needed to publish them. Storage happens after the lock is
     /// released; an unbound run is not published.

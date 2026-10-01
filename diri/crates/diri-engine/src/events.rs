@@ -518,6 +518,10 @@ fn next_notification_id() -> u64 {
     SEQUENCE.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Engine-internal: a wrapped agent exited asking to be started again. The
+/// app never subscribes to it; [`crate::control::ControlServer`] relaunches.
+pub const RELAUNCH_REQUESTED: &str = "session.relaunch_requested";
+
 pub fn spawn_registry_watcher(
     registry: Arc<Mutex<crate::registry::Registry>>,
     events: EventBus,
@@ -533,7 +537,7 @@ pub fn spawn_registry_watcher(
             // every pass, all under the registry lock.
             let mut published: HashMap<String, u64> = HashMap::new();
             while !stop.load(Ordering::SeqCst) {
-                let (mut changed, cursor_requests, native_title_requests, completed) = {
+                let (mut changed, cursor_requests, native_title_requests, completed, relaunches) = {
                     let Ok(mut registry) = registry.lock() else {
                         break;
                     };
@@ -542,8 +546,13 @@ pub fn spawn_registry_watcher(
                         registry.cursor_refresh_requests(),
                         registry.native_title_refresh_requests(),
                         registry.take_completed_publications(),
+                        registry.take_relaunch_requests(),
                     )
                 };
+                // The control server owns launch specs; it acts on these.
+                for id in relaunches {
+                    events.publish(RELAUNCH_REQUESTED, json!({}), Some(&id));
+                }
                 // Retained terminals are written here, off the Registry lock,
                 // so a slow disk never stalls input or grid publication.
                 let published_any = !completed.is_empty();

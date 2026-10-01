@@ -427,6 +427,11 @@ struct Shared {
     /// The exit status a `returnToLoginShell` wrapper reported for its agent,
     /// which the PTY's own exit never carries: the login shell outlives it.
     agent_exit: Mutex<Option<i32>>,
+    /// The manifest's `relaunchNotice`, for a wrapped agent that declares one.
+    relaunch_notice: Option<String>,
+    /// The wrapped agent exited asking to be started again; the Registry
+    /// watcher takes this and the control server relaunches the tab.
+    relaunch_requested: AtomicBool,
     /// The latest keystroke whose echo the held pump has not published yet.
     echo_request: Mutex<Option<EchoRequest>>,
     /// What a local shell is running and where it is. Stays empty for Agent
@@ -2115,6 +2120,16 @@ impl Session {
         self.shared.state_version.load(Ordering::SeqCst)
     }
 
+    /// The exit status the `returnToLoginShell` wrapper reported, if any.
+    pub fn agent_exit(&self) -> Option<i32> {
+        *self.shared.agent_exit.lock().expect("agent exit")
+    }
+
+    /// Whether the wrapped agent exited asking to be started again, once.
+    pub fn take_relaunch_request(&self) -> bool {
+        self.shared.relaunch_requested.swap(false, Ordering::SeqCst)
+    }
+
     pub fn status(&self) -> SessionStatus {
         self.shared.status.lock().expect("status").clone()
     }
@@ -3171,6 +3186,13 @@ fn new_shared(
         terminate_requested: AtomicBool::new(false),
         exit_recorded: AtomicBool::new(false),
         agent_exit: Mutex::new(None),
+        relaunch_notice: engine
+            .manifest(&spec.manifest_id)
+            .and_then(|manifest| manifest.agent.as_ref())
+            .filter(|agent| agent.return_to_login_shell)
+            .and_then(|agent| agent.relaunch_notice.clone())
+            .filter(|notice| !notice.is_empty()),
+        relaunch_requested: AtomicBool::new(false),
         echo_request: Mutex::new(None),
         foreground: Mutex::new(ForegroundProgram::default()),
         progress: Mutex::new(ProgressTrack::default()),
@@ -4680,7 +4702,7 @@ fn feed_output_batch(
                 shared.bump_state_version();
             }
             if let Some(status) = screen.take_agent_exit() {
-                note_agent_exit(shared, status);
+                note_agent_exit(shared, status, &screen);
             }
             let after = screen.filled_cells();
             (after < before, after == 0 && before != 0)
@@ -5326,7 +5348,7 @@ fn pump_held(
                     shared.bump_state_version();
                 }
                 if let Some(status) = screen.take_agent_exit() {
-                    note_agent_exit(&shared, status);
+                    note_agent_exit(&shared, status, &screen);
                 }
                 let replies = screen.take_replies();
                 let observation = if evaluate_now {
@@ -5585,8 +5607,20 @@ fn split_shell_status(status: i32) -> (Option<i32>, Option<i32>) {
 /// otherwise invisible: the PTY lives on as the shell, so `session.exit`
 /// later carries the shell's status, not the agent's. The early-exit probe
 /// reads the stored status to say why an agent died at startup.
-fn note_agent_exit(shared: &Shared, status: i32) {
+fn note_agent_exit(shared: &Shared, status: i32, screen: &HeadlessScreen) {
     *shared.agent_exit.lock().expect("agent exit") = Some(status);
+    if status == 0
+        && let Some(notice) = &shared.relaunch_notice
+        && shows_relaunch_notice(screen, notice)
+    {
+        shared.relaunch_requested.store(true, Ordering::SeqCst);
+        shared.bump_state_version();
+        diri_telemetry::event!(
+            "session.agent_relaunch_requested",
+            session = diri_telemetry::id(&shared.id),
+            agent = diri_telemetry::id(&shared.agent),
+        );
+    }
     let (code, signal) = split_shell_status(status);
     let runtime = shared.launched_at.map(|launched| launched.elapsed());
     if status == 0 {
@@ -5610,6 +5644,30 @@ fn note_agent_exit(shared: &Shared, status: i32) {
         );
     }
 }
+
+/// Whether the agent's last words, the bottom lines above the wrapper's own
+/// output, carry its relaunch notice. Only the bottom: an older notice still
+/// higher up the screen (an earlier run's) must not restart a tab whose agent
+/// the user has just quit. Rows are joined so a soft-wrapped notice matches.
+fn shows_relaunch_notice(screen: &HeadlessScreen, notice: &str) -> bool {
+    let lines = screen.lines();
+    let bottom = lines
+        .iter()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(RELAUNCH_NOTICE_LINES)
+        .collect::<Vec<_>>();
+    bottom
+        .iter()
+        .rev()
+        .map(|line| line.as_str())
+        .collect::<String>()
+        .contains(notice)
+}
+
+/// Non-blank bottom rows searched for a relaunch notice: the notice itself,
+/// possibly wrapped, and the first prompt line of the shell that follows it.
+const RELAUNCH_NOTICE_LINES: usize = 4;
 
 fn record_returned_to_shell(shared: &Shared, early: bool, source: &'static str) {
     let left = terminal_modes_left(shared);
@@ -7558,5 +7616,35 @@ mod foreground_program_tests {
         eprintln!("--- back at the shell: {back}");
         let _ = session.terminate(Duration::from_secs(2));
         assert!(worked && settled && back);
+    }
+}
+
+#[cfg(test)]
+mod relaunch_notice_tests {
+    use super::*;
+
+    const NOTICE: &str = "Please restart Codex.";
+
+    fn screen(cols: usize, bytes: &[u8]) -> HeadlessScreen {
+        let mut screen = HeadlessScreen::new(cols, 12);
+        screen.feed(bytes);
+        screen
+    }
+
+    #[test]
+    fn the_notice_at_the_bottom_matches_even_when_wrapped() {
+        let text = b"Updating Codex via `npm install -g @openai/codex`...\r\n\r\n\
+            added 5 packages\r\n\r\n\xf0\x9f\x8e\x89 Update ran successfully! Please restart Codex.\r\n";
+        assert!(shows_relaunch_notice(&screen(80, text), NOTICE));
+        // 24 columns splits the notice across two rows.
+        assert!(shows_relaunch_notice(&screen(24, text), NOTICE));
+    }
+
+    #[test]
+    fn an_older_notice_further_up_does_not_match() {
+        let text = b"\xf0\x9f\x8e\x89 Update ran successfully! Please restart Codex.\r\n\
+            $ codex\r\nToken usage: total=1\r\nTo continue this session, run codex resume 1\r\n\
+            $ \r\nbye\r\n";
+        assert!(!shows_relaunch_notice(&screen(80, text), NOTICE));
     }
 }
