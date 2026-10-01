@@ -457,6 +457,12 @@ fn hibernate(
         && let Some(ports) = listening_ports(&candidate.pids, Duration::from_secs(3))
         && !ports.is_empty()
     {
+        diri_telemetry::debug_event!(
+            "governor.freeze_vetoed",
+            session = diri_telemetry::id(&candidate.id),
+            reason = "listening_port",
+            ports = ports.len(),
+        );
         apply_sample(
             registry,
             events,
@@ -473,9 +479,23 @@ fn hibernate(
         let Ok(mut guard) = registry.lock() else {
             return false;
         };
-        if guard.hibernate(id, reason).is_err() {
+        if let Err(error) = guard.hibernate(id, reason) {
+            diri_telemetry::warn_event!(
+                "governor.freeze_failed",
+                session = diri_telemetry::id(id),
+                io = diri_telemetry::io_error(&error),
+            );
             return false;
         }
+        diri_telemetry::event!(
+            "governor.freeze",
+            session = diri_telemetry::id(id),
+            reason = crate::telemetry::hibernation_reason_name(reason),
+            idle_s = ((now_millis() - candidate.idle_since_ms) / 1000.0).max(0.0) as u64,
+            footprint_mb = candidate.footprint >> 20,
+            processes = candidate.pids.len(),
+            idle_threshold_s = config.idle_threshold_seconds,
+        );
         let _ = guard.persist();
         guard.record(id)
     };
@@ -1007,6 +1027,11 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
+            scheduled_run: None,
         }
     }
 

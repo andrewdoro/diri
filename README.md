@@ -1,18 +1,20 @@
 # diri
 
-**A native workspace for coding agents.**
+**The best way to work with coding agents.**
 
-Run Claude Code, Codex, Cursor, Gemini, and other terminal agents side by side.
-See what needs you, give each task its own worktree, and review the changes in
-place. Built with Rust and GPUI for macOS, with Linux in beta.
+Run five agents or fifty. Claude Code, Codex, Cursor, Gemini, and any other
+terminal agent, side by side. diri shows you which ones need you, gives each
+task its own worktree, lets agents spawn and coordinate other agents, and puts
+every change in one place to review. Native, built with Rust and GPUI. macOS,
+with Linux in beta.
 
 [Download](https://github.com/cristicretu/diri/releases/latest) ·
-[Getting started](docs/GETTING_STARTED.md) ·
+[Getting started](https://diri.sh/docs/quickstart/) ·
 [Guides](https://diri.sh/guides/) ·
-[Documentation](docs/README.md) ·
+[Documentation](https://diri.sh/docs/) ·
 [Contributing](CONTRIBUTING.md)
 
-<img width="1862" height="1194" alt="image" src="https://github.com/user-attachments/assets/245af985-6bba-4ce2-acb5-2dfad51fd83f" />
+<img width="1862" height="1194" alt="diri running several coding agents side by side" src="docs/images/diri-hero.webp" />
 
 ## Install
 
@@ -28,25 +30,36 @@ and drag Diri to Applications.
 See the [Linux guide](diri/LINUX.md) for packages, source builds, and limitations.
 Linux packages are not included in every release.
 
-Install your agent CLIs separately. Diri uses the tools and accounts already
-on your machine; Claude Code and Codex have the deepest status and resume
-integration.
+Bring your own agents. diri runs the CLIs and accounts already on your machine,
+22 of them out of the box. Claude Code and Codex get the deepest status and
+resume integration.
 
-## Work in parallel
+## Run agents in parallel
 
-- **Know what needs you.** Live status and notifications distinguish working,
-  waiting, and finished sessions.
-- **Keep tasks separate.** Give agents their own Git worktrees and branches.
-- **Review in context.** Inspect diffs, stage changes, commit, and follow pull
-  request checks beside the session.
-- **Come back to your work.** Local sessions keep running when you close the
-  app or the Engine restarts.
-- **Use your own machines.** Run locally or on an SSH host you control.
-  Diri handles remote Helper setup.
+- **Know what needs you.** Live status and notifications separate working,
+  waiting, and finished sessions. Read one sidebar, not thirty terminals.
+- **Let agents run agents.** The built-in MCP server lets an agent spawn other
+  agents, hand them tasks, read their output, and answer their questions. A
+  swarm is one prompt away.
+- **Keep tasks separate.** Every agent can get its own Git worktree and branch,
+  so parallel work never collides.
+- **Review in context.** Inspect diffs, stage, commit, and follow pull request
+  checks beside the session that wrote the code.
+- **Never lose a session.** Each terminal is owned by its own process. Close
+  the app or restart the Engine and every agent keeps running.
+- **Use your own machines.** Run locally or on any SSH host you control. No
+  tmux, no sudo, no Diri account, no hosted relay.
 
-Your agents run under your user account, in real terminals. No Diri account or
-hosted relay is required. Remote session persistence depends on the host;
-Diri reports its persistence capabilities.
+## Where this is going
+
+Agents are good enough now that the bottleneck is you: how many you can keep
+track of and how much context you can hold. diri exists to remove that.
+
+Notes are next. Write a PRD in a note, break it into to-dos, and send any to-do
+to an agent. Agents write notes back. You stay at the level of the plan while
+the agents do the work.
+
+Today you can run dozens of agents in parallel. The goal is hundreds.
 
 ## Contribute
 

@@ -26,10 +26,14 @@ use sha2::{Digest, Sha256};
 use crate::registry::Registry;
 mod account_handoff;
 mod account_switch;
+mod agent_relaunch;
 mod claude_accounts;
 mod codex_accounts;
+mod hook_queue;
 mod message_delivery;
 mod operations;
+mod orchestration;
+mod schedules;
 mod tasks;
 mod workspaces;
 
@@ -50,6 +54,50 @@ const fn default_shell() -> &'static str {
 #[cfg(not(target_os = "macos"))]
 const fn default_shell() -> &'static str {
     "/bin/sh"
+}
+
+/// Requests that act on a Session's terminal or process. A note Session
+/// has neither, so these fail with `session_has_no_terminal`.
+const TERMINAL_ONLY_METHODS: &[&str] = &[
+    Method::SESSION_DELIVER_MESSAGE,
+    Method::TASK_SUBMIT,
+    Method::SESSION_SEND_KEY,
+    Method::SESSION_SEND_TEXT,
+    Method::SESSION_RESIZE,
+    Method::SESSION_READ_SCREEN,
+    Method::SESSION_TERMINAL_TITLE,
+    Method::SESSION_RESET_TERMINAL,
+    Method::SESSION_CAPTURE_FIND,
+    Method::SESSION_READ_SCROLLBACK,
+    Method::SESSION_READ_SCROLLBACK_CELLS,
+    Method::SESSION_READ_TRANSCRIPT,
+    Method::SESSION_RESUME,
+    Method::SESSION_RECONNECT,
+    Method::SESSION_HIBERNATE,
+    Method::SESSION_WAKE,
+    Method::SESSION_FORK,
+    Method::SESSION_MIGRATE,
+    Method::SESSION_CONTINUE_ACCOUNT,
+];
+/// A terminal's shell: the user's own, as a login shell.
+fn login_shell_argv() -> Vec<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell().into());
+    vec![shell, "-l".into()]
+}
+
+/// Where a fresh shell for an existing local terminal starts: the directory it
+/// had `cd`'d to, while that is still an absolute directory on this host.
+/// `None` sends it to the launch `cwd`, as before. Remote shells and Agents
+/// always start in `cwd`.
+fn restored_terminal_directory(record: &diri_proto::SessionRecord) -> Option<PathBuf> {
+    if record.kind != diri_proto::AgentKind::SHELL || record.host.is_some() {
+        return None;
+    }
+    record
+        .terminal_cwd
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_dir())
 }
 
 pub struct ControlServer {
@@ -75,6 +123,11 @@ pub struct ControlServer {
     account_operations: std::sync::RwLock<()>,
     session_operations: Mutex<std::collections::HashSet<String>>,
     agent_scans: Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
+    hook_reports: hook_queue::HookQueue,
+    /// Where note Sessions keep their files; `None` resolves the standard
+    /// notes directory (tests pin a temporary one).
+    notes_dir: Option<PathBuf>,
+    scheduler: Arc<schedules::Scheduler>,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -121,6 +174,14 @@ fn local_session_uses_worktree(record: &diri_proto::SessionRecord, target: &Path
 }
 
 impl ControlServer {
+    /// Configure private power endpoints before starting the scheduler.
+    pub fn with_schedule_power(mut self, config: crate::wake::PowerConfig) -> Self {
+        Arc::get_mut(&mut self.scheduler)
+            .expect("scheduler not started")
+            .power = config;
+        self
+    }
+
     pub fn new(registry: Arc<Mutex<Registry>>, socket_path: impl Into<PathBuf>) -> Self {
         // Capture the bytes this process actually started from before an app
         // updater can replace the bundle path underneath the live daemon.
@@ -183,6 +244,9 @@ impl ControlServer {
             account_operations: std::sync::RwLock::new(()),
             session_operations: Mutex::new(std::collections::HashSet::new()),
             agent_scans: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            hook_reports: hook_queue::HookQueue::new(),
+            notes_dir: None,
+            scheduler: Arc::new(schedules::Scheduler::default()),
         }
     }
 
@@ -192,6 +256,7 @@ impl ControlServer {
     pub fn with_injection(mut self, config: InjectionConfig) -> Self {
         let _ = crate::inject::write_claude_hooks_file(&config.inject_dir);
         let _ = crate::inject::write_claude_mcp_file(&config.inject_dir, &config.cli_path);
+        let _ = crate::inject::write_claude_skills_plugin(&config.inject_dir);
         self.injection = Some(config);
         self
     }
@@ -220,6 +285,11 @@ impl ControlServer {
 
     /// Where session output logs are written. Defaults to `logs/` beside the
     /// socket, matching the Swift daemon's layout.
+    pub fn with_notes_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.notes_dir = Some(dir.into());
+        self
+    }
+
     pub fn with_logs_dir(mut self, logs_dir: impl Into<PathBuf>) -> Self {
         self.logs_dir = logs_dir.into();
         let activity_path = self
@@ -268,7 +338,13 @@ impl ControlServer {
                 let Some(manager) = manager else {
                     return;
                 };
+                let started = Instant::now();
                 let adopted = server.restore_remote_bindings(&manager);
+                diri_telemetry::event!(
+                    "engine.remote_restore",
+                    adopted = adopted.len(),
+                    ms = started.elapsed(),
+                );
                 if !adopted.is_empty() {
                     eprintln!(
                         "diri-engine: adopted {} remote Holder session(s): {adopted:?}",
@@ -346,6 +422,12 @@ impl ControlServer {
                     .ok()
             });
             let Some(helper) = helper.clone() else {
+                diri_telemetry::warn_event!(
+                    "remote.restore_skipped",
+                    session = diri_telemetry::id(&binding.session_id),
+                    host = diri_telemetry::id(&binding.host_id),
+                    reason = "helper_unavailable",
+                );
                 continue;
             };
             let selector = diri_proto::remote_pty::SessionSelector {
@@ -353,8 +435,18 @@ impl ControlServer {
                 session_token: binding.session_token.clone(),
                 expected_incarnation: Some(binding.session_incarnation.clone()),
             };
-            let Ok(inspection) = manager.inspect(&helper, &selector) else {
-                continue;
+            let inspection = match manager.inspect(&helper, &selector) {
+                Ok(inspection) => inspection,
+                Err(error) => {
+                    diri_telemetry::warn_event!(
+                        "remote.restore_skipped",
+                        session = diri_telemetry::id(&binding.session_id),
+                        host = diri_telemetry::id(&binding.host_id),
+                        reason = "inspect_failed",
+                        io = diri_telemetry::io_error(&error),
+                    );
+                    continue;
+                }
             };
             if matches!(record.status, diri_proto::SessionStatus::Exited(_))
                 || matches!(
@@ -450,6 +542,7 @@ impl ControlServer {
     /// does.
     pub fn serve(self: &Arc<Self>, stream: UnixStream) -> std::io::Result<()> {
         let _connection = ActiveConnectionGuard::new(Arc::clone(&self.active_connections));
+        diri_telemetry::count("engine.connections", 1);
         let mut reader = BufReader::new(stream.try_clone()?);
         let writer = Arc::new(Mutex::new(stream));
         let mut subscription: Option<SubscriptionHandle> = None;
@@ -511,6 +604,15 @@ impl ControlServer {
                     // its immediate pass seeing a foreground/recent session
                     // even if registration has not completed yet.
                     if let Ok(mut registry) = self.registry.lock() {
+                        // The attach stream has no error frame: closing at once
+                        // is how it fails, as for any id without a terminal.
+                        if registry.is_note(&attach.attach.0) {
+                            diri_telemetry::event!(
+                                "attach.note_rejected",
+                                session = diri_telemetry::id(&attach.attach.0),
+                            );
+                            return Ok(());
+                        }
                         if registry.get(&attach.attach.0).is_some_and(|session| {
                             !session.allows_keyboard_controller(attach.enhanced_keyboard)
                         }) {
@@ -587,6 +689,9 @@ impl ControlServer {
                         | Method::HOST_USAGE
                         | Method::HOST_LIST_DIRECTORIES
                         | Method::SESSION_READ_DIFF
+                        | Method::WORKTREE_INTEGRATE
+                        | Method::TASK_ANSWER
+                        | Method::TASK_CANCEL
                         | Method::SESSION_CAPTURE_FIND
                         | Method::SESSION_READ_SCROLLBACK_CELLS
                         | Method::SESSION_KILL
@@ -599,6 +704,7 @@ impl ControlServer {
                         | Method::SESSION_MIGRATE
                         | Method::WORKTREE_OVERVIEW
                         | Method::WORKTREE_CLEANUP
+                        | Method::TELEMETRY_UPLOAD_NOW
                 ) || ((method == Method::AGENT_READINESS
                     || method == Method::AGENT_CONFIGURE)
                     && params
@@ -757,6 +863,33 @@ impl ControlServer {
     }
 
     fn dispatch(&self, method: &str, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        if !diri_telemetry::is_enabled() {
+            return self.dispatch_method(method, params);
+        }
+        let session = crate::telemetry::request_session(params.as_ref());
+        let started = Instant::now();
+        let result = self.dispatch_method(method, params);
+        let elapsed = started.elapsed();
+        crate::telemetry::record_rpc(method, elapsed, result.as_ref().err(), session.as_deref());
+        if result.is_ok() && crate::telemetry::is_lifecycle_method(method) {
+            diri_telemetry::event!(
+                "rpc.op",
+                method = diri_telemetry::id(method),
+                session = session.as_deref().map(diri_telemetry::id),
+                ms = elapsed,
+            );
+        }
+        result
+    }
+
+    fn dispatch_method(
+        &self,
+        method: &str,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
+        if TERMINAL_ONLY_METHODS.contains(&method) {
+            self.reject_note_terminal(method, params.as_ref())?;
+        }
         // Bulk switching excludes concurrent launches/catalog edits without blocking input,
         // output, snapshots, or unrelated read-only requests.
         let _account_switch = if matches!(
@@ -822,6 +955,14 @@ impl ControlServer {
             Method::TASK_SUBMIT => self.task_submit(params),
             Method::TASK_GET => self.task_get(params),
             Method::TASK_REPORT => self.task_report(params),
+            Method::TASK_ANSWER => self.task_answer(params),
+            Method::TASK_CANCEL => self.task_cancel(params),
+            Method::TASK_LIST => self.task_list(params),
+            Method::SCHEDULE_CREATE => self.schedule_create(params),
+            Method::SCHEDULE_UPDATE => self.schedule_update(params),
+            Method::SCHEDULE_DELETE => self.schedule_delete(params),
+            Method::SCHEDULE_LIST => self.schedule_list(),
+            Method::SCHEDULE_RUN_NOW => self.schedule_run_now(params),
             Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),
             Method::SESSION_DELIVER_MESSAGE => self.session_deliver_message(params),
             Method::SESSION_SEND_KEY => self.session_send_key(params),
@@ -837,6 +978,7 @@ impl ControlServer {
             Method::SESSION_REMOVE => self.session_remove(params),
             Method::SESSION_RENAME => self.session_rename(params),
             Method::SESSION_MARK_SEEN => self.session_mark_seen(params),
+            Method::SESSION_MARK_UNREAD => self.session_mark_unread(params),
             Method::SESSION_ARCHIVE => self.session_archive(params),
             Method::SESSION_UNARCHIVE => self.session_unarchive(params),
             Method::SESSION_HISTORY => self.session_history(),
@@ -870,15 +1012,19 @@ impl ControlServer {
             Method::SESSION_FORK => self.session_fork(params),
             Method::SESSION_RESUME_FROM_HISTORY => self.session_resume_from_history(params),
             Method::SESSION_REOPEN_LAST => self.session_reopen_last(),
+            Method::SESSION_REVEAL => self.session_reveal(params),
             Method::AGENT_READINESS => self.agent_readiness(params),
             Method::AGENT_CONFIGURE => self.agent_configure(params),
             Method::PROJECT_ADD => self.project_add(params),
             Method::SESSION_READ_DIFF => self.session_read_diff(params),
+            Method::SESSION_READ_TRANSCRIPT => self.session_read_transcript(params),
+            Method::WORKTREE_INTEGRATE => self.worktree_integrate(params),
             Method::SESSION_HIBERNATE => self.session_hibernate(params),
             Method::SESSION_WAKE => self.session_wake(params),
             Method::DAEMON_PREPARE_SHUTDOWN => self.daemon_prepare_shutdown(),
             Method::DAEMON_SHUTDOWN_IF_IDLE => self.daemon_shutdown_if_idle(),
             Method::DAEMON_SHUTDOWN => self.daemon_shutdown(),
+            Method::TELEMETRY_UPLOAD_NOW => telemetry_upload_now(),
             Method::GOVERNOR_CONFIGURE => self.governor_configure(params),
             Method::CLIENT_SET_ACTIVE => self.client_set_active(params),
             other => Err(ControlError::not_found(format!(
@@ -893,6 +1039,16 @@ impl ControlServer {
             .and_then(|value| value.get("proto"))
             .and_then(Value::as_u64)
             .unwrap_or(WIRE_VERSION as u64);
+        diri_telemetry::event!(
+            "client.hello",
+            proto = proto,
+            build = params
+                .as_ref()
+                .and_then(|value| value.get("build"))
+                .and_then(Value::as_str)
+                .map(diri_telemetry::id),
+            ok = proto == WIRE_VERSION as u64,
+        );
         if proto != WIRE_VERSION as u64 {
             return Err(ControlError::version_mismatch(format!(
                 "client speaks protocol {proto}, this engine speaks {WIRE_VERSION}"
@@ -917,13 +1073,14 @@ impl ControlServer {
     /// `generic` need an explicit `argv`, since their manifests declare no
     /// binary.
     fn session_spawn(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
-        self.session_spawn_identified(params, None)
+        self.session_spawn_identified(params, None, None)
     }
 
     fn session_spawn_identified(
         &self,
         params: Option<JsonValue>,
         reserved_id: Option<String>,
+        scheduled: Option<diri_proto::schedules::ScheduledRunInfo>,
     ) -> Result<JsonValue, ControlError> {
         let raw = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
         // Validate before any account, worktree, or remote side effect. Missing
@@ -931,13 +1088,17 @@ impl ControlServer {
         // never silently drop arguments or fall back to a login shell.
         let argv = decode_launch_argv(&raw)?;
         let p: diri_proto::SessionSpawnParams = decode(Some(raw))?;
+        // A note runs nothing: no account, argv, or holder applies.
+        if p.kind.id() == diri_proto::AgentKind::NOTE_ID {
+            return self.session_spawn_note(p, reserved_id);
+        }
         let mut account_profile = self.accounts.lock().map_err(poisoned)?.resolve(
             p.account_profile_id.as_deref(),
             p.kind.id(),
             p.host.as_deref(),
         )?;
         if p.host.is_some() {
-            return self.session_spawn_remote(p, argv, account_profile, reserved_id);
+            return self.session_spawn_remote(p, argv, account_profile, reserved_id, scheduled);
         }
         if let Some(profile) = &account_profile
             && profile.agent == "codex"
@@ -960,10 +1121,7 @@ impl ControlServer {
                     let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell().into());
                     vec![shell, "-lc".into(), command.to_string()]
                 }
-                _ if kind == diri_proto::AgentKind::SHELL_ID => {
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell().into());
-                    vec![shell, "-l".into()]
-                }
+                _ if kind == diri_proto::AgentKind::SHELL_ID => login_shell_argv(),
                 _ => Vec::new(),
             }
         } else {
@@ -1045,11 +1203,20 @@ impl ControlServer {
         }
 
         let inherited: Vec<(String, String)> = std::env::vars().collect();
-        let mut pty = match descriptor.spawn_spec(&cwd_path, inherited.clone(), &launch_args) {
+        // A terminal may start where another terminal had `cd`'d to, while
+        // `cwd` keeps it in the project it was opened from.
+        let start_directory = p
+            .start_directory
+            .as_deref()
+            .filter(|_| kind == diri_proto::AgentKind::SHELL_ID)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && path.is_dir());
+        let launch_path = start_directory.as_deref().unwrap_or(&cwd_path);
+        let mut pty = match descriptor.spawn_spec(launch_path, inherited.clone(), &launch_args) {
             Some(spec) => spec,
             // No binary in the manifest: the caller has to say what to run.
             None if !argv.is_empty() => {
-                let mut spec = crate::pty::PtySpec::new(argv.clone(), &cwd_path);
+                let mut spec = crate::pty::PtySpec::new(argv.clone(), launch_path);
                 spec.env = inherited;
                 // GUI apps launched by launchd commonly inherit no terminal
                 // environment. A binary-free descriptor is still attached to
@@ -1070,6 +1237,8 @@ impl ControlServer {
             crate::accounts::bind_pty(profile, &mut pty)?;
         }
         let mut record = new_record(&id, &kind, &cwd);
+        record.scheduled_run = scheduled;
+        record.terminal_cwd = start_directory.map(|path| path.to_string_lossy().into_owned());
         record.account_profile = account_profile;
         record.kind = p.kind.clone();
         record.originating_prompt = p.initial_prompt.clone();
@@ -1111,6 +1280,12 @@ impl ControlServer {
                         .to_string_lossy()
                         .into_owned(),
                 ));
+                if let Some(dir) = self.resolved_notes_dir() {
+                    pty.env.push((
+                        diri_proto::paths::ENV_NOTES_DIR.into(),
+                        dir.to_string_lossy().into_owned(),
+                    ));
+                }
             }
             if let Some(uuid) = &agent_session_id {
                 record.agent_session_id = Some(uuid.clone());
@@ -1158,9 +1333,18 @@ impl ControlServer {
             registry.insert_record(record.clone());
             registry.persist_for_shutdown().map_err(io_control_error)?;
         }
+        let spawn_started = Instant::now();
         registry
             .spawn(spec, record)
             .map_err(|error| ControlError::internal(error.to_string()))?;
+        if let Some(record) = registry.record(&id) {
+            crate::telemetry::record_session_spawn(
+                &record,
+                "fresh",
+                spawn_started.elapsed(),
+                registry.other_live_agent(&id),
+            );
+        }
         if tracked {
             registry.persist_for_shutdown().map_err(io_control_error)?;
         } else {
@@ -1200,12 +1384,250 @@ impl ControlServer {
         serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
     }
 
+    /// A note has no terminal: typing into it, reading its screen, or
+    /// resuming it can never succeed, so every client learns that at once
+    /// instead of waiting on a PTY that will never exist.
+    fn reject_note_terminal(
+        &self,
+        method: &str,
+        params: Option<&JsonValue>,
+    ) -> Result<(), ControlError> {
+        let Some(id) = crate::telemetry::request_session(params) else {
+            return Ok(());
+        };
+        if !self.registry.lock().map_err(poisoned)?.is_note(&id) {
+            return Ok(());
+        }
+        Err(ControlError::new(
+            diri_proto::control::SESSION_HAS_NO_TERMINAL,
+            format!(
+                "{id} is a note, which has no terminal; {method} applies only to agents and terminals"
+            ),
+        ))
+    }
+
+    /// A note Session: a record with no process, backed by a Markdown file
+    /// in the notes store. The file is created first so a record can never
+    /// point at a note that does not exist. `initial_prompt` seeds the body
+    /// (Markdown), which is how a PRD or handoff arrives pre-written. With
+    /// `note_id` the Session adopts that existing file instead.
+    fn session_spawn_note(
+        &self,
+        p: diri_proto::SessionSpawnParams,
+        reserved_id: Option<String>,
+    ) -> Result<JsonValue, ControlError> {
+        if p.host.is_some() {
+            return Err(ControlError::bad_request(
+                "notes are stored on this Mac; they cannot be opened on a remote host",
+            ));
+        }
+        if p.new_worktree.unwrap_or(false) {
+            return Err(ControlError::bad_request("a note has no worktree"));
+        }
+        let store = self.note_store()?;
+        let id = reserved_id.unwrap_or_else(next_session_id);
+        if let Some(note_id) = p.note_id.as_deref() {
+            let requested = Some(p.cwd.trim()).filter(|cwd| !cwd.is_empty());
+            let record = self.adopt_note(&store, note_id, requested, p.parent.clone(), id)?;
+            return serde_json::to_value(&record)
+                .map_err(|error| ControlError::internal(error.to_string()));
+        }
+        let cwd = p.cwd.trim().to_owned();
+        if cwd.is_empty() || !Path::new(&cwd).is_dir() {
+            return Err(ControlError::bad_request(format!(
+                "cwd {cwd:?} is not a directory"
+            )));
+        }
+        let title = p.title.clone().unwrap_or_default();
+        let body = p.initial_prompt.clone().unwrap_or_default();
+        let (_, parsed) = diri_notes::markdown::parse(&format!("\n{body}"));
+        let doc = diri_notes::doc::Document::new(title.trim(), parsed.blocks);
+        let (note_id, _) = store
+            .create_for_session(doc, Some(&cwd), Some(&id), &note_author(p.parent.as_ref()))
+            .map_err(io_control_error)?;
+        let record = note_record(&id, &cwd, title.trim(), note_id, p.parent.clone());
+        self.insert_note_record(record.clone())?;
+        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
+
+    /// Gives an existing notes file its Session. Idempotent per note id: a
+    /// file that already has a Session gets that one back. The file keeps its
+    /// id and created date; only its `session` stamp is written.
+    fn adopt_note(
+        &self,
+        store: &diri_notes::store::NoteStore,
+        note_id: &str,
+        requested_cwd: Option<&str>,
+        parent: Option<diri_proto::SessionId>,
+        id: String,
+    ) -> Result<diri_proto::SessionRecord, ControlError> {
+        let meta = store.meta(note_id).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ControlError::not_found(format!("no note {note_id:?}")),
+            std::io::ErrorKind::InvalidInput => {
+                ControlError::bad_request(format!("invalid note id {note_id:?}"))
+            }
+            _ => io_control_error(error),
+        })?;
+        let record = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            match note_session_for(&registry, note_id) {
+                Some(existing) => existing,
+                None => {
+                    drop(registry);
+                    let cwd = note_home(meta.project.as_deref(), requested_cwd)?;
+                    let mut record =
+                        note_record(&id, &cwd, meta.display_title(), note_id.to_owned(), parent);
+                    record.created_at = diri_proto::DateMillis(meta.created as f64 * 1000.0);
+                    record.updated_at = diri_proto::DateMillis(meta.modified_ms as f64);
+                    // A concurrent adoption of the same file wins; return it.
+                    let registry = self.registry.lock().map_err(poisoned)?;
+                    if let Some(existing) = note_session_for(&registry, note_id) {
+                        existing
+                    } else {
+                        drop(registry);
+                        self.insert_note_record(record.clone())?;
+                        record
+                    }
+                }
+            }
+        };
+        // Stamp after the record exists: a crash in between leaves an
+        // unstamped file whose record the next startup scan recognises.
+        if meta.session.as_deref() != Some(record.id.0.as_str()) {
+            let session = record.id.0.clone();
+            store
+                .update(note_id, &diri_notes::history::Author::User, |note| {
+                    note.front
+                        .set(diri_notes::store::KEY_SESSION, Some(session));
+                    Ok(())
+                })
+                .map_err(io_control_error)?;
+        }
+        Ok(record)
+    }
+
+    fn insert_note_record(&self, record: diri_proto::SessionRecord) -> Result<(), ControlError> {
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        self.ensure_published_project(&mut registry, &record.cwd, None);
+        let id = record.id.0.clone();
+        registry.insert_record(record);
+        registry.persist_for_shutdown().map_err(io_control_error)?;
+        self.publish_updated(&registry, &id);
+        Ok(())
+    }
+
+    /// Gives every orphan note a Session so it shows in the sidebar: notes
+    /// written before note Sessions existed, or by `dirijor note` while the
+    /// Engine was down. An orphan is an unarchived file with no `session`
+    /// stamp and no Session; a note whose Session was removed keeps its stamp
+    /// and stays removed. Runs once per Engine start, oldest note first.
+    pub fn adopt_orphan_notes(&self) -> Result<usize, ControlError> {
+        let store = self.note_store()?;
+        self.relink_notes(&store)?;
+        let mut notes = store.list().map_err(io_control_error)?;
+        notes.sort_by(|a, b| a.created.cmp(&b.created).then(a.id.cmp(&b.id)));
+        let known: std::collections::HashSet<String> = self
+            .registry
+            .lock()
+            .map_err(poisoned)?
+            .records()
+            .into_iter()
+            .filter(diri_proto::SessionRecord::is_note)
+            .filter_map(|record| record.note_id)
+            .collect();
+        let mut adopted = 0;
+        for note in notes {
+            // Stamped: shown, or removed on purpose. Unstamped but listed:
+            // created before stamps, so adopt_note only stamps it.
+            let listed = known.contains(&note.id);
+            if note.session.is_some() || (note.archived && !listed) {
+                continue;
+            }
+            match self.adopt_note(&store, &note.id, None, None, next_session_id()) {
+                Ok(_) if !listed => adopted += 1,
+                Ok(_) => {}
+                Err(error) => diri_telemetry::event!(
+                    "notes.adopt_failed",
+                    code = diri_telemetry::id(&error.code),
+                ),
+            }
+        }
+        Ok(adopted)
+    }
+
+    /// Gives back a note Session's file link when its record lost it. An
+    /// Engine that predates notes rewrites state.json without `noteId` (it
+    /// does not know the field) and reaps the record as exited; the note then
+    /// opens as "file is gone" although its file is intact. The file names
+    /// its Session in front matter, so the link is recovered from there.
+    /// Returns how many records were repaired.
+    fn relink_notes(&self, store: &diri_notes::store::NoteStore) -> Result<usize, ControlError> {
+        let notes = store.list().map_err(io_control_error)?;
+        let mut repaired = 0;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        for note in notes {
+            let Some(session) = note.session.as_deref() else {
+                continue;
+            };
+            let Some(mut record) = registry.record(session) else {
+                continue;
+            };
+            if !record.is_note() || record.note_id.is_some() {
+                continue;
+            }
+            record.note_id = Some(note.id.clone());
+            if matches!(record.status, diri_proto::SessionStatus::Exited(_)) {
+                record.status = diri_proto::SessionStatus::Idle;
+            }
+            registry.insert_record(record);
+            self.publish_updated(&registry, session);
+            repaired += 1;
+        }
+        if repaired > 0 {
+            registry.persist_for_shutdown().map_err(io_control_error)?;
+            diri_telemetry::event!("notes.relinked", count = repaired);
+        }
+        Ok(repaired)
+    }
+
+    /// Adopts orphan notes on a one-shot thread, off the accept path.
+    pub fn spawn_note_adoption(self: &Arc<Self>) {
+        let server = Arc::clone(self);
+        let _ = std::thread::Builder::new()
+            .name("dirijord-note-adoption".into())
+            .spawn(move || {
+                if let Ok(adopted) = server.adopt_orphan_notes()
+                    && adopted > 0
+                {
+                    diri_telemetry::event!("notes.adopted", count = adopted);
+                }
+            });
+    }
+
+    /// The notes directory this Engine serves: pinned by the daemon, else the
+    /// standard location.
+    fn resolved_notes_dir(&self) -> Option<PathBuf> {
+        self.notes_dir
+            .clone()
+            .or_else(diri_notes::store::NoteStore::resolve_dir)
+    }
+
+    fn note_store(&self) -> Result<diri_notes::store::NoteStore, ControlError> {
+        let dir = match &self.notes_dir {
+            Some(dir) => dir.clone(),
+            None => diri_notes::store::NoteStore::resolve_dir()
+                .ok_or_else(|| ControlError::internal("no home directory for notes"))?,
+        };
+        diri_notes::store::NoteStore::open(dir).map_err(io_control_error)
+    }
+
     fn session_spawn_remote(
         &self,
         p: diri_proto::SessionSpawnParams,
         caller_argv: Vec<String>,
         mut account_profile: Option<diri_proto::AgentAccountProfile>,
         reserved_id: Option<String>,
+        scheduled: Option<diri_proto::schedules::ScheduledRunInfo>,
     ) -> Result<JsonValue, ControlError> {
         let manager = self
             .remote
@@ -1383,6 +1805,7 @@ impl ControlServer {
         };
 
         let mut record = new_record(&id, &kind, &captured.cwd);
+        record.scheduled_run = scheduled;
         record.account_profile = account_profile;
         record.kind = p.kind.clone();
         record.originating_prompt = p.initial_prompt.clone();
@@ -1415,8 +1838,17 @@ impl ControlServer {
             }),
             defer_launch: false,
         };
+        let spawn_started = Instant::now();
         self.spawn_session_with_intent(spec, Some(record), tracked)?;
         let mut registry = self.registry.lock().map_err(poisoned)?;
+        if let Some(record) = registry.record(&id) {
+            crate::telemetry::record_session_spawn(
+                &record,
+                "fresh",
+                spawn_started.elapsed(),
+                registry.other_live_agent(&id),
+            );
+        }
         self.ensure_published_project(&mut registry, &captured.cwd, Some(&host.id));
         if tracked {
             registry.persist_for_shutdown().map_err(io_control_error)?;
@@ -1712,6 +2144,15 @@ impl ControlServer {
         let revived = self.session_resume(Some(json!({ "sessionID": id })))?;
         let session: diri_proto::SessionRecord = serde_json::from_value(revived)
             .map_err(|error| ControlError::internal(error.to_string()))?;
+        diri_telemetry::event!(
+            "session.migrate",
+            session = diri_telemetry::id(&id),
+            agent = diri_telemetry::id(session.kind.id()),
+            from_host = record.host.as_deref().map(diri_telemetry::id),
+            to_host = session.host.as_deref().map(diri_telemetry::id),
+            transcript_migrated = shuttle.migrated,
+            warnings = warnings.len(),
+        );
         encode(&diri_proto::SessionMigrateResult {
             session,
             transcript_migrated: shuttle.migrated,
@@ -1999,7 +2440,7 @@ impl ControlServer {
         if registry.get(&p.session_id.0).is_none() {
             return Err(ControlError::not_found(p.session_id.0.clone()));
         }
-        message_delivery::deliver(
+        let receipt = message_delivery::deliver(
             &self
                 .socket_path
                 .with_file_name("message-receipts-v1.sqlite"),
@@ -2015,7 +2456,24 @@ impl ControlServer {
                     .send_text(&p.text, p.submit)
                     .map_err(io_control_error)
             },
-        )
+        );
+        if let Ok(receipt) = &receipt {
+            diri_telemetry::event!(
+                "message.deliver",
+                session = diri_telemetry::id(&p.session_id.0),
+                delivery = match receipt.get("delivery").and_then(Value::as_str) {
+                    Some("sent") => "sent",
+                    _ => "unknown",
+                },
+                duplicate = receipt
+                    .get("duplicate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                submit = p.submit,
+                chars = p.text.chars().count(),
+            );
+        }
+        receipt
     }
 
     fn session_send_key(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
@@ -2075,13 +2533,20 @@ impl ControlServer {
         let p: diri_proto::ResizeParams = decode(params)?;
         let cols = u16::try_from(p.cols.clamp(2, u16::MAX as i64)).expect("clamped");
         let rows = u16::try_from(p.rows.clamp(2, u16::MAX as i64)).expect("clamped");
-        let registry = self.registry.lock().map_err(poisoned)?;
-        let session = registry
-            .get(&p.session_id.0)
-            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
-        session
-            .resize(cols, rows)
-            .map_err(|error| ControlError::internal(error.to_string()))?;
+        let reflow = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            let session = registry
+                .get(&p.session_id.0)
+                .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+            session
+                .resize_pty(cols, rows)
+                .map_err(|error| ControlError::internal(error.to_string()))?
+        };
+        // The reflow runs after the Registry lock is released; see
+        // `Session::resize_pty`.
+        if let Some(reflow) = reflow {
+            reflow.apply();
+        }
         Ok(json!({}))
     }
 
@@ -2409,6 +2874,9 @@ impl ControlServer {
         if let Some(store) = &self.remote_bindings {
             let _ = store.remove(&p.session_id.0);
         }
+        // Closing a note's tab never touches its file: the note stays in
+        // Search notes (as a closed note) and opening it there brings its tab
+        // back, the way closed chats stay in conversation search.
         self.events.record_removed(&removed);
         self.events.publish(
             diri_proto::EventName::SESSION_REMOVED,
@@ -2448,6 +2916,20 @@ impl ControlServer {
         registry.persist_deferred();
         self.publish_updated(&registry, &p.session_id.0);
         self.pr_monitor_wake.wake_session(p.session_id.0);
+        Ok(json!({}))
+    }
+
+    fn session_mark_unread(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        if registry
+            .mark_unread(&p.session_id.0)
+            .map_err(io_control_error)?
+        {
+            // An explicit edit, but as small as mark-seen: same deferred write.
+            registry.persist_deferred();
+            self.publish_updated(&registry, &p.session_id.0);
+        }
         Ok(json!({}))
     }
 
@@ -2500,15 +2982,30 @@ impl ControlServer {
             "codex-notify" => crate::hooks::parse_codex_notify(&p.payload),
             _ => None,
         };
+        diri_telemetry::debug_event!(
+            "hook.report",
+            session = diri_telemetry::id(&session_id.0),
+            kind = diri_telemetry::id(&p.kind),
+            event = p.event.as_deref().map(diri_telemetry::id),
+            parsed = parsed.is_some(),
+        );
         let Some((signal, meta)) = parsed else {
             return Ok(json!({}));
         };
-        let mut registry = self.registry.lock().map_err(poisoned)?;
-        let changed = registry.apply_hook_report(&session_id.0, signal, &meta);
-        if changed {
-            let _ = registry.persist();
-        }
-        self.publish_updated(&registry, &session_id.0);
+        let session_end = p.kind == "claude-hook" && p.event.as_deref() == Some("SessionEnd");
+        // Never wait on the Registry here: the Agent is blocked on this reply.
+        self.hook_reports
+            .submit(
+                &self.registry,
+                &self.events,
+                hook_queue::HookReport {
+                    session_id: session_id.0,
+                    signal,
+                    meta,
+                    session_end,
+                },
+            )
+            .map_err(poisoned)?;
         Ok(json!({}))
     }
 
@@ -2653,35 +3150,62 @@ impl ControlServer {
                 && !matches!(record.status, diri_proto::SessionStatus::Exited(_))
             {
                 // Genuinely live: resuming is a no-op, not an error.
+                crate::telemetry::record_resume(&record, "already_live", None);
                 return self.restored_resume_result(&mut registry, &p.session_id.0);
             }
             record
         };
+        // A local terminal has no conversation to re-enter: it restarts as a
+        // fresh login shell, back in the directory it had `cd`'d to.
+        let restored_directory = restored_terminal_directory(&record);
         let mut spec = if record.host.is_some() {
+            crate::telemetry::record_resume(&record, "remote", record.agent_session_id.as_deref());
             self.remote_resume_spec(&record)?
+        } else if record.kind == diri_proto::AgentKind::SHELL {
+            crate::telemetry::record_resume(&record, "shell", None);
+            self.shell_restart_spec(&record, restored_directory.as_deref())?
         } else {
             let registry = self.registry.lock().map_err(poisoned)?;
             match claude_resume_target(&record) {
                 // Claude has no transcript for this tab: `--resume` would only
                 // print "No conversation found" and leave a bare shell, so
                 // start the tab's own id afresh instead.
-                Some(None) => self.fresh_spec(
-                    &registry,
-                    &record.id.0,
-                    record.kind.id(),
-                    &record.cwd,
-                    record.agent_session_id.as_deref(),
-                )?,
-                target => self.resume_spec(
-                    &registry,
-                    &record.id.0,
-                    record.kind.id(),
-                    &record.cwd,
-                    target
+                Some(None) => {
+                    crate::telemetry::record_resume(
+                        &record,
+                        "fresh_unwritten",
+                        record.agent_session_id.as_deref(),
+                    );
+                    self.fresh_spec(
+                        &registry,
+                        &record.id.0,
+                        record.kind.id(),
+                        &record.cwd,
+                        record.agent_session_id.as_deref(),
+                    )?
+                }
+                target => {
+                    let conversation = target
+                        .clone()
                         .flatten()
-                        .as_deref()
-                        .or(record.agent_session_id.as_deref()),
-                )?,
+                        .or_else(|| record.agent_session_id.clone());
+                    crate::telemetry::record_resume(
+                        &record,
+                        match (&target, &conversation) {
+                            (Some(Some(_)), _) => "resume_verified",
+                            (_, Some(_)) => "resume",
+                            (_, None) => "no_conversation",
+                        },
+                        conversation.as_deref(),
+                    );
+                    self.resume_spec(
+                        &registry,
+                        &record.id.0,
+                        record.kind.id(),
+                        &record.cwd,
+                        conversation.as_deref(),
+                    )?
+                }
             }
         };
         if record.host.is_none()
@@ -2709,6 +3233,21 @@ impl ControlServer {
             .record(&p.session_id.0)
             .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
         let exited = matches!(record.status, diri_proto::SessionStatus::Exited(_));
+        // The previous run's size is the pane's size: the App kept sizing that
+        // PTY. Waiting for the App to propose it again cost the whole launch
+        // fallback (an unchanged pane sends no resize) and started the agent
+        // at the 80x24 default, to be reflowed once the App caught up.
+        if let Some((cols, rows)) = registry
+            .get(&p.session_id.0)
+            .map(crate::session::Session::screen_size)
+            .or_else(|| previous_screen_size(&spec))
+            .and_then(|(cols, rows)| Some((u16::try_from(cols).ok()?, u16::try_from(rows).ok()?)))
+            .filter(|&(cols, rows)| cols >= 2 && rows >= 2)
+        {
+            spec.pty.cols = cols;
+            spec.pty.rows = rows;
+            spec.defer_launch = false;
+        }
         if registry.get(&p.session_id.0).is_some() {
             if !exited {
                 // Already live: resuming is a no-op, not an error.
@@ -2721,9 +3260,20 @@ impl ControlServer {
             // silently handing back the dead record it was asked to revive.
             let _ = registry.terminate(&p.session_id.0, std::time::Duration::from_millis(500));
         }
+        let local_shell = record.kind == diri_proto::AgentKind::SHELL && record.host.is_none();
         registry
             .respawn(spec)
             .map_err(|error| ControlError::internal(error.to_string()))?;
+        if local_shell {
+            // Report where the new shell actually starts before its first
+            // sample: the restored directory, or none when that directory is
+            // gone and the shell fell back to `cwd`.
+            registry.update_record(&p.session_id.0, |record| {
+                record.terminal_cwd = restored_directory
+                    .as_deref()
+                    .map(|path| path.to_string_lossy().into_owned());
+            });
+        }
         if let Some(persistence) = remote_persistence {
             registry.update_record(&p.session_id.0, |record| {
                 record.remote_persistence = Some(persistence);
@@ -2759,7 +3309,13 @@ impl ControlServer {
                 .record(&p.session_id.0)
                 .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?
         };
-        let kind = source.effective_kind().clone();
+        // An Agent started by hand in a shell has no conversation Diri
+        // knows, so a shell forks as the shell it is.
+        let kind = if source.kind == diri_proto::AgentKind::SHELL {
+            source.kind.clone()
+        } else {
+            source.effective_kind().clone()
+        };
         let id = next_session_id();
         let mut spec = if source.host.is_some() {
             self.remote_conversation_spec(&source, &id, &kind, ConversationAction::Fork)?
@@ -2791,7 +3347,7 @@ impl ControlServer {
         record.project_id = source.project_id.clone();
         record.worktree_path = source.worktree_path.clone();
         record.git_branch = source.git_branch.clone();
-        record.parent = Some(source.id.clone());
+        record.parent = Some(p.parent.clone().unwrap_or_else(|| source.id.clone()));
         record.host = source.host.clone();
         record.remote_persistence = remote_persistence;
         record.title = format!("Fork of {}", source.title);
@@ -2983,6 +3539,32 @@ impl ControlServer {
         })
     }
 
+    /// A fresh login shell under an existing local terminal's id, started in
+    /// `directory` when there is one and in the terminal's `cwd` otherwise.
+    /// It is launched exactly as `session.spawn` launches a new terminal.
+    fn shell_restart_spec(
+        &self,
+        record: &diri_proto::SessionRecord,
+        directory: Option<&Path>,
+    ) -> Result<crate::session::SessionSpec, ControlError> {
+        let registry = self.registry.lock().map_err(poisoned)?;
+        let kind = diri_proto::AgentKind::SHELL_ID;
+        let launch_path = directory.unwrap_or_else(|| Path::new(&record.cwd));
+        let mut pty = crate::pty::PtySpec::new(login_shell_argv(), launch_path);
+        pty.env = std::env::vars().collect();
+        crate::agent::assert_color_environment(&mut pty.env);
+        Ok(crate::session::SessionSpec {
+            id: record.id.0.clone(),
+            pty,
+            manifest_id: kind.to_owned(),
+            authority: crate::session::authority_for(kind, &registry.engine()),
+            logs_dir: self.logs_dir.clone(),
+            holder: self.holder.clone(),
+            remote: None,
+            defer_launch: true,
+        })
+    }
+
     /// Revives a conversation found in an agent's own history: a NEW record
     /// whose agent-side id is the transcript's.
     fn session_resume_from_history(
@@ -3003,9 +3585,18 @@ impl ControlServer {
         }
         let spec = self.resume_spec(&registry, &id, &kind, &p.entry.cwd, Some(&p.entry.id))?;
         self.ensure_published_project(&mut registry, &p.entry.cwd, None);
+        let spawn_started = Instant::now();
         registry
             .spawn(spec, record)
             .map_err(|error| ControlError::internal(error.to_string()))?;
+        if let Some(record) = registry.record(&id) {
+            crate::telemetry::record_session_spawn(
+                &record,
+                "history",
+                spawn_started.elapsed(),
+                registry.other_live_agent(&id),
+            );
+        }
         let _ = registry.persist();
         self.publish_updated(&registry, &id);
         let record = registry
@@ -3149,6 +3740,12 @@ impl ControlServer {
                     .to_string_lossy()
                     .into_owned(),
             ));
+            if let Some(dir) = self.resolved_notes_dir() {
+                pty.env.push((
+                    diri_proto::paths::ENV_NOTES_DIR.into(),
+                    dir.to_string_lossy().into_owned(),
+                ));
+            }
         }
         Ok(crate::session::SessionSpec {
             id: id.to_string(),
@@ -3176,6 +3773,17 @@ impl ControlServer {
             self.publish_updated(&registry, &record.id.0);
             record
         };
+        // A note has nothing to relaunch: bring its file back and show it.
+        if record.is_note() {
+            if let Some(note_id) = &record.note_id
+                && let Ok(store) = self.note_store()
+                && store.path_for(note_id).is_ok_and(|path| !path.exists())
+            {
+                let _ = store.restore(note_id);
+            }
+            return serde_json::to_value(&record)
+                .map_err(|error| ControlError::internal(error.to_string()));
+        }
         match self.session_resume(Some(serde_json::json!({ "sessionID": record.id.0 }))) {
             Ok(resumed) => Ok(resumed),
             Err(error) => {
@@ -3638,7 +4246,8 @@ impl ControlServer {
                     let Ok(mut registry) = server.registry.lock() else {
                         return;
                     };
-                    let live_sessions = registry.live_count();
+                    // An enabled schedule is work the Engine must stay up for.
+                    let live_sessions = registry.live_count() + server.scheduler.enabled_count();
                     if !watch.observe(live_sessions, connections, Instant::now(), grace) {
                         continue;
                     }
@@ -3675,6 +4284,8 @@ impl ControlServer {
                 browser.shutdown();
             }
             let _ = std::fs::remove_file(socket_path);
+            diri_telemetry::event!("engine.exit", reason = "shutdown");
+            diri_telemetry::flush(Duration::from_secs(1));
             std::process::exit(0);
         });
         Ok(json!({}))
@@ -3698,6 +4309,27 @@ impl ControlServer {
     }
 
     /// Publishes `session.updated` with the session's current record.
+    /// Relays a request to show a Session to every app window.
+    fn session_reveal(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let id = p.session_id.0;
+        if self
+            .registry
+            .lock()
+            .map_err(poisoned)?
+            .record(&id)
+            .is_none()
+        {
+            return Err(ControlError::not_found(format!("no session {id}")));
+        }
+        self.events.publish_encoded(
+            diri_proto::EventName::SESSION_REVEAL,
+            &json!({ "sessionID": id }),
+            Some(&id),
+        );
+        Ok(json!({}))
+    }
+
     fn publish_updated(&self, registry: &Registry, id: &str) {
         // One folded record, not a folded copy of the whole table.
         if let Some(record) = registry.record(id) {
@@ -3757,6 +4389,11 @@ impl ControlServer {
         Ok(json!({}))
     }
 
+    /// Open control and data connections.
+    pub fn connection_count(&self) -> usize {
+        self.active_connections.load(Ordering::SeqCst)
+    }
+
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
@@ -3774,6 +4411,19 @@ impl Drop for ControlServer {
 /// `None` leaves the record's id untouched (not Claude, or nothing to check
 /// against), `Some(Some(id))` resumes a conversation whose transcript exists,
 /// and `Some(None)` means the tab's id was never written and must start fresh.
+/// The grid size of this session's last screen checkpoint: the size its
+/// previous run was using when the Engine last saved it.
+fn previous_screen_size(spec: &crate::session::SessionSpec) -> Option<(usize, usize)> {
+    let log = spec.logs_dir.join(format!("{}.bin", spec.id));
+    let checkpoint = crate::checkpoint::ScreenCheckpoint::load(
+        &crate::checkpoint::ScreenCheckpoint::path_for_log(&log),
+    )?;
+    Some((
+        usize::from(checkpoint.grid.cols),
+        usize::from(checkpoint.grid.rows),
+    ))
+}
+
 fn claude_resume_target(record: &diri_proto::SessionRecord) -> Option<Option<String>> {
     claude_resume_target_in(record, Path::new(&std::env::var_os("HOME")?))
 }
@@ -3877,6 +4527,64 @@ fn random_session_token() -> Result<diri_proto::remote_pty::SessionToken, Contro
         .map_err(|error| ControlError::internal(error.to_string()))
 }
 
+/// Who wrote a note the Engine creates: the agent it was created for, else
+/// the person at the app.
+fn note_author(parent: Option<&diri_proto::SessionId>) -> diri_notes::history::Author {
+    parent.map_or(diri_notes::history::Author::User, |parent| {
+        diri_notes::history::Author::Session(parent.0.clone())
+    })
+}
+
+/// The note Session showing `note_id`, if any.
+fn note_session_for(registry: &Registry, note_id: &str) -> Option<diri_proto::SessionRecord> {
+    registry
+        .records()
+        .into_iter()
+        .find(|record| record.is_note() && record.note_id.as_deref() == Some(note_id))
+}
+
+/// Where an adopted note lives in the sidebar: its own project folder when it
+/// still exists, else the folder the caller asked for, else the home folder,
+/// where a note with no project (an Inbox note) belongs, the same place a new
+/// terminal without a project opens.
+fn note_home(project: Option<&str>, requested: Option<&str>) -> Result<String, ControlError> {
+    project
+        .into_iter()
+        .chain(requested)
+        .find(|path| Path::new(path).is_dir())
+        .map(str::to_owned)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|home| Path::new(home).is_dir())
+                .map(|home| home.to_string_lossy().into_owned())
+        })
+        .ok_or_else(|| ControlError::internal("no folder to place the note in"))
+}
+
+fn note_record(
+    id: &str,
+    cwd: &str,
+    title: &str,
+    note_id: String,
+    parent: Option<diri_proto::SessionId>,
+) -> diri_proto::SessionRecord {
+    let mut record = new_record(id, diri_proto::AgentKind::NOTE_ID, cwd);
+    record.kind = diri_proto::AgentKind::NOTE;
+    record.project_id = crate::registry::session_project_id(cwd, None);
+    if title.trim().is_empty() {
+        record.title = "Untitled".into();
+    } else {
+        record.title = title.trim().to_owned();
+        record.title_source = diri_proto::TitleSource::DirijorAssigned;
+    }
+    record.parent = parent;
+    record.git_branch = None;
+    record.status = diri_proto::SessionStatus::Idle;
+    record.resumability = diri_proto::Resumability::NotResumable;
+    record.note_id = Some(note_id);
+    record
+}
+
 pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::SessionRecord {
     use diri_proto::{AgentKind, DateMillis, Resumability, SessionId, TitleSource};
     let now: DateMillis = std::time::SystemTime::now().into();
@@ -3915,6 +4623,11 @@ pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::Session
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        terminal_cwd: None,
+        note_id: None,
+        foreground_ports: None,
+        terminal_progress: None,
+        scheduled_run: None,
     }
 }
 
@@ -3989,6 +4702,8 @@ fn release_idle_engine(
         browser.shutdown();
     }
     let _ = std::fs::remove_file(socket_path);
+    diri_telemetry::event!("engine.exit", reason = "idle");
+    diri_telemetry::flush(Duration::from_secs(1));
     std::process::exit(0);
 }
 
@@ -4014,6 +4729,40 @@ impl OrphanWatch {
         let since = *self.idle_since.get_or_insert(now);
         now.duration_since(since) >= grace
     }
+}
+
+/// Uploads the telemetry spool now at the user's request (Settings, Report a
+/// Problem). Runs as a background request: the upload can take seconds.
+fn telemetry_upload_now() -> Result<JsonValue, ControlError> {
+    use diri_telemetry::upload::UploadNow;
+    let result = match diri_telemetry::upload::upload_now(Duration::from_secs(45)) {
+        UploadNow::Unavailable => diri_proto::TelemetryUploadNowResult {
+            status: "unavailable".into(),
+            ..Default::default()
+        },
+        UploadNow::TimedOut => diri_proto::TelemetryUploadNowResult {
+            status: "timeout".into(),
+            ..Default::default()
+        },
+        UploadNow::Done(report) => diri_proto::TelemetryUploadNowResult {
+            status: if report.failed {
+                "failed"
+            } else if report.batches == 0 {
+                "up_to_date"
+            } else {
+                "sent"
+            }
+            .into(),
+            batches: u32::try_from(report.batches).unwrap_or(u32::MAX),
+            records: report.lines as u64,
+        },
+    };
+    diri_telemetry::event!(
+        "telemetry.upload_now",
+        status = diri_telemetry::id(&result.status),
+        batches = result.batches,
+    );
+    encode(&result)
 }
 
 fn idle_shutdown_refusal(live_sessions: usize, connections: usize) -> Option<&'static str> {
@@ -4200,9 +4949,95 @@ fn prepare_agent_input(
         accept_claude_workspace_trust(registry, session_id);
     }
     if let Some(prompt) = prompt {
+        let gemini = with_session(registry, session_id, |session| {
+            session.manifest_id() == diri_proto::AgentKind::GEMINI_ID
+        })
+        .unwrap_or(false);
+        if gemini {
+            accept_gemini_folder_trust(registry, session_id);
+        }
+        let pi = with_session(registry, session_id, |session| {
+            session.manifest_id() == "pi"
+        })
+        .unwrap_or(false);
+        if pi {
+            accept_pi_project_trust(registry, session_id);
+        }
+        let grok = with_session(registry, session_id, |session| {
+            session.manifest_id() == "grok"
+        })
+        .unwrap_or(false);
+        if grok {
+            wait_for_grok_composer(registry, session_id)?;
+        }
+        let kimi = with_session(registry, session_id, |session| {
+            session.manifest_id() == "kimi"
+        })
+        .unwrap_or(false);
+        if kimi {
+            accept_kimi_workspace_trust(registry, session_id);
+        }
+        let copilot = with_session(registry, session_id, |session| {
+            session.manifest_id() == "copilot"
+        })
+        .unwrap_or(false);
+        if copilot {
+            accept_copilot_folder_trust(registry, session_id);
+        }
+        let cursor = with_session(registry, session_id, |session| {
+            session.manifest_id() == diri_proto::AgentKind::CURSOR_ID
+        })
+        .unwrap_or(false);
+        if cursor {
+            prepare_cursor_input(registry, session_id)?;
+        }
         inject_initial_prompt(registry, session_id, prompt)?;
     }
     Ok(())
+}
+
+/// Grok paints a composer-shaped placeholder on its unauthenticated welcome
+/// screen. Pasting there drops the prompt; Enter starts login, and the fresh
+/// NeedsInput evidence can falsely confirm delivery. Only its interactive
+/// footer or authenticated home menu proves readiness. Never answer login for a user.
+fn wait_for_grok_composer(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+) -> Result<(), InitialPromptFailure> {
+    for _ in 0..200 {
+        let text = screen_text(registry, session_id).ok_or(InitialPromptFailure::SessionEnded)?;
+        let bottom = text
+            .lines()
+            .rev()
+            .filter(|line| !line.trim().is_empty())
+            .take(8)
+            .collect::<Vec<_>>();
+        if bottom
+            .iter()
+            .any(|line| line.split_whitespace().eq(["Login", "with", "Grok", "l"]))
+            && bottom
+                .iter()
+                .any(|line| line.split_whitespace().eq(["Quit", "q"]))
+        {
+            return Err(InitialPromptFailure::SubmissionUnconfirmed);
+        }
+        let authenticated_home = text
+            .lines()
+            .any(|line| line.contains("New worktree") && line.contains("ctrl+w"))
+            && text
+                .lines()
+                .any(|line| line.contains("Resume session") && line.contains("ctrl+r"));
+        if authenticated_home
+            || bottom.iter().any(|line| {
+                let line = line.to_ascii_lowercase();
+                line.contains("ctrl+x:shortcuts") || line.contains("ctrl+.:shortcuts")
+            })
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(InitialPromptFailure::SubmissionUnconfirmed)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4240,13 +5075,25 @@ fn initial_prompt_control_error(session_id: &str, failure: InitialPromptFailure)
 /// directory the session was pointed at. That is defensible when the user
 /// picked the directory in the UI, and weaker when they did not — an
 /// orchestrator spawning into a freshly cloned repository gets trust without
-/// anyone affirming it. The window is bounded (20s, and it stops at the first
-/// non-matching screen), but a session whose own output contains the matched
-/// phrases inside that window would also receive the keystroke.
+/// anyone affirming it. The window is bounded (20s), but a session whose own
+/// output contains the matched phrases inside that window would also receive
+/// the keystroke.
+///
+/// The watch ends as soon as a Claude hook reports: Claude runs no hooks
+/// until the workspace is trusted, so a hook proves the picker is not coming.
+/// Without that exit an already-trusted folder — the common case — held a
+/// spawn's initial prompt, and the spawn RPC with it, for the full 20s.
 fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
     for _ in 0..200 {
-        let Some((exited, screen)) = with_session(registry, session_id, |session| {
-            (session.view().exited, session.screen_lines().join("\n"))
+        let Some((exited, screen, hooked)) = with_session(registry, session_id, |session| {
+            let view = session.view();
+            (
+                view.exited,
+                session.screen_lines().join("\n"),
+                view.status_evidence.is_some_and(|evidence| {
+                    evidence.source == diri_proto::StatusEvidenceSource::Hook
+                }),
+            )
         }) else {
             return;
         };
@@ -4254,6 +5101,10 @@ fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &s
             return;
         }
         if is_claude_workspace_trust_screen(&screen) {
+            diri_telemetry::event!(
+                "prompt.workspace_trust_accepted",
+                session = diri_telemetry::id(session_id),
+            );
             let _ = with_session(registry, session_id, |session| session.send_text("1", true));
             // Let Claude persist trust and replace the picker before a caller's
             // initial prompt starts its own readiness/verification loop.
@@ -4269,6 +5120,9 @@ fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &s
             }
             return;
         }
+        if hooked {
+            return;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -4279,6 +5133,320 @@ fn is_claude_workspace_trust_screen(screen: &str) -> bool {
         && (normalized.contains("1.") || normalized.contains("1 "))
 }
 
+/// Answers Gemini CLI's "Do you trust the files in this folder?" dialog when
+/// a spawn carries an initial prompt, then waits out the restart Gemini does
+/// to apply trust.
+///
+/// Before this the injector's paste-then-Enter answered the dialog by
+/// accident: Enter picks the preselected "Trust folder", Gemini restarts, and
+/// the prompt died with the old process while the spawn reported success. The
+/// trade is the one [`accept_claude_workspace_trust`] documents, and it is no
+/// wider than the accidental Enter was. Without a prompt the dialog is left to
+/// the user, where the manifest reports it as a question.
+///
+/// A trusted folder costs about a second: the composer has to stand alone
+/// long enough to rule out the dialog Gemini opens just after it. Capped at
+/// 20s either way.
+fn accept_gemini_folder_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted_at: Option<Instant> = None;
+    let mut composer_since: Option<Instant> = None;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_gemini_folder_trust_screen(&screen) {
+            composer_since = None;
+            if accepted_at.is_none() {
+                diri_telemetry::event!(
+                    "prompt.workspace_trust_accepted",
+                    session = diri_telemetry::id(session_id),
+                );
+                // Enter on the preselected "1. Trust folder": a digit would
+                // only move Gemini's selection.
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted_at = Some(Instant::now());
+            }
+        } else if is_gemini_composer_screen(&screen) {
+            // The outgoing process can repaint its composer before it
+            // restarts, and a prompt typed into it dies with it. After an
+            // accept, only a composer drawn below the restart notice is the
+            // new process's; the time bound covers a Gemini that applies
+            // trust without restarting.
+            //
+            // Before any accept, Gemini paints the composer first and opens
+            // the dialog ~100 ms later, so the composer only proves a
+            // trusted folder once it has stood alone for a moment.
+            let since = *composer_since.get_or_insert_with(Instant::now);
+            let ready = match accepted_at {
+                None => since.elapsed() >= GEMINI_TRUST_QUIET,
+                Some(accepted) => {
+                    gemini_restarted_below_notice(&screen)
+                        || accepted.elapsed() > Duration::from_secs(5)
+                }
+            };
+            if ready {
+                return;
+            }
+        } else {
+            composer_since = None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// How long Gemini's composer must stand with no trust dialog before a
+/// folder counts as already trusted.
+const GEMINI_TRUST_QUIET: Duration = Duration::from_secs(1);
+
+/// True when Gemini's composer appears after its "restarting to apply the
+/// trust changes" notice, i.e. the relaunched process has drawn its UI.
+fn gemini_restarted_below_notice(lines: &[String]) -> bool {
+    let notice = lines
+        .iter()
+        .rposition(|line| line.contains("restarting to apply the trust changes"));
+    let composer = lines.iter().rposition(|line| {
+        line.to_lowercase()
+            .contains("type your message or @path/to/file")
+    });
+    matches!((notice, composer), (Some(notice), Some(composer)) if composer > notice)
+}
+
+/// Gemini's trust dialog, anchored to its option lines at the bottom of the
+/// screen: the question itself stays in view above the restarted UI.
+fn is_gemini_folder_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 8)
+        .join("\n")
+        .to_lowercase();
+    bottom.contains("1. trust folder") && bottom.contains("don't trust")
+}
+
+fn is_gemini_composer_screen(lines: &[String]) -> bool {
+    crate::detect::bottom_non_empty(lines, 8)
+        .join("\n")
+        .to_lowercase()
+        .contains("type your message or @path/to/file")
+}
+
+/// Answers Pi's startup "Trust project folder?" selector when a spawn carries
+/// an initial prompt, then waits for the composer Pi draws once startup goes
+/// on.
+///
+/// Pi asks before its interactive UI exists, whenever the folder holds
+/// project resources (`.pi/settings.json`, `.pi/extensions`, ...). The
+/// injector's paste went into the selector, which drops it, and its blind
+/// Enter picked the preselected "Trust" and saved it: the folder ended up
+/// trusted anyway and the prompt was gone. The trade is the one
+/// [`accept_claude_workspace_trust`] documents, and it is no wider than the
+/// accidental Enter was. Without a prompt the selector is left to the user,
+/// where the manifest reports it as a question.
+///
+/// The composer only ever follows the selector, so it ends the wait as soon
+/// as it shows. Capped at 20s.
+fn accept_pi_project_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted = false;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_pi_project_trust_screen(&screen) {
+            if !accepted {
+                diri_telemetry::event!(
+                    "prompt.workspace_trust_accepted",
+                    session = diri_telemetry::id(session_id),
+                );
+                // Enter on the preselected "→ Trust".
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted = true;
+            }
+        } else if is_pi_composer_screen(&screen) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Pi's trust selector, anchored to its key hint at the bottom of the screen.
+fn is_pi_project_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 16);
+    let hint = bottom
+        .iter()
+        .rev()
+        .take(3)
+        .any(|line| line.contains("↑↓ navigate"));
+    hint && bottom
+        .iter()
+        .any(|line| line.to_lowercase().contains("trust project folder?"))
+}
+
+/// Pi's composer: two bare full-width rules (above and below the input)
+/// directly over its two-line footer.
+fn is_pi_composer_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 6);
+    let rules = bottom
+        .iter()
+        .filter(|line| {
+            let line = line.trim();
+            line.chars().count() >= 10 && line.chars().all(|c| c == '─')
+        })
+        .count();
+    rules >= 2 && !bottom.iter().any(|line| line.contains("↑↓ navigate"))
+}
+
+/// Kimi 2.x gates every new workspace before creating its first session.
+/// Pasting into that selector drops the prompt, then the injector's Enter
+/// accepts trust anyway. Handle trust explicitly before delivering the prompt,
+/// as for Pi/Gemini. Without an initial prompt leave this choice to the user.
+fn accept_kimi_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted = false;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_kimi_workspace_trust_screen(&screen) {
+            if !accepted {
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted = true;
+            }
+        } else if crate::detect::bottom_non_empty(&screen, 5)
+            .iter()
+            .any(|line| line.trim_start().starts_with("│ >"))
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn is_kimi_workspace_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 16);
+    bottom
+        .iter()
+        .any(|line| line.contains("Trust this folder?"))
+        && bottom
+            .iter()
+            .any(|line| line.contains("↑↓ navigate · Enter select · Esc exit"))
+        && !crate::detect::bottom_non_empty(lines, 5)
+            .iter()
+            .any(|line| line.trim_start().starts_with("│ >"))
+}
+
+/// Copilot's folder selector drops pasted text; a blind Enter then accepts
+/// trust with the initial prompt lost. As with Gemini/Pi, explicitly accept
+/// the one-session "Yes" before injecting, only when a prompt was requested.
+/// Do not persist trust or answer any other dialog. Without a prompt the
+/// selector remains visible and the manifest reports needs-input.
+fn accept_copilot_folder_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted = false;
+    let mut composer_since: Option<Instant> = None;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_copilot_folder_trust_screen(&screen) {
+            composer_since = None;
+            if !accepted {
+                diri_telemetry::event!(
+                    "prompt.workspace_trust_accepted",
+                    session = diri_telemetry::id(session_id),
+                );
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted = true;
+            }
+        } else if crate::detect::bottom_non_empty(&screen, 3)
+            .iter()
+            .any(|line| line.contains("/ commands") && line.contains("? help"))
+        {
+            // Folder trust is checked asynchronously after the UI mounts.
+            let since = *composer_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= Duration::from_secs(1) {
+                return;
+            }
+        } else {
+            composer_since = None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn is_copilot_folder_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 20).join("\n");
+    bottom.contains("Confirm folder trust")
+        && bottom.contains("Do you trust the files in this folder?")
+        && bottom.contains("❯ 1. Yes")
+        && crate::detect::bottom_non_empty(lines, 3)
+            .iter()
+            .any(|line| line.contains("enter to select") && line.contains("esc to cancel"))
+}
+
+/// Cursor asks for workspace trust before creating its composer. Pasting into
+/// that selector drops the prompt, and the injector's later Enter accepts trust.
+/// Answer that specific selector first, with the same workspace-trust tradeoff
+/// as Claude/Gemini/Pi. Never send an initial prompt to onboarding: any byte there
+/// starts browser login. Wait for the user to finish it, or fail unconfirmed.
+fn prepare_cursor_input(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+) -> Result<(), InitialPromptFailure> {
+    let mut accepted = false;
+    for _ in 0..200 {
+        let (exited, lines) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        })
+        .ok_or(InitialPromptFailure::SessionEnded)?;
+        if exited {
+            return Err(InitialPromptFailure::SessionEnded);
+        }
+        if is_cursor_workspace_trust_screen(&lines) {
+            if !accepted {
+                with_session(registry, session_id, |session| {
+                    session.send_text("a", false)
+                })
+                .ok_or(InitialPromptFailure::SessionEnded)?
+                .map_err(|_| InitialPromptFailure::InputFailed)?;
+                accepted = true;
+            }
+        } else if crate::detect::bottom_non_empty(&lines, 8)
+            .iter()
+            .any(|line| {
+                let line = line.trim();
+                line.starts_with("→ Plan, search, build anything")
+                    || line.starts_with("→ Add a follow-up")
+            })
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(InitialPromptFailure::SubmissionUnconfirmed)
+}
+
+fn is_cursor_workspace_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 8).join("\n");
+    bottom.contains("[a] Trust this workspace")
+        && bottom.contains("[q] Quit")
+        && bottom.contains("Use arrow keys to navigate, Enter to select, or press the key shown")
+}
+
 /// Types and submits an initial prompt at most once. Screen observations can
 /// confirm acceptance, but an absent echo cannot prove that input was lost.
 /// Never clear/retype or send another Enter after an ambiguous outcome.
@@ -4286,6 +5454,40 @@ fn inject_initial_prompt(
     registry: &Arc<Mutex<Registry>>,
     session_id: &str,
     prompt: &str,
+) -> Result<(), InitialPromptFailure> {
+    let started = Instant::now();
+    let mut delivery = "echo_verified";
+    let result = deliver_initial_prompt(registry, session_id, prompt, &mut delivery);
+    match result {
+        Ok(()) => diri_telemetry::event!(
+            "prompt.delivered",
+            session = diri_telemetry::id(session_id),
+            delivery = delivery,
+            chars = prompt.chars().count(),
+            ms = started.elapsed(),
+        ),
+        Err(failure) => diri_telemetry::error_event!(
+            "prompt.delivery_failed",
+            session = diri_telemetry::id(session_id),
+            delivery = delivery,
+            reason = match failure {
+                InitialPromptFailure::SessionEnded => "session_ended",
+                InitialPromptFailure::SubmissionUnconfirmed => "submission_unconfirmed",
+                InitialPromptFailure::InputFailed => "input_failed",
+            },
+            chars = prompt.chars().count(),
+            ms = started.elapsed(),
+        ),
+    }
+    result
+}
+
+/// [`inject_initial_prompt`]'s steps; `delivery` names the path taken.
+fn deliver_initial_prompt(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+    prompt: &str,
+    delivery: &mut &'static str,
 ) -> Result<(), InitialPromptFailure> {
     if !wait_until_ready(registry, session_id) {
         return Err(InitialPromptFailure::SessionEnded);
@@ -4295,15 +5497,23 @@ fn inject_initial_prompt(
     with_session(registry, session_id, |session| session.paste_text(prompt))
         .ok_or(InitialPromptFailure::SessionEnded)?
         .map_err(|_| InitialPromptFailure::InputFailed)?;
-    match wait_for_echo(registry, session_id, probe.as_deref(), &before, ECHO_WINDOW) {
+    match wait_for_echo(
+        registry,
+        session_id,
+        probe.as_deref(),
+        &before,
+        ECHO_WINDOW,
+        None,
+    ) {
         EchoOutcome::Gone => return Err(InitialPromptFailure::SessionEnded),
-        EchoOutcome::Visible => {
-            return submit_typed_prompt(registry, session_id, probe.as_deref());
+        EchoOutcome::Visible(shown) => {
+            return submit_typed_prompt(registry, session_id, shown.as_deref());
         }
-        EchoOutcome::Missing => {}
+        EchoOutcome::Missing => *delivery = "blind_enter",
     }
     // A line-mode reader may not display anything until Enter. Send it once;
     // a missing response leaves an unknown outcome, never permission to retry.
+    let submitted_at = diri_proto::DateMillis::from(std::time::SystemTime::now());
     with_session(registry, session_id, |session| session.submit_input())
         .ok_or(InitialPromptFailure::SessionEnded)?
         .map_err(|_| InitialPromptFailure::InputFailed)?;
@@ -4313,17 +5523,20 @@ fn inject_initial_prompt(
         probe.as_deref(),
         &before,
         LANDED_WINDOW,
+        Some(submitted_at),
     ) {
         EchoOutcome::Gone => Err(InitialPromptFailure::SessionEnded),
-        EchoOutcome::Visible => Ok(()),
+        EchoOutcome::Visible(_) => Ok(()),
         EchoOutcome::Missing => Err(InitialPromptFailure::SubmissionUnconfirmed),
     }
 }
 
 /// What the screen said about a prompt we just typed.
 enum EchoOutcome {
-    /// The prompt is visibly sitting in the composer: safe to submit.
-    Visible,
+    /// The prompt is visibly sitting in the composer: safe to submit. Carries
+    /// the text that proved it — the probe, or the placeholder a TUI shows in
+    /// place of a long paste — for the submission check to watch.
+    Visible(Option<String>),
     /// No echo was observed; acceptance is unknown.
     Missing,
     /// The session exited or vanished — stop touching it.
@@ -4333,19 +5546,25 @@ enum EchoOutcome {
 /// How long to watch for the prompt to echo back as it is typed, and how long
 /// to watch for it after submitting. The first is short because a TUI that
 /// renders its composer does so immediately; the second is longer because it
-/// covers a round trip through the agent.
+/// covers a round trip through the agent, which Codex holds back until all
+/// of its MCP servers have started. Both end early on confirmation, so the
+/// long window only delays reporting an outcome that stays unknown.
 const ECHO_WINDOW: Duration = Duration::from_millis(1500);
-const LANDED_WINDOW: Duration = Duration::from_millis(2500);
+const LANDED_WINDOW: Duration = Duration::from_secs(10);
 
 /// Polls for the typed prompt to appear on screen. With no usable probe —
 /// every word of the prompt was already on screen — any change from `before`
-/// is taken as the echo, which is the best signal available in that case.
+/// is taken as the echo, which is the best signal available in that case. A
+/// paste placeholder that was not on screen before also counts: Claude and
+/// Codex show one instead of a long paste, so no word of it ever appears.
+/// With `submitted_at`, fresh Agent evidence after that Enter counts too.
 fn wait_for_echo(
     registry: &Arc<Mutex<Registry>>,
     session_id: &str,
     probe: Option<&str>,
     before: &str,
     window: Duration,
+    submitted_at: Option<diri_proto::DateMillis>,
 ) -> EchoOutcome {
     let polls = (window.as_millis() / 100).max(1);
     for _ in 0..polls {
@@ -4360,10 +5579,31 @@ fn wait_for_echo(
         }
         let echoed = probe.map_or_else(|| now != before, |probe| now.contains(probe));
         if echoed {
-            return EchoOutcome::Visible;
+            return EchoOutcome::Visible(probe.map(str::to_owned));
+        }
+        if let Some(placeholder) = new_paste_placeholder(before, &now) {
+            return EchoOutcome::Visible(Some(placeholder));
+        }
+        if submitted_at.is_some_and(|at| agent_started_working(registry, session_id, at)) {
+            return EchoOutcome::Visible(None);
         }
     }
     EchoOutcome::Missing
+}
+
+/// Claude Code shows `[Pasted text #1 +6 lines]` and Codex `[Pasted Content
+/// 1234 chars]` in place of a long paste. The first such marker on `now` that
+/// `before` lacked is the composer's echo of our paste.
+fn new_paste_placeholder(before: &str, now: &str) -> Option<String> {
+    static PLACEHOLDER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\[Pasted (?:text #\d+(?: \+\d+ lines)?|Content \d+ chars)\]")
+            .expect("paste placeholder pattern compiles")
+    });
+    PLACEHOLDER
+        .find_iter(now)
+        .map(|found| found.as_str())
+        .find(|placeholder| !before.contains(placeholder))
+        .map(str::to_owned)
 }
 
 /// Presses Enter on a prompt already verified to be in the composer, and
@@ -4394,7 +5634,7 @@ fn submit_typed_prompt(
     // The prompt may remain in the transcript after submission. In that
     // case require a fresh, authoritative Agent signal; startup output or
     // a status that predates Enter cannot acknowledge these bytes.
-    for _ in 0..20 {
+    for _ in 0..LANDED_WINDOW.as_millis() / 100 {
         std::thread::sleep(Duration::from_millis(100));
         match screen_text(registry, session_id) {
             None => return Err(InitialPromptFailure::SessionEnded),
@@ -4494,12 +5734,14 @@ fn wait_until_ready(registry: &Arc<Mutex<Registry>>, session_id: &str) -> bool {
         if exited {
             return false;
         }
-        if paste {
+        if paste && !text.trim().is_empty() {
             // Paste mode says the input line exists; it does NOT say the TUI
             // has stopped repainting over it. Claude Code turns paste mode on
             // while its banner and tips panel are still landing, and anything
             // typed into that window is discarded. Wait for the screen to
-            // hold still before treating the composer as real.
+            // hold still before treating the composer as real. OpenCode
+            // turns paste mode on before its first paint: a blank screen is
+            // not a composer, however still it holds.
             return screen_settled(registry, session_id);
         }
         if !text.trim().is_empty() && text == last_text {
@@ -4578,9 +5820,31 @@ const MAX_PROBE_CHARS: usize = 20;
 mod tests {
     use super::*;
 
+    mod agent_relaunch_tests;
     mod find_capture_tests;
     mod reconnect_tests;
     mod send_key_tests;
+
+    #[test]
+    fn kimi_trust_requires_the_active_selector() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let trust = include_str!("../tests/fixtures/kimi_screens/trust.txt");
+        let idle = include_str!("../tests/fixtures/kimi_screens/idle.txt");
+        assert!(is_kimi_workspace_trust_screen(&lines(trust)));
+        assert!(!is_kimi_workspace_trust_screen(&lines(idle)));
+        assert!(!is_kimi_workspace_trust_screen(&lines(&format!(
+            "{trust}{idle}"
+        ))));
+    }
+
+    #[test]
+    fn telemetry_upload_now_reports_unavailable_without_an_uploader() {
+        // Debug builds and tests never start the uploader.
+        let value = telemetry_upload_now().unwrap();
+        let result: diri_proto::TelemetryUploadNowResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.status, "unavailable");
+        assert_eq!(result.batches, 0);
+    }
 
     #[test]
     fn a_shared_event_frame_is_the_line_control_message_writes() {
@@ -4754,6 +6018,11 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
+            scheduled_run: None,
         }
     }
 
@@ -4791,6 +6060,8 @@ mod tests {
 
     fn ended_resumable_record(id: &str, repo: &Path) -> diri_proto::SessionRecord {
         let mut record = test_record(id);
+        // An Agent's conversation: a terminal typed `exit` is closed for good.
+        record.kind = diri_proto::AgentKind::CLAUDE_CODE;
         record.cwd = repo.to_string_lossy().into_owned();
         record.project_id = crate::registry::session_project_id(&record.cwd, None);
         record.status = diri_proto::SessionStatus::Exited(diri_proto::ExitInfo {
@@ -4834,6 +6105,311 @@ mod tests {
             .read_line(&mut response)
             .expect("background response");
         serde_json::from_str(&response).expect("a request gets a response")
+    }
+
+    #[test]
+    fn note_sessions_have_a_file_and_survive_the_restart_reaper() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let server = Arc::new(
+            ControlServer::new(Arc::clone(&registry), temp.path().join("daemon.sock"))
+                .with_notes_dir(temp.path().join("notes")),
+        );
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let record = ok_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({
+                "kind": "note",
+                "cwd": project.to_string_lossy(),
+                "title": "Launch plan",
+                "initialPrompt": "- [ ] ship it",
+            })),
+        ));
+        let record: diri_proto::SessionRecord = serde_json::from_value(record).expect("record");
+        assert!(record.is_note());
+        assert_eq!(record.title, "Launch plan");
+        assert!(matches!(record.status, diri_proto::SessionStatus::Idle));
+        let note_id = record.note_id.clone().expect("note id");
+        let store = diri_notes::store::NoteStore::open(temp.path().join("notes")).expect("store");
+        let note = store.load(&note_id).expect("note file");
+        assert_eq!(note.doc.title, "Launch plan");
+        assert_eq!(note.doc.todo_progress(), (0, 1));
+        assert_eq!(note.project(), Some(project.to_string_lossy().as_ref()));
+
+        // Closing the note's tab keeps its file, so search can still find it;
+        // reopening brings the tab back.
+        ok_of(call(
+            &server,
+            "session.remove",
+            Some(json!({ "sessionID": record.id.0 })),
+        ));
+        assert!(store.load(&note_id).is_ok(), "a closed note stays findable");
+        let reopened = ok_of(call(&server, "session.reopen_last", None));
+        assert_eq!(reopened["id"], record.id.0.as_str());
+        assert_eq!(store.load(&note_id).unwrap().doc.title, "Launch plan");
+
+        // An Engine that predates notes drops `noteId` from the record and
+        // reaps it; the next notes-aware start links it back from the file.
+        {
+            let mut registry = registry.lock().expect("registry");
+            let mut broken = registry.record(&record.id.0).expect("listed");
+            broken.note_id = None;
+            broken.status = diri_proto::SessionStatus::Exited(diri_proto::ExitInfo {
+                reason: diri_proto::ExitReason::DaemonRestart,
+                code: None,
+                signal: None,
+            });
+            registry.insert_record(broken);
+        }
+        server.adopt_orphan_notes().expect("relink");
+        let healed = registry
+            .lock()
+            .expect("registry")
+            .record(&record.id.0)
+            .expect("listed");
+        assert_eq!(
+            healed.note_id.as_deref(),
+            Some(note_id.as_str()),
+            "link restored"
+        );
+        assert!(matches!(healed.status, diri_proto::SessionStatus::Idle));
+
+        // A daemon restart finds no holder for the note and must not call it lost.
+        registry.lock().expect("registry").reap_orphans_for_test();
+        let after = registry
+            .lock()
+            .expect("registry")
+            .record(&record.id.0)
+            .expect("still listed");
+        assert!(matches!(after.status, diri_proto::SessionStatus::Idle));
+    }
+
+    fn note_server(temp: &tempfile::TempDir) -> (Arc<Mutex<Registry>>, Arc<ControlServer>) {
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let server = Arc::new(
+            ControlServer::new(Arc::clone(&registry), temp.path().join("daemon.sock"))
+                .with_notes_dir(temp.path().join("notes")),
+        );
+        (registry, server)
+    }
+
+    #[test]
+    fn adopting_a_note_keeps_its_id_and_date_and_is_idempotent() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (_, server) = note_server(&temp);
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let store = diri_notes::store::NoteStore::open(temp.path().join("notes")).expect("store");
+        let (note_id, _) = store
+            .create(
+                diri_notes::doc::Document::new("Q3 campaign", Vec::new()),
+                Some(&project.to_string_lossy()),
+            )
+            .expect("note");
+        let before = store.meta(&note_id).expect("meta");
+
+        let adopt = || {
+            let record = ok_of(call(
+                &server,
+                "session.spawn",
+                Some(json!({"kind": "note", "cwd": "", "noteId": note_id})),
+            ));
+            serde_json::from_value::<diri_proto::SessionRecord>(record).expect("record")
+        };
+        let first = adopt();
+        assert_eq!(first.note_id.as_deref(), Some(note_id.as_str()));
+        assert_eq!(first.title, "Q3 campaign");
+        assert_eq!(first.cwd, project.to_string_lossy());
+        assert_eq!(first.created_at.0, before.created as f64 * 1000.0);
+        let second = adopt();
+        assert_eq!(second.id, first.id, "one Session per note");
+
+        let after = store.load(&note_id).expect("note");
+        assert_eq!(after.front.get("id"), Some(note_id.as_str()));
+        assert_eq!(
+            after.front.get("created"),
+            before_created(&before).as_deref()
+        );
+        assert_eq!(after.front.get("session"), Some(first.id.0.as_str()));
+
+        let missing = err_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({"kind": "note", "cwd": "", "noteId": "20000101-000000-dead"})),
+        ));
+        assert_eq!(missing.code, "not_found");
+    }
+
+    fn before_created(meta: &diri_notes::store::NoteMeta) -> Option<String> {
+        Some(diri_notes::store::format_timestamp(meta.created))
+    }
+
+    #[test]
+    fn startup_adopts_only_true_orphans_once() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (registry, server) = note_server(&temp);
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let project = project.to_string_lossy().into_owned();
+        let store = diri_notes::store::NoteStore::open(temp.path().join("notes")).expect("store");
+        let doc = |title: &str| diri_notes::doc::Document::new(title, Vec::new());
+
+        let (offline, _) = store
+            .create(doc("Written offline"), Some(&project))
+            .unwrap();
+        let (inbox, _) = store.create(doc("Loose idea"), None).unwrap();
+        let (archived, mut note) = store.create(doc("Old"), Some(&project)).unwrap();
+        note.front.set_flag(diri_notes::store::KEY_ARCHIVED, true);
+        store.save(&archived, &note).unwrap();
+        // Removed on purpose: stamped with a Session that no longer exists.
+        let (removed, _) = store
+            .create_for_session(
+                doc("Removed"),
+                Some(&project),
+                Some("s_gone"),
+                &diri_notes::history::Author::User,
+            )
+            .unwrap();
+        // Already a Session.
+        let shown = ok_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({"kind": "note", "cwd": project, "title": "Shown"})),
+        ));
+
+        assert_eq!(server.adopt_orphan_notes().expect("scan"), 2);
+        assert_eq!(
+            server.adopt_orphan_notes().expect("rescan"),
+            0,
+            "deterministic"
+        );
+
+        let notes: Vec<diri_proto::SessionRecord> = registry
+            .lock()
+            .unwrap()
+            .records()
+            .into_iter()
+            .filter(diri_proto::SessionRecord::is_note)
+            .collect();
+        let by_note = |id: &str| notes.iter().find(|r| r.note_id.as_deref() == Some(id));
+        assert_eq!(notes.len(), 3);
+        assert_eq!(by_note(&offline).unwrap().cwd, project);
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            by_note(&inbox).unwrap().cwd,
+            home,
+            "Inbox notes live in the home folder"
+        );
+        assert!(by_note(&archived).is_none());
+        assert!(by_note(&removed).is_none());
+        assert!(by_note(shown["noteId"].as_str().unwrap()).is_some());
+        assert_eq!(
+            store.meta(&offline).unwrap().session.as_deref(),
+            Some(by_note(&offline).unwrap().id.0.as_str())
+        );
+    }
+
+    #[test]
+    fn tracked_spawns_may_start_from_a_note() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (_, server) = note_server(&temp);
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let note = ok_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({"kind": "note", "cwd": project.to_string_lossy(), "title": "PRD"})),
+        ));
+        let note_session = note["id"].as_str().unwrap().to_owned();
+        // A note may not send anything itself, so an agent starts the work.
+        let started = ok_of(call(
+            &server,
+            "session.spawn_tracked",
+            Some(json!({
+                "senderID": "s_agent",
+                "operationID": "op-1",
+                "spawn": {"kind": "note", "cwd": project.to_string_lossy(), "title": "Brief", "parent": note_session},
+            })),
+        ));
+        assert_eq!(started["ok"], true);
+        assert_eq!(started["parent"], note_session.as_str());
+
+        // Any other parent that is not the sender stays refused.
+        let refused = err_of(call(
+            &server,
+            "session.spawn_tracked",
+            Some(json!({
+                "senderID": "s_agent",
+                "operationID": "op-2",
+                "spawn": {"kind": "note", "cwd": project.to_string_lossy(), "parent": "s_someone_else"},
+            })),
+        ));
+        assert_eq!(refused.code, "bad_request");
+    }
+
+    #[test]
+    fn terminal_requests_on_a_note_fail_fast_for_every_client() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let server = Arc::new(
+            ControlServer::new(Arc::clone(&registry), temp.path().join("daemon.sock"))
+                .with_notes_dir(temp.path().join("notes")),
+        );
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project");
+        let record = ok_of(call(
+            &server,
+            "session.spawn",
+            Some(json!({"kind": "note", "cwd": project.to_string_lossy(), "title": "Plan"})),
+        ));
+        let id = record["id"].as_str().expect("id").to_owned();
+        let started = Instant::now();
+        for (method, params) in [
+            ("session.send_text", json!({"sessionID": id, "text": "hi"})),
+            ("session.send_key", json!({"sessionID": id, "key": "enter"})),
+            ("session.read_screen", json!({"sessionID": id})),
+            ("session.resume", json!({"sessionID": id})),
+            (
+                "session.resize",
+                json!({"sessionID": id, "cols": 80, "rows": 24}),
+            ),
+            (
+                "session.deliver_message",
+                json!({"sessionID": id, "senderID": "s_x", "messageID": "m", "text": "hi"}),
+            ),
+            (
+                "task.submit",
+                json!({"caller_id": "s_x", "request_id": "r", "session_id": id, "text": "hi"}),
+            ),
+        ] {
+            let error = err_of(call(&server, method, Some(params)));
+            assert_eq!(
+                error.code,
+                diri_proto::control::SESSION_HAS_NO_TERMINAL,
+                "{method}: {error:?}"
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "must not wait on a terminal"
+        );
+        // Everything else about a note still works.
+        ok_of(call(
+            &server,
+            "session.rename",
+            Some(json!({"sessionID": id, "title": "Renamed"})),
+        ));
     }
 
     fn ok_of(message: ControlMessage) -> JsonValue {
@@ -5471,6 +7047,57 @@ mod tests {
     }
 
     #[test]
+    fn resume_size_falls_back_to_the_last_screen_checkpoint() {
+        // After an Engine restart a dead session is no longer in the
+        // registry; its last checkpoint still records the size it ran at.
+        let temp = tempfile::tempdir().expect("temp");
+        let logs = temp.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs");
+        let spec = crate::session::SessionSpec {
+            id: "s_gone".into(),
+            pty: crate::pty::PtySpec::new(vec!["/bin/sh".into()], "/tmp"),
+            manifest_id: "shell".into(),
+            authority: crate::Authority::ProcessOnly,
+            logs_dir: logs.clone(),
+            holder: None,
+            remote: None,
+            defer_launch: true,
+        };
+        assert_eq!(previous_screen_size(&spec), None, "no checkpoint, no size");
+
+        let row = vec![diri_proto::grid::GridCell::BLANK; 3];
+        let checkpoint = crate::checkpoint::ScreenCheckpoint {
+            keyboard_snapshot: None,
+            keyboard: None,
+            log_offset: 0,
+            history_metadata: Vec::new(),
+            history: Vec::new(),
+            grid: diri_proto::grid::GridUpdate {
+                cols: 3,
+                rows: 2,
+                cursor_col: 0,
+                cursor_row: 0,
+                cursor_visible: true,
+                is_full_snapshot: true,
+                changed_rows: vec![
+                    diri_proto::grid::ChangedRow::new(0, row.clone()),
+                    diri_proto::grid::ChangedRow::new(1, row),
+                ],
+            },
+            marker_buffer: Vec::new(),
+            alt_screen: false,
+            bracketed_paste: false,
+            mouse: diri_proto::terminal::MouseModes::default(),
+        };
+        checkpoint
+            .write_atomically(&crate::checkpoint::ScreenCheckpoint::path_for_log(
+                &logs.join("s_gone.bin"),
+            ))
+            .expect("write checkpoint");
+        assert_eq!(previous_screen_size(&spec), Some((3, 2)));
+    }
+
+    #[test]
     fn claude_resume_never_targets_an_unwritten_conversation() {
         let home = tempfile::tempdir().expect("temp");
         let project = home.path().join(".claude/projects/-work-repo");
@@ -5561,6 +7188,175 @@ mod tests {
             record.agent_session_id.as_deref(),
             Some("saved-conversation")
         );
+    }
+
+    /// A local terminal whose shell died under it (a crash, a reboot that
+    /// took its Holder) with `cwd` the project and `terminal_cwd` wherever it
+    /// had `cd`'d to. `/usr/bin/false` stands in for the shell that went away;
+    /// its non-zero exit is not the user closing the tab.
+    fn dead_terminal(
+        temp: &Path,
+        terminal_cwd: Option<&Path>,
+    ) -> (Arc<Mutex<Registry>>, Arc<ControlServer>, PathBuf) {
+        let project = temp.join("project").canonicalize().expect("project");
+        let registry = Arc::new(Mutex::new(Registry::new(engine(), temp.join("state.json"))));
+        {
+            let mut guard = registry.lock().expect("registry");
+            let mut record = test_record("s_term");
+            record.cwd = project.to_string_lossy().into_owned();
+            record.terminal_cwd = terminal_cwd.map(|path| path.to_string_lossy().into_owned());
+            guard
+                .spawn(
+                    crate::session::SessionSpec {
+                        id: "s_term".into(),
+                        pty: crate::pty::PtySpec::new(vec!["/usr/bin/false".into()], &project),
+                        manifest_id: diri_proto::AgentKind::SHELL_ID.into(),
+                        authority: crate::status::Authority::ProcessOnly,
+                        logs_dir: temp.join("logs"),
+                        holder: None,
+                        remote: None,
+                        defer_launch: false,
+                    },
+                    record,
+                )
+                .expect("spawn");
+        }
+        let exited = (0..200).any(|_| {
+            let exited = registry
+                .lock()
+                .expect("registry")
+                .record("s_term")
+                .is_some_and(|record| {
+                    matches!(record.status, diri_proto::SessionStatus::Exited(_))
+                });
+            if !exited {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            exited
+        });
+        assert!(exited, "the stand-in shell never exited");
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.join("daemon.sock"),
+        ));
+        (registry, server, project)
+    }
+
+    /// Where the resumed shell's own process sits, as the Engine samples it.
+    fn wait_for_live_directory(registry: &Arc<Mutex<Registry>>, expected: &Path) {
+        let expected = expected.to_string_lossy().into_owned();
+        let mut last = None;
+        for _ in 0..500 {
+            last = registry
+                .lock()
+                .expect("registry")
+                .get("s_term")
+                .and_then(|session| session.view().terminal_cwd);
+            if last.as_deref() == Some(expected.as_str()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the resumed shell runs in {last:?}, not {expected}");
+    }
+
+    fn stop_terminal(registry: &Arc<Mutex<Registry>>) {
+        let _ = registry
+            .lock()
+            .expect("registry")
+            .terminate("s_term", Duration::from_secs(2));
+    }
+
+    /// A terminal that comes back after its shell died starts in the directory
+    /// it had `cd`'d to, keeps its project, and says so before the new shell
+    /// has been sampled.
+    #[test]
+    fn a_resumed_terminal_starts_in_its_last_directory() {
+        let temp = tempfile::tempdir().expect("temp");
+        let sub = temp.path().join("project/crates/engine");
+        std::fs::create_dir_all(&sub).expect("sub");
+        let sub = sub.canonicalize().expect("sub");
+        let (registry, server, project) = dead_terminal(temp.path(), Some(&sub));
+        let record = registry
+            .lock()
+            .expect("registry")
+            .record("s_term")
+            .expect("record");
+        assert_eq!(
+            record.resumability,
+            diri_proto::Resumability::Resumable,
+            "a terminal whose shell died must offer to come back"
+        );
+
+        let result = ok_of(call(
+            &server,
+            "session.resume",
+            Some(json!({ "sessionID": "s_term" })),
+        ));
+        assert!(
+            result["status"].get("exited").is_none(),
+            "resume handed back the dead terminal: {}",
+            result["status"]
+        );
+        assert_eq!(result["terminalCwd"], sub.to_string_lossy().as_ref());
+        assert_eq!(result["cwd"], project.to_string_lossy().as_ref());
+        wait_for_live_directory(&registry, &sub);
+        stop_terminal(&registry);
+    }
+
+    /// A directory deleted while the terminal was down is not an error: the
+    /// shell starts in the project, as it always did, and stops claiming the
+    /// vanished directory.
+    #[test]
+    fn a_resumed_terminal_whose_directory_vanished_starts_in_its_project() {
+        let temp = tempfile::tempdir().expect("temp");
+        std::fs::create_dir_all(temp.path().join("project")).expect("project");
+        let gone = temp.path().join("project/gone");
+        let (registry, server, project) = dead_terminal(temp.path(), Some(&gone));
+
+        let result = ok_of(call(
+            &server,
+            "session.resume",
+            Some(json!({ "sessionID": "s_term" })),
+        ));
+        assert!(result.get("terminalCwd").is_none(), "{result}");
+        assert_eq!(result["cwd"], project.to_string_lossy().as_ref());
+        wait_for_live_directory(&registry, &project);
+        stop_terminal(&registry);
+    }
+
+    /// Only a local shell restarts in its last directory. Agents re-enter
+    /// their conversation in `cwd`, remote shells are left to the Helper, and
+    /// nothing but an existing absolute directory is trusted.
+    #[test]
+    fn only_a_local_terminal_restores_an_existing_absolute_directory() {
+        let temp = tempfile::tempdir().expect("temp");
+        let sub = temp.path().canonicalize().expect("temp").join("sub");
+        std::fs::create_dir_all(&sub).expect("sub");
+        let mut shell = test_record("shell");
+        shell.terminal_cwd = Some(sub.to_string_lossy().into_owned());
+        assert_eq!(restored_terminal_directory(&shell), Some(sub.clone()));
+
+        let mut agent = shell.clone();
+        agent.kind = diri_proto::AgentKind::CLAUDE_CODE;
+        assert_eq!(restored_terminal_directory(&agent), None);
+
+        let mut remote = shell.clone();
+        remote.host = Some("forge".into());
+        assert_eq!(restored_terminal_directory(&remote), None);
+
+        let mut relative = shell.clone();
+        relative.terminal_cwd = Some("sub".into());
+        assert_eq!(restored_terminal_directory(&relative), None);
+
+        let mut file = shell.clone();
+        let path = sub.join("notes.txt");
+        std::fs::write(&path, "").expect("file");
+        file.terminal_cwd = Some(path.to_string_lossy().into_owned());
+        assert_eq!(restored_terminal_directory(&file), None);
+
+        shell.terminal_cwd = None;
+        assert_eq!(restored_terminal_directory(&shell), None);
     }
 
     fn check_resume_relaunches(archived: bool) {
@@ -5845,6 +7641,56 @@ mod tests {
     }
 
     #[test]
+    fn mark_unread_returns_a_seen_completion_to_done_unseen() {
+        use diri_proto::{AgentKind, AttentionLevel, DateMillis, SessionRecord};
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let mut finished = test_record("s_done");
+        finished.kind = AgentKind::CLAUDE_CODE;
+        finished.last_turn_completed_at = Some(DateMillis(2_000.0));
+        let mut fresh = test_record("s_fresh");
+        fresh.kind = AgentKind::CLAUDE_CODE;
+        registry.lock().expect("registry").insert_record(finished);
+        registry.lock().expect("registry").insert_record(fresh);
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.path().join("daemon.sock"),
+        ));
+        let attention = |id: &str| {
+            let list = ok_of(call(&server, "session.list", None));
+            let record = list["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|record| record["id"] == id)
+                .cloned()
+                .unwrap();
+            serde_json::from_value::<SessionRecord>(record)
+                .unwrap()
+                .attention()
+        };
+        let params = |id: &str| Some(json!({ "sessionID": id }));
+
+        ok_of(call(&server, "session.mark_seen", params("s_done")));
+        assert_eq!(attention("s_done"), AttentionLevel::IdleSeen);
+        ok_of(call(&server, "session.mark_unread", params("s_done")));
+        assert_eq!(attention("s_done"), AttentionLevel::DoneUnseen);
+        ok_of(call(&server, "session.mark_seen", params("s_done")));
+        assert_eq!(attention("s_done"), AttentionLevel::IdleSeen);
+
+        // No completed turn: nothing to be unread, and nothing changes.
+        ok_of(call(&server, "session.mark_seen", params("s_fresh")));
+        ok_of(call(&server, "session.mark_unread", params("s_fresh")));
+        assert_eq!(attention("s_fresh"), AttentionLevel::IdleSeen);
+
+        let error = err_of(call(&server, "session.mark_unread", params("s_missing")));
+        assert_eq!(error.code, "not_found");
+    }
+
+    #[test]
     fn codex_subagent_completion_does_not_finish_the_parent_turn() {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("codex");
@@ -5945,6 +7791,87 @@ mod tests {
                 "callback from {thread}"
             );
         }
+    }
+
+    /// `session.remove` holds the Registry through the Holder's TERM→KILL
+    /// escalation while a closing Claude waits on its own SessionEnd hook.
+    /// The hook must be answered at once and still land, in order.
+    #[test]
+    fn a_hook_report_never_waits_for_a_busy_registry_and_keeps_order() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        registry
+            .lock()
+            .expect("registry")
+            .insert_record(test_record("s_hook"));
+        let server = Arc::new(ControlServer::new(
+            Arc::clone(&registry),
+            temp.path().join("daemon.sock"),
+        ));
+        // Only SessionStart may move the tab to another conversation, so the
+        // later reports switch with it; applied out of order, the first
+        // prompt would arrive for a foreign conversation and lose its title.
+        fn prompt(uuid: &str, prompt: &str) -> Option<JsonValue> {
+            let event = if uuid == "uuid-1" {
+                "UserPromptSubmit"
+            } else {
+                "SessionStart"
+            };
+            Some(json!({
+                "kind": "claude-hook", "dirijorSessionID": "s_hook", "event": event,
+                "payload": {"session_id": uuid, "hook_event_name": event, "prompt": prompt},
+            }))
+        }
+        let busy = registry.lock().expect("registry");
+        let (answered, replies) = std::sync::mpsc::channel();
+        let agent = {
+            let server = Arc::clone(&server);
+            std::thread::spawn(move || {
+                for (uuid, text) in [("uuid-1", "first prompt"), ("uuid-2", "second prompt")] {
+                    ok_of(call(&server, "hook.report", prompt(uuid, text)));
+                }
+                answered.send(()).unwrap();
+            })
+        };
+        assert!(
+            replies.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "hook.report waited for the busy Registry"
+        );
+        drop(busy);
+        agent.join().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let record = loop {
+            let record = registry.lock().unwrap().record("s_hook").unwrap();
+            if record.agent_session_id.as_deref() == Some("uuid-2")
+                || std::time::Instant::now() > deadline
+            {
+                break record;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        // Applied in callback order: the first prompt titled the placeholder,
+        // the second report's identity is the latest.
+        assert_eq!(record.agent_session_id.as_deref(), Some("uuid-2"));
+        assert_eq!(record.title, "first prompt");
+        // Drained: the next report applies inline, before its reply.
+        ok_of(call(
+            &server,
+            "hook.report",
+            prompt("uuid-3", "third prompt"),
+        ));
+        assert_eq!(
+            registry
+                .lock()
+                .unwrap()
+                .record("s_hook")
+                .unwrap()
+                .agent_session_id
+                .as_deref(),
+            Some("uuid-3")
+        );
     }
 
     #[test]
@@ -6071,7 +7998,11 @@ mod tests {
         registry
             .lock()
             .expect("registry")
-            .insert_record(test_record("s_gone"));
+            .insert_record(diri_proto::SessionRecord {
+                // An Agent with no resume grammar; a terminal restarts instead.
+                kind: diri_proto::AgentKind::new("amp"),
+                ..test_record("s_gone")
+            });
         let server = Arc::new(ControlServer::new(
             registry,
             temp.path().join("daemon.sock"),
@@ -6087,7 +8018,7 @@ mod tests {
 
         let reopened = ok_of(call(&server, "session.reopen_last", None));
         assert_eq!(reopened["id"], "s_gone");
-        // A shell cannot resume; it must come back exited, never still
+        // This Agent cannot resume; it must come back exited, never still
         // claiming the live status it had when closed.
         assert!(
             reopened["status"].get("exited").is_some(),
@@ -6703,6 +8634,91 @@ mod tests {
             &path,
         );
         let _listener = server.bind().expect("a stale socket should be replaced");
+    }
+
+    #[test]
+    fn pi_trust_and_composer_screens_are_told_apart() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let rule = "─".repeat(60);
+        // Captured from Pi 0.99.2 in a folder holding `.pi/settings.json`.
+        let dialog = format!(
+            "{rule}\n Trust project folder?\n /tmp/project\n\n\
+             This allows pi to load .pi settings and resources, install missing project packages, and execute\n\
+             project extensions.\n\n → Trust\n   Trust parent folder (/tmp)\n   Trust (this session only)\n\
+             \x20  Do not trust\n   Do not trust (this session only)\n\n\
+             \x20↑↓ navigate  enter select  escape/ctrl+c cancel\n\n{rule}"
+        );
+        assert!(is_pi_project_trust_screen(&lines(&dialog)));
+        assert!(!is_pi_composer_screen(&lines(&dialog)));
+
+        let composer = format!(
+            " ▀▀█  v0.99.2\n Warning: fd not found. Offline mode enabled, skipping download.\n\
+             {rule}\n\n{rule}\n/tmp/project\n0.0%/128k (auto)                fake-model"
+        );
+        assert!(!is_pi_project_trust_screen(&lines(&composer)));
+        assert!(is_pi_composer_screen(&lines(&composer)));
+    }
+
+    #[test]
+    fn copilot_trust_acceptance_is_limited_to_the_selected_folder_dialog() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let trust = include_str!("../tests/fixtures/copilot_screens/trust.txt");
+        assert!(is_copilot_folder_trust_screen(&lines(trust)));
+        assert!(!is_copilot_folder_trust_screen(&lines(
+            &trust.replace("❯ 1. Yes", "  1. Yes")
+        )));
+        for other in [
+            include_str!("../tests/fixtures/copilot_screens/permission.txt"),
+            include_str!("../tests/fixtures/copilot_screens/login.txt"),
+        ] {
+            assert!(!is_copilot_folder_trust_screen(&lines(other)));
+        }
+        let stale = format!(
+            "{trust}\n{}",
+            include_str!("../tests/fixtures/copilot_screens/idle.txt")
+        );
+        assert!(!is_copilot_folder_trust_screen(&lines(&stale)));
+    }
+
+    #[test]
+    fn cursor_trust_requires_the_live_selector() {
+        let lines = |screen: &str| screen.lines().map(str::to_owned).collect::<Vec<_>>();
+        assert!(is_cursor_workspace_trust_screen(&lines(include_str!(
+            "../tests/fixtures/cursor_screens/trust.txt"
+        ))));
+        assert!(!is_cursor_workspace_trust_screen(&lines(include_str!(
+            "../tests/fixtures/cursor_screens/idle.txt"
+        ))));
+        assert!(!is_cursor_workspace_trust_screen(&lines(include_str!(
+            "../tests/fixtures/cursor_screens/login.txt"
+        ))));
+    }
+
+    #[test]
+    fn gemini_trust_is_read_from_the_dialog_at_the_bottom_only() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let dialog = "│ Do you trust the files in this folder? │\n\
+                      │ ● 1. Trust folder (project)          │\n\
+                      │   2. Trust parent folder (work)      │\n\
+                      │   3. Don't trust                     │";
+        assert!(is_gemini_folder_trust_screen(&lines(dialog)));
+        assert!(!is_gemini_composer_screen(&lines(dialog)));
+
+        // After accepting, Gemini restarts beneath the old dialog.
+        let restarted = format!(
+            "{dialog}\n Gemini CLI is restarting to apply the trust changes...\n\
+             Gemini CLI v0.62.0\n Tips for getting started:\n\
+             1. Create GEMINI.md files\n ▄▄▄▄▄▄\n\
+             >   Type your message or @path/to/file\n ▀▀▀▀▀▀\n\
+             workspace (/directory)\n ~/project"
+        );
+        assert!(!is_gemini_folder_trust_screen(&lines(&restarted)));
+        assert!(is_gemini_composer_screen(&lines(&restarted)));
+        assert!(gemini_restarted_below_notice(&lines(&restarted)));
+        // The outgoing process's composer, drawn before the notice.
+        let outgoing = " ▄▄▄▄▄▄\n >   Type your message or @path/to/file\n ▀▀▀▀▀▀\n\
+                        Gemini CLI is restarting to apply the trust changes...";
+        assert!(!gemini_restarted_below_notice(&lines(outgoing)));
     }
 
     #[test]

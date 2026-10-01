@@ -1,0 +1,32 @@
+// Diri telemetry ingest. See README.md for the one-time setup (D1 database,
+// R2 bucket and lifecycle rule, ADMIN_TOKEN secret) before `wrangler deploy`.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "diri-telemetry",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  "workers_dev": true,
+  // Uncomment after adding the zone to the account (README, step 6).
+  // "routes": [{ "pattern": "telemetry.diri.sh", "custom_domain": true }],
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "diri-telemetry",
+      // Replace with the id printed by `wrangler d1 create diri-telemetry`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Source throttling is per Cloudflare location; D1 also enforces a global cap.
+  "ratelimits": [{ "name": "INGEST_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }],
+  "r2_buckets": [{ "binding": "BATCHES", "bucket_name": "diri-telemetry" }],
+  // Daily retention sweep (UTC). The R2 lifecycle rule is the primary
+  // mechanism for objects; this deletes D1 rows and the objects they index.
+  "triggers": { "crons": ["17 3 * * *"] },
+  "vars": {
+    "RETENTION_DAYS": "30",
+    "RATE_LIMIT_PER_HOUR": "120"
+  }
+  // Secret, never in this file: `wrangler secret put ADMIN_TOKEN`.
+}

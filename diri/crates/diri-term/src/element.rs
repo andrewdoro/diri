@@ -96,6 +96,9 @@ pub struct TerminalElement {
     background_opacity: f32,
     font: Font,
     font_size: Pixels,
+    /// Multiple of the font's natural line height; 1.0 paints rows exactly
+    /// as tall as the font asks for.
+    line_height_scale: f32,
     focus_handle: Option<FocusHandle>,
     text_input: Option<TextInputCallback>,
     ime_state: Arc<Mutex<TerminalImeState>>,
@@ -357,14 +360,44 @@ struct ElementSharedState {
     selection: Mutex<TerminalSelection>,
     selection_shimmer: Mutex<SelectionShimmer>,
     find_highlights: Mutex<FindHighlights>,
+    /// Window-space rect of the grid cursor's cell from the latest live
+    /// prepaint, whether or not the caret itself is drawn.
+    input_cell: Mutex<Option<Bounds<Pixels>>>,
     modes: Mutex<TerminalModes>,
     scroll_router: Mutex<ScrollRouter>,
     history_lines: Mutex<HistoryLineCache>,
-    metrics: Mutex<Option<(Font, u32, CellMetrics)>>,
+    metrics: Mutex<Option<(Font, u32, u32, CellMetrics)>>,
     /// Behind its own `Arc` so the input handler and the blink wake can hold
     /// it without holding the rest of the view's state.
     cursor: Arc<Mutex<CursorDriver>>,
     scroll_glide: Mutex<GlideState>,
+    /// Frames GPUI painted this view in, including ones with nothing to draw
+    /// yet (no grid, suspended). Unlike `stats` it is never reset, so a host
+    /// can tell whether the view was on screen at all since a point it
+    /// remembered.
+    paints: AtomicU64,
+    /// Called once, from the first paint that puts non-blank content on
+    /// screen after it was armed; see [`TerminalElement::on_first_content_paint`].
+    content_paint: Mutex<Option<ArmedContentPaint>>,
+}
+
+/// When a view first painted content after the host armed the callback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentPaint {
+    /// The first frame of any kind (blank included) drawn since arming: when
+    /// the view came on screen. A view armed while nothing draws it (a
+    /// covered or background pane) is shown only later.
+    pub shown_at: Instant,
+    /// The frame that put content on screen.
+    pub at: Instant,
+}
+
+/// Told when a view first painted content.
+pub type ContentPaintCallback = Box<dyn FnOnce(ContentPaint) + Send>;
+
+struct ArmedContentPaint {
+    callback: ContentPaintCallback,
+    shown_at: Option<Instant>,
 }
 
 /// The glide to a find match, if one is running, and the clock it reads.
@@ -514,6 +547,19 @@ struct CachedRow {
 }
 
 impl CachedRow {
+    fn translate(&mut self, delta: Point<Pixels>) {
+        for quad in self
+            .background_quads
+            .iter_mut()
+            .chain(self.decoration_quads.iter_mut())
+        {
+            quad.bounds.origin += delta;
+        }
+        for shape in &mut self.sprite_shapes {
+            shape.translate(delta);
+        }
+    }
+
     /// Whether the row moved. Sprites are laid out on whole device pixels, so
     /// a row holding any moves only by a whole number of them.
     fn move_vertically(&mut self, dy: Pixels, grid: SpriteGrid) -> bool {
@@ -576,8 +622,29 @@ struct RowRenderContext {
     visible_rows: usize,
 }
 
+impl RowRenderContext {
+    /// How far the grid moved, when moving it is the only difference.
+    fn moved_to(self, next: &Self) -> Option<Point<Pixels>> {
+        let origin = |context: &Self| {
+            point(
+                px(f32::from_bits(context.origin_x_bits)),
+                px(f32::from_bits(context.origin_y_bits)),
+            )
+        };
+        let unmoved = Self {
+            origin_x_bits: next.origin_x_bits,
+            origin_y_bits: next.origin_y_bits,
+            ..self
+        };
+        (unmoved == *next && self != *next).then(|| origin(next) - origin(&self))
+    }
+}
+
 pub struct TerminalPrepaintState {
     started_at: Option<Instant>,
+    /// This element's own prepaint cost, for the flight recorder; the frame
+    /// time in `RendererStats` also spans every element painted in between.
+    prepaint_time: Duration,
     background_quads: Vec<PaintQuad>,
     decoration_quads: Vec<PaintQuad>,
     sprite_shapes: Vec<AntialiasedShape>,
@@ -663,17 +730,21 @@ impl TerminalElement {
                 selection: Mutex::new(TerminalSelection::default()),
                 selection_shimmer: Mutex::new(SelectionShimmer::default()),
                 find_highlights: Mutex::new(FindHighlights::default()),
+                input_cell: Mutex::new(None),
                 modes: Mutex::new(TerminalModes::default()),
                 scroll_router: Mutex::new(ScrollRouter::default()),
                 history_lines: Mutex::new(HistoryLineCache::default()),
                 metrics: Mutex::new(None),
                 cursor: Arc::new(Mutex::new(CursorDriver::default())),
                 scroll_glide: Mutex::new(GlideState::default()),
+                paints: AtomicU64::new(0),
+                content_paint: Mutex::new(None),
             }),
             theme: TermTheme::default(),
             background_opacity: 1.0,
             font: terminal_font,
             font_size: px(13.0),
+            line_height_scale: 1.0,
             focus_handle: None,
             text_input: None,
             ime_state: Arc::new(Mutex::new(TerminalImeState::default())),
@@ -745,6 +816,12 @@ impl TerminalElement {
 
     pub fn font_size(mut self, font_size: Pixels) -> Self {
         self.font_size = font_size;
+        self
+    }
+
+    #[must_use]
+    pub fn line_height_scale(mut self, scale: f32) -> Self {
+        self.line_height_scale = scale;
         self
     }
 
@@ -859,6 +936,25 @@ impl TerminalElement {
             buffer: self.buffer.clone(),
             shared: self.shared.clone(),
         }
+    }
+
+    /// Frames GPUI painted this view (or a clone) in since it was built,
+    /// empty ones included. A view outside every drawn window, or in a window
+    /// the system stopped drawing, stays where it was.
+    #[must_use]
+    pub fn paint_count(&self) -> u64 {
+        self.shared.paints.load(Ordering::Relaxed)
+    }
+
+    /// Arms `callback` for the next paint that puts non-blank content on
+    /// screen, replacing whatever was armed before. It runs inside that
+    /// paint, so the instant it gets is when the content was drawn, not when
+    /// the host next looked.
+    pub fn on_first_content_paint(&self, callback: ContentPaintCallback) {
+        *mutex_lock(&self.shared.content_paint) = Some(ArmedContentPaint {
+            callback,
+            shown_at: None,
+        });
     }
 
     #[must_use]
@@ -1207,14 +1303,25 @@ impl TerminalElement {
                 .map(|byte| candidate[..byte].chars().count())
                 .unwrap_or(0);
             let target_start = start + prefix;
-            ReferenceHit {
-                spans: vec![(
-                    absolute_row,
-                    target_start,
-                    (target_start + target.chars().count()).min(end),
-                )],
-                reference,
-            }
+            let spans = vec![(
+                absolute_row,
+                target_start,
+                (target_start + target.chars().count()).min(end),
+            )];
+            // Python names its line in prose after the quoted path.
+            let reference = match reference {
+                TerminalReference::File(path)
+                    if candidate.starts_with('"') && candidate.ends_with("\",") =>
+                {
+                    let rest: String = chars[end..].iter().take(32).collect();
+                    match python_traceback_line(&rest) {
+                        Some(line) => TerminalReference::File(format!("{path}:{line}")),
+                        None => TerminalReference::File(path),
+                    }
+                }
+                other => other,
+            };
+            ReferenceHit { spans, reference }
         })
     }
 
@@ -1244,6 +1351,16 @@ impl TerminalElement {
     #[must_use]
     pub fn current_find_match_bounds(&self) -> Option<Bounds<Pixels>> {
         mutex_lock(&self.shared.find_highlights).current_bounds
+    }
+
+    /// Window-space bounds of the cell under the grid cursor from this
+    /// element's latest prepaint. Unlike the painted caret this ignores cursor
+    /// visibility: TUIs such as Claude Code hide the caret but still park the
+    /// cursor on their input line, which is where an input popover belongs.
+    /// `None` while reading history, suspended, or before the first paint.
+    #[must_use]
+    pub fn input_cell_bounds(&self) -> Option<Bounds<Pixels>> {
+        *mutex_lock(&self.shared.input_cell)
     }
 
     /// Captures the small live grid and packages it with daemon history for a
@@ -1882,11 +1999,13 @@ impl Element for TerminalElement {
     ) -> Self::PrepaintState {
         if self.suspended {
             mutex_lock(&self.shared.find_highlights).current_bounds = None;
+            *mutex_lock(&self.shared.input_cell) = None;
             mutex_lock(&self.shared.row_cache).clear();
             mutex_lock(&self.shared.render_generations).clear();
             *mutex_lock(&self.shared.render_context) = None;
             return TerminalPrepaintState {
                 started_at: None,
+                prepaint_time: Duration::ZERO,
                 background_quads: Vec::new(),
                 decoration_quads: Vec::new(),
                 sprite_shapes: Vec::new(),
@@ -1910,8 +2029,10 @@ impl Element for TerminalElement {
 
         if grid_is_empty {
             mutex_lock(&self.shared.find_highlights).current_bounds = None;
+            *mutex_lock(&self.shared.input_cell) = None;
             return TerminalPrepaintState {
                 started_at: None,
+                prepaint_time: Duration::ZERO,
                 background_quads: Vec::new(),
                 decoration_quads: Vec::new(),
                 sprite_shapes: Vec::new(),
@@ -1929,18 +2050,21 @@ impl Element for TerminalElement {
 
         let started_at = Instant::now();
         let font_size_bits = f32::from(self.font_size).to_bits();
+        let scale_bits = self.line_height_scale.to_bits();
         let metrics = {
             let mut cached = mutex_lock(&self.shared.metrics);
-            if let Some((cached_font, cached_size, metrics)) = cached.as_ref()
+            if let Some((cached_font, cached_size, cached_scale, metrics)) = cached.as_ref()
                 && cached_font == &self.font
                 && *cached_size == font_size_bits
+                && *cached_scale == scale_bits
             {
                 *metrics
             } else {
                 let font_id = window.text_system().resolve_font(&self.font);
                 let metrics =
-                    CellMetrics::measure_font(window.text_system(), font_id, self.font_size);
-                *cached = Some((self.font.clone(), font_size_bits, metrics));
+                    CellMetrics::measure_font(window.text_system(), font_id, self.font_size)
+                        .with_line_height_scale(self.line_height_scale);
+                *cached = Some((self.font.clone(), font_size_bits, scale_bits, metrics));
                 metrics
             }
         };
@@ -2103,13 +2227,25 @@ impl Element for TerminalElement {
                 visible_rows,
             };
             let mut remembered_context = mutex_lock(&self.shared.render_context);
-            let mut force = remembered_context.as_ref() != Some(&context);
+            // A seam or divider sliding past the terminal only moves it:
+            // shapes are position-independent, so the cached rows are
+            // translated instead of prepared again, as long as the move keeps
+            // device-pixel snapping exact.
+            let moved = remembered_context
+                .and_then(|previous| previous.moved_to(&context))
+                .filter(|delta| grid.keeps_snapping(delta.x) && grid.keeps_snapping(delta.y));
+            let mut force = remembered_context.as_ref() != Some(&context) && moved.is_none();
             *remembered_context = Some(context);
             drop(remembered_context);
             {
-                let cache = mutex_lock(&self.shared.row_cache);
+                let mut cache = mutex_lock(&self.shared.row_cache);
                 force |= cache.len() < visible_rows
                     || cache.iter().take(visible_rows).any(Option::is_none);
+                if let Some(delta) = moved.filter(|_| !force) {
+                    for row in cache.iter_mut().flatten() {
+                        row.translate(delta);
+                    }
+                }
             }
             let damage = {
                 let buffer = read_lock(&self.buffer);
@@ -2247,6 +2383,19 @@ impl Element for TerminalElement {
 
         drop(highlights);
 
+        *mutex_lock(&self.shared.input_cell) = (!viewport.is_reading()
+            && usize::from(cursor.row) < visible_rows
+            && usize::from(cursor.col) < visible_cols)
+            .then(|| {
+                Bounds::new(
+                    point(
+                        bounds.left() + metrics.x_for_col(cursor.col),
+                        bounds.top() + metrics.y_for_row(cursor.row),
+                    ),
+                    size(metrics.cell_width, metrics.line_height),
+                )
+            });
+
         let cursor = if cursor_should_render(!self.cursor_hidden, cursor.visible)
             && !viewport.is_reading()
             && usize::from(cursor.row) < visible_rows
@@ -2335,6 +2484,7 @@ impl Element for TerminalElement {
 
         TerminalPrepaintState {
             started_at: Some(started_at),
+            prepaint_time: started_at.elapsed(),
             background_quads,
             decoration_quads,
             sprite_shapes,
@@ -2360,6 +2510,11 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let paint_started = Instant::now();
+        self.shared.paints.fetch_add(1, Ordering::Relaxed);
+        if let Some(armed) = mutex_lock(&self.shared.content_paint).as_mut() {
+            armed.shown_at.get_or_insert(paint_started);
+        }
         if let (Some(focus_handle), Some(text_input)) = (&self.focus_handle, &self.text_input) {
             let (cursor_bounds, cell_width) = match (prepaint.metrics, prepaint.cursor.as_ref()) {
                 (Some(metrics), Some(cursor)) => (
@@ -2605,6 +2760,8 @@ impl Element for TerminalElement {
             }
         });
 
+        self.report_first_content_paint();
+
         if let Some(started_at) = prepaint.started_at {
             let elapsed = started_at.elapsed();
             let mut stats = mutex_lock(&self.shared.stats);
@@ -2615,7 +2772,95 @@ impl Element for TerminalElement {
             stats.shape_cache_misses = stats
                 .shape_cache_misses
                 .saturating_add(prepaint.cache_misses);
+            drop(stats);
+            record_paint(
+                prepaint.prepaint_time + paint_started.elapsed(),
+                prepaint.cache_misses,
+                || {
+                    let buffer = read_lock(&self.buffer);
+                    (buffer.cols, buffer.rows)
+                },
+            );
         }
+    }
+}
+
+/// Running totals of terminal paints in this process, for per-frame
+/// breakdowns: a frame's share is the difference across it.
+static PAINTS: AtomicU64 = AtomicU64::new(0);
+static PAINT_SHAPE_MISSES: AtomicU64 = AtomicU64::new(0);
+static PAINT_MICROS: AtomicU64 = AtomicU64::new(0);
+
+/// Terminal element paints (prepaint + paint) so far in this process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaintTotals {
+    pub paints: u64,
+    pub shape_misses: u64,
+    pub micros: u64,
+}
+
+impl PaintTotals {
+    pub fn now() -> Self {
+        Self {
+            paints: PAINTS.load(Ordering::Relaxed),
+            shape_misses: PAINT_SHAPE_MISSES.load(Ordering::Relaxed),
+            micros: PAINT_MICROS.load(Ordering::Relaxed),
+        }
+    }
+
+    /// What was painted between `earlier` and `self`.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            paints: self.paints.saturating_sub(earlier.paints),
+            shape_misses: self.shape_misses.saturating_sub(earlier.shape_misses),
+            micros: self.micros.saturating_sub(earlier.micros),
+        }
+    }
+}
+
+impl TerminalElement {
+    /// Hands the armed first-content callback the paint that just drew
+    /// content. The grid is only scanned while a callback is armed.
+    fn report_first_content_paint(&self) {
+        let mut armed = mutex_lock(&self.shared.content_paint);
+        if armed.is_none() || read_lock(&self.buffer).is_blank() {
+            return;
+        }
+        let taken = armed.take();
+        drop(armed);
+        if let Some(ArmedContentPaint { callback, shown_at }) = taken {
+            let at = Instant::now();
+            callback(ContentPaint {
+                shown_at: shown_at.unwrap_or(at),
+                at,
+            });
+        }
+    }
+}
+
+/// One terminal paint (prepaint + paint of this element) for the flight
+/// recorder: a histogram always, an event when it alone would blow a frame.
+fn record_paint(cost: Duration, cache_misses: u64, grid: impl FnOnce() -> (u16, u16)) {
+    const SLOW_PAINT: Duration = Duration::from_millis(50);
+    PAINTS.fetch_add(1, Ordering::Relaxed);
+    PAINT_SHAPE_MISSES.fetch_add(cache_misses, Ordering::Relaxed);
+    PAINT_MICROS.fetch_add(
+        u64::try_from(cost.as_micros()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+    if !diri_telemetry::is_enabled() {
+        return;
+    }
+    diri_telemetry::observe("term.paint", cost);
+    if cost >= SLOW_PAINT {
+        let (cols, rows) = grid();
+        diri_telemetry::warn_event!(
+            "term.slow_paint",
+            ms = cost,
+            cols = cols,
+            rows = rows,
+            shape_misses = cache_misses
+        );
     }
 }
 
@@ -3102,12 +3347,13 @@ fn file_reference_from_run(run: &str) -> Option<String> {
     if candidate.is_empty() {
         return None;
     }
-    let path_candidate = if let Some(path) = candidate.strip_prefix("file://") {
-        path
+    let (candidate, path_candidate) = if let Some(path) = candidate.strip_prefix("file://") {
+        (candidate, path)
     } else if candidate.contains("://") {
         return None;
     } else {
-        candidate
+        let candidate = cut_after_location(candidate);
+        (candidate, candidate)
     };
 
     // Ignore up to the conventional `:line:column` suffix while deciding
@@ -3132,6 +3378,8 @@ fn file_reference_from_run(run: &str) -> Option<String> {
     let has_extension = file_name.rsplit_once('.').is_some_and(|(stem, extension)| {
         (!stem.is_empty() || file_name.starts_with('.'))
             && !extension.is_empty()
+            // A letter keeps versions and addresses (`1.2.3`, `10.0.0.1`) out.
+            && extension.bytes().any(|byte| byte.is_ascii_alphabetic())
             && extension
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
@@ -3153,7 +3401,46 @@ fn trim_file_reference_run(run: &str) -> &str {
         candidate = candidate[..candidate.len() - 1]
             .trim_end_matches(['.', ',', ';', ':', ']', '}', '\'', '"', '>', '!', '?']);
     }
+    // Agent tool calls print `Update(src/app.rs)`: the path is the argument.
+    if parenthesized_location_path(candidate).is_none()
+        && let Some(open) = candidate.rfind('(')
+        && !candidate[open..].contains(')')
+    {
+        candidate = &candidate[open + 1..];
+    }
     candidate
+}
+
+/// The line number in the remainder of a Python traceback frame,
+/// `  File "app.py", line 12, in <module>`, read after the quoted path.
+fn python_traceback_line(rest: &str) -> Option<usize> {
+    let digits = rest.strip_prefix(" line ")?;
+    let end = digits
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(digits.len());
+    digits[..end].parse().ok().filter(|line| *line > 0)
+}
+
+/// Cuts grep-style output after its location: `src/lib.rs:120:fn main()`
+/// arrives as the run `src/lib.rs:120:fn`, of which only `src/lib.rs:120`
+/// names a place. A run without a numeric position is returned unchanged.
+fn cut_after_location(candidate: &str) -> &str {
+    let mut segments = candidate.split(':');
+    let Some(path) = segments.next().filter(|path| !path.is_empty()) else {
+        return candidate;
+    };
+    let mut kept = path.len();
+    for segment in segments.take(2) {
+        if segment.is_empty() || !segment.bytes().all(|byte| byte.is_ascii_digit()) {
+            break;
+        }
+        kept += 1 + segment.len();
+    }
+    if kept == path.len() {
+        candidate
+    } else {
+        &candidate[..kept]
+    }
 }
 
 fn parenthesized_location_path(candidate: &str) -> Option<&str> {
@@ -3959,6 +4246,77 @@ mod link_tests {
         assert_eq!(
             file_reference_from_run("(src/main.rs(42))."),
             Some("src/main.rs(42)".to_owned())
+        );
+    }
+
+    /// The cases a `file:line` link has to get right, as the run under the
+    /// pointer. `None` means the matcher never offers it; everything else is
+    /// still subject to the host's existence check before it is underlined.
+    #[test]
+    fn file_locations_from_compilers_tests_and_tools() {
+        let file = |text: &str| Some(TerminalReference::File(text.to_owned()));
+        for (run, expected) in [
+            // rustc `--> src/app.rs:42:9`
+            ("src/app.rs:42:9", file("src/app.rs:42:9")),
+            // gcc/clang/go vet `main.c:3:5: error:`
+            ("main.c:3:5:", file("main.c:3:5")),
+            // go test `main_test.go:33: want 1`
+            ("main_test.go:33:", file("main_test.go:33")),
+            // rg/grep `src/lib.rs:120:fn main()` and `src/lib.rs:120:5:let x`
+            ("src/lib.rs:120:fn", file("src/lib.rs:120")),
+            ("src/lib.rs:120:5:let", file("src/lib.rs:120:5")),
+            // node `at run (/abs/app.js:10:5)`
+            ("(/abs/app.js:10:5)", file("/abs/app.js:10:5")),
+            // tsc `src/app.ts(12,5): error`
+            ("src/app.ts(12,5):", file("src/app.ts(12,5)")),
+            // Claude Code tool calls `⏺ Update(src/app.rs)`
+            ("Update(src/app.rs)", file("src/app.rs")),
+            ("Read(diri/AGENTS.md)", file("diri/AGENTS.md")),
+            ("~/notes/todo.md:4", file("~/notes/todo.md:4")),
+            ("./Cargo.toml", file("./Cargo.toml")),
+            ("Cargo.toml", file("Cargo.toml")),
+            // Not files: versions, times, addresses, URLs, IPv6.
+            ("1.2.3", None),
+            ("v0.8.2", None),
+            ("10.0.0.1:8080", None),
+            ("12:30", None),
+            ("12:30:45", None),
+            ("localhost:3000", None),
+            ("::1", None),
+            ("fe80::1", None),
+            ("[::1]:8080", None),
+            ("2001:db8::ff00:42:8329", None),
+            ("ftp://example.com/a.txt", None),
+            ("Finished", None),
+        ] {
+            assert_eq!(reference_from_run(run), expected, "{run}");
+        }
+        // URLs keep winning over the file reading of their path.
+        assert_eq!(
+            reference_from_run("https://example.com/src/app.rs:42"),
+            Some(TerminalReference::Url(
+                "https://example.com/src/app.rs:42".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn python_traceback_frames_carry_their_line() {
+        let terminal = terminal_with_rows(&[
+            "Traceback (most recent call last):",
+            "  File \"/srv/app/main.py\", line 12, in <module>",
+            "  File \"tools.py\", lines 3",
+        ]);
+        let hit = terminal.reference_hit_at(12, 1).unwrap();
+        assert_eq!(
+            hit.reference,
+            TerminalReference::File("/srv/app/main.py:12".to_owned())
+        );
+        // The underline covers the path, not its quotes or the line words.
+        assert_eq!(hit.spans, vec![(1, 8, 24)]);
+        assert_eq!(
+            terminal.reference_at(10, 2),
+            Some(TerminalReference::File("tools.py".to_owned()))
         );
     }
 

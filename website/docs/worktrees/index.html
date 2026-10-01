@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Worktrees and review · Diri docs</title>
+  <meta name="description" content="Give each diri agent its own git worktree and branch, review its diff in the Review panel, commit, follow pull request checks, and clean up afterwards.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/worktrees/">
+  <link rel="alternate" type="text/markdown" href="/docs/worktrees.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Worktrees and review">
+  <meta property="og:description" content="Give each diri agent its own git worktree and branch, review its diff in the Review panel, commit, follow pull request checks, and clean up afterwards.">
+  <meta property="og:url" content="https://diri.sh/docs/worktrees/">
+  <meta property="og:image" content="https://diri.sh/og/docs-worktrees.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Worktrees and review: diri documentation">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Worktrees and review","description":"Give each diri agent its own git worktree and branch, review its diff in the Review panel, commit, follow pull request checks, and clean up afterwards.","url":"https://diri.sh/docs/worktrees/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Working with agents<span class="docs-menu-sep">/</span><strong>Worktrees and review</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/" aria-current="page"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Schedules</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/worktrees.md">
+        <header class="docs-heading"><span class="eyebrow">Working with agents</span><h1>Worktrees and review</h1><p>Give each diri agent its own git worktree and branch, review its diff in the Review panel, commit, follow pull request checks, and clean up afterwards.</p></header>
+        <article class="docs-content">
+<p>When several agents work in one repository, give each its own git worktree: a separate checkout on its own branch, so nothing one agent does touches another until you bring it back. diri then shows every change in one place to review.</p>
+<h2 id="give-an-agent-its-own-worktree"><a class="anchor" href="#give-an-agent-its-own-worktree" aria-hidden="true" tabindex="-1">#</a>Give an agent its own worktree</h2>
+<p>Worktrees need a git repository. There are three ways to get one.</p>
+<ul><li><strong>Ask the agent.</strong> Agents in diri have tools to create worktrees and to start helpers in them. Say so in the task: &quot;Use diri to do this in a new worktree so it does not touch my current files.&quot;</li><li><strong>From the launcher.</strong> A <a href="/docs/scheduled-tasks/">recipe</a> can use a fresh worktree. Each run creates a new branch from the recipe's branch prefix plus a unique suffix. Fresh worktrees are local only.</li><li><strong>From the command line.</strong> <code>dirijor worktree list</code>, <code>create</code> and <code>remove</code> work from any shell.</li></ul>
+<p>Treat a worktree like any checkout. Its branch and commits belong to the repository, so commit or move changes before you delete one.</p>
+<aside class="callout note"><strong>Note</strong><p>Worktrees separate files only. Agents still share your accounts, the network, and anything running on your machine.</p></aside>
+<h2 id="the-review-panel"><a class="anchor" href="#the-review-panel" aria-hidden="true" tabindex="-1">#</a>The Review panel</h2>
+<p>Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>D</kbd> to open the right panel and choose <strong>Review</strong>. It follows the selected session and lists every file changed in that session's checkout, with added and removed lines. A folder that is not a git repository shows &quot;Not a Git repository&quot;.</p>
+<h3 id="choose-what-to-compare"><a class="anchor" href="#choose-what-to-compare" aria-hidden="true" tabindex="-1">#</a>Choose what to compare</h3>
+<div class="table-wrap"><table><thead><tr><th>Compare against</th><th>Shows</th></tr></thead><tbody><tr><td>Default branch</td><td>Everything this session changed, committed or not</td></tr><tr><td>HEAD</td><td>Only changes that are not committed yet</td></tr></tbody></table></div>
+<p>Choose the working or staged layer to act on individual hunks.</p>
+<h3 id="stage-discard-and-commit"><a class="anchor" href="#stage-discard-and-commit" aria-hidden="true" tabindex="-1">#</a>Stage, discard and commit</h3>
+<div class="table-wrap"><table><thead><tr><th>Action</th><th>What it does</th></tr></thead><tbody><tr><td>Stage</td><td>Stage one file or hunk</td></tr><tr><td>Stage all</td><td>Stage every current change</td></tr><tr><td>Unstage</td><td>In the Staged layer, unstage a file or everything staged</td></tr><tr><td>Discard</td><td>Throw a hunk or your working changes away. Asks you to confirm, because it cannot be undone</td></tr><tr><td>Commit</td><td>Commit the staged changes with the message you type</td></tr></tbody></table></div>
+<p>Changes on a remote host are view-only in the panel.</p>
+<h3 id="ask-the-agent-to-check-itself"><a class="anchor" href="#ask-the-agent-to-check-itself" aria-hidden="true" tabindex="-1">#</a>Ask the agent to check itself</h3>
+<p><strong>Ask active agent</strong> sends a ready-made request to the session's agent:</p>
+<div class="table-wrap"><table><thead><tr><th>Button</th><th>Request</th></tr></thead><tbody><tr><td>Review</td><td>Review this for correctness, regressions, and missing tests</td></tr><tr><td>Find risks</td><td>Find the highest-risk behavior changes and explain why they matter</td></tr><tr><td>Suggest tests</td><td>Identify missing tests and propose concrete cases for this context</td></tr></tbody></table></div>
+<p>You can also type your own follow-up.</p>
+<h2 id="pull-requests-and-checks"><a class="anchor" href="#pull-requests-and-checks" aria-hidden="true" tabindex="-1">#</a>Pull requests and checks</h2>
+<p>When a session has a pull request, the session header links to it with its check status: passed, failed or still running. The panel shows checks, review state and comments, with a link to the conversation on GitHub. For an open pull request, <strong>Merge pull request</strong> opens GitHub so you can review and confirm the merge there. Next to it, the panel says &quot;Ready to merge&quot; when nothing blocks it.</p>
+<p>To open file links in your editor, set <strong>Settings → Appearance → Open file links in</strong>.</p>
+<h2 id="bring-work-back"><a class="anchor" href="#bring-work-back" aria-hidden="true" tabindex="-1">#</a>Bring work back</h2>
+<p>When helpers worked in separate worktrees, review each one in the Review panel and merge them one at a time. An agent that started helpers can do this itself with diri's <code>integrate</code> tool: it brings a helper's committed branch into the agent's own checkout as a merge, squash, or cherry-pick. Both checkouts must have no uncommitted tracked changes. On conflict nothing changes, and the conflicting paths are reported back. It works for local sessions in the same project only.</p>
+<p>Try asking the lead agent: &quot;Use diri to give each sub-task its own agent in a separate worktree, review their changes, and merge only the ones whose tests pass.&quot; See <a href="/guides/agent-teams/">Let agents work as a team</a>.</p>
+<h2 id="hand-work-to-another-session"><a class="anchor" href="#hand-work-to-another-session" aria-hidden="true" tabindex="-1">#</a>Hand work to another session</h2>
+<ul><li><strong>Keyboard.</strong> Select the source session and press <kbd>⌃</kbd><kbd>⌘</kbd><kbd>D</kbd>, select the target, and press it again.</li><li><strong>Drag and drop.</strong> Drop a session onto another session's row to hand its work to that session.</li></ul>
+<p>Either way, a handoff sheet opens with the generated context. You can edit it, remote targets carry a Remote badge, and nothing is sent until you click <strong>Send handoff</strong> or press Return. Esc cancels.</p>
+<p>Dropping a session on the zone below the last project instead starts a sibling with the same prompt.</p>
+<h2 id="clean-up"><a class="anchor" href="#clean-up" aria-hidden="true" tabindex="-1">#</a>Clean up</h2>
+<p>Open <strong>Settings → Worktrees</strong> to see the linked worktrees of your local projects, with their age and pull request state (Open, Merged or Closed). Filter by <strong>All</strong>, <strong>Ready to clean</strong> or <strong>Older than 30 days</strong>. Each worktree shows what keeps it from being cleaned up:</p>
+<div class="table-wrap"><table><thead><tr><th>Label</th><th>Meaning</th></tr></thead><tbody><tr><td>Main checkout</td><td>The repository's own checkout</td></tr><tr><td>Default branch</td><td>It is on the repository's default branch</td></tr><tr><td>Session in use or status unknown</td><td>A diri session still runs in it</td></tr><tr><td>Local changes</td><td>It has uncommitted work</td></tr><tr><td>Open pull request</td><td>Its pull request is still open</td></tr><tr><td>Merge not verified</td><td>diri could not confirm its branch was merged</td></tr><tr><td>Ready to clean</td><td>Nothing stands in the way</td></tr></tbody></table></div>
+<p><strong>Clean up…</strong> asks first, then <strong>Remove worktree</strong> deletes the checkout and its ignored files, including build output. The git branch and its commits are kept. <strong>Measure cleanup size</strong> shows how much space you would get back. <kbd>⌥</kbd><kbd>⌘</kbd><kbd>W</kbd> opens the worktrees overview.</p>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><a class="prev" href="/docs/sessions/"><span>Previous</span>Sessions</a><a class="next" href="/docs/notes/"><span>Next</span>Notes</a></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#give-an-agent-its-own-worktree">Give an agent its own worktree</a><a href="#the-review-panel">The Review panel</a><a href="#pull-requests-and-checks">Pull requests and checks</a><a href="#bring-work-back">Bring work back</a><a href="#hand-work-to-another-session">Hand work to another session</a><a href="#clean-up">Clean up</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/worktrees.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Fworktrees.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/worktrees.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a><a href="/agents/">Agents</a><a href="/compare/">Compare</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>

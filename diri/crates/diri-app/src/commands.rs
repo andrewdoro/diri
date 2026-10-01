@@ -19,7 +19,10 @@ pub type ShortcutOverrides = BTreeMap<String, Option<String>>;
 
 static ACTIVE_SHORTCUT_OVERRIDES: OnceLock<RwLock<ShortcutOverrides>> = OnceLock::new();
 
-actions!(diri_app, [Quit, HideApp, NewWindow, CloseWindow]);
+actions!(
+    diri_app,
+    [Quit, HideApp, NewWindow, CloseWindow, ReportProblem]
+);
 
 actions!(
     diri,
@@ -58,6 +61,10 @@ actions!(
         MovePaneUp,
         MovePaneDown,
         OpenWorktrees,
+        NewNote,
+        ShowTodos,
+        SearchNotes,
+        NoteVersionHistory,
         OpenSettings,
         // Palette destination: open Settings even when it is already visible.
         // OpenSettings retains the Cmd+, toggle behavior.
@@ -78,6 +85,7 @@ actions!(
         DelegateSelectedSession,
         SelectNextAttentionSession,
         CheckForUpdates,
+        ShowWhatsNew,
         SelectPreviousSession,
         SelectNextSession,
         MoveSelectedSessionUp,
@@ -112,6 +120,7 @@ actions!(
         CopySelection,
         EnterCopyMode,
         FindSelection,
+        InsertPath,
         ExportScrollback,
         PreviousPrompt,
         NextPrompt,
@@ -158,6 +167,10 @@ pub enum CommandId {
     MovePaneUp,
     MovePaneDown,
     OpenWorktrees,
+    NewNote,
+    ShowTodos,
+    SearchNotes,
+    NoteVersionHistory,
     OpenSettings,
     ToggleSidebar,
     ToggleTabOrientation,
@@ -173,6 +186,7 @@ pub enum CommandId {
     DelegateSelectedSession,
     SelectNextAttentionSession,
     CheckForUpdates,
+    ShowWhatsNew,
     SelectPreviousSession,
     SelectNextSession,
     MoveSelectedSessionUp,
@@ -196,6 +210,7 @@ pub enum CommandId {
     CopySelection,
     EnterCopyMode,
     FindSelection,
+    InsertPath,
     ExportScrollback,
     PreviousPrompt,
     NextPrompt,
@@ -624,6 +639,46 @@ pub const COMMANDS: &[CommandSpec] = &[
         "workspace move pane down dock"
     ),
     spec!(
+        NewNote,
+        "new-note",
+        Some("cmd-alt-n"),
+        Some("⌥⌘N"),
+        Some(APP_CONTEXT),
+        "New Note",
+        "doc.text",
+        "note notes markdown todo todos write memo prd plan doc"
+    ),
+    spec!(
+        ShowTodos,
+        "todos",
+        Some("cmd-ctrl-t"),
+        Some("⌃⌘T"),
+        Some(APP_CONTEXT),
+        "To-dos",
+        "checklist",
+        "todos to-dos tasks checklist open review notes"
+    ),
+    spec!(
+        SearchNotes,
+        "search-notes",
+        Some("cmd-shift-f"),
+        Some("⇧⌘F"),
+        Some(APP_CONTEXT),
+        "Search notes",
+        "magnifyingglass",
+        "notes find search open archived memo doc"
+    ),
+    spec!(
+        NoteVersionHistory,
+        "note-version-history",
+        None,
+        None,
+        Some(APP_CONTEXT),
+        "Version History…",
+        "arrow.counterclockwise",
+        "note history versions earlier restore undo changes"
+    ),
+    spec!(
         OpenWorktrees,
         "worktrees",
         Some("cmd-alt-w"),
@@ -777,6 +832,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Check for Updates…",
         "arrow.triangle.2.circlepath",
         "upgrade version release"
+    ),
+    spec!(
+        ShowWhatsNew,
+        "whats-new",
+        None,
+        None,
+        Some(APP_CONTEXT),
+        "What's New",
+        "sparkles",
+        "whats new release highlights features changelog demo video tour"
     ),
     spec_with_alternates!(
         SelectPreviousSession,
@@ -949,6 +1014,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         "find selection terminal"
     ),
     spec!(
+        InsertPath,
+        "terminal-insert-path",
+        Some("cmd-e"),
+        Some("⌘E"),
+        Some(TERMINAL_CONTEXT),
+        "Insert path",
+        "magnifyingglass",
+        "insert path file picker fuzzy terminal"
+    ),
+    spec!(
         ExportScrollback,
         "terminal-export",
         Some("cmd-shift-e"),
@@ -1026,6 +1101,9 @@ fn bind_active_keys(cx: &mut App, overrides: &ShortcutOverrides) {
             .iter()
             .flat_map(|command| command.key_bindings(overrides)),
     );
+    // The Notes window's editing keys live in their own key contexts, so
+    // they never shadow terminal or app shortcuts in the main window.
+    cx.bind_keys(crate::notes::key_bindings());
 }
 
 fn active_shortcut_overrides() -> &'static RwLock<ShortcutOverrides> {
@@ -1172,6 +1250,10 @@ impl CommandSpec {
             CommandId::MovePaneDown => KeyBinding::new(key, MovePaneDown, context),
 
             CommandId::OpenWorktrees => KeyBinding::new(key, OpenWorktrees, context),
+            CommandId::NewNote => KeyBinding::new(key, NewNote, context),
+            CommandId::ShowTodos => KeyBinding::new(key, ShowTodos, context),
+            CommandId::SearchNotes => KeyBinding::new(key, SearchNotes, context),
+            CommandId::NoteVersionHistory => KeyBinding::new(key, NoteVersionHistory, context),
             CommandId::OpenSettings => KeyBinding::new(key, OpenSettings, context),
             CommandId::ToggleSidebar => KeyBinding::new(key, ToggleSidebar, context),
             CommandId::ToggleTabOrientation => KeyBinding::new(key, ToggleTabOrientation, context),
@@ -1199,6 +1281,7 @@ impl CommandSpec {
                 KeyBinding::new(key, SelectNextAttentionSession, context)
             }
             CommandId::CheckForUpdates => KeyBinding::new(key, CheckForUpdates, context),
+            CommandId::ShowWhatsNew => KeyBinding::new(key, ShowWhatsNew, context),
             CommandId::SelectPreviousSession => {
                 KeyBinding::new(key, SelectPreviousSession, context)
             }
@@ -1228,6 +1311,7 @@ impl CommandSpec {
             CommandId::CopySelection => KeyBinding::new(key, CopySelection, context),
             CommandId::EnterCopyMode => KeyBinding::new(key, EnterCopyMode, context),
             CommandId::FindSelection => KeyBinding::new(key, FindSelection, context),
+            CommandId::InsertPath => KeyBinding::new(key, InsertPath, context),
             CommandId::ExportScrollback => KeyBinding::new(key, ExportScrollback, context),
             CommandId::PreviousPrompt => KeyBinding::new(key, PreviousPrompt, context),
             CommandId::NextPrompt => KeyBinding::new(key, NextPrompt, context),
@@ -1254,6 +1338,10 @@ fn linux_keystroke(id: CommandId, key: &str) -> Option<String> {
     // after translating macOS modifiers to Linux.
     if id == CommandId::DelegateSelectedSession {
         return Some("ctrl-alt-d".to_owned());
+    }
+    // Cmd-Ctrl-T would land on New Tab's Ctrl-Shift-T.
+    if id == CommandId::ShowTodos {
+        return Some("ctrl-alt-shift-t".to_owned());
     }
     let pane_focus = match id {
         CommandId::FocusPaneLeft => Some("ctrl-alt-h"),
@@ -1304,6 +1392,12 @@ fn platform_shortcut_label(label: &str) -> String {
     let key = label.replace(['⌘', '⌥', '⇧', '⌃'], "").replace('−', "-");
     modifiers.push(&key);
     modifiers.join("+")
+}
+
+/// How a native menu prints a keymap source such as `"cmd-alt-1"`: `⌥⌘1`.
+pub(crate) fn keystroke_label(source: &str) -> String {
+    Keystroke::parse(source)
+        .map_or_else(|_| source.to_owned(), |k| shortcut_label_for_keystroke(&k))
 }
 
 #[cfg(target_os = "macos")]
@@ -1591,6 +1685,26 @@ impl CommandId {
                 description: "Preview sessions across projects without changing work",
                 category: Navigation,
             },
+            Self::ShowTodos => ShortcutMetadata {
+                title: "To-dos",
+                description: "Every open to-do across your notes",
+                category: Navigation,
+            },
+            Self::SearchNotes => ShortcutMetadata {
+                title: "Search notes",
+                description: "Find any note, live or archived",
+                category: Navigation,
+            },
+            Self::NewNote => ShortcutMetadata {
+                title: "New note",
+                description: "Start a note in the current project, beside its agents",
+                category: Navigation,
+            },
+            Self::NoteVersionHistory => ShortcutMetadata {
+                title: "Version history",
+                description: "See and restore earlier versions of the open note",
+                category: Navigation,
+            },
             Self::OpenWorktrees => ShortcutMetadata {
                 title: "Worktrees overview",
                 description: "Open the Git worktrees overview",
@@ -1725,6 +1839,11 @@ impl CommandId {
                 description: "Search for the selected terminal text",
                 category: ShortcutCategory::Terminal,
             },
+            Self::InsertPath => ShortcutMetadata {
+                title: "Insert path",
+                description: "Pick a file under the session's directory and type its path",
+                category: ShortcutCategory::Terminal,
+            },
             Self::ExportScrollback => ShortcutMetadata {
                 title: "Open scrollback in editor",
                 description: "Open retained terminal output in your text editor",
@@ -1753,6 +1872,11 @@ impl CommandId {
             Self::CheckForUpdates => ShortcutMetadata {
                 title: "Check for updates",
                 description: "Look for a newer version of Diri",
+                category: Application,
+            },
+            Self::ShowWhatsNew => ShortcutMetadata {
+                title: "What's New",
+                description: "Replay the highlights of recent releases",
                 category: Application,
             },
             Self::NewWindow => ShortcutMetadata {
@@ -1829,6 +1953,10 @@ impl CommandId {
             Self::MovePaneDown => Box::new(MovePaneDown),
 
             Self::OpenWorktrees => Box::new(OpenWorktrees),
+            Self::NewNote => Box::new(NewNote),
+            Self::ShowTodos => Box::new(ShowTodos),
+            Self::SearchNotes => Box::new(SearchNotes),
+            Self::NoteVersionHistory => Box::new(NoteVersionHistory),
             Self::OpenSettings => Box::new(OpenSettings),
             Self::ToggleSidebar => Box::new(ToggleSidebar),
             Self::ToggleTabOrientation => Box::new(ToggleTabOrientation),
@@ -1844,6 +1972,7 @@ impl CommandId {
             Self::DelegateSelectedSession => Box::new(DelegateSelectedSession),
             Self::SelectNextAttentionSession => Box::new(SelectNextAttentionSession),
             Self::CheckForUpdates => Box::new(CheckForUpdates),
+            Self::ShowWhatsNew => Box::new(ShowWhatsNew),
             Self::SelectPreviousSession => Box::new(SelectPreviousSession),
             Self::SelectNextSession => Box::new(SelectNextSession),
             Self::MoveSelectedSessionUp => Box::new(MoveSelectedSessionUp),
@@ -1867,6 +1996,7 @@ impl CommandId {
             Self::CopySelection => Box::new(CopySelection),
             Self::EnterCopyMode => Box::new(EnterCopyMode),
             Self::FindSelection => Box::new(FindSelection),
+            Self::InsertPath => Box::new(InsertPath),
             Self::ExportScrollback => Box::new(ExportScrollback),
             Self::PreviousPrompt => Box::new(PreviousPrompt),
             Self::NextPrompt => Box::new(NextPrompt),

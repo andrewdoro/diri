@@ -305,6 +305,9 @@ impl Registry {
                         repaired.push(record.id.0.clone());
                     }
                     record.remote_connection = None;
+                    // Progress is a live report; whatever reported it is gone
+                    // or will report again.
+                    record.terminal_progress = None;
                     repair_persisted_agent_title(&mut record);
                     // Resolve the owning project before repairing its
                     // location namespace. In particular, a linked worktree's
@@ -593,6 +596,16 @@ impl Registry {
         }
     }
 
+    /// Local sessions whose wrapped agent exited asking to be started again
+    /// (Codex after updating itself). Each request is returned once.
+    pub fn take_relaunch_requests(&self) -> Vec<String> {
+        self.sessions
+            .iter()
+            .filter(|(_, session)| session.take_relaunch_request())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Final terminals of held children that exited since the last call, with
     /// everything needed to publish them. Storage happens after the lock is
     /// released; an unbound run is not published.
@@ -810,11 +823,18 @@ impl Registry {
     /// Remote (`host`-bound) sessions are none of this pass's business: their
     /// authenticated Holders live on another machine and outlive both this
     /// daemon and this Mac, so their records stay untouched.
+    #[cfg(test)]
+    pub(crate) fn reap_orphans_for_test(&mut self) {
+        self.reap_orphans();
+    }
+
     fn reap_orphans(&mut self) {
         let orphaned: Vec<String> = self
             .records
             .values()
             .filter(|record| record.host.is_none())
+            // A note never had a process, so there is no claim to retract.
+            .filter(|record| !record.is_note())
             .filter(|record| !matches!(record.status, SessionStatus::Exited(_)))
             .filter(|record| !self.sessions.contains_key(&record.id.0))
             .map(|record| record.id.0.clone())
@@ -822,8 +842,16 @@ impl Registry {
         if orphaned.is_empty() {
             return;
         }
+        diri_telemetry::warn_event!("engine.holders_lost", count = orphaned.len());
         for id in &orphaned {
             if let Some(record) = self.records.get_mut(id) {
+                diri_telemetry::event!(
+                    "session.lost",
+                    session = diri_telemetry::id(id),
+                    agent = diri_telemetry::id(record.kind.id()),
+                    conv = record.agent_session_id.as_deref().map(diri_telemetry::id),
+                    status = crate::telemetry::status_name(&record.status),
+                );
                 record.status = SessionStatus::Exited(ExitInfo {
                     reason: ExitReason::DaemonRestart,
                     code: None,
@@ -869,6 +897,12 @@ impl Registry {
                 Ok(stat) => stat,
                 Err(error) => {
                     eprintln!("diri-engine: holder recovery {session_id}: stat failed: {error}");
+                    diri_telemetry::warn_event!(
+                        "holder.adopt_failed",
+                        session = diri_telemetry::id(&session_id),
+                        stage = "stat",
+                        kind = crate::telemetry::holder_error_kind(&error),
+                    );
                     continue;
                 }
             };
@@ -952,11 +986,24 @@ impl Registry {
                             session.feed_identified_signal(signal, metadata.identity.clone());
                         }
                     }
+                    diri_telemetry::debug_event!(
+                        "session.adopted",
+                        session = diri_telemetry::id(&session_id),
+                        agent = diri_telemetry::id(&manifest_id),
+                        hibernated = was_hibernated,
+                        from_capsule = recovered_from_capsule,
+                    );
                     adopted.push(session_id);
                 }
                 Err(error) => {
                     eprintln!(
                         "diri-engine: holder recovery {session_id}: adoption failed: {error}"
+                    );
+                    diri_telemetry::error_event!(
+                        "holder.adopt_failed",
+                        session = diri_telemetry::id(&session_id),
+                        stage = "adopt",
+                        io = diri_telemetry::io_error(&error),
                     );
                     continue;
                 }
@@ -987,6 +1034,11 @@ impl Registry {
 
     pub fn get(&self, id: &str) -> Option<&Session> {
         self.sessions.get(id)
+    }
+
+    /// Whether `id` is a note Session: a record with no process or terminal.
+    pub fn is_note(&self, id: &str) -> bool {
+        self.records.get(id).is_some_and(SessionRecord::is_note)
     }
 
     pub fn views(&self) -> Vec<SessionView> {
@@ -1092,6 +1144,7 @@ impl Registry {
                     record.title.clone(),
                     record.title_source,
                     record.last_turn_completed_at,
+                    record.terminal_cwd.clone(),
                 );
                 fold_session_view(record, &view);
                 fold_record_lifecycle(&self.engine, record);
@@ -1105,6 +1158,9 @@ impl Registry {
                             record.title.clone(),
                             record.title_source,
                             record.last_turn_completed_at,
+                            // A terminal restarts where it was: a `cd` must
+                            // reach disk even when the tab keeps its name.
+                            record.terminal_cwd.clone(),
                         );
                 if record_persistence_changed {
                     record.updated_at = DateMillis::from(std::time::SystemTime::now());
@@ -1413,7 +1469,7 @@ impl Registry {
             // The stack holds the record as it was before the close, so it
             // still claims its last live status. Nothing runs under it now;
             // re-listing it live would leave clients attaching to no PTY.
-            if !matches!(record.status, SessionStatus::Exited(_)) {
+            if !record.is_note() && !matches!(record.status, SessionStatus::Exited(_)) {
                 record.status = SessionStatus::Exited(diri_proto::ExitInfo {
                     reason: diri_proto::ExitReason::Exited,
                     code: None,
@@ -1480,6 +1536,19 @@ impl Registry {
             let _ = session.set_hibernated(false);
         }
         if known_hibernated {
+            let info = self
+                .records
+                .get(id)
+                .and_then(|record| record.hibernation.as_ref());
+            diri_telemetry::event!(
+                "session.wake",
+                session = diri_telemetry::id(id),
+                reason = info.map(|info| crate::telemetry::hibernation_reason_name(info.reason)),
+                frozen_s = info.map(|info| {
+                    let now = DateMillis::from(std::time::SystemTime::now()).0;
+                    ((now - info.since.0) / 1000.0).max(0.0) as u64
+                }),
+            );
             self.set_hibernation(id, None);
         }
         Ok(())
@@ -1532,6 +1601,27 @@ impl Registry {
         meta: &crate::hooks::HookMetadata,
         home: Option<&Path>,
     ) -> Option<bool> {
+        let stripped;
+        let meta = if let Some((reason, holder)) = self.refused_conversation(id, meta) {
+            diri_telemetry::event!(
+                "session.conversation_refused",
+                session = diri_telemetry::id(id),
+                conv = meta.agent_session_id.as_deref().map(diri_telemetry::id),
+                reason = reason,
+                holder = holder.as_deref().map(diri_telemetry::id),
+            );
+            // The status signal still belongs to this PTY; only the foreign
+            // identity, transcript and prompt title are dropped.
+            stripped = crate::hooks::HookMetadata {
+                agent_session_id: None,
+                transcript_path: None,
+                first_prompt_title: None,
+                ..meta.clone()
+            };
+            &stripped
+        } else {
+            meta
+        };
         let claimed = self.claimed_agent_ids(Some(id));
         let mut transcript = self.records.get(id).and_then(|record| {
             if record.host.is_some() {
@@ -1626,6 +1716,14 @@ impl Registry {
         if let Some(agent_id) = &meta.agent_session_id
             && record.agent_session_id.as_ref() != Some(agent_id)
         {
+            diri_telemetry::event!(
+                "session.conversation",
+                session = diri_telemetry::id(id),
+                agent = diri_telemetry::id(record.kind.id()),
+                conv = diri_telemetry::id(agent_id),
+                previous = record.agent_session_id.as_deref().map(diri_telemetry::id),
+                source = "hook",
+            );
             record.agent_session_id = Some(agent_id.clone());
             record.resumability = diri_proto::Resumability::Live;
             changed = true;
@@ -1634,6 +1732,12 @@ impl Registry {
             transcript.map(|transcript| transcript.path().to_string_lossy().into_owned())
             && record.transcript_path.as_ref() != Some(&transcript)
         {
+            diri_telemetry::debug_event!(
+                "session.transcript",
+                session = diri_telemetry::id(id),
+                path = diri_telemetry::path_hash(&transcript),
+                moved = record.transcript_path.is_some(),
+            );
             record.transcript_path = Some(transcript);
             changed = true;
         }
@@ -1852,7 +1956,10 @@ impl Registry {
                 record.worktree_path.clone(),
                 record.git_branch.clone(),
                 record.updated_at,
+                record.terminal_cwd.take(),
             );
+            // A terminal moved to another checkout restarts there, not in
+            // the directory it had `cd`'d to in the old one.
             record.cwd.clone_from(&cwd);
             record.worktree_path = Some(cwd);
             record.git_branch = branch;
@@ -1872,6 +1979,7 @@ impl Registry {
             record.worktree_path = previous.1;
             record.git_branch = previous.2;
             record.updated_at = previous.3;
+            record.terminal_cwd = previous.4;
             self.dirty = was_dirty;
             return Err(error);
         }
@@ -1887,6 +1995,20 @@ impl Registry {
         let record = self.records.get_mut(id).ok_or_else(|| not_found(id))?;
         record.last_seen_at = Some(DateMillis::from(std::time::SystemTime::now()));
         Ok(())
+    }
+
+    /// Puts the last completed turn back behind `last_seen_at`, so the
+    /// session reads "done · unseen" again until it is next viewed. Returns
+    /// false when no turn has completed: there is nothing to be unread.
+    pub fn mark_unread(&mut self, id: &str) -> std::io::Result<bool> {
+        let record = self.records.get_mut(id).ok_or_else(|| not_found(id))?;
+        let Some(completed) = record.last_turn_completed_at else {
+            return Ok(false);
+        };
+        // One millisecond earlier keeps `last_seen_at` a real recency signal
+        // for the PR monitor and the governor.
+        record.last_seen_at = Some(DateMillis(completed.0 - 1.0));
+        Ok(true)
     }
 
     /// Ends the session but keeps its record on the shelf: kill-tree,
@@ -1954,12 +2076,50 @@ impl Registry {
         &self.projects
     }
 
+    /// Whether an agent session other than `except` is live (terminals and
+    /// notes excluded), for the `activation.second_session` milestone.
+    pub fn other_live_agent(&self, except: &str) -> bool {
+        self.sessions.keys().any(|id| {
+            id != except
+                && self
+                    .records
+                    .get(id)
+                    .is_some_and(|record| crate::telemetry::counts_for_activation(&record.kind))
+        })
+    }
+
     pub fn live_count(&self) -> usize {
         self.sessions.len()
     }
 
     pub fn record_count(&self) -> usize {
         self.records.len()
+    }
+
+    /// Cheap fleet counts for the telemetry `health` gauge.
+    pub fn telemetry_counts(&self) -> TelemetryCounts {
+        let mut counts = TelemetryCounts {
+            records: self.records.len(),
+            live: self.sessions.len(),
+            ..TelemetryCounts::default()
+        };
+        for session in self.sessions.values() {
+            if session.is_held() {
+                counts.held += 1;
+            }
+            if session.remote_stop().is_some() {
+                counts.remote += 1;
+            }
+            if session.is_hibernated() {
+                counts.hibernated += 1;
+            }
+            match session.status() {
+                SessionStatus::Working => counts.working += 1,
+                SessionStatus::NeedsInput(_) => counts.needs_input += 1,
+                _ => {}
+            }
+        }
+        counts
     }
 
     pub fn state_file(&self) -> &Path {
@@ -1980,6 +2140,34 @@ impl Registry {
             .collect()
     }
 
+    /// Why a hook may not move `id` to the conversation it names. A tab must
+    /// never flip between conversations: its title, transcript and resume
+    /// target all follow `agent_session_id`.
+    fn refused_conversation(
+        &self,
+        id: &str,
+        meta: &crate::hooks::HookMetadata,
+    ) -> Option<(&'static str, Option<String>)> {
+        let incoming = meta.agent_session_id.as_deref()?;
+        let record = self.records.get(id)?;
+        let current = record.agent_session_id.as_deref();
+        if current == Some(incoming) {
+            return None;
+        }
+        if current.is_some() && !meta.binds_conversation {
+            return Some(("not_session_start", None));
+        }
+        self.records
+            .iter()
+            .find(|(other, other_record)| {
+                other.as_str() != id
+                    && self.sessions.contains_key(other.as_str())
+                    && other_record.host == record.host
+                    && other_record.agent_session_id.as_deref() == Some(incoming)
+            })
+            .map(|(other, _)| ("held_by_other_session", Some(other.clone())))
+    }
+
     fn claimed_agent_ids(&self, except: Option<&str>) -> HashSet<String> {
         self.records
             .iter()
@@ -1987,6 +2175,17 @@ impl Registry {
             .filter_map(|(_, record)| record.agent_session_id.clone())
             .collect()
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TelemetryCounts {
+    pub records: usize,
+    pub live: usize,
+    pub held: usize,
+    pub remote: usize,
+    pub hibernated: usize,
+    pub working: usize,
+    pub needs_input: usize,
 }
 
 fn user_home() -> Option<PathBuf> {
@@ -2092,6 +2291,14 @@ fn apply_cursor_conversation(
 ) -> bool {
     let mut changed = false;
     if record.agent_session_id.as_deref() != Some(conversation.id.as_str()) {
+        diri_telemetry::event!(
+            "session.conversation",
+            session = diri_telemetry::id(&record.id.0),
+            agent = diri_telemetry::id(record.kind.id()),
+            conv = diri_telemetry::id(&conversation.id),
+            previous = record.agent_session_id.as_deref().map(diri_telemetry::id),
+            source = "cursor_store",
+        );
         record.agent_session_id = Some(conversation.id);
         record.resumability = diri_proto::Resumability::Live;
         changed = true;
@@ -2113,7 +2320,7 @@ fn apply_cursor_conversation(
         && let Some(title) = conversation
             .title
             .and_then(|title| normalize_agent_title(&title))
-            .filter(|title| !is_generic_terminal_title(title, record))
+            .filter(|title| !is_generic_terminal_title(title, &record.kind, &record.cwd))
         && (record.title != title || record.title_source != TitleSource::AgentProvided)
     {
         record.title = title;
@@ -2138,8 +2345,8 @@ fn apply_native_title(record: &mut SessionRecord, title: &str) -> bool {
     if !accepts_native_title(record.title_source) {
         return false;
     }
-    let Some(title) =
-        normalize_agent_title(title).filter(|title| !is_generic_terminal_title(title, record))
+    let Some(title) = normalize_agent_title(title)
+        .filter(|title| !is_generic_terminal_title(title, &record.kind, &record.cwd))
     else {
         return false;
     };
@@ -2186,17 +2393,20 @@ fn is_local_cursor_record(record: &SessionRecord) -> bool {
 
 fn fold_session_view(record: &mut SessionRecord, view: &SessionView) {
     record.remote_connection = view.remote_connection;
+    record.terminal_progress = view.terminal_progress;
     fold_session_status(record, view);
     // cursor-agent (and similar) stamp a brand/status OSC title as soon as
     // they are idle. That must not freeze the record as AgentProvided, or
     // the first real prompt can never name the session.
     repair_persisted_agent_title(record);
-    if record.kind == diri_proto::AgentKind::SHELL
-        || matches!(
-            record.title_source,
-            TitleSource::AgentProvided | TitleSource::DirijorAssigned | TitleSource::UserRename
-        )
-    {
+    if record.kind == diri_proto::AgentKind::SHELL {
+        fold_shell_view(record, view);
+        return;
+    }
+    if matches!(
+        record.title_source,
+        TitleSource::AgentProvided | TitleSource::DirijorAssigned | TitleSource::UserRename
+    ) {
         return;
     }
     let terminal_title = view.terminal_title.as_deref().or_else(|| {
@@ -2222,6 +2432,107 @@ fn fold_session_view(record: &mut SessionRecord, view: &SessionView) {
     }
 }
 
+/// Names a shell after what it is doing, the way a terminal's own tab would:
+/// the Agent's task, the address a dev server in its foreground serves, or
+/// the program there, else the directory its prompt sits in. A name the user
+/// or Diri gave it is never replaced.
+///
+/// A remote shell reports none of this and keeps its placeholder.
+fn fold_shell_view(record: &mut SessionRecord, view: &SessionView) {
+    record.foreground_agent = view.foreground_agent.clone().map(AgentKind::new);
+    if view.terminal_cwd.is_some() {
+        record.terminal_cwd.clone_from(&view.terminal_cwd);
+    }
+    if record.host.is_none() {
+        fold_foreground_ports(
+            record,
+            if view.exited {
+                &[]
+            } else {
+                &view.foreground_ports
+            },
+        );
+    }
+    if matches!(
+        record.title_source,
+        TitleSource::AgentProvided | TitleSource::DirijorAssigned | TitleSource::UserRename
+    ) {
+        return;
+    }
+    let cwd = record.terminal_cwd.as_deref().unwrap_or(&record.cwd);
+    let title = record
+        .foreground_agent
+        .as_ref()
+        .and_then(|agent| {
+            let title = view.terminal_title.as_deref()?;
+            normalize_terminal_title_for(title, agent, cwd)
+        })
+        .or_else(|| serving_title(record.foreground_ports.as_deref().unwrap_or_default()))
+        .or_else(|| view.foreground_program.clone())
+        .or_else(|| record.terminal_cwd.as_deref().map(directory_title));
+    if let Some(title) = title
+        && (record.title != title || record.title_source != TitleSource::TerminalTitle)
+    {
+        record.title = title;
+        record.title_source = TitleSource::TerminalTitle;
+    }
+}
+
+/// Keeps `listening_ports` current for what a shell's foreground job serves.
+/// The governor's own scan runs every couple of minutes and only while a
+/// client is attached; the job's ports join the list as they open and leave
+/// it with the job, so the preview link is never late or stale.
+fn fold_foreground_ports(record: &mut SessionRecord, ports: &[diri_proto::PortInfo]) {
+    let previous = record.foreground_ports.take().unwrap_or_default();
+    record.foreground_ports = (!ports.is_empty()).then(|| ports.to_vec());
+    if previous.as_slice() == ports {
+        return;
+    }
+    let mut listening = record.listening_ports.take().unwrap_or_default();
+    listening.retain(|known| !previous.iter().any(|old| old.port == known.port));
+    for port in ports {
+        if !listening.iter().any(|known| known.port == port.port) {
+            listening.push(port.clone());
+        }
+    }
+    listening.sort_by_key(|port| port.port);
+    record.listening_ports = Some(listening);
+}
+
+/// Ports from here up are the kernel's to hand out: a worker's or a
+/// debugger's, not a page anyone opens, so they never name a tab.
+const EPHEMERAL_PORTS: i64 = 32768;
+
+/// What a tab calls a dev server: the address it serves, `localhost:3000`.
+/// A job serving more than one names its lowest and counts the rest,
+/// `localhost:3000 +1`, since the tab has room for one address and the
+/// links menu lists them all.
+fn serving_title(ports: &[diri_proto::PortInfo]) -> Option<String> {
+    let mut served = ports
+        .iter()
+        .map(|info| info.port)
+        .filter(|port| (1..EPHEMERAL_PORTS).contains(port));
+    let first = served.next()?;
+    Some(match served.count() {
+        0 => format!("localhost:{first}"),
+        more => format!("localhost:{first} +{more}"),
+    })
+}
+
+/// A directory as a tab names it: its last component, or `~` for home.
+fn directory_title(path: &str) -> String {
+    let path = path.trim_end_matches('/');
+    if std::env::var_os("HOME")
+        .is_some_and(|home| home.to_string_lossy().trim_end_matches('/') == path)
+    {
+        return "~".to_owned();
+    }
+    match path.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => "/".to_owned(),
+    }
+}
+
 fn repair_codex_conversation(record: &mut SessionRecord, home: &Path) -> bool {
     if record.host.is_some() || record.effective_kind() != &AgentKind::CODEX {
         return false;
@@ -2238,6 +2549,16 @@ fn repair_codex_conversation(record: &mut SessionRecord, home: &Path) -> bool {
     ) else {
         return false;
     };
+    if record.agent_session_id.as_deref() != Some(root_id.as_str()) {
+        diri_telemetry::event!(
+            "session.conversation",
+            session = diri_telemetry::id(&record.id.0),
+            agent = diri_telemetry::id(record.kind.id()),
+            conv = diri_telemetry::id(&root_id),
+            previous = record.agent_session_id.as_deref().map(diri_telemetry::id),
+            source = "codex_repair",
+        );
+    }
     record.agent_session_id = Some(root_id);
     record.transcript_path = Some(transcript.path().to_string_lossy().into_owned());
     true
@@ -2247,6 +2568,10 @@ fn repair_codex_conversation(record: &mut SessionRecord, home: &Path) -> bool {
 /// titles by older builds. User and Diri-assigned names are intentionally
 /// untouched; only titles attributed to the Agent/PTY are safe to repair.
 fn repair_persisted_agent_title(record: &mut SessionRecord) -> bool {
+    // A shell's title names its foreground program, which may be `claude`.
+    if record.kind == AgentKind::SHELL {
+        return false;
+    }
     // Once Codex has an identified native name, its literal text belongs to
     // the conversation. A valid `/rename Ready` must not be parsed as activity.
     if record.kind == AgentKind::CODEX
@@ -2306,12 +2631,25 @@ fn fold_session_status(record: &mut SessionRecord, view: &SessionView) {
 /// Resolves status-dependent facts at the one seam shared by snapshots and
 /// incremental events, so clients never have to reconstruct Agent behavior.
 fn fold_record_lifecycle(engine: &ManifestEngine, record: &mut SessionRecord) {
-    // `Live` only records that the agent named its conversation while it was
-    // running. After exit, Resume needs the stronger answer: whether that
-    // conversation can actually be re-entered through its manifest.
-    if matches!(record.status, SessionStatus::Exited(_))
+    // A local terminal that did not close itself restarts: `session.resume`
+    // gives it a fresh login shell in the directory it had `cd`'d to. A
+    // clean `exit` stays final, which is what lets its tab close.
+    if let SessionStatus::Exited(exit) = &record.status
+        && record.kind == AgentKind::SHELL
+        && record.host.is_none()
+    {
+        let closed_itself = exit.reason == diri_proto::ExitReason::Exited && exit.code == Some(0);
+        record.resumability = if closed_itself {
+            diri_proto::Resumability::NotResumable
+        } else {
+            diri_proto::Resumability::Resumable
+        };
+    } else if matches!(record.status, SessionStatus::Exited(_))
         && record.resumability == diri_proto::Resumability::Live
     {
+        // `Live` only records that the agent named its conversation while it
+        // was running. After exit, Resume needs the stronger answer: whether
+        // that conversation can actually be re-entered through its manifest.
         record.resumability = if can_reenter(engine, record) {
             diri_proto::Resumability::Resumable
         } else {
@@ -2349,17 +2687,15 @@ fn normalize_agent_title(title: &str) -> Option<String> {
 /// the project, and temporarily replaces the name while generation is pending.
 /// Only a useful conversation component may become a provisional sidebar name.
 fn normalize_terminal_title(title: &str, record: &SessionRecord) -> Option<String> {
+    normalize_terminal_title_for(title, &record.kind, &record.cwd)
+}
+
+fn normalize_terminal_title_for(title: &str, kind: &AgentKind, cwd: &str) -> Option<String> {
     let mut title = normalize_agent_title(title)?;
-    if record.kind == AgentKind::CODEX {
+    if *kind == AgentKind::CODEX {
         if let Some((name, directory)) = title.rsplit_once(" | ")
-            && (directory
-                == record
-                    .cwd
-                    .trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("")
-                || directory == record.cwd)
+            && (directory == cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("")
+                || directory == cwd)
         {
             title = name.trim().to_owned();
         }
@@ -2390,16 +2726,16 @@ fn normalize_terminal_title(title: &str, record: &SessionRecord) -> Option<Strin
         }
         title = parts.join(" | ");
     }
-    (!title.is_empty() && !is_generic_terminal_title(&title, record)).then_some(title)
+    (!title.is_empty() && !is_generic_terminal_title(&title, kind, cwd)).then_some(title)
 }
 
-fn is_generic_terminal_title(title: &str, record: &SessionRecord) -> bool {
+fn is_generic_terminal_title(title: &str, kind: &AgentKind, cwd: &str) -> bool {
     let title = title.trim().to_ascii_lowercase();
     let compact_title = title
         .chars()
         .filter(|character| character.is_alphanumeric())
         .collect::<String>();
-    let cwd = record.cwd.trim_end_matches('/').to_ascii_lowercase();
+    let cwd = cwd.trim_end_matches('/').to_ascii_lowercase();
     let directory = cwd.rsplit('/').next().unwrap_or(&cwd);
     title == cwd
         || title == directory
@@ -2414,7 +2750,7 @@ fn is_generic_terminal_title(title: &str, record: &SessionRecord) -> bool {
                 | "terminal"
                 | "shell"
         )
-        || (record.kind == diri_proto::AgentKind::CURSOR && is_cursor_status_title(&title))
+        || (*kind == diri_proto::AgentKind::CURSOR && is_cursor_status_title(&title))
 }
 
 fn is_cursor_status_title(title: &str) -> bool {
@@ -2501,6 +2837,11 @@ fn recovered_record(capsule: diri_proto::recovery::SessionRecoveryCapsule) -> Se
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        terminal_cwd: None,
+        note_id: None,
+        foreground_ports: None,
+        terminal_progress: None,
+        scheduled_run: None,
     }
 }
 
@@ -2726,6 +3067,11 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
+            scheduled_run: None,
         }
     }
 
@@ -2988,6 +3334,7 @@ mod tests {
         original.worktree_path = Some("/repo/main".into());
         original.git_branch = Some("main".into());
         original.updated_at = DateMillis(42.0);
+        original.terminal_cwd = Some("/repo/main/src".into());
         registry.records.insert("s_move".into(), original.clone());
 
         let error = registry
@@ -3006,6 +3353,7 @@ mod tests {
         assert_eq!(current.worktree_path, original.worktree_path);
         assert_eq!(current.git_branch, original.git_branch);
         assert_eq!(current.updated_at, original.updated_at);
+        assert_eq!(current.terminal_cwd, original.terminal_cwd);
         assert!(!registry.dirty, "failed edit must not be flushed later");
     }
 
@@ -3500,6 +3848,128 @@ mod tests {
         assert_eq!(updated.title_source, TitleSource::AgentProvided);
     }
 
+    fn claude_transcript(home: &Path, agent_id: &str, title: &str) -> String {
+        let transcript = home
+            .join(".claude/projects/-tmp")
+            .join(format!("{agent_id}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &transcript,
+            format!("{{\"type\":\"ai-title\",\"aiTitle\":\"{title}\"}}\n"),
+        )
+        .expect("write transcript");
+        transcript.to_string_lossy().into_owned()
+    }
+
+    fn claude_hook(event: &str, agent_id: &str, transcript: &str) -> crate::hooks::HookMetadata {
+        crate::hooks::parse_claude_hook(
+            event,
+            &serde_json::json!({
+                "session_id": agent_id,
+                "transcript_path": transcript,
+                "prompt": "unrelated prompt",
+            }),
+            std::time::SystemTime::now(),
+        )
+        .expect("parsed")
+        .1
+    }
+
+    /// Two Claude conversations reporting through one tab's environment made
+    /// the tab flip between them on every hook, swapping its title with the
+    /// other tab's.
+    #[test]
+    fn only_session_start_moves_a_claude_tab_to_another_conversation() {
+        let temp = tempfile::tempdir().expect("temp");
+        let vanta = "0199f2c4-1a2b-4c3d-8e9f-0000000000a1";
+        let perf = "0199f2c4-1a2b-4c3d-8e9f-0000000000b2";
+        let vanta_path = claude_transcript(temp.path(), vanta, "Vanta audit");
+        let perf_path = claude_transcript(temp.path(), perf, "Performance pass");
+        let mut registry = Registry::new(engine(), temp.path().join("state.json"));
+        let mut session = record("claude");
+        session.kind = AgentKind::CLAUDE_CODE;
+        session.agent_session_id = Some(vanta.to_owned());
+        session.transcript_path = Some(vanta_path.clone());
+        registry.insert_record(session);
+        let home = Some(temp.path());
+
+        assert!(registry.apply_hook_metadata_with_home(
+            "claude",
+            &claude_hook("Stop", vanta, &vanta_path),
+            home,
+        ));
+        assert_eq!(registry.record("claude").unwrap().title, "Vanta audit");
+
+        for event in ["UserPromptSubmit", "Stop", "SubagentStop", "PreToolUse"] {
+            registry.apply_hook_metadata_with_home(
+                "claude",
+                &claude_hook(event, perf, &perf_path),
+                home,
+            );
+            let record = registry.record("claude").unwrap();
+            assert_eq!(record.agent_session_id.as_deref(), Some(vanta), "{event}");
+            assert_eq!(record.transcript_path.as_deref(), Some(&*vanta_path));
+            assert_eq!(record.title, "Vanta audit", "{event}");
+        }
+
+        // `/resume` and `/clear` announce the switch with SessionStart.
+        assert!(registry.apply_hook_metadata_with_home(
+            "claude",
+            &claude_hook("SessionStart", perf, &perf_path),
+            home,
+        ));
+        let record = registry.record("claude").unwrap();
+        assert_eq!(record.agent_session_id.as_deref(), Some(perf));
+        assert_eq!(record.transcript_path.as_deref(), Some(&*perf_path));
+        assert_eq!(record.title, "Performance pass");
+    }
+
+    #[test]
+    fn a_tab_never_takes_a_conversation_another_live_tab_holds() {
+        let temp = tempfile::tempdir().expect("temp");
+        let mine = "0199f2c4-1a2b-4c3d-8e9f-0000000000c3";
+        let theirs = "0199f2c4-1a2b-4c3d-8e9f-0000000000d4";
+        let mine_path = claude_transcript(temp.path(), mine, "Mine");
+        let theirs_path = claude_transcript(temp.path(), theirs, "Theirs");
+        let mut registry = Registry::new(engine(), temp.path().join("state.json"));
+        for (id, agent_id, path) in [("a", mine, &mine_path), ("b", theirs, &theirs_path)] {
+            let mut session = record(id);
+            session.kind = AgentKind::CLAUDE_CODE;
+            session.agent_session_id = Some(agent_id.to_owned());
+            session.transcript_path = Some(path.clone());
+            session.title = if id == "a" { "Mine" } else { "Theirs" }.into();
+            session.title_source = TitleSource::AgentProvided;
+            registry
+                .spawn(
+                    SessionSpec {
+                        id: id.into(),
+                        pty: crate::PtySpec::new(vec!["/bin/cat".into()], "/tmp"),
+                        manifest_id: "claude-code".into(),
+                        authority: crate::Authority::ProcessOnly,
+                        logs_dir: temp.path().join("logs"),
+                        holder: None,
+                        remote: None,
+                        defer_launch: false,
+                    },
+                    session,
+                )
+                .unwrap();
+        }
+
+        registry.apply_hook_metadata_with_home(
+            "a",
+            &claude_hook("SessionStart", theirs, &theirs_path),
+            Some(temp.path()),
+        );
+        let a = registry.record("a").unwrap();
+        assert_eq!(a.agent_session_id.as_deref(), Some(mine));
+        assert_eq!(a.title, "Mine");
+        assert_eq!(
+            registry.record("b").unwrap().agent_session_id.as_deref(),
+            Some(theirs)
+        );
+    }
+
     #[test]
     fn codex_subagent_notify_does_not_replace_the_parent_conversation() {
         let temp = tempfile::tempdir().unwrap();
@@ -3740,9 +4210,181 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_is_named_after_its_foreground_program_or_directory() {
+        let view = |program: Option<&str>, agent: Option<&str>, title: Option<&str>| SessionView {
+            remote_connection: None,
+            foreground_program: program.map(str::to_owned),
+            foreground_agent: agent.map(str::to_owned),
+            terminal_cwd: Some("/work/diri/crates".to_owned()),
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
+            attention_state: None,
+            terminal_title: title.map(str::to_owned),
+            id: "shell".to_owned(),
+            status: SessionStatus::Idle,
+            status_evidence: None,
+            needs_input: None,
+            last_turn_completed_at: None,
+            title: title.map(str::to_owned),
+            title_source: Some(TitleSource::TerminalTitle),
+            tail_offset: 0,
+            exited: false,
+        };
+        let mut shell = record("shell");
+        shell.cwd = "/work/diri".into();
+
+        // At the prompt, the directory `cd` moved it to; the shell's own
+        // OSC title (fish writes "fish ~/w/diri") is not a name.
+        fold_session_view(&mut shell, &view(None, None, Some("fish /work/diri")));
+        assert_eq!(shell.title, "crates");
+        assert_eq!(shell.title_source, TitleSource::TerminalTitle);
+        assert_eq!(shell.terminal_cwd.as_deref(), Some("/work/diri/crates"));
+        assert_eq!(shell.cwd, "/work/diri", "the launch cwd owns the project");
+        assert_eq!(shell.effective_kind(), &AgentKind::SHELL);
+
+        fold_session_view(&mut shell, &view(Some("vim"), None, Some("notes.md - VIM")));
+        assert_eq!(shell.title, "vim");
+
+        // Claude started by hand: its icon, then its own task title.
+        fold_session_view(
+            &mut shell,
+            &view(Some("claude"), Some("claude-code"), Some("✳ Claude Code")),
+        );
+        assert_eq!(shell.effective_kind(), &AgentKind::CLAUDE_CODE);
+        assert_eq!(shell.kind, AgentKind::SHELL);
+        assert_eq!(shell.title, "claude");
+        fold_session_view(
+            &mut shell,
+            &view(
+                Some("claude"),
+                Some("claude-code"),
+                Some("✳ Fix login redirect"),
+            ),
+        );
+        assert_eq!(shell.title, "Fix login redirect");
+
+        fold_session_view(&mut shell, &view(None, None, None));
+        assert_eq!(shell.foreground_agent, None);
+        assert_eq!(shell.title, "crates");
+
+        shell.title = "Build server".into();
+        shell.title_source = TitleSource::UserRename;
+        fold_session_view(&mut shell, &view(Some("npm"), None, None));
+        assert_eq!(shell.title, "Build server");
+
+        // A remote shell reports nothing and keeps its placeholder.
+        let mut remote = record("remote");
+        remote.title = "shell".into();
+        remote.title_source = TitleSource::Placeholder;
+        let mut nothing = view(None, None, None);
+        nothing.terminal_cwd = None;
+        fold_session_view(&mut remote, &nothing);
+        assert_eq!(remote.title_source, TitleSource::Placeholder);
+    }
+
+    #[test]
+    fn a_shell_serving_a_port_is_named_after_its_address() {
+        let port = |port: i64| diri_proto::PortInfo {
+            port,
+            process_name: "node".to_owned(),
+        };
+        let view = |program: Option<&str>, ports: Vec<diri_proto::PortInfo>| SessionView {
+            remote_connection: None,
+            foreground_program: program.map(str::to_owned),
+            foreground_agent: None,
+            terminal_cwd: Some("/work/web".to_owned()),
+            foreground_ports: ports,
+            terminal_progress: None,
+            attention_state: None,
+            terminal_title: None,
+            id: "shell".to_owned(),
+            status: SessionStatus::Working,
+            status_evidence: None,
+            needs_input: None,
+            last_turn_completed_at: None,
+            title: None,
+            title_source: Some(TitleSource::TerminalTitle),
+            tail_offset: 0,
+            exited: false,
+        };
+        let mut shell = record("shell");
+        shell.cwd = "/work/web".into();
+        // A port the governor found elsewhere in the tree stays put.
+        shell.listening_ports = Some(vec![port(6006)]);
+
+        // `npm run dev` before its server listens is just `npm`.
+        fold_session_view(&mut shell, &view(Some("npm"), Vec::new()));
+        assert_eq!(shell.title, "npm");
+        assert_eq!(shell.foreground_ports, None);
+
+        fold_session_view(&mut shell, &view(Some("npm"), vec![port(3000)]));
+        assert_eq!(shell.title, "localhost:3000");
+        assert_eq!(shell.title_source, TitleSource::TerminalTitle);
+        assert_eq!(
+            shell.listening_ports,
+            Some(vec![port(3000), port(6006)]),
+            "the preview link appears with the name, not at the next governor scan"
+        );
+
+        // A second server counts; an inspector's ephemeral port does not.
+        fold_session_view(
+            &mut shell,
+            &view(Some("turbo"), vec![port(3000), port(3001), port(50123)]),
+        );
+        assert_eq!(shell.title, "localhost:3000 +1");
+
+        // The server stops: back to the folder, and its ports leave with it.
+        fold_session_view(&mut shell, &view(None, Vec::new()));
+        assert_eq!(shell.title, "web");
+        assert_eq!(shell.foreground_ports, None);
+        assert_eq!(shell.listening_ports, Some(vec![port(6006)]));
+
+        // Only an ephemeral port: named after the program.
+        fold_session_view(&mut shell, &view(Some("node"), vec![port(50123)]));
+        assert_eq!(shell.title, "node");
+
+        // The user's name wins; the port is still recorded for the link.
+        shell.title = "API".into();
+        shell.title_source = TitleSource::UserRename;
+        fold_session_view(&mut shell, &view(Some("npm"), vec![port(8080)]));
+        assert_eq!(shell.title, "API");
+        assert!(
+            shell
+                .listening_ports
+                .as_deref()
+                .unwrap()
+                .contains(&port(8080))
+        );
+
+        // A job that exits takes its ports with it.
+        let mut exited = view(Some("npm"), vec![port(8080)]);
+        exited.exited = true;
+        fold_session_view(&mut shell, &exited);
+        assert_eq!(shell.foreground_ports, None);
+        assert_eq!(shell.listening_ports, Some(vec![port(6006)]));
+
+        // A remote shell is left as it was, whatever a view claims.
+        let mut remote = record("remote");
+        remote.host = Some("forge".into());
+        remote.title = "shell".into();
+        remote.title_source = TitleSource::Placeholder;
+        let mut serving = view(None, vec![port(3000)]);
+        serving.terminal_cwd = None;
+        fold_session_view(&mut remote, &serving);
+        assert_eq!(remote.title_source, TitleSource::Placeholder);
+        assert_eq!(remote.foreground_ports, None);
+        assert_eq!(remote.listening_ports, None);
+    }
+
+    #[test]
     fn pty_titles_are_filtered_fallbacks_and_never_override_user_renames() {
         let view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
             attention_state: None,
             terminal_title: None,
             id: "claude".to_owned(),
@@ -3780,6 +4422,11 @@ mod tests {
         captured_prompt.kind = AgentKind::CODEX;
         let prompt_view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("Implement terminal IME".to_owned()),
             title_source: Some(TitleSource::FirstPrompt),
             ..view.clone()
@@ -3793,6 +4440,11 @@ mod tests {
         generic.cwd = "/work/diri".to_owned();
         let generic_view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("diri".to_owned()),
             ..view
         };
@@ -3803,6 +4455,11 @@ mod tests {
         decorated.kind = AgentKind::CLAUDE_CODE;
         let decorated_view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("✳ Claude Code".to_owned()),
             ..generic_view.clone()
         };
@@ -3830,6 +4487,11 @@ mod tests {
         cursor.kind = AgentKind::CURSOR;
         let cursor_ready = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("Cursor Agent - \u{2705} Ready".to_owned()),
             title_source: Some(TitleSource::AgentProvided),
             ..generic_view
@@ -3841,6 +4503,11 @@ mod tests {
         cursor.title_source = TitleSource::AgentProvided;
         let cursor_prompt = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("Fix the cursor session title".to_owned()),
             title_source: Some(TitleSource::FirstPrompt),
             ..cursor_ready.clone()
@@ -3853,6 +4520,11 @@ mod tests {
         cursor.title_source = TitleSource::FirstPrompt;
         let named_working = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
             title: Some("Cursor Integration Fix - \u{23f3} Working ...".to_owned()),
             title_source: Some(TitleSource::AgentProvided),
             ..cursor_ready
@@ -3873,6 +4545,11 @@ mod tests {
         // be a follow-up to the conversation whose title was already saved.
         let view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
             attention_state: None,
             id: session.id.to_string(),
             status: SessionStatus::Working,
@@ -3988,6 +4665,11 @@ mod tests {
             session.title_source = TitleSource::FirstPrompt;
             let view = SessionView {
                 remote_connection: None,
+                foreground_program: None,
+                foreground_agent: None,
+                terminal_cwd: None,
+                foreground_ports: Vec::new(),
+                terminal_progress: None,
                 attention_state: None,
                 terminal_title: None,
                 id: session.id.to_string(),
@@ -4012,6 +4694,11 @@ mod tests {
         session.cwd = "/work/anara".into();
         let mut view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
             attention_state: None,
             id: session.id.to_string(),
             status: SessionStatus::Working,
@@ -4544,6 +5231,11 @@ mod tests {
         session.status = SessionStatus::Working;
         let view = SessionView {
             remote_connection: None,
+            foreground_program: None,
+            foreground_agent: None,
+            terminal_cwd: None,
+            foreground_ports: Vec::new(),
+            terminal_progress: None,
             attention_state: None,
             terminal_title: None,
             id: "completed".to_owned(),
@@ -4561,5 +5253,196 @@ mod tests {
 
         assert_eq!(session.last_turn_completed_at, Some(DateMillis(2_000.0)));
         assert_eq!(session.attention(), diri_proto::AttentionLevel::DoneUnseen);
+    }
+
+    /// A reboot takes every Holder with it. The directory a terminal had
+    /// `cd`'d to must outlive that: through the state file, through a first
+    /// live view that has not sampled a directory yet (an adopted Holder),
+    /// and into the exit that offers to bring the terminal back.
+    #[test]
+    fn a_terminal_keeps_its_last_directory_across_a_reboot() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = temp.path().join("state.json");
+        let mut shell = record("shell");
+        shell.status = SessionStatus::Idle;
+        shell.terminal_cwd = Some("/work/diri/crates".into());
+        let mut before = Registry::new(engine(), &state);
+        before.insert_record(shell);
+        before.persist_now().expect("persist");
+
+        let mut after = Registry::new(engine(), &state);
+        after.load().expect("load");
+        let mut adopted = after.record("shell").expect("record");
+        let unsampled = SessionView {
+            remote_connection: None,
+            foreground_program: None,
+            foreground_ports: Vec::new(),
+            foreground_agent: None,
+            terminal_cwd: None,
+            terminal_progress: None,
+            attention_state: None,
+            terminal_title: None,
+            id: "shell".to_owned(),
+            status: SessionStatus::Idle,
+            status_evidence: None,
+            needs_input: None,
+            last_turn_completed_at: None,
+            title: None,
+            title_source: None,
+            tail_offset: 0,
+            exited: false,
+        };
+        fold_session_view(&mut adopted, &unsampled);
+        assert_eq!(adopted.terminal_cwd.as_deref(), Some("/work/diri/crates"));
+
+        after.reap_orphans();
+        let lost = after.record("shell").expect("record");
+        assert!(matches!(
+            lost.status,
+            SessionStatus::Exited(ExitInfo {
+                reason: ExitReason::DaemonRestart,
+                ..
+            })
+        ));
+        assert_eq!(lost.terminal_cwd.as_deref(), Some("/work/diri/crates"));
+        assert_eq!(lost.resumability, Resumability::Resumable);
+        assert!(lost.can_resume());
+    }
+
+    /// Typing `exit` closes a terminal for good, as it would a terminal tab;
+    /// anything else that ended its shell leaves it restartable. Remote
+    /// shells and Agents keep their own rules.
+    #[test]
+    fn only_a_terminal_that_did_not_close_itself_restarts() {
+        let engine = engine();
+        let exited = |reason, code| {
+            let mut shell = record("shell");
+            shell.status = SessionStatus::Exited(ExitInfo {
+                reason,
+                code,
+                signal: None,
+            });
+            shell
+        };
+        for (reason, code, expected) in [
+            (ExitReason::Exited, Some(0), Resumability::NotResumable),
+            (ExitReason::Exited, Some(1), Resumability::Resumable),
+            (ExitReason::Signaled, None, Resumability::Resumable),
+            (ExitReason::DaemonRestart, None, Resumability::Resumable),
+            (ExitReason::External, None, Resumability::Resumable),
+            (ExitReason::Archived, None, Resumability::Resumable),
+        ] {
+            let mut shell = exited(reason, code);
+            fold_record_lifecycle(&engine, &mut shell);
+            assert_eq!(shell.resumability, expected, "{reason:?} {code:?}");
+        }
+        // A restarted terminal that is then closed by hand still closes.
+        let mut restarted = exited(ExitReason::Exited, Some(0));
+        restarted.resumability = Resumability::Resumable;
+        fold_record_lifecycle(&engine, &mut restarted);
+        assert_eq!(restarted.resumability, Resumability::NotResumable);
+
+        let mut remote = exited(ExitReason::DaemonRestart, None);
+        remote.host = Some("forge".into());
+        fold_record_lifecycle(&engine, &mut remote);
+        assert_eq!(remote.resumability, Resumability::NotResumable);
+
+        let mut agent = exited(ExitReason::DaemonRestart, None);
+        agent.kind = AgentKind::new("amp");
+        fold_record_lifecycle(&engine, &mut agent);
+        assert_eq!(
+            agent.resumability,
+            Resumability::NotResumable,
+            "an Agent without a resumable conversation is untouched"
+        );
+    }
+
+    /// A terminal moved to another worktree restarts in that checkout, not in
+    /// a directory of the one it left.
+    #[test]
+    fn a_terminal_moved_to_another_worktree_forgets_its_old_directory() {
+        let temp = tempfile::tempdir().expect("temp");
+        let mut registry = Registry::new(engine(), temp.path().join("state.json"));
+        let mut shell = record("s_move");
+        shell.cwd = "/repo/main".into();
+        shell.terminal_cwd = Some("/repo/main/src".into());
+        registry.records.insert("s_move".into(), shell);
+        let moved = registry
+            .reparent_worktree("s_move", "/repo/feature".into(), Some("feature".into()))
+            .expect("move");
+        assert_eq!(moved.cwd, "/repo/feature");
+        assert_eq!(moved.terminal_cwd, None);
+    }
+
+    /// A `cd` is written to disk even when it does not rename the tab: a
+    /// renamed terminal, or two directories with the same last component.
+    #[test]
+    fn a_cd_reaches_the_state_file_without_a_new_title() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().canonicalize().expect("root");
+        std::fs::create_dir_all(root.join("sub")).expect("sub");
+        let mut registry = Registry::new(engine(), root.join("state.json"));
+        let mut shell = record("shell");
+        shell.cwd = root.to_string_lossy().into_owned();
+        shell.title = "Build server".into();
+        shell.title_source = TitleSource::UserRename;
+        registry
+            .spawn(
+                SessionSpec {
+                    id: "shell".into(),
+                    pty: crate::pty::PtySpec::new(vec!["/bin/sh".into(), "-i".into()], &root)
+                        .env("PS1", "$ ")
+                        .size(80, 24),
+                    manifest_id: AgentKind::SHELL_ID.into(),
+                    authority: crate::status::Authority::ProcessOnly,
+                    logs_dir: root.join("logs"),
+                    holder: None,
+                    remote: None,
+                    defer_launch: false,
+                },
+                shell,
+            )
+            .expect("spawn");
+        let mut published = HashMap::new();
+        let sampled = |registry: &Registry, path: &str| {
+            registry
+                .get("shell")
+                .and_then(|session| session.view().terminal_cwd)
+                .as_deref()
+                == Some(path)
+        };
+        let root_text = root.to_string_lossy().into_owned();
+        assert!(
+            (0..500).any(|_| sampled(&registry, &root_text) || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }),
+            "the shell's directory was never sampled"
+        );
+        registry.changed_since(&mut published);
+        registry.persist_now().expect("persist");
+
+        registry
+            .get("shell")
+            .expect("session")
+            .write_input(b"cd sub\r")
+            .expect("cd");
+        let sub = root.join("sub").to_string_lossy().into_owned();
+        assert!(
+            (0..500).any(|_| sampled(&registry, &sub) || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }),
+            "cd was never followed"
+        );
+        registry.changed_since(&mut published);
+        assert!(registry.dirty, "a cd must schedule a write");
+        registry.persist_now().expect("persist");
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("state.json")).expect("state"))
+                .expect("state JSON");
+        assert_eq!(saved["sessions"][0]["terminalCwd"], sub.as_str());
+        assert_eq!(saved["sessions"][0]["title"], "Build server");
+        let _ = registry.terminate("shell", std::time::Duration::from_secs(2));
     }
 }

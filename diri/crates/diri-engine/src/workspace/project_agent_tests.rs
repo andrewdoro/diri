@@ -209,7 +209,7 @@ fn project_open_limit_failure_keeps_the_file_unchanged() {
             Some(&context),
         )
         .unwrap_err();
-    assert_eq!(error.code, "invalid_workspace");
+    assert_eq!(error.code, "workspace_limit_reached");
     assert_eq!(std::fs::read(&f.path).unwrap(), before);
 }
 
@@ -223,4 +223,148 @@ fn old_workspaces_decode_unbound_and_duplicate_project_bindings_fail_closed() {
     duplicate.id = WorkspaceId::new("another");
     state.workspaces.push(duplicate);
     assert_eq!(validate(&state).unwrap_err().code, "invalid_workspace");
+}
+
+fn single_pane_tab(tab: usize, session: &str) -> WorkspaceTab {
+    let pane = PaneId::new(format!("pane_{tab}"));
+    WorkspaceTab {
+        id: TabId::new(format!("tab_{tab}")),
+        title: None,
+        layout: LayoutNode::Pane {
+            id: pane.clone(),
+            session_id: SessionId::new(session),
+        },
+        focused_pane: pane,
+        zoomed_pane: None,
+    }
+}
+
+/// Tabs outlive their deleted sessions, so a long-used install reaches the
+/// tab limit with placements nobody can use (228 of 256 on the report).
+fn full_of_deleted_sessions(f: &mut Fixture) {
+    let mut tabs: Vec<_> = (0..MAX_WORKSPACE_TABS - 1)
+        .map(|i| single_pane_tab(i, &format!("deleted_{i}")))
+        .collect();
+    // A split that keeps one live pane is still a usable layout.
+    let mut split = single_pane_tab(MAX_WORKSPACE_TABS, "session_1");
+    split.layout = LayoutNode::Split {
+        id: SplitId::new("split_mixed"),
+        axis: LayoutAxis::Horizontal,
+        fraction: 0.5,
+        first: Box::new(split.layout),
+        second: Box::new(LayoutNode::Pane {
+            id: PaneId::new("pane_gone"),
+            session_id: SessionId::new("deleted_split"),
+        }),
+    };
+    tabs.push(split);
+    let snapshot = WorkspaceSnapshot {
+        workspaces: vec![WorkspaceRecord {
+            project_id: Some(ProjectId("p".into())),
+            id: WorkspaceId::new("workspace_p"),
+            name: "Project".into(),
+            selected_tab: Some(tabs[0].id.clone()),
+            tabs,
+        }],
+        ..WorkspaceSnapshot::default()
+    };
+    std::fs::write(
+        &f.path,
+        serde_json::to_vec(&serde_json::json!({"workspaceState": snapshot})).unwrap(),
+    )
+    .unwrap();
+    f.snapshot = f.store.snapshot().unwrap();
+    assert_eq!(f.snapshot.workspaces[0].tabs.len(), MAX_WORKSPACE_TABS);
+}
+
+#[test]
+fn opening_an_agent_at_the_tab_limit_drops_tabs_of_deleted_sessions() {
+    let mut f = Fixture::new();
+    full_of_deleted_sessions(&mut f);
+    open(&mut f, &inventory(0, "p"), None);
+    let workspace = &f.snapshot.workspaces[0];
+    let ids: Vec<_> = workspace.tabs.iter().map(|tab| tab.id.0.as_str()).collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert_eq!(ids[0], format!("tab_{MAX_WORKSPACE_TABS}"));
+    assert!(matches!(
+        &workspace.tabs[0].layout,
+        LayoutNode::Split { .. }
+    ));
+    assert_eq!(workspace.selected_tab.as_ref(), Some(&workspace.tabs[1].id));
+    assert!(matches!(
+        &workspace.tabs[1].layout,
+        LayoutNode::Pane { session_id, .. } if session_id.0 == "session_0"
+    ));
+    assert_eq!(f.store.snapshot().unwrap(), f.snapshot);
+}
+
+#[test]
+fn placing_a_spawned_agent_at_the_tab_limit_drops_tabs_of_deleted_sessions() {
+    let mut f = Fixture::new();
+    full_of_deleted_sessions(&mut f);
+    f.apply(WorkspaceMutation::CreateTab {
+        select: false,
+        workspace_id: WorkspaceId::new("workspace_p"),
+        session_id: SessionId::new("session_2"),
+        title: None,
+    });
+    let workspace = &f.snapshot.workspaces[0];
+    assert_eq!(workspace.tabs.len(), 2);
+    // The selected tab was an unavailable placement; selection falls back.
+    assert_eq!(workspace.selected_tab.as_ref(), Some(&workspace.tabs[0].id));
+}
+
+#[test]
+fn below_the_limit_unavailable_tabs_are_retained_and_can_be_closed() {
+    let mut f = Fixture::new();
+    full_of_deleted_sessions(&mut f);
+    f.apply(WorkspaceMutation::RemoveTab {
+        tab_id: TabId::new("tab_7"),
+    });
+    // Below the limit unavailable placements are retained as they were.
+    let tabs = &f.snapshot.workspaces[0].tabs;
+    assert_eq!(tabs.len(), MAX_WORKSPACE_TABS - 1);
+    assert!(!tabs.iter().any(|tab| tab.id.0 == "tab_7"));
+}
+
+#[test]
+fn a_tab_limit_of_live_placements_is_reported_as_a_limit() {
+    let mut f = Fixture::new();
+    let tabs: Vec<_> = (0..MAX_WORKSPACE_TABS)
+        .map(|i| single_pane_tab(i, "session_1"))
+        .collect();
+    let snapshot = WorkspaceSnapshot {
+        workspaces: vec![WorkspaceRecord {
+            project_id: Some(ProjectId("p".into())),
+            id: WorkspaceId::new("workspace_p"),
+            name: "Project".into(),
+            selected_tab: Some(tabs[0].id.clone()),
+            tabs,
+        }],
+        ..WorkspaceSnapshot::default()
+    };
+    std::fs::write(
+        &f.path,
+        serde_json::to_vec(&serde_json::json!({"workspaceState": snapshot})).unwrap(),
+    )
+    .unwrap();
+    f.snapshot = f.store.snapshot().unwrap();
+    let before = std::fs::read(&f.path).unwrap();
+    let context = inventory(0, "p");
+    let error = f
+        .store
+        .apply_with_project_agent(
+            WorkspaceMutationParams {
+                expected_revision: f.snapshot.revision,
+                mutation: WorkspaceMutation::OpenProjectAgent {
+                    session_id: context.session_id.clone(),
+                    preferred_workspace: None,
+                },
+            },
+            &f.sessions,
+            Some(&context),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "workspace_limit_reached");
+    assert_eq!(std::fs::read(&f.path).unwrap(), before);
 }

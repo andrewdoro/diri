@@ -1,6 +1,7 @@
 pub mod brand_raster;
 pub mod browser;
 pub(crate) mod floating_panel;
+pub(crate) mod login_item;
 pub mod menu_bar;
 pub mod notifier;
 pub(crate) mod terminal_keys;
@@ -120,6 +121,49 @@ pub(crate) fn observe_reduce_motion(cx: &mut gpui::App) {
         }
     })
     .detach();
+}
+
+/// Records app activation and system sleep/wake for the flight recorder.
+/// The observers post on the main queue and only record; they last as long
+/// as the process.
+pub(crate) fn observe_app_lifecycle() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSNotification, NSNotificationCenter, NSOperationQueue, NSString};
+
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    let observe = |center: &NSNotificationCenter, name: &str, handler: fn()| {
+        let block = block2::RcBlock::new(move |_: std::ptr::NonNull<NSNotification>| handler());
+        let name = NSString::from_str(name);
+        // SAFETY: the block captures only a function pointer, and the main
+        // queue delivers it on the thread AppKit already runs the app on.
+        let observer = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(&name),
+                None,
+                Some(&NSOperationQueue::mainQueue()),
+                &block,
+            )
+        };
+        std::mem::forget(observer);
+    };
+    let app = NSNotificationCenter::defaultCenter();
+    observe(&app, "NSApplicationDidBecomeActiveNotification", || {
+        crate::telemetry::app_activation_changed(true);
+    });
+    observe(&app, "NSApplicationDidResignActiveNotification", || {
+        crate::telemetry::app_activation_changed(false);
+    });
+    // Sleep and wake are posted on the workspace's centre, not the default one.
+    let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
+    observe(&workspace, "NSWorkspaceWillSleepNotification", || {
+        crate::telemetry::system_sleep(true);
+    });
+    observe(&workspace, "NSWorkspaceDidWakeNotification", || {
+        crate::telemetry::system_sleep(false);
+    });
 }
 
 /// Plays one haptic pattern on the trackpad, now. AppKit respects the

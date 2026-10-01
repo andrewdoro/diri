@@ -41,6 +41,8 @@ pub(in crate::sidebar) struct SessionRowProps {
     pub(super) activity_state: StatusState,
     /// The activity mark's frame, or zero for a mark that does not animate.
     pub(super) activity_frame: usize,
+    /// Terminal progress, when the session reports any.
+    pub(super) progress: Option<crate::progress_mark::ProgressFace>,
     pub(super) marked: bool,
     pub(super) hovered: bool,
     pub(super) focused: bool,
@@ -60,7 +62,7 @@ pub(in crate::sidebar) struct SessionRowView {
     pub(super) renders: usize,
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 impl SessionRowView {
     pub(super) fn held_hint_for_test(&self) -> f32 {
         self.props.held_hint
@@ -83,6 +85,7 @@ impl Render for SessionRowView {
 }
 
 impl Sidebar {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn session_row_props(
         &mut self,
         row: &crate::store::SidebarRow,
@@ -90,6 +93,7 @@ impl Sidebar {
         drop: Option<RowDrop>,
         host_marked_above: bool,
         colors: SemanticColors,
+        reduce_motion: bool,
         window: &Window,
     ) -> SessionRowProps {
         let session = &row.session;
@@ -97,7 +101,9 @@ impl Sidebar {
         let (selected, multi, drag_selection, migrating, unread) = {
             let mut store = self.store.write().expect("session store lock poisoned");
             (
-                store.selected_session_id() == Some(id),
+                // While the To-dos page covers the workbench, no row is the
+                // one on screen.
+                store.selected_session_id() == Some(id) && !self.todos_active,
                 store.sidebar_selection().contains(id),
                 (store.sidebar_selection().len() > 1).then(|| store.sidebar_selection_ordered()),
                 store.migrating().contains(id),
@@ -121,6 +127,7 @@ impl Sidebar {
             } else {
                 0
             },
+            progress: crate::progress_mark::face(session, self.activity_frame, reduce_motion),
             marked: self.ui.delegation_mark.as_ref() == Some(id),
             hovered: self.ui.hovered_session.as_ref() == Some(id),
             focused: self.focus_handle.is_focused(window)
@@ -153,8 +160,18 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.mounted_row_ids.insert(row.id().clone());
-        let props = self.session_row_props(row, shortcut, drop, host_marked_above, colors, window);
-        let working = props.activity_state == StatusState::Working;
+        let props = self.session_row_props(
+            row,
+            shortcut,
+            drop,
+            host_marked_above,
+            colors,
+            cx.reduce_motion(),
+            window,
+        );
+        // An indeterminate progress sweep rides the working marks' tick.
+        let working = props.activity_state == StatusState::Working
+            || props.progress.is_some_and(|face| face.animates());
         self.working_row_rendered |= working;
         // A row growing in or collapsing out renders every frame of its
         // motion, like a settling title.
@@ -201,7 +218,8 @@ impl Sidebar {
     /// working rows are notified: the sidebar re-renders as their ancestor,
     /// hands them their next frame, and reuses every other row. The
     /// horizontal strip, painted by `RootView`, still needs the sidebar
-    /// notified.
+    /// notified; its tabs take the new frame through their props, so the
+    /// notify does not stale them.
     pub(super) fn notify_activity_frame(&mut self, cx: &mut Context<Self>) {
         let mut notified = false;
         if self.rows_mounted {
@@ -210,7 +228,7 @@ impl Sidebar {
             }
         }
         if !notified {
-            cx.notify();
+            self.notify_without_staling_rows(cx);
         }
     }
 
@@ -222,12 +240,13 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// Any other notify may have changed something a row reads outside its
-    /// props, so every row renders once more.
+    /// Any other notify may have changed something a row or strip tab reads
+    /// outside its props, so every row and tab renders once more.
     pub(super) fn note_self_notified(&mut self) {
         if std::mem::take(&mut self.notify_keeps_rows) {
             return;
         }
         self.rows_stale = true;
+        self.tabs_stale = true;
     }
 }

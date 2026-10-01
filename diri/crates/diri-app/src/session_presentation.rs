@@ -115,6 +115,7 @@ pub(crate) fn ui_agent_kind(kind: &ProtoAgentKind) -> AgentKind {
         ProtoAgentKind::CURSOR_ID => AgentKind::Cursor,
         ProtoAgentKind::GEMINI_ID => AgentKind::Gemini,
         ProtoAgentKind::SHELL_ID => AgentKind::Shell,
+        ProtoAgentKind::NOTE_ID => AgentKind::Note,
         _ => AgentKind::Generic,
     }
 }

@@ -155,6 +155,75 @@ pub(crate) fn surface(
 /// Default corner radius for a menu panel.
 pub(crate) const MENU_RADIUS: f32 = Radius::FLOATING_MENU;
 
+/// One row shape for every diri menu, set by the New Agent menu: 32 pt rows
+/// inset 6 pt from the panel edge, a 22 pt icon slot, and 10 pt between the
+/// slot and the label. Mixed row sizes inside one menu read as broken
+/// hierarchy, so menus share these rather than tuning their own.
+pub(crate) const MENU_ROW_HEIGHT: f32 = 32.0;
+pub(crate) const MENU_ROW_INSET: f32 = 10.0;
+pub(crate) const MENU_ROW_GAP: f32 = 10.0;
+pub(crate) const MENU_ROW_ICON_SLOT: f32 = 22.0;
+pub(crate) const MENU_ROW_RADIUS: f32 = 12.0;
+/// Space between a row's highlight and the panel edge.
+pub(crate) const MENU_ROW_MARGIN: f32 = 6.0;
+/// Padding above the first row and below the last.
+pub(crate) const MENU_PADDING_Y: f32 = 5.0;
+
+/// A row for a menu the keyboard drives (the note editor's `/` and `@`
+/// menus): the glass menu-row highlight when `on`, an icon slot, then
+/// whatever the caller adds, a label and a trailing [`menu_shortcut`].
+///
+/// Unlike [`diri_ui::GlassMenuRow`] it has no hover style of its own: the
+/// caller moves its selection on hover, so the pointer and the arrow keys
+/// share one highlight and a menu never shows two lit rows.
+pub(crate) fn menu_row(
+    id: impl Into<gpui::ElementId>,
+    icon: AnyElement,
+    colors: SemanticColors,
+    on: bool,
+) -> gpui::Stateful<Div> {
+    use diri_ui::GlassPill as _;
+    div()
+        .id(id)
+        .mx(px(MENU_ROW_MARGIN))
+        .px(px(MENU_ROW_INSET))
+        .h(px(MENU_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .gap(px(MENU_ROW_GAP))
+        .rounded(px(MENU_ROW_RADIUS))
+        .cursor_pointer()
+        .border_1()
+        .border_color(colors.primary.alpha(0.0))
+        .glass_pill(colors, on)
+        .child(
+            div()
+                .w(px(MENU_ROW_ICON_SLOT))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon),
+        )
+}
+
+/// Menu separator with the breathing room a native menu gives one.
+pub(crate) fn menu_separator(colors: SemanticColors) -> Div {
+    div()
+        .py(px(4.0))
+        .child(diri_ui::HairlineDivider::horizontal(colors))
+}
+
+/// A menu row's trailing shortcut, printed the way a native menu prints it.
+pub(crate) fn menu_shortcut(text: impl Into<gpui::SharedString>, colors: SemanticColors) -> Div {
+    div()
+        .flex_none()
+        .text_size(px(diri_ui::Typo::META.size))
+        .font_weight(diri_ui::Typo::META.weight)
+        .text_color(colors.tertiary)
+        .child(text.into())
+}
+
 /// Measures `content` the way the panel will lay it out, so the window can
 /// open at its final size instead of resizing after a first frame. The
 /// height is offered as a definite bound rather than min-content: a scroll
@@ -495,6 +564,7 @@ impl Panel {
                     crate::macos::floating_panel::prepare(window, frame.radius);
                     #[cfg(not(target_os = "macos"))]
                     let _ = window;
+                    let telemetry = crate::telemetry::WindowGuard::new("floating", window);
                     cx.new(|cx| {
                         cx.observe(&source, |_, _, cx| cx.notify()).detach();
                         PanelView {
@@ -503,6 +573,7 @@ impl Panel {
                             frames: 0,
                             settled_frames: 0,
                             revealed: false,
+                            _telemetry: telemetry,
                         }
                     })
                 },
@@ -550,6 +621,7 @@ struct PanelView {
     /// surface for occluded windows and never show.
     settled_frames: u32,
     revealed: bool,
+    _telemetry: crate::telemetry::WindowGuard,
 }
 
 /// On-screen frames painted before the panel is shown.

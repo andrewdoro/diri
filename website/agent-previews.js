@@ -18,6 +18,19 @@ const agentPreviews = (() => {
   const changes = (file, lines) => `<div class="diff-file"><span class="icon" data-icon="code"></span>${file}</div><div class="diff-lines">${lines.map((line, i) => `<div class="${line.startsWith('+') ? 'added' : ''}"><span>${line.startsWith('+') ? '+' : i + 1}</span><code>${esc(line.replace(/^\+/, ''))}</code></div>`).join('')}</div>`;
   const command = (symbol, placeholder) => `<span class="composer-prefix">${symbol}</span><span>${placeholder}</span><span class="terminal-cursor" aria-hidden="true"></span>`;
   return {
+    swarm: {
+      // Final state of the scripted swarm. app.js reveals [data-step] lines and flips [data-child] states on a timeline.
+      render(chat) {
+        const child = (n, title, agent) => `<div class="swarm-child" data-child="${n}"><span class="swarm-state done">✓</span><span>${title}</span>${mark(agent)}</div>`;
+        const answer = (step, text) => `<div class="claude-answer" data-step="${step}"><span class="claude-bullet">●</span><div><p>${text}</p></div></div>`;
+        return {
+          html: `<div class="claude-welcome"><pre class="claude-mascot" aria-hidden="true"> ▐▛███▜▌\n▝▜█████▛▘\n  ▘▘ ▝▝</pre><div><strong>Claude Code</strong><span>Opus</span><small>~/fun/diri</small></div></div><div class="claude-user" data-step="prompt">❯ ${chat.prompt}</div>${answer('plan', 'Three independent pieces. I’ll give each its own agent and worktree.')}<div class="claude-tool" data-step="spawn"><span class="claude-bullet">●</span><div><strong>diri</strong><span> - spawn_agents (3 agents)</span><div class="swarm-list">${child(1, 'Write the release notes', 'codex')}${child(2, 'Verify the Linux build', 'claude')}${child(3, 'Test the updater', 'gemini')}</div></div></div>${answer('notes', 'Release notes are in. Reviewing the diff while the other two finish.')}${answer('done', 'All three are done: notes written, Linux build verified, updater tested. Ready to tag 0.9.')}`,
+          composer: command('❯', 'Ask a follow-up'),
+          footer: '<span class="swarm-footer">3 agents finished</span><span>Opus</span>',
+          changes: changes('RELEASE_NOTES.md', ['+## 0.9', '+', '+- Agents can start other agents', '+- Faster session restore', '+- Linux: Wayland fixes'])
+        };
+      }
+    },
     codex: {
       render(chat) {
         return {

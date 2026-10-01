@@ -99,15 +99,23 @@ fn start_server_with_engine(temp: &Path, engine: Arc<ManifestEngine>) -> Arc<Con
 /// installed Agent or account. The submitted prompt remains in the transcript.
 #[test]
 fn codex_prompt_retained_in_transcript_is_acknowledged_once() {
-    assert_codex_delivery(false);
+    assert_codex_delivery(false, 0);
 }
 
 #[test]
 fn codex_banner_repaint_neither_acknowledges_nor_retries_a_swallowed_enter() {
-    assert_codex_delivery(true);
+    assert_codex_delivery(true, 0);
 }
 
-fn assert_codex_delivery(swallow_first_enter: bool) {
+/// Codex holds a submitted prompt until its MCP servers have started, which
+/// takes seconds with several configured. Enter did land; the late
+/// acknowledgement must still confirm it rather than report a failure.
+#[test]
+fn codex_acknowledging_after_mcp_startup_is_confirmed() {
+    assert_codex_delivery(false, 4);
+}
+
+fn assert_codex_delivery(swallow_first_enter: bool, ack_delay_secs: u32) {
     let temp = tempfile::tempdir().expect("temp");
     let manifests = temp.path().join("manifests");
     std::fs::create_dir(&manifests).unwrap();
@@ -143,6 +151,7 @@ printf '{prompt}'
 dd of=/dev/null bs=1 count=1 2>/dev/null
 {swallow}
 printf accepted > '{}'
+sleep {ack_delay_secs}
 printf '\r\033[2K› {prompt}\r\nAnswer received.\r\n› '
 dd of=/dev/null bs=1 count=1 2>/dev/null
 printf duplicate > '{}'
@@ -436,5 +445,53 @@ exec cat"#,
     assert!(
         result.is_err(),
         "an unobservable outcome must be reported honestly"
+    );
+}
+
+/// Claude Code collapses a long paste into `[Pasted text #1 +N lines]`, so no
+/// word of the prompt is ever on screen, before or after Enter. The
+/// placeholder is the echo: the prompt must be submitted once and confirmed,
+/// not reported as `submission_unconfirmed` while the agent works on it.
+#[test]
+fn a_paste_shown_as_a_placeholder_is_confirmed_once() {
+    let temp = tempfile::tempdir().expect("temp");
+    let server = start_server(temp.path());
+    let mut control = Control::connect(&server);
+    let prompt = "Investigate the flaky upload\nthen report findings\nwith evidence";
+    let capture = temp.path().join("received");
+    let framed_len = prompt.len() + 12;
+    let script = format!(
+        r#"stty raw -echo
+printf '\033[?2004h> '
+dd bs=1 count={framed_len} of='{}' 2>/dev/null
+printf '\r\033[2K> [Pasted text #1 +2 lines]'
+dd bs=1 count=1 >>'{}' 2>/dev/null
+printf '\r\033[2K> [Pasted text #1 +2 lines]\r\n\r\nThinking\r\n> '
+exec cat >>'{}'"#,
+        capture.display(),
+        capture.display(),
+        capture.display(),
+    );
+    let result = control.try_request(
+        "session.spawn",
+        json!({
+            "kind": { "shell": {} }, "cwd": "/tmp",
+            "argv": ["/bin/sh", "-c", script], "initialPrompt": prompt,
+        }),
+    );
+    let id = match &result {
+        Ok(value) => value["id"].as_str().unwrap().to_owned(),
+        Err(error) => error.message.split_whitespace().nth(1).unwrap().to_owned(),
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    control.request("session.kill", json!({ "sessionID": id }));
+    assert!(
+        result.is_ok(),
+        "a submitted paste reported as failed: {result:?}"
+    );
+    assert_eq!(
+        std::fs::read(capture).unwrap(),
+        format!("\x1b[200~{prompt}\x1b[201~\r").as_bytes(),
+        "the prompt must be pasted and submitted exactly once"
     );
 }

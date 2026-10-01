@@ -46,6 +46,7 @@ pub enum SettingsTab {
     WhatsNew,
     Agents,
     Skills,
+    Schedules,
     Accounts,
     Shortcuts,
     Terminal,
@@ -57,11 +58,12 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::General,
         Self::WhatsNew,
         Self::Agents,
         Self::Skills,
+        Self::Schedules,
         Self::Accounts,
         Self::Shortcuts,
         Self::Terminal,
@@ -78,6 +80,7 @@ impl SettingsTab {
             Self::WhatsNew => "What's New",
             Self::Agents => "Agents",
             Self::Skills => "Skills",
+            Self::Schedules => "Schedules",
             Self::Accounts => "Accounts",
             Self::Shortcuts => "Shortcuts",
             Self::Terminal => "Appearance",
@@ -95,6 +98,7 @@ impl SettingsTab {
             Self::WhatsNew => "Latest release notes",
             Self::Agents => "Installed CLIs and quick create",
             Self::Skills => "Browse local and project skills",
+            Self::Schedules => "Run agents at a set time",
             Self::Accounts => "Profiles for work and personal accounts",
             Self::Shortcuts => "Keyboard commands and bindings",
             Self::Terminal => "Themes and terminal type",
@@ -114,6 +118,7 @@ impl SettingsTab {
             | Self::WhatsNew
             | Self::Agents
             | Self::Skills
+            | Self::Schedules
             | Self::Accounts
             | Self::Shortcuts
             | Self::Terminal
@@ -130,6 +135,7 @@ impl SettingsTab {
             Self::WhatsNew => "sparkles",
             Self::Agents => "sparkles",
             Self::Skills => "doc.text",
+            Self::Schedules => "clock.fill",
             Self::Accounts => "account.circle",
             Self::Shortcuts => "keyboard",
             Self::Terminal => "terminal",

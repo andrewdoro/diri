@@ -6,6 +6,10 @@
 #[cfg(unix)]
 pub mod checkpoint;
 #[cfg(unix)]
+pub mod foreground;
+#[cfg(unix)]
+pub mod line_wait;
+#[cfg(unix)]
 pub mod process_facts;
 #[cfg(unix)]
 pub mod process_identity;
@@ -55,7 +59,7 @@ impl PtySpec {
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{ExitWatcher, Pty, PtyStream};
+pub use unix::{ExitWatcher, KILL_REAP_TIMEOUT, Pty, PtyStream, REAP_POLL_INTERVAL};
 
 /// How a child ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

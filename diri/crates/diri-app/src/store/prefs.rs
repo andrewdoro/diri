@@ -33,6 +33,23 @@ pub enum WindowMaterial {
     Opaque,
 }
 
+/// Where a terminal `file:line` link opens. Stored by name; a name this
+/// build does not know reads as `Automatic` rather than failing the file.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FileEditor {
+    Cursor,
+    VsCode,
+    Zed,
+    /// The app macOS opens the file with; it receives no line number.
+    DefaultApp,
+    /// The first of Cursor, VS Code and Zed that is installed, otherwise the
+    /// file's default app. Last because serde's catch-all must be.
+    #[default]
+    #[serde(other)]
+    Automatic,
+}
+
 impl WindowMaterial {
     pub const fn to_ui(self) -> diri_ui::Material {
         match self {
@@ -174,7 +191,15 @@ fn sidebar_lineage_highlights_default() -> bool {
     true
 }
 
+fn terminal_follows_last_directory_default() -> bool {
+    true
+}
+
 const fn window_transparency_default() -> f32 {
+    1.0
+}
+
+const fn terminal_line_height_default() -> f32 {
     1.0
 }
 
@@ -217,8 +242,25 @@ pub struct Prefs {
     /// Follow native appearance changes; terminal_theme stores the resolved palette.
     pub follow_system_theme: bool,
     pub terminal_font_size: f32,
+    /// Terminal font family by name. Empty follows diri's platform default,
+    /// so a file never pins a font that only existed on another Mac.
+    #[serde(default)]
+    pub terminal_font_family: String,
+    /// Row height as a multiple of the font's own line height.
+    #[serde(default = "terminal_line_height_default")]
+    pub terminal_line_height: f32,
     pub terminal_copy_on_select: bool,
+    /// Open a terminal URL on a plain click. When off, links still open with
+    /// Command- or Control-click.
+    pub terminal_open_links_on_click: bool,
     pub terminal_hide_pointer: bool,
+    /// Where a clicked `file:line` reference in terminal output opens.
+    #[serde(default)]
+    pub terminal_file_editor: FileEditor,
+    /// Start a new terminal in the directory the last terminal was in,
+    /// instead of its project's root. Missing files pick this up as on.
+    #[serde(default = "terminal_follows_last_directory_default")]
+    pub terminal_follows_last_directory: bool,
     pub terminal_paste_protection: bool,
     /// Whether the window blurs the desktop behind it. Field-level default so
     /// files written before it existed pick up glass.
@@ -286,6 +328,12 @@ pub struct Prefs {
     /// herdr panes and conversations already brought over, so importing
     /// again only offers what is new. See `crate::herdr_import`.
     pub herdr_imported: std::collections::BTreeSet<String>,
+    /// The newest release whose What's New highlights were shown or
+    /// dismissed. A new install starts at the running version, so it never
+    /// sees highlights; a file written before this field existed reads as
+    /// empty, so an update from those versions shows them once.
+    #[serde(default)]
+    pub whats_new_seen_version: String,
 }
 
 impl Default for Prefs {
@@ -306,8 +354,13 @@ impl Default for Prefs {
             terminal_theme: DEFAULT_THEME.to_owned(),
             follow_system_theme: false,
             terminal_font_size: 13.0,
+            terminal_font_family: String::new(),
+            terminal_line_height: terminal_line_height_default(),
             terminal_copy_on_select: false,
+            terminal_open_links_on_click: true,
             terminal_hide_pointer: true,
+            terminal_file_editor: FileEditor::Automatic,
+            terminal_follows_last_directory: true,
             terminal_paste_protection: false,
             window_material: WindowMaterial::Glass,
             window_transparency: window_transparency_default(),
@@ -339,6 +392,7 @@ impl Default for Prefs {
             shortcut_overrides: BTreeMap::new(),
             last_selected_session: None,
             herdr_imported: Default::default(),
+            whats_new_seen_version: crate::updates::CURRENT_VERSION.to_owned(),
         }
     }
 }
@@ -346,6 +400,8 @@ impl Default for Prefs {
 impl Prefs {
     pub const MIN_TERMINAL_FONT_SIZE: f32 = 10.0;
     pub const MAX_TERMINAL_FONT_SIZE: f32 = 20.0;
+    pub const MIN_TERMINAL_LINE_HEIGHT: f32 = 1.0;
+    pub const MAX_TERMINAL_LINE_HEIGHT: f32 = 2.0;
 
     pub fn path() -> PathBuf {
         let home = std::env::var_os("HOME")
@@ -444,6 +500,19 @@ impl Prefs {
         self.terminal_font_size = self
             .terminal_font_size
             .clamp(Self::MIN_TERMINAL_FONT_SIZE, Self::MAX_TERMINAL_FONT_SIZE);
+        self.terminal_line_height = if self.terminal_line_height.is_finite() {
+            // Tenths, so stepping by 0.1 never accumulates float drift.
+            ((self.terminal_line_height * 10.0).round() / 10.0).clamp(
+                Self::MIN_TERMINAL_LINE_HEIGHT,
+                Self::MAX_TERMINAL_LINE_HEIGHT,
+            )
+        } else {
+            terminal_line_height_default()
+        };
+        let family = self.terminal_font_family.trim();
+        if family.len() != self.terminal_font_family.len() {
+            self.terminal_font_family = family.to_owned();
+        }
         if self
             .window_placement
             .as_mut()
@@ -505,6 +574,33 @@ mod tests {
     }
 
     #[test]
+    fn terminal_typography_defaults_round_trips_and_repairs() {
+        let legacy: Prefs = serde_json::from_str(r#"{"terminalFontSize":14}"#).unwrap();
+        assert_eq!(legacy.terminal_font_family, "");
+        assert_eq!(legacy.terminal_line_height, 1.0);
+
+        let mut prefs = Prefs {
+            terminal_font_family: "  JetBrains Mono ".to_owned(),
+            terminal_line_height: 1.2999,
+            ..legacy
+        };
+        prefs.normalize();
+        assert_eq!(prefs.terminal_font_family, "JetBrains Mono");
+        assert_eq!(prefs.terminal_line_height, 1.3);
+        let restored: Prefs = serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+        assert_eq!(restored, prefs);
+
+        for (stored, repaired) in [(f32::NAN, 1.0), (0.4, 1.0), (9.0, 2.0)] {
+            let mut prefs = Prefs {
+                terminal_line_height: stored,
+                ..Prefs::default()
+            };
+            prefs.normalize();
+            assert_eq!(prefs.terminal_line_height, repaired);
+        }
+    }
+
+    #[test]
     fn tab_orientation_defaults_migrates_and_round_trips_without_changing_order() {
         let legacy: Prefs = serde_json::from_str(r#"{"sidebarVisible":true}"#).unwrap();
         assert_eq!(legacy.tab_orientation, TabOrientation::Vertical);
@@ -555,6 +651,22 @@ mod tests {
         let rechosen = prefs_with_hibernation(15, 6, Some(1));
         assert_eq!(rechosen.hibernate_after_minutes, 15);
         assert_eq!(rechosen.memory_hard_limit_gb, 6);
+    }
+
+    #[test]
+    fn file_editor_choice_round_trips_and_unknown_names_fall_back() {
+        let fresh: Prefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(fresh.terminal_file_editor, FileEditor::Automatic);
+        let saved: Prefs = serde_json::from_str(r#"{"terminalFileEditor":"zed"}"#).unwrap();
+        assert_eq!(saved.terminal_file_editor, FileEditor::Zed);
+        let future: Prefs =
+            serde_json::from_str(r#"{"terminalFileEditor":"sublime","terminalCopyOnSelect":true}"#)
+                .unwrap();
+        assert_eq!(future.terminal_file_editor, FileEditor::Automatic);
+        assert!(
+            future.terminal_copy_on_select,
+            "the rest of the file survives"
+        );
     }
 
     #[test]

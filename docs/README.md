@@ -1,5 +1,11 @@
 # Documentation
 
+The user documentation lives at **[diri.sh/docs](https://diri.sh/docs/)**,
+including the [MCP server](https://diri.sh/docs/mcp/) and
+[`dirijor` CLI](https://diri.sh/docs/cli/) references. Its source is
+[`website/docs-src`](../website/docs-src/). The files below are the
+contributor-facing references.
+
 ## Use Diri
 
 | Guide | Covers |

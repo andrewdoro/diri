@@ -589,6 +589,154 @@ fn diff_failure(stderr: &[u8]) -> std::io::Error {
     })
 }
 
+/// Git with the user's own identity and config, for commits the user owns
+/// (integration merges). Unlike [`run`], failure is returned as output so the
+/// caller can inspect conflicts before aborting.
+fn run_as_user(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env("LANGUAGE", "C")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .env("GIT_MERGE_AUTOEDIT", "no");
+    command.output()
+}
+
+fn user_git(args: &[&str], cwd: &Path) -> std::io::Result<String> {
+    let output = run_as_user(args, cwd)?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git {} failed: {}",
+            args.first().copied().unwrap_or_default(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn has_tracked_changes(cwd: &Path) -> std::io::Result<bool> {
+    Ok(!user_git(&["status", "--porcelain=v1", "--untracked-files=no"], cwd)?.is_empty())
+}
+
+fn unmerged_paths(cwd: &Path) -> Vec<String> {
+    user_git(&["diff", "--name-only", "--diff-filter=U"], cwd)
+        .map(|paths| paths.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Brings `source_branch` (checked out clean at `source_cwd`) into the clean
+/// checkout at `target_cwd`. Conflicts abort the operation and are reported
+/// as paths; nothing is force-resolved and no uncommitted work is touched.
+pub fn integrate(
+    target_cwd: &Path,
+    source_cwd: &Path,
+    source_branch: &str,
+    strategy: diri_proto::IntegrateStrategy,
+    message: Option<&str>,
+) -> std::io::Result<diri_proto::WorktreeIntegrateResult> {
+    use diri_proto::IntegrateStrategy;
+    if source_branch.is_empty()
+        || source_branch.starts_with('-')
+        || source_branch.chars().any(char::is_control)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the source session has no integrable branch",
+        ));
+    }
+    user_git(&["check-ref-format", "--branch", source_branch], target_cwd)?;
+    if has_tracked_changes(source_cwd)? {
+        return Err(std::io::Error::other(
+            "the source session has uncommitted changes; ask its Agent to commit before integrating",
+        ));
+    }
+    if has_tracked_changes(target_cwd)? {
+        return Err(std::io::Error::other(
+            "the target checkout has uncommitted changes; commit or stash them before integrating",
+        ));
+    }
+    if branch(target_cwd).as_deref() == Some(source_branch) {
+        return Err(std::io::Error::other(
+            "the target is already on the source branch",
+        ));
+    }
+    let range = format!("HEAD..{source_branch}");
+    let commits: u32 = user_git(&["rev-list", "--count", &range], target_cwd)?
+        .parse()
+        .unwrap_or(0);
+    let mut result = diri_proto::WorktreeIntegrateResult {
+        integrated: true,
+        source_branch: source_branch.to_owned(),
+        target_cwd: target_cwd.to_string_lossy().into_owned(),
+        head: None,
+        commits,
+        conflicts: Vec::new(),
+        note: None,
+    };
+    if commits == 0 {
+        result.head = user_git(&["rev-parse", "HEAD"], target_cwd).ok();
+        result.note = Some("already up to date".into());
+        return Ok(result);
+    }
+    let default_message = format!("Integrate {source_branch}");
+    let message = message.unwrap_or(&default_message);
+    let (attempt, abort): (Vec<String>, &[&str]) = match strategy {
+        IntegrateStrategy::Merge => (
+            vec![
+                "merge".into(),
+                "--no-ff".into(),
+                "-m".into(),
+                message.into(),
+                source_branch.into(),
+            ],
+            &["merge", "--abort"],
+        ),
+        IntegrateStrategy::Squash => (
+            vec!["merge".into(), "--squash".into(), source_branch.into()],
+            &["reset", "--merge"],
+        ),
+        IntegrateStrategy::CherryPick => {
+            let picks = user_git(
+                &["rev-list", "--reverse", "--no-merges", &range],
+                target_cwd,
+            )?;
+            let mut args = vec!["cherry-pick".to_owned()];
+            args.extend(picks.lines().map(str::to_owned));
+            (args, &["cherry-pick", "--abort"])
+        }
+    };
+    let attempt: Vec<&str> = attempt.iter().map(String::as_str).collect();
+    let output = run_as_user(&attempt, target_cwd)?;
+    if !output.status.success() {
+        result.integrated = false;
+        result.conflicts = unmerged_paths(target_cwd);
+        let _ = run_as_user(abort, target_cwd);
+        result.note = Some(if result.conflicts.is_empty() {
+            format!(
+                "git {} failed and was aborted: {}",
+                attempt[0],
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        } else {
+            "conflicts; nothing was changed. Resolve in the source branch (for example rebase it onto the target) and retry".into()
+        });
+        return Ok(result);
+    }
+    if strategy == IntegrateStrategy::Squash
+        && let Err(error) = user_git(&["commit", "-m", message], target_cwd)
+    {
+        let _ = run_as_user(&["reset", "--merge"], target_cwd);
+        return Err(error);
+    }
+    result.head = user_git(&["rev-parse", "HEAD"], target_cwd).ok();
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,5 +1109,76 @@ mod tests {
     fn remote_working_diff_pins_machine_readable_locale() {
         assert!(WORKING_DIFF_SCRIPT.contains("export LC_ALL=C LANG=C LANGUAGE=C"));
         assert!(WORKING_DIFF_SCRIPT.contains("export GIT_TERMINAL_PROMPT=0"));
+    }
+
+    #[test]
+    fn integrate_merges_a_clean_branch_and_aborts_conflicts_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&target).unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let output = run_as_user(args, cwd).unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        git(&["init", "--initial-branch=main"], &target);
+        git(&["config", "user.name", "Test"], &target);
+        git(&["config", "user.email", "test@example.invalid"], &target);
+        git(&["config", "commit.gpgsign", "false"], &target);
+        std::fs::write(target.join("shared.txt"), "base\n").unwrap();
+        git(&["add", "."], &target);
+        git(&["commit", "-m", "base"], &target);
+        git(
+            &["worktree", "add", "-b", "child", source.to_str().unwrap()],
+            &target,
+        );
+        std::fs::write(source.join("child.txt"), "child\n").unwrap();
+        git(&["add", "."], &source);
+        git(&["commit", "-m", "child work"], &source);
+
+        let merged = integrate(
+            &target,
+            &source,
+            "child",
+            diri_proto::IntegrateStrategy::Squash,
+            Some("Squash child"),
+        )
+        .unwrap();
+        assert!(merged.integrated);
+        assert_eq!(merged.commits, 1);
+        assert!(target.join("child.txt").exists());
+
+        std::fs::write(source.join("shared.txt"), "child side\n").unwrap();
+        git(&["commit", "-am", "child edit"], &source);
+        std::fs::write(target.join("shared.txt"), "parent side\n").unwrap();
+        git(&["commit", "-am", "parent edit"], &target);
+        let conflicted = integrate(
+            &target,
+            &source,
+            "child",
+            diri_proto::IntegrateStrategy::Merge,
+            None,
+        )
+        .unwrap();
+        assert!(!conflicted.integrated);
+        assert_eq!(conflicted.conflicts, vec!["shared.txt".to_owned()]);
+        assert_eq!(
+            std::fs::read_to_string(target.join("shared.txt")).unwrap(),
+            "parent side\n"
+        );
+        assert!(!has_tracked_changes(&target).unwrap());
+
+        std::fs::write(source.join("dirty.txt"), "x").unwrap();
+        git(&["add", "dirty.txt"], &source);
+        assert!(
+            integrate(
+                &target,
+                &source,
+                "child",
+                diri_proto::IntegrateStrategy::Merge,
+                None
+            )
+            .is_err()
+        );
     }
 }

@@ -24,11 +24,17 @@ on:
 permissions:
   contents: read
 
-# A new push supersedes the run it interrupts. macOS runners queue — a public
-# repo gets five concurrent — so without this a branch pushed three times in a
-# row sits behind two runs whose results nobody will read.
+# On a pull request a new push supersedes the run it interrupts. macOS runners
+# queue — a public repo gets five concurrent — so without this a branch pushed
+# three times in a row sits behind two runs whose results nobody will read.
+#
+# Pushes to main are the opposite: every main commit is a release candidate,
+# and diri/scripts/release.sh gates on CI's result for the exact commit it
+# ships. Sharing one group there cancelled a commit's run whenever the next
+# merge landed (and GitHub cancels a *pending* run in a group even without
+# cancel-in-progress), so each main push gets a group of its own.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-{0}', github.ref) || format('ci-push-{0}', github.sha) }}
   cancel-in-progress: true
 
 env:
@@ -146,12 +152,17 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Pinned like every other action; the signing round-trip below uses a
+      # throwaway key and never touches the Sigstore transparency log.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Validate shell and release scripts
         run: |
           bash -n ../scripts/*.sh scripts/*.sh
           bash scripts/verify-remote-refactor.sh
           bash scripts/test-publish-github-release.sh
           bash scripts/test-publish-homebrew-cask.sh
+          bash scripts/test-linux-signatures.sh
           python3 ../ios/scripts/test-prepare-simulator.py
       - name: Check dependency license policy
         run: python3 ../scripts/check-licenses.py

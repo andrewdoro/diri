@@ -1539,13 +1539,15 @@ dependencies = [
 
 [[package]]
 name = "diri-app"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "base64 0.23.1",
  "block2 0.6.2",
  "diri-client",
  "diri-engine",
+ "diri-notes",
  "diri-proto",
+ "diri-telemetry",
  "diri-term",
  "diri-terminal-state",
  "diri-ui",
@@ -1582,6 +1584,7 @@ name = "diri-client"
 version = "0.1.0"
 dependencies = [
  "diri-proto",
+ "diri-telemetry",
  "futures-core",
  "getrandom 0.4.3",
  "serde",
@@ -1596,8 +1599,10 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "base64 0.23.1",
+ "diri-notes",
  "diri-proto",
  "diri-pty",
+ "diri-telemetry",
  "diri-terminal-state",
  "getrandom 0.4.3",
  "libc",
@@ -1610,6 +1615,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "socket2",
  "tempfile",
  "toml_edit 0.22.27",
 ]
@@ -1628,6 +1634,18 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "diri-notes"
+version = "0.1.0"
+dependencies = [
+ "diri-proto",
+ "getrandom 0.4.3",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -1667,11 +1685,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "diri-telemetry"
+version = "0.1.0"
+dependencies = [
+ "diri-proto",
+ "getrandom 0.4.3",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+]
+
+[[package]]
 name = "diri-term"
 version = "0.1.0"
 dependencies = [
  "criterion",
  "diri-proto",
+ "diri-telemetry",
  "diri-terminal-state",
  "gpui",
  "gpui_platform",
@@ -1684,6 +1716,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "diri-proto",
+ "libc",
  "memchr",
 ]
 
@@ -1733,6 +1766,7 @@ name = "dirijor-mcp"
 version = "0.1.0"
 dependencies = [
  "diri-engine",
+ "diri-notes",
  "diri-proto",
  "libc",
  "serde",

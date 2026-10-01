@@ -3,9 +3,11 @@
 pub mod attachment;
 pub mod client;
 pub mod connection;
+pub mod latency_trace;
 pub mod node_client;
 pub mod preview_set;
 pub mod state;
+mod telemetry;
 
 pub use attachment::{
     AttachmentChunks, AttachmentClosed, AttachmentError, SessionAttachment,

@@ -107,7 +107,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         self.columns = columns;
 
-        let reflow_rows = self.raw.prepare_reflow(columns);
+        let reflow_rows = self
+            .raw
+            .prepare_reflow(columns, reflow, self.display_offset);
         let mut reversed: Vec<Row<T>> = Vec::with_capacity(reflow_rows);
         let mut cursor_line_delta = 0;
 
@@ -212,7 +214,14 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             reversed.push(row);
         }
 
+        // Compact history may reflow only its newest rows here. The rows it
+        // kept back are already at the new width and follow a hard line
+        // break, so they count towards the rows below, and are moved in
+        // (oldest first) when the reflowed rows alone are too few.
+        let mut kept = self.raw.reflow_suffix_rows();
+
         // Make sure we have at least the viewport filled.
+        self.take_kept(&mut reversed, &mut kept, self.lines);
         if reversed.len() < self.lines {
             let delta = (self.lines - reversed.len()) as i32;
             self.cursor.point.line = max(self.cursor.point.line - delta, Line(0));
@@ -223,8 +232,13 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // more lines to delete below the cursor.
         if cursor_line_delta != 0 {
             let cursor_buffer_line = self.lines - self.cursor.point.line.0 as usize - 1;
-            let available = min(cursor_buffer_line, reversed.len() - self.lines);
+            let available = min(cursor_buffer_line, reversed.len() + kept - self.lines);
             let overflow = cursor_line_delta.saturating_sub(available);
+            self.take_kept(
+                &mut reversed,
+                &mut kept,
+                self.lines + cursor_line_delta - overflow,
+            );
             reversed.truncate(reversed.len() + overflow - cursor_line_delta);
             self.cursor.point.line = max(self.cursor.point.line - overflow, Line(0));
         }
@@ -244,6 +258,18 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         self.display_offset = min(self.display_offset, self.history_size());
     }
 
+    /// Move rows that compact history kept back from a reflow in front of
+    /// the reflowed (oldest first) rows until there are `wanted` of them.
+    fn take_kept(&mut self, reversed: &mut Vec<Row<T>>, kept: &mut usize, wanted: usize) {
+        if reversed.len() < wanted && *kept != 0 {
+            let mut older = self.raw.take_reflowed_newest(wanted - reversed.len());
+            *kept -= older.len();
+            older.reverse();
+            older.append(reversed);
+            *reversed = older;
+        }
+    }
+
     /// Shrink number of columns in each row, reflowing if necessary.
     fn shrink_columns(&mut self, reflow: bool, columns: usize) {
         self.columns = columns;
@@ -254,7 +280,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             self.cursor.point.column += 1;
         }
 
-        let reflow_rows = self.raw.prepare_reflow(columns);
+        let reflow_rows = self
+            .raw
+            .prepare_reflow(columns, reflow, self.display_offset);
         let mut new_raw = Vec::with_capacity(reflow_rows);
         let mut buffered: Option<Vec<T>> = None;
 

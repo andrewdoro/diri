@@ -551,17 +551,39 @@ impl RankCandidate {
     }
 }
 
-fn home_relative(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    let Some(home) = std::env::var_os("HOME") else {
-        return text.into_owned();
-    };
-    let home = home.to_string_lossy();
+/// `path` with the home directory written as `~`. Only a whole component
+/// matches: `/Users/ann` is `~`, `/Users/anna` is left alone.
+pub(crate) fn home_relative(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(|home| home.to_string_lossy().into_owned());
+    home_relative_to(&path.to_string_lossy(), home.as_deref())
+}
+
+fn home_relative_to(path: &str, home: Option<&str>) -> String {
+    let home = home.unwrap_or_default().trim_end_matches('/');
     if home.is_empty() {
-        return text.into_owned();
+        return path.to_owned();
     }
-    text.strip_prefix(home.as_ref())
-        .map_or_else(|| text.clone().into_owned(), |rest| format!("~{rest}"))
+    path.strip_prefix(home)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        .map_or_else(|| path.to_owned(), |rest| format!("~{rest}"))
+}
+
+#[cfg(test)]
+mod home_relative_tests {
+    use super::home_relative_to;
+
+    #[test]
+    fn only_the_whole_home_component_becomes_a_tilde() {
+        let home = Some("/Users/ann");
+        assert_eq!(home_relative_to("/Users/ann", home), "~");
+        assert_eq!(home_relative_to("/Users/ann/code/web", home), "~/code/web");
+        assert_eq!(
+            home_relative_to("/Users/anna/code", home),
+            "/Users/anna/code"
+        );
+        assert_eq!(home_relative_to("/tmp", home), "/tmp");
+        assert_eq!(home_relative_to("/tmp", None), "/tmp");
+    }
 }
 
 impl From<&DirectoryEntry> for RankCandidate {

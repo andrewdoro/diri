@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Sessions · Diri docs</title>
+  <meta name="description" content="How diri sessions work: status colors, notifications, the sidebar, searching and resuming past chats, persistence across quits, hibernation and terminal features.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/sessions/">
+  <link rel="alternate" type="text/markdown" href="/docs/sessions.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Sessions">
+  <meta property="og:description" content="How diri sessions work: status colors, notifications, the sidebar, searching and resuming past chats, persistence across quits, hibernation and terminal features.">
+  <meta property="og:url" content="https://diri.sh/docs/sessions/">
+  <meta property="og:image" content="https://diri.sh/og/docs-sessions.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Sessions: diri documentation">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Sessions","description":"How diri sessions work: status colors, notifications, the sidebar, searching and resuming past chats, persistence across quits, hibernation and terminal features.","url":"https://diri.sh/docs/sessions/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Working with agents<span class="docs-menu-sep">/</span><strong>Sessions</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/" aria-current="page"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Schedules</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/sessions.md">
+        <header class="docs-heading"><span class="eyebrow">Working with agents</span><h1>Sessions</h1><p>How diri sessions work: status colors, notifications, the sidebar, searching and resuming past chats, persistence across quits, hibernation and terminal features.</p></header>
+        <article class="docs-content">
+<p>A session is one agent, terminal or note running in diri. Each gets a row in the sidebar and its own terminal. Sessions run in background processes, so they keep going when you close the window or quit the app.</p>
+<h2 id="status"><a class="anchor" href="#status" aria-hidden="true" tabindex="-1">#</a>Status</h2>
+<p>The mark on the left of a row shows what the session is doing; the agent's logo is on the right.</p>
+<div class="table-wrap"><table><thead><tr><th>Mark</th><th>Meaning</th></tr></thead><tbody><tr><td>Spinner</td><td>Working</td></tr><tr><td>Amber warning sign</td><td>Needs you: a question or a permission prompt. It turns red when the prompt looks destructive</td></tr><tr><td>Green check</td><td>Done, and you have not looked yet</td></tr><tr><td>No mark</td><td>Idle, or done and already seen</td></tr><tr><td>Moon</td><td>Hibernated to save memory; opening it wakes it</td></tr></tbody></table></div>
+<p>Claude Code reports its status through hooks, which is the most reliable signal. Codex also reports each finished turn. For every other agent, diri reads the status from its screen. Every agent still runs as a normal terminal.</p>
+<p>Right-click a row to <strong>Mark as Read</strong> or <strong>Mark as Unread</strong>.</p>
+<h2 id="notifications"><a class="anchor" href="#notifications" aria-hidden="true" tabindex="-1">#</a>Notifications</h2>
+<p>When a session needs you or finishes, diri sends a macOS notification.</p>
+<ul><li><strong>Reply.</strong> For a plain question, answer straight from the notification banner.</li><li><strong>Inbox.</strong> <kbd>⇧</kbd><kbd>⌘</kbd><kbd>I</kbd> opens the bell, which collects every &quot;needs you&quot; and &quot;finished&quot; moment. The Dock icon shows the unread count.</li><li><strong>Jump.</strong> <kbd>⇧</kbd><kbd>⌘</kbd><kbd>J</kbd> selects the next session that needs you.</li><li><strong>Sounds.</strong> <strong>Settings → General → Gentle status chimes</strong> plays quiet cues for input, completion and memory pauses.</li></ul>
+<h2 id="the-sidebar"><a class="anchor" href="#the-sidebar" aria-hidden="true" tabindex="-1">#</a>The sidebar</h2>
+<p>Sessions are grouped by project folder. Sessions started by another agent nest under it; selecting a session highlights its parent and children (turn off <strong>Highlight parent and children</strong> in Settings → General).</p>
+<div class="table-wrap"><table><thead><tr><th>Task</th><th>How</th></tr></thead><tbody><tr><td>Rename</td><td>Double-click the row, <kbd>⌘</kbd><kbd>R</kbd>, or <strong>Rename…</strong></td></tr><tr><td>Pin</td><td><strong>Pin Session</strong> in the row's menu</td></tr><tr><td>Reorder</td><td>Drag between rows, or <kbd>⌃</kbd><kbd>⌘</kbd><kbd>↑</kbd> / <kbd>↓</kbd></td></tr><tr><td>Reorder projects</td><td>Drag the project header</td></tr><tr><td>Hand off work</td><td>Drop a session onto another session's row</td></tr><tr><td>Start a sibling with the same prompt</td><td>Drop a session on the zone below the last project</td></tr><tr><td>Archive</td><td><strong>Archive Session</strong>, or <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>W</kbd></td></tr><tr><td>Remove</td><td><strong>Remove from Sidebar</strong>, or <kbd>⌘</kbd><kbd>W</kbd></td></tr><tr><td>Close a project</td><td><strong>Close All Sessions</strong> on the project</td></tr></tbody></table></div>
+<p>Escape cancels a drag. Select several rows to act on them together. <kbd>⇧</kbd><kbd>⌘</kbd><kbd>S</kbd> moves tabs from the sidebar to the top of the window and back.</p>
+<h3 id="archive-remove-and-reopen"><a class="anchor" href="#archive-remove-and-reopen" aria-hidden="true" tabindex="-1">#</a>Archive, remove and reopen</h3>
+<ul><li><strong>Archive Session</strong> stops the agent and keeps the session in an <strong>Archived</strong> group under its project. Right-click it and choose <strong>Revive</strong> to continue the conversation. For an agent that cannot resume, the menu item reads <strong>Archive (won't be resumable)</strong>.</li><li><strong>Remove from Sidebar</strong> stops the agent and removes the session and its screen history. With <strong>Confirm before closing a session</strong> on, diri asks first if a process is still running.</li><li><kbd>⇧</kbd><kbd>⌘</kbd><kbd>T</kbd> reopens the most recently closed session.</li></ul>
+<p>Neither touches your files.</p>
+<h2 id="search-past-chats"><a class="anchor" href="#search-past-chats" aria-hidden="true" tabindex="-1">#</a>Search past chats</h2>
+<p>Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>H</kbd> for <strong>Search chats</strong>. It lists Claude Code and Codex conversations on this machine, including ones started outside diri. Type to filter and press Return to continue that conversation in a new session.</p>
+<h2 id="resume-and-fork"><a class="anchor" href="#resume-and-fork" aria-hidden="true" tabindex="-1">#</a>Resume and fork</h2>
+<p>After your Mac restarts, sessions whose agent stopped offer <strong>Resume</strong>. Resuming continues the same conversation for agents that support it. A local terminal shows <strong>Restart</strong> instead and starts a fresh shell in the same folder. Both are also in the row's menu.</p>
+<p>Forking copies a conversation into a new session so you can try another approach. It works for Claude Code and Codex, from an agent's <code>fork_agent</code> tool or the CLI:</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">dirijor</span> session fork &lt;session&gt;</code></pre></div>
+<h2 id="persistence"><a class="anchor" href="#persistence" aria-hidden="true" tabindex="-1">#</a>Persistence</h2>
+<p>Each session is owned by its own holder process, not by the window. The background Engine keeps the record of every session.</p>
+<div class="table-wrap"><table><thead><tr><th>Event</th><th>What happens</th></tr></thead><tbody><tr><td>Close the window or quit diri</td><td>Agents keep running with their full screen history</td></tr><tr><td>diri updates its Engine</td><td>Sessions are picked up again where they were</td></tr><tr><td>Mac restarts</td><td>Agents stop; sessions offer <strong>Resume</strong></td></tr></tbody></table></div>
+<h2 id="hibernation"><a class="anchor" href="#hibernation" aria-hidden="true" tabindex="-1">#</a>Hibernation</h2>
+<p>Idle agents still use memory. In <strong>Settings → Resources</strong>, <strong>Hibernate idle sessions</strong> freezes a session after it has had no output or CPU activity for a set time (1 hour by default, or off), and <strong>Memory limit</strong> freezes an idle session that grows past a size you choose. Frozen sessions show a moon and are never killed; opening one wakes it exactly where it was.</p>
+<h2 id="terminal-features"><a class="anchor" href="#terminal-features" aria-hidden="true" tabindex="-1">#</a>Terminal features</h2>
+<div class="table-wrap"><table><thead><tr><th>Feature</th><th>How</th></tr></thead><tbody><tr><td>Find, including scrollback</td><td><kbd>⌘</kbd><kbd>F</kbd>, then <kbd>⌘</kbd><kbd>G</kbd> / <kbd>⇧</kbd><kbd>⌘</kbd><kbd>G</kbd></td></tr><tr><td>Insert a file path</td><td><kbd>⌘</kbd><kbd>E</kbd> opens a picker under the session's folder</td></tr><tr><td>Drop files</td><td>Drop files from Finder on the terminal to paste their escaped paths</td></tr><tr><td>Paste images</td><td><kbd>⌘</kbd><kbd>V</kbd></td></tr><tr><td>Quote a selection into your reply</td><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>C</kbd></td></tr><tr><td>Open scrollback in your editor</td><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>E</kbd></td></tr><tr><td>Jump between shell prompts</td><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>↑</kbd> / <kbd>↓</kbd></td></tr><tr><td>Auxiliary terminal</td><td><kbd>⌘</kbd><kbd>J</kbd> opens a shell below the session</td></tr><tr><td>Split panes</td><td><kbd>⌘</kbd><kbd>D</kbd> splits right, <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>D</kbd> splits below</td></tr></tbody></table></div>
+<p>Links in the output open with a click, and <code>file:line</code> links open in your editor at that line (set it in <strong>Settings → Appearance → Open file links in</strong>). Clipboard writes from programs over OSC 52, such as Codex copying text, reach your clipboard. Themes, terminal font and line height are in <strong>Settings → Appearance</strong>.</p>
+<p>See <a href="/docs/keyboard-shortcuts/">Keyboard shortcuts</a> for every binding and <a href="/guides/never-lose-work/">Never lose your work</a> for a beginner's view of persistence.</p>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><a class="prev" href="/docs/keyboard-shortcuts/"><span>Previous</span>Keyboard shortcuts</a><a class="next" href="/docs/worktrees/"><span>Next</span>Worktrees and review</a></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#status">Status</a><a href="#notifications">Notifications</a><a href="#the-sidebar">The sidebar</a><a href="#search-past-chats">Search past chats</a><a href="#resume-and-fork">Resume and fork</a><a href="#persistence">Persistence</a><a href="#hibernation">Hibernation</a><a href="#terminal-features">Terminal features</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/sessions.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Fsessions.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/sessions.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a><a href="/agents/">Agents</a><a href="/compare/">Compare</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sitePages } from './site.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../dist');
 const read = file => readFile(resolve(root, file), 'utf8');
 const html = await read('index.html');
@@ -30,13 +31,13 @@ assert.match(html, /<script type="module" src="downloads\.[a-f0-9]{12}\.js"><\/s
 assert.match(html, /id="download-primary"[^>]+href="https:\/\/github\.com\/cristicretu\/diri\/releases\/latest"/);
 assert.match(headers, /https:\/\/:project\.pages\.dev\/\*\n  X-Robots-Tag: noindex/);
 assert.match(headers, /https:\/\/:version\.:project\.pages\.dev\/\*\n  X-Robots-Tag: noindex/);
-const pagePaths = ['index.html', '404.html', 'guides/index.html', 'guides/parallel-agents/index.html', 'guides/remote-sessions/index.html'];
+const pagePaths = ['index.html', '404.html', 'guides/index.html', 'guides/first-agent/index.html', 'guides/never-lose-work/index.html', 'guides/parallel-agents/index.html', 'guides/agent-teams/index.html', 'guides/review-changes/index.html', 'guides/remote-sessions/index.html', 'guides/shortcuts/index.html', 'whats-new/index.html', ...await sitePages()];
 const sitemap = await read('sitemap.xml');
 const titles = new Set();
-for (const page of pagePaths) {
+for (const page of new Set(pagePaths)) {
   const content = await read(page);
   assert.equal((content.match(/<h1\b/g) || []).length, 1, `${page}: one heading`);
-  if (page.startsWith('guides/')) {
+  if (/^(guides|whats-new|docs|agents|compare)\//.test(page)) {
     const url = 'https://diri.sh/' + page.replace(/index\.html$/, '');
     assert.ok(content.includes(`rel="canonical" href="${url}"`), `${page}: canonical`);
     assert.ok(sitemap.includes(`<loc>${url}</loc>`), `${page}: sitemap`);
@@ -47,6 +48,8 @@ for (const page of pagePaths) {
     assert.ok(!titles.has(title), `${page}: unique title`);
     titles.add(title);
   }
+  const og = content.match(/property="og:image" content="https:\/\/diri\.sh\/([^"]+)"/);
+  if (page !== '404.html') { assert.ok(og, `${page}: share image`); await stat(resolve(root, og[1])); }
   for (const match of content.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)) {
     assert.equal(JSON.parse(match[1])['@context'], 'https://schema.org');
     const hash = createHash('sha256').update(match[1]).digest('base64');
@@ -65,6 +68,15 @@ for (const page of pagePaths) {
     }
   }
 }
+const llms = await read('llms.txt');
+for (const page of pagePaths.filter(page => page.startsWith('docs/'))) {
+  const md = page === 'docs/index.html' ? 'docs/index.md' : page.replace(/\/index\.html$/, '.md');
+  assert.match(await read(md), /^# .+\n\n> .+/, `${md}: Markdown twin`);
+  assert.ok(llms.includes(`https://diri.sh/${md}`), `${md}: listed in llms.txt`);
+}
+const search = JSON.parse(await read('docs/search.json'));
+assert.ok(search.length > 50 && search.every(entry => entry.t && entry.u), 'docs search index');
+await stat(resolve(root, 'docs-search.js'));
 for (const entry of await readdir(root)) assert.ok(!['README.md','CLOUDFLARE.md','package.json','server.mjs','scripts','.wrangler','node_modules'].includes(entry), `Source file leaked into build: ${entry}`);
 assert.ok((await stat(resolve(root, 'assets/social-card.jpg'))).size < 300_000);
 console.log('SEO/build checks passed: canonical metadata, schema, crawl files, preview exclusion, local assets, and public output.');

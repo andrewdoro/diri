@@ -25,9 +25,12 @@ pub(super) struct QolState {
     /// Selection drag held past an edge: cell under the pointer and signed
     /// pixels past the edge, positive above the top.
     pub drag: Option<(SessionId, usize, usize, f32)>,
-    pub autoscroll: Option<Task<()>>,
+    pub autoscroll: Option<Autoscroll>,
+    autoscroll_generation: u64,
     export_files: Vec<tempfile::NamedTempFile>,
     busy: bool,
+    /// Which file references under the pointer name a real local file.
+    files: crate::file_links::ExistenceCache,
 }
 
 impl QolState {
@@ -40,6 +43,16 @@ impl QolState {
     pub fn hover_key_clear(&mut self) {
         self.hover_key = None;
     }
+}
+
+/// A selection autoscroll in flight. It advances once per display-link
+/// frame, integrating the time since the last one, so it moves at 120 Hz on
+/// ProMotion rather than at a 16 ms timer's ~53 uneven frames a second.
+pub(super) struct Autoscroll {
+    accumulator: autoscroll::Accumulator,
+    last: Instant,
+    /// Tells a frame callback left over from a cancelled run to stop.
+    generation: u64,
 }
 
 pub(super) struct PendingPaste {
@@ -65,12 +78,16 @@ pub(super) struct TerminalMenu {
     target: Option<ReferenceHit>,
     selected: usize,
     actions: Vec<MenuAction>,
+    /// The editor file links open in, named by the Open item.
+    editor: Option<crate::file_links::Editor>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuAction {
     Open,
     CopyLink,
+    OpenFile,
+    CopyPath,
     Copy,
     Paste,
     Find,
@@ -81,10 +98,22 @@ enum MenuAction {
 }
 
 impl MenuAction {
-    fn label(self) -> &'static str {
+    fn label(self, editor: Option<crate::file_links::Editor>) -> SharedString {
+        match self {
+            Self::OpenFile => match editor {
+                Some(editor) => format!("Open in {}", editor.name()).into(),
+                None => "Open file".into(),
+            },
+            other => other.static_label().into(),
+        }
+    }
+
+    fn static_label(self) -> &'static str {
         match self {
             Self::Open => "Open link",
             Self::CopyLink => "Copy link",
+            Self::OpenFile => "Open file",
+            Self::CopyPath => "Copy path",
             Self::Copy => "Copy selection",
             Self::Paste => "Paste",
             Self::Find => "Find selection",
@@ -131,8 +160,44 @@ impl TerminalPane {
         let key = (col, row, generation, offset, sequence);
         if self.qol.hover_key != Some(key) {
             self.qol.hover_key = Some(key);
-            self.qol.hit = resident.element.reference_hit_at(col, row);
+            let hit = resident.element.reference_hit_at(col, row);
+            self.qol.hit = self.linkable(hit);
         }
+    }
+
+    /// Keeps a reference only if clicking it would open something: every web
+    /// URL, but a file reference only when it names a file on this Mac.
+    /// Hover, press, release and the context menu all ask here, so what is
+    /// underlined is exactly what opens.
+    pub(super) fn linkable(&mut self, hit: Option<ReferenceHit>) -> Option<ReferenceHit> {
+        let hit = hit?;
+        match &hit.reference {
+            TerminalReference::Url(_) => Some(hit),
+            TerminalReference::File(reference) => {
+                self.local_file(reference).is_some().then_some(hit)
+            }
+        }
+    }
+
+    /// Where a file reference in the selected session points, if it exists.
+    /// A remote session's paths name the remote host, so none resolve here.
+    fn local_file(&mut self, reference: &str) -> Option<crate::file_links::LocalFile> {
+        let session = self.selected_session()?;
+        let bases = file_reference_bases(&session)?;
+        let bases: Vec<&std::path::Path> = bases.iter().map(std::path::PathBuf::as_path).collect();
+        self.qol.files.resolve(&bases, reference, Instant::now())
+    }
+
+    /// The editor a file link opens in under the current preference.
+    pub(super) fn file_editor(&self) -> Option<crate::file_links::Editor> {
+        let choice = self
+            .runtime
+            .store
+            .read()
+            .expect("store")
+            .preferences()
+            .terminal_file_editor;
+        crate::file_links::editor_for(choice)
     }
 
     pub(super) fn open_reference(
@@ -144,26 +209,12 @@ impl TerminalPane {
         match reference {
             TerminalReference::Url(url) => cx.open_url(&url),
             TerminalReference::File(reference) => {
-                if let Some(session) = self.selected_session() {
-                    if session.host.is_none() {
-                        match crate::code_intelligence::local_reference_url(
-                            std::path::Path::new(&session.cwd),
-                            &reference,
-                        ) {
-                            Some(url) => cx.open_url(url.as_str()),
-                            None => self.show_terminal_feedback(
-                                "Could not open this local file link",
-                                window,
-                                cx,
-                            ),
-                        }
-                    } else {
-                        cx.emit(TerminalPaneEvent::OpenFileReference {
-                            reference,
-                            cwd: session.cwd.clone(),
-                            session_id: session.id.clone(),
-                        });
-                    }
+                let opened = self
+                    .local_file(&reference)
+                    .and_then(|file| crate::file_links::open_url(&file, self.file_editor()));
+                match opened {
+                    Some(url) => cx.open_url(&url),
+                    None => self.show_terminal_feedback("That file is not on this Mac", window, cx),
                 }
             }
         }
@@ -214,11 +265,19 @@ impl TerminalPane {
             return;
         };
         let target = resident.element.reference_hit_at(col, row);
+        let has_selection = !resident.element.selected_text().is_empty();
+        let target = self.linkable(target);
         let mut actions = Vec::new();
-        if target.is_some() {
-            actions.extend([MenuAction::Open, MenuAction::CopyLink]);
+        match target.as_ref().map(|hit| &hit.reference) {
+            Some(TerminalReference::Url(_)) => {
+                actions.extend([MenuAction::Open, MenuAction::CopyLink]);
+            }
+            Some(TerminalReference::File(_)) => {
+                actions.extend([MenuAction::OpenFile, MenuAction::CopyPath]);
+            }
+            None => {}
         }
-        if !resident.element.selected_text().is_empty() {
+        if has_selection {
             actions.extend([MenuAction::Copy, MenuAction::Find]);
         }
         actions.extend([
@@ -228,11 +287,13 @@ impl TerminalPane {
             MenuAction::PreviousPrompt,
             MenuAction::NextPrompt,
         ]);
+        let editor = self.file_editor();
         self.qol.menu = Some(TerminalMenu {
             position,
             target,
             selected: 0,
             actions,
+            editor,
         });
         self.qol.pressed = None;
         self.qol.drag = None;
@@ -251,9 +312,19 @@ impl TerminalPane {
     ) {
         self.qol.menu = None;
         match action {
-            MenuAction::Open => {
+            MenuAction::Open | MenuAction::OpenFile => {
                 if let Some(hit) = target {
                     self.open_reference(hit.reference, window, cx);
+                }
+            }
+            MenuAction::CopyPath => {
+                let file = target.and_then(|hit| match hit.reference {
+                    TerminalReference::File(reference) => self.local_file(&reference),
+                    TerminalReference::Url(_) => None,
+                });
+                if let Some(file) = file {
+                    cx.write_to_clipboard(ClipboardItem::new_string(file.display()));
+                    self.show_terminal_feedback("Path copied", window, cx);
                 }
             }
             MenuAction::CopyLink => {
@@ -429,66 +500,92 @@ impl TerminalPane {
         if self.qol.autoscroll.is_some() {
             return;
         }
-        self.qol.autoscroll = Some(cx.spawn_in(window, async move |this, cx| {
-            let mut accumulator = autoscroll::Accumulator::default();
-            let mut last = Instant::now();
-            loop {
-                cx.background_executor().timer(autoscroll::TICK).await;
-                let now = Instant::now();
-                let elapsed = now.saturating_duration_since(last);
-                last = now;
-                let keep = crate::floating::update_in_owner(&this, cx, |this, window, cx| {
-                    let Some((id, col, row, past)) = this.qol.drag.clone() else {
-                        return false;
-                    };
-                    if this.selected_id().as_ref() != Some(&id) || !this.focus.is_focused(window) {
-                        this.qol.drag = None;
-                        return false;
-                    }
-                    let Some(resident) = this.residents.get(&id) else {
-                        return false;
-                    };
-                    if resident.pointer_owner
-                        != Some((MouseButton::Left, PointerOwner::LocalSelection))
-                    {
-                        return false;
-                    }
-                    let velocity = autoscroll::lines_per_second(past.abs()).copysign(past);
-                    // Autoscroll is function, not decoration: reduced motion
-                    // still scrolls, but in whole rows with no sub-row glide.
-                    let whole_rows = cx.reduce_motion();
-                    let travel = accumulator.advance(velocity, elapsed, whole_rows);
-                    if travel == 0.0 {
-                        return true;
-                    }
-                    let rows = usize::from(resident.last_size.1);
-                    let mut before = resident.element.scroll_position();
-                    if whole_rows {
-                        // Settle a trackpad's leftover fraction onto the row
-                        // grid so every step lands on a whole row.
-                        before = before.round();
-                    }
-                    let moved = resident.element.set_scroll_position(before + travel, rows);
-                    if !moved {
-                        // Oldest retained row or the live edge: nothing more
-                        // to reveal until the pointer moves again.
-                        this.qol.drag = None;
-                        return false;
-                    }
-                    resident.element.drag_selection(col, row);
-                    this.pump_scrollback_fetch(&id, rows);
-                    cx.notify();
-                    true
-                })
-                .unwrap_or(false);
-                if !keep {
-                    break;
+        self.qol.autoscroll_generation += 1;
+        let generation = self.qol.autoscroll_generation;
+        self.qol.autoscroll = Some(Autoscroll {
+            accumulator: autoscroll::Accumulator::default(),
+            last: Instant::now(),
+            generation,
+        });
+        self.request_autoscroll_frame(generation, window, cx);
+    }
+
+    fn request_autoscroll_frame(
+        &mut self,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            let _ = this.update(cx, |this, cx| {
+                let current = this
+                    .qol
+                    .autoscroll
+                    .as_ref()
+                    .is_some_and(|run| run.generation == generation);
+                if !current {
+                    return;
                 }
-            }
-            let _ = crate::floating::update_in_owner(&this, cx, |this, _, _| {
-                this.qol.autoscroll = None;
+                if this.autoscroll_frame(window, cx) {
+                    this.request_autoscroll_frame(generation, window, cx);
+                } else {
+                    this.qol.autoscroll = None;
+                }
             });
-        }));
+        });
+    }
+
+    /// Scrolls by the travel owed since the last frame. False ends the run.
+    fn autoscroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let now = Instant::now();
+        let Some(run) = self.qol.autoscroll.as_mut() else {
+            return false;
+        };
+        let elapsed = now.saturating_duration_since(run.last);
+        run.last = now;
+        let Some((id, col, row, past)) = self.qol.drag.clone() else {
+            return false;
+        };
+        if self.selected_id().as_ref() != Some(&id) || !self.focus.is_focused(window) {
+            self.qol.drag = None;
+            return false;
+        }
+        let velocity = autoscroll::lines_per_second(past.abs()).copysign(past);
+        // Autoscroll is function, not decoration: reduced motion still
+        // scrolls, but in whole rows with no sub-row glide.
+        let whole_rows = cx.reduce_motion();
+        let Some(run) = self.qol.autoscroll.as_mut() else {
+            return false;
+        };
+        let travel = run.accumulator.advance(velocity, elapsed, whole_rows);
+        let Some(resident) = self.residents.get(&id) else {
+            return false;
+        };
+        if resident.pointer_owner != Some((MouseButton::Left, PointerOwner::LocalSelection)) {
+            return false;
+        }
+        if travel == 0.0 {
+            return true;
+        }
+        let rows = usize::from(resident.last_size.1);
+        let mut before = resident.element.scroll_position();
+        if whole_rows {
+            // Settle a trackpad's leftover fraction onto the row grid so
+            // every step lands on a whole row.
+            before = before.round();
+        }
+        let moved = resident.element.set_scroll_position(before + travel, rows);
+        if !moved {
+            // Oldest retained row or the live edge: nothing more to reveal
+            // until the pointer moves again.
+            self.qol.drag = None;
+            return false;
+        }
+        resident.element.drag_selection(col, row);
+        self.pump_scrollback_fetch(&id, rows);
+        cx.notify();
+        true
     }
 
     pub(super) fn enter_copy_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -758,7 +855,7 @@ impl TerminalPane {
             let _ = crate::floating::update_in_owner(&this, cx, |this, window, cx| {
                 if this.selected_id().as_ref() != Some(&id) { return; }
                 this.qol.busy = false;
-                if !this.residents.get(&id).is_some_and(|resident| resident.attachment_generation == generation) {
+                if this.residents.get(&id).is_none_or(|resident| resident.attachment_generation != generation) {
                     this.show_terminal_feedback("Terminal changed. Try again.", window, cx);
                     return;
                 }
@@ -902,7 +999,7 @@ impl TerminalPane {
                         })
                         .cursor_pointer()
                         .hover(move |style| style.bg(colors.primary.alpha(0.08)))
-                        .child(action.label())
+                        .child(action.label(menu.editor))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.run_menu_action(action, target.clone(), window, cx)
                         })),
@@ -1176,6 +1273,21 @@ fn append_export_row(text: &mut String, row: &[GridCell], metadata: Option<&RowM
         text.push_str(line.trim_end_matches(' '));
         text.push('\n');
     }
+}
+
+/// The directories a relative file reference is read from, most specific
+/// first: a shell's live directory, then the launch directory, which is an
+/// Agent's worktree. `None` for remote sessions.
+fn file_reference_bases(session: &SessionRecord) -> Option<Vec<std::path::PathBuf>> {
+    if session.host.is_some() {
+        return None;
+    }
+    let mut bases = Vec::with_capacity(2);
+    if let Some(live) = session.terminal_cwd.as_deref() {
+        bases.push(std::path::PathBuf::from(live));
+    }
+    bases.push(std::path::PathBuf::from(&session.cwd));
+    Some(bases)
 }
 
 #[cfg(test)]

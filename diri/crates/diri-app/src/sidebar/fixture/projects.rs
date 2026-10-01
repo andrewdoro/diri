@@ -25,6 +25,7 @@ pub(super) fn make(now: f64) -> SidebarPreviewFixture {
         prompt_excerpt: None,
         options: None,
         risk_hint,
+        secret: false,
         occurred_at: DateMillis(now - 45_000.0),
     };
     let idle = SessionStatus::Idle;

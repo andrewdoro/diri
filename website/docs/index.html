@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Documentation · Diri</title>
+  <meta name="description" content="How to install diri, run coding agents side by side, keep their work apart, review it, and let agents start and coordinate other agents over MCP.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/">
+  <link rel="alternate" type="text/markdown" href="/docs/index.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Diri documentation">
+  <meta property="og:description" content="How to install diri, run coding agents side by side, keep their work apart, review it, and let agents start and coordinate other agents over MCP.">
+  <meta property="og:url" content="https://diri.sh/docs/">
+  <meta property="og:image" content="https://diri.sh/og/docs.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Diri documentation: diri documentation">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Diri documentation","description":"How to install diri, run coding agents side by side, keep their work apart, review it, and let agents start and coordinate other agents over MCP.","url":"https://diri.sh/docs/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Getting started<span class="docs-menu-sep">/</span><strong>Introduction</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/" aria-current="page"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Schedules</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/index.md">
+        <header class="docs-heading"><span class="eyebrow">Getting started</span><h1>Diri documentation</h1><p>Everything diri does, from the first session to agents that run other agents. New here? The <a href="/guides/">guides</a> walk through the basics with screenshots.</p></header>
+        <article class="docs-content">
+<p>diri runs Claude Code, Codex, Cursor, Gemini and 16 other terminal agents side by side in one native window. It tells you which agents are working, which ones need you, and which are done. Every agent can get its own git worktree, and every change lands in one place to review.</p>
+<h2 id="start-here"><a class="anchor" href="#start-here" aria-hidden="true" tabindex="-1">#</a>Start here</h2>
+<div class="table-wrap"><table><thead><tr><th>Page</th><th>What you get</th></tr></thead><tbody><tr><td><a href="/docs/install/">Install</a></td><td>macOS and Linux packages, updates, and where diri keeps its data.</td></tr><tr><td><a href="/docs/quickstart/">Quickstart</a></td><td>Your first agent session, start to finish.</td></tr><tr><td><a href="/docs/keyboard-shortcuts/">Keyboard shortcuts</a></td><td>Every binding, grouped by task.</td></tr></tbody></table></div>
+<h2 id="how-diri-fits-together"><a class="anchor" href="#how-diri-fits-together" aria-hidden="true" tabindex="-1">#</a>How diri fits together</h2>
+<p>diri has three parts. You mostly see the first one.</p>
+<div class="table-wrap"><table><thead><tr><th>Part</th><th>What it does</th></tr></thead><tbody><tr><td>The app</td><td>The window: sidebar, terminals, changes, notes, settings. Closing it never stops an agent.</td></tr><tr><td>The Engine</td><td>A background process that owns every session, its status, worktrees and history. The app and the CLI both talk to it.</td></tr><tr><td>Holders</td><td>One small process per session that owns the terminal. Agents keep running when the app or the Engine restarts.</td></tr></tbody></table></div>
+<p>Agents you start inside diri can reach the Engine too, through the built-in <a href="/docs/mcp/">MCP server</a>. That is how one agent starts helpers, hands them tasks, waits for results and merges their branches.</p>
+<h2 id="work-with-many-agents"><a class="anchor" href="#work-with-many-agents" aria-hidden="true" tabindex="-1">#</a>Work with many agents</h2>
+<ul><li><a href="/docs/sessions/">Sessions</a>: status, notifications, the sidebar, history, and what survives a restart.</li><li><a href="/docs/worktrees/">Worktrees and review</a>: give each task its own checkout, then review and bring the changes back.</li><li><a href="/docs/notes/">Notes</a>: plans and to-do lists you can hand to agents.</li><li><a href="/docs/scheduled-tasks/">Recipes and schedules</a>: start an agent at a set time, or save a task and rerun it in one click.</li><li><a href="/docs/accounts/">Accounts and usage</a>: switch accounts and see what you spend.</li></ul>
+<h2 id="automate"><a class="anchor" href="#automate" aria-hidden="true" tabindex="-1">#</a>Automate</h2>
+<ul><li><a href="/docs/mcp/">MCP server</a>: what agents can do with diri, and how to connect any agent.</li><li><a href="/docs/mcp-tools/">MCP tool reference</a>: every tool and argument, generated from the server itself.</li><li><a href="/docs/cli/">dirijor CLI</a>: script sessions, worktrees and notes from a terminal.</li><li><a href="/docs/agents/">Supported agents</a>: what each agent supports, and how to add your own.</li></ul>
+<h2 id="use-these-docs-from-an-agent"><a class="anchor" href="#use-these-docs-from-an-agent" aria-hidden="true" tabindex="-1">#</a>Use these docs from an agent</h2>
+<p>Every page has a Markdown version: add <code>.md</code> to its path, for example <a href="/docs/mcp.md">/docs/mcp.md</a>. <a href="/llms.txt">llms.txt</a> lists them all and <a href="/llms-full.txt">llms-full.txt</a> has the whole set in one file. To let an agent search the docs itself, add the <a href="/docs/mcp/#docs-mcp">docs MCP server</a>:</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">claude</span> mcp add <span class="tk-flag">--transport</span> http diri-docs https://diri.sh/mcp</code></pre></div>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><span></span><a class="next" href="/docs/install/"><span>Next</span>Install</a></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#start-here">Start here</a><a href="#how-diri-fits-together">How diri fits together</a><a href="#work-with-many-agents">Work with many agents</a><a href="#automate">Automate</a><a href="#use-these-docs-from-an-agent">Use these docs from an agent</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/index.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Findex.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/index.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a><a href="/agents/">Agents</a><a href="/compare/">Compare</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>

@@ -47,6 +47,10 @@ struct SessionController {
     hold: Option<ReflowHold>,
     _events: Option<Task<()>>,
     shutdown: Option<oneshot::Sender<()>>,
+    /// When the oldest input not yet followed by a screen change was sent;
+    /// see [`crate::telemetry::EchoProbe`].
+    echo: Arc<crate::telemetry::EchoProbe>,
+    _live: crate::telemetry::Live,
 }
 
 struct ControlState {
@@ -60,6 +64,15 @@ struct ControlState {
     /// lease can tell whether another view left the PTY at a different size.
     requested_size: Option<(u16, u16)>,
     resize_wake: Arc<Notify>,
+    /// Flip-flopping PTY sizes (A→B→A…), the signature of a layout loop.
+    resize_storm: crate::telemetry::ResizeStorm,
+    /// Last `pane.input_rejected` event, to keep one per burst.
+    rejection_recorded: Option<Instant>,
+    /// When the owner last queued typed input whose echo has not yet been
+    /// seen; see [`AttachmentControl::take_echo`].
+    echo_due: Option<Instant>,
+    /// The session's keystroke probe, shared with its transport task.
+    echo: Arc<crate::telemetry::EchoProbe>,
     #[cfg(test)]
     resize_sends: u64,
 }
@@ -73,6 +86,14 @@ pub(super) enum InputRejection {
 }
 
 impl InputRejection {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::PassiveView => "passive_view",
+            Self::Disconnected => "disconnected",
+            Self::Overloaded => "overloaded",
+        }
+    }
+
     fn message(self) -> &'static str {
         match self {
             Self::PassiveView => "This terminal is active in another view. Focus it to type here.",
@@ -88,6 +109,7 @@ pub(super) struct AttachmentControl {
     view: u64,
     events: PaneEventSender,
     id: SessionId,
+    echo: Arc<crate::telemetry::EchoProbe>,
     #[cfg(test)]
     pub(super) input_observer: Option<(SessionId, InputObserver)>,
 }
@@ -101,6 +123,18 @@ impl AttachmentControl {
             state.last_resize = None;
             state.pending_resize = None;
             state.resize_wake.notify_one();
+        }
+    }
+
+    /// A press or wheel is the user pointing at this view. With no view in
+    /// control (the owner closed, or its window gave the lease up on
+    /// deactivation) nothing contends for the session, so the view the user
+    /// is touching takes it instead of dropping the gesture. A lease another
+    /// view holds is never taken this way: only focus moves a held lease.
+    fn claim_if_vacant(&self) {
+        let vacant = self.state.lock().unwrap().owner == 0;
+        if vacant {
+            self.claim();
         }
     }
 
@@ -164,6 +198,7 @@ impl AttachmentControl {
         }
         if let AttachmentCommand::Resize(cols, rows) = command {
             let size = (cols, rows);
+            state.resize_storm.note(&self.id, size);
             state.requested_size = Some(size);
             let result = match &state.writer {
                 Some(writer) => writer.resize(cols, rows),
@@ -188,6 +223,7 @@ impl AttachmentControl {
             return Ok(());
         }
         let writer = state.writer.as_ref().ok_or(InputRejection::Disconnected)?;
+        let typed = matches!(command, AttachmentCommand::Input(_));
         let result = match command {
             AttachmentCommand::Input(bytes) => writer.send_input(bytes),
             AttachmentCommand::Mouse(bytes) => writer.send_mouse(bytes),
@@ -199,14 +235,18 @@ impl AttachmentControl {
                 row,
             } => writer.scroll(direction, lines, col, row),
         };
+        if typed && result.is_ok() {
+            state.echo_due = Some(Instant::now());
+        }
         result.map_err(|error| match error {
             AttachmentClosed::Backpressure => InputRejection::Overloaded,
             AttachmentClosed::Closed => InputRejection::Disconnected,
         })
     }
 
-    fn report(&self, result: Result<(), InputRejection>) {
+    fn report(&self, what: &'static str, result: Result<(), InputRejection>) {
         if let Err(error) = result {
+            self.record_rejection(what, error);
             let _ = self.events.send(PaneEvent::InputFeedback(
                 self.id.clone(),
                 error.message().into(),
@@ -224,7 +264,35 @@ impl AttachmentControl {
         {
             let _ = observer.send((id.clone(), bytes.clone()));
         }
-        self.report(self.submit(AttachmentCommand::Input(bytes)));
+        let result = self.submit(AttachmentCommand::Input(bytes));
+        if result.is_ok() {
+            self.echo.sent();
+            diri_client::latency_trace::mark(diri_client::latency_trace::Hop::InputQueued);
+        }
+        self.report("input", result);
+    }
+
+    /// The session's grid was painted; closes a pending echo's timing.
+    pub(super) fn echo_painted(&self, agent: &str) {
+        self.echo.painted(agent);
+    }
+
+    /// Whether a screen change landing now answers input this attachment
+    /// queued within [`diri_term::cursor_motion::KEYSTROKE_WINDOW`] (long enough for a remote echo).
+    /// True at most once per input, so a keystroke buys one echo frame and
+    /// the output that follows it is paced like any other.
+    pub(super) fn take_echo(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .echo_due
+            .take()
+            .is_some_and(|sent| sent.elapsed() <= diri_term::cursor_motion::KEYSTROKE_WINDOW)
+    }
+
+    #[cfg(test)]
+    pub(super) fn note_echo_due_for_test(&self) {
+        self.state.lock().unwrap().echo_due = Some(Instant::now());
     }
 
     pub(super) fn resize(&self, cols: u16, rows: u16) {
@@ -234,7 +302,8 @@ impl AttachmentControl {
 
     pub(super) fn mouse(&self, bytes: Vec<u8>) {
         if !bytes.is_empty() {
-            self.report(self.submit(AttachmentCommand::Mouse(bytes)));
+            self.claim_if_vacant();
+            self.report("mouse", self.submit(AttachmentCommand::Mouse(bytes)));
         }
     }
 
@@ -243,24 +312,52 @@ impl AttachmentControl {
     /// layout changes the pane under the pointer may already have lost its
     /// lease; an any-motion terminal such as Codex would then raise the
     /// "active in another view" notice on every pointer move. A passive view
-    /// drops motion silently; delivery failures are still reported.
+    /// drops motion silently, and so does a view whose transport is
+    /// reconnecting: the pane already shows that state, and a notice per
+    /// pointer move says nothing more. A full queue is still reported.
     pub(super) fn mouse_motion(&self, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
         }
         match self.submit(AttachmentCommand::Mouse(bytes)) {
-            Err(InputRejection::PassiveView) => {}
-            result => self.report(result),
+            Err(InputRejection::PassiveView | InputRejection::Disconnected) => {}
+            result => self.report("mouse_motion", result),
         }
     }
 
     pub(super) fn scroll(&self, direction: u8, lines: u16, col: u16, row: u16) {
-        self.report(self.submit(AttachmentCommand::Scroll {
-            direction,
-            lines,
-            col,
-            row,
-        }));
+        self.claim_if_vacant();
+        self.report(
+            "scroll",
+            self.submit(AttachmentCommand::Scroll {
+                direction,
+                lines,
+                col,
+                row,
+            }),
+        );
+    }
+
+    /// Records why input did not reach the session (the lease is elsewhere,
+    /// the transport is down, or its queue is full), once per burst.
+    fn record_rejection(&self, what: &'static str, error: InputRejection) {
+        diri_telemetry::count("pane.input_rejected", 1);
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        if state
+            .rejection_recorded
+            .is_some_and(|at| now.duration_since(at) < Duration::from_secs(5))
+        {
+            return;
+        }
+        state.rejection_recorded = Some(now);
+        drop(state);
+        diri_telemetry::warn_event!(
+            "pane.input_rejected",
+            session = diri_telemetry::id(&self.id.0),
+            input = what,
+            reason = error.kind()
+        );
     }
 }
 
@@ -291,6 +388,7 @@ impl ControllerLease {
         let session = existing.unwrap_or_else(|| {
             let (tx, mut rx) = pane_event_channel();
             let (shutdown, shutdown_rx) = oneshot::channel();
+            let echo = Arc::<crate::telemetry::EchoProbe>::default();
             let control = Arc::new(Mutex::new(ControlState {
                 owner: 0,
                 ownership_revision: 0,
@@ -299,6 +397,10 @@ impl ControllerLease {
                 pending_resize: None,
                 requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                resize_storm: crate::telemetry::ResizeStorm::default(),
+                rejection_recorded: None,
+                echo_due: None,
+                echo: echo.clone(),
                 #[cfg(test)]
                 resize_sends: 0,
             }));
@@ -313,6 +415,8 @@ impl ControllerLease {
                 hold: None,
                 _events: None,
                 shutdown: Some(shutdown),
+                echo,
+                _live: crate::telemetry::Live::attached_session(),
             }));
             let weak = Rc::downgrade(&session);
             session.borrow_mut()._events = Some(cx.spawn(async move |cx| {
@@ -365,6 +469,7 @@ impl ControllerLease {
             view,
             events: events.clone(),
             id: id.clone(),
+            echo: core.echo.clone(),
             #[cfg(test)]
             input_observer: None,
         };
@@ -532,6 +637,10 @@ impl SessionController {
             }
         }
         let changed = self.buffer.write().unwrap().apply(update).changed;
+        if changed {
+            self.echo.screen_changed();
+            diri_client::latency_trace::mark(diri_client::latency_trace::Hop::GridApplied);
+        }
         for view in self.views.values() {
             let _ = view.events.send(PaneEvent::ControllerDamage(
                 self.id.clone(),
@@ -568,12 +677,20 @@ fn spawn_transport(
             // drain barrier. Otherwise A→B→C could let C attach ahead of A.
             if cancelled { return; }
         }
+        let mut trace = crate::telemetry::TransportTrace::new(&id);
+        let echo = control.lock().unwrap().echo.clone();
         loop {
+            trace.connecting();
             let connect = SessionAttachment::connect(&socket, id.clone());
             let connected = tokio::select! {
                 _ = &mut shutdown => return,
                 result = tokio::time::timeout(Duration::from_secs(2), connect) => result,
             };
+            match &connected {
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => trace.connect_failed("error"),
+                Err(_) => trace.connect_failed("timeout"),
+            }
             if let Ok(Ok(mut attachment)) = connected {
                 let writer = attachment.handle();
                 let resize_wake = {
@@ -585,6 +702,7 @@ fn spawn_transport(
                     state.writer = Some(writer.clone());
                     state.resize_wake.clone()
                 };
+                trace.live();
                 let _ = events.send(PaneEvent::AttachmentState(id.clone(), 0, AttachmentState::Live));
                 let mut resize_wait = None;
                 let stopping = loop {
@@ -618,7 +736,19 @@ fn spawn_transport(
                         }
                         _ = &mut shutdown => break true,
                         chunk = attachment.chunks.recv() => match chunk {
-                            Some(chunk) => { let _ = events.send(PaneEvent::Chunk(id.clone(), 0, chunk)); }
+                            Some(chunk) => {
+                                trace.chunk(&chunk);
+                                let grid = matches!(chunk, TerminalChunk::Grid(_));
+                                if grid {
+                                    echo.frame_received();
+                                }
+                                let _ = events.send(PaneEvent::Chunk(id.clone(), 0, chunk));
+                                if grid {
+                                    diri_client::latency_trace::mark(
+                                        diri_client::latency_trace::Hop::MailboxQueued,
+                                    );
+                                }
+                            }
                             None => break false,
                         }
                     }
@@ -631,8 +761,10 @@ fn spawn_transport(
                     // Payload-free diagnostic also covers EOF/write failure
                     // during last-view close, when no view remains to notify.
                     eprintln!("diri: terminal attachment drain interrupted; queued input may not have reached the session");
+                    trace.drain_interrupted();
                 }
                 if stopping { return; }
+                trace.detached();
                 let _ = events.send(PaneEvent::InputFeedback(id.clone(),
                     "Terminal connection interrupted. Recent input may not have reached the session; it will not be replayed.".into()));
             }
@@ -797,6 +929,10 @@ mod tests {
                 pending_resize: None,
                 requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                resize_storm: crate::telemetry::ResizeStorm::default(),
+                rejection_recorded: None,
+                echo_due: None,
+                echo: Arc::default(),
                 #[cfg(test)]
                 resize_sends: 0,
             }))
@@ -858,12 +994,17 @@ mod tests {
                 pending_resize: None,
                 requested_size: None,
                 resize_wake: Arc::new(Notify::new()),
+                resize_storm: crate::telemetry::ResizeStorm::default(),
+                rejection_recorded: None,
+                echo_due: None,
+                echo: Arc::default(),
                 #[cfg(test)]
                 resize_sends: 0,
             })),
             view: 1,
             events,
             id: SessionId("benchmark".into()),
+            echo: Arc::default(),
             input_observer: None,
         };
         let mut samples = Vec::new();
@@ -890,7 +1031,19 @@ mod tests {
             .build()
             .unwrap();
         let engine = FakeEngine::start(&runtime);
+        let (owner_events, _owner_rx) = pane_event_channel();
         let (events, rx) = pane_event_channel();
+        let (_owner_lease, owner, _) = cx.update(|cx| {
+            ControllerLease::mount(
+                engine.path.clone(),
+                SessionId("shared-session".into()),
+                runtime.handle(),
+                owner_events,
+                1,
+                None,
+                cx,
+            )
+        });
         let (_lease, control, _) = cx.update(|cx| {
             ControllerLease::mount(
                 engine.path.clone(),
@@ -906,7 +1059,8 @@ mod tests {
             control.state.lock().unwrap().writer.is_some()
                 && engine.connects.load(Ordering::SeqCst) == 1
         });
-        assert!(!control.is_controller(), "first mount starts passive");
+        owner.claim();
+        assert!(!control.is_controller(), "another view holds the lease");
         let feedback = || {
             rx.state
                 .lock()
@@ -922,9 +1076,176 @@ mod tests {
         assert_eq!(feedback(), 0, "passive motion raises no notice");
         control.mouse(b"\x1b[<0;1;1M".to_vec());
         assert_eq!(feedback(), 1, "a passive click still explains itself");
+        assert!(owner.is_controller(), "a click does not take a held lease");
         control.claim();
         control.mouse_motion(b"\x1b[<35;2;2M".to_vec());
         assert_eq!(feedback(), 1, "owned motion is delivered, not reported");
+    }
+
+    #[gpui::test]
+    fn a_press_or_wheel_takes_a_vacant_lease(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let engine = FakeEngine::start(&runtime);
+        let (owner_events, _owner_rx) = pane_event_channel();
+        let (events, rx) = pane_event_channel();
+        let (owner_lease, owner, _) = cx.update(|cx| {
+            ControllerLease::mount(
+                engine.path.clone(),
+                SessionId("shared-session".into()),
+                runtime.handle(),
+                owner_events,
+                1,
+                None,
+                cx,
+            )
+        });
+        let (_lease, control, _) = cx.update(|cx| {
+            ControllerLease::mount(
+                engine.path.clone(),
+                SessionId("shared-session".into()),
+                runtime.handle(),
+                events,
+                1,
+                None,
+                cx,
+            )
+        });
+        wait_for(cx, &runtime, || {
+            control.state.lock().unwrap().writer.is_some()
+                && engine.connects.load(Ordering::SeqCst) == 1
+        });
+        let feedback = || {
+            rx.state
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| matches!(event, PaneEvent::InputFeedback(..)))
+                .count()
+        };
+        owner.claim();
+        control.scroll(0, 3, 1, 1);
+        assert_eq!(feedback(), 1, "a wheel over a passive view is refused");
+        assert!(owner.is_controller());
+
+        // The owner's window gave the lease up (a workbench does on
+        // deactivation) or its view closed: nobody holds it now.
+        drop(owner_lease);
+        drop(owner);
+        assert!(!control.is_controller());
+        control.scroll(0, 3, 1, 1);
+        assert!(control.is_controller(), "a wheel takes a vacant lease");
+        assert_eq!(feedback(), 1, "and is delivered, not refused");
+
+        control.release();
+        control.mouse(b"\x1b[<0;1;1M".to_vec());
+        assert!(control.is_controller(), "so does a press");
+        assert_eq!(feedback(), 1);
+
+        control.release();
+        control.mouse_motion(b"\x1b[<35;1;1M".to_vec());
+        assert!(
+            !control.is_controller(),
+            "motion alone never claims: a stale frame routes it to panes \
+             that are already gone"
+        );
+    }
+
+    #[gpui::test]
+    fn pointer_motion_while_reconnecting_raises_no_notice(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let engine = FakeEngine::start(&runtime);
+        let (events, rx) = pane_event_channel();
+        let (_lease, control, _) = cx.update(|cx| {
+            ControllerLease::mount(
+                engine.path.clone(),
+                SessionId("shared-session".into()),
+                runtime.handle(),
+                events,
+                1,
+                None,
+                cx,
+            )
+        });
+        control.claim();
+        // The transport has not connected yet: there is no writer.
+        assert!(control.state.lock().unwrap().writer.is_none());
+        let feedback = || {
+            rx.state
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| matches!(event, PaneEvent::InputFeedback(..)))
+                .count()
+        };
+        control.mouse_motion(b"\x1b[<35;1;1M".to_vec());
+        assert_eq!(feedback(), 0, "motion during a reconnect is not news");
+        control.mouse(b"\x1b[<0;1;1M".to_vec());
+        assert_eq!(
+            feedback(),
+            1,
+            "a click during a reconnect still explains itself"
+        );
+    }
+
+    #[gpui::test]
+    fn a_keystroke_buys_one_echo_frame(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let engine = FakeEngine::start(&runtime);
+        let (events, _rx) = pane_event_channel();
+        let (_lease, control, _) = cx.update(|cx| {
+            ControllerLease::mount(
+                engine.path.clone(),
+                SessionId("shared-session".into()),
+                runtime.handle(),
+                events,
+                1,
+                None,
+                cx,
+            )
+        });
+        wait_for(cx, &runtime, || {
+            control.state.lock().unwrap().writer.is_some()
+        });
+        assert!(
+            !control.take_echo(),
+            "output nobody typed for is not an echo"
+        );
+        control.input(b"x".to_vec());
+        assert!(
+            !control.take_echo(),
+            "a passive view's rejected key has no echo"
+        );
+        control.claim();
+        control.mouse(b"\x1b[<0;1;1M".to_vec());
+        assert!(!control.take_echo(), "a click is not typing");
+        control.input(b"x".to_vec());
+        assert!(
+            control.take_echo(),
+            "the first change after a key is its echo"
+        );
+        assert!(
+            !control.take_echo(),
+            "the output after it is paced normally"
+        );
+        control.input(b"y".to_vec());
+        control.state.lock().unwrap().echo_due = Some(
+            Instant::now() - diri_term::cursor_motion::KEYSTROKE_WINDOW - Duration::from_millis(1),
+        );
+        assert!(
+            !control.take_echo(),
+            "a key too long ago is not being answered"
+        );
     }
 
     #[gpui::test]

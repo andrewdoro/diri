@@ -1,0 +1,26 @@
+{
+  "name": "diri-telemetry-worker",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Diri telemetry ingest Worker (Cloudflare Workers + R2 + D1). See README.md.",
+  "type": "module",
+  "packageManager": "pnpm@12.4.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "typecheck": "tsc",
+    "check": "tsc && vitest run && wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "deploy": "wrangler deploy",
+    "migrate": "wrangler d1 migrations apply diri-telemetry --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@cloudflare/workers-types": "^5.20260927.1",
+    "typescript": "^7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.124.0"
+  }
+}

@@ -14,7 +14,7 @@
 //! see [`scan_progress`].
 
 mod notifications;
-pub use notifications::TerminalNotification;
+pub use notifications::{AGENT_EXIT_OSC, TerminalNotification};
 
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
@@ -22,7 +22,7 @@ use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{CONTENT_CHANGED, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use diri_proto::grid::{
     ChangedRow, GridCell, GridRowCodec, GridUpdate, LinkSpan, RowMetadata, TermColor, TermStyle,
@@ -339,6 +339,7 @@ pub struct HeadlessScreen {
     title: Option<String>,
     progress_state: Option<i64>,
     progress_value: Option<i64>,
+    progress_reports: u64,
 
     content_seq: u64,
     filled_cells: usize,
@@ -346,6 +347,25 @@ pub struct HeadlessScreen {
     /// changes from cursor/mode damage without hashing the full viewport.
     row_digests: Vec<u64>,
     row_filled_cells: Vec<usize>,
+    /// Rows whose fingerprint may predate their cells: the parser changed
+    /// them without line damage (it clears a wide character's leading spacer
+    /// on the line above the cursor). Partial damage leaves those
+    /// fingerprints as they are; full damage hashes them again.
+    stale_fingerprints: Vec<bool>,
+    /// The previous settle's fingerprints, reused when scrolling only moved
+    /// rows. Kept to avoid an allocation per settle.
+    moved_digests: Vec<u64>,
+    moved_filled_cells: Vec<usize>,
+    moved_stale: Vec<bool>,
+    /// False after cells changed outside the parser (restore), until full
+    /// damage re-fingerprints every row. Moved fingerprints are only reused
+    /// while this holds.
+    fingerprints_track_cells: bool,
+    #[cfg(test)]
+    fingerprinted_rows: std::sync::atomic::AtomicUsize,
+    /// Tests compare against hashing every row after full damage.
+    #[cfg(test)]
+    reuse_moved_fingerprints: bool,
     /// Damage produced by the current parser advance, reused to avoid a fresh
     /// allocation for every PTY read.
     current_damage_rows: Vec<bool>,
@@ -413,10 +433,20 @@ impl HeadlessScreen {
             title: None,
             progress_state: None,
             progress_value: None,
+            progress_reports: 0,
             content_seq: 0,
             filled_cells: 0,
             row_digests: Vec::new(),
             row_filled_cells: Vec::new(),
+            stale_fingerprints: Vec::new(),
+            moved_digests: Vec::new(),
+            moved_filled_cells: Vec::new(),
+            moved_stale: Vec::new(),
+            fingerprints_track_cells: true,
+            #[cfg(test)]
+            fingerprinted_rows: Default::default(),
+            #[cfg(test)]
+            reuse_moved_fingerprints: true,
             current_damage_rows: vec![false; geometry.rows],
             pending_damage_rows: vec![true; geometry.rows],
             progress_carry: Vec::new(),
@@ -479,6 +509,12 @@ impl HeadlessScreen {
         self.notifications.as_mut()?.clipboard.take()
     }
 
+    /// The exit status the login-shell wrapper reported for its agent since
+    /// the last call. See [`notifications::AGENT_EXIT_OSC`].
+    pub fn take_agent_exit(&mut self) -> Option<i32> {
+        self.notifications.as_mut()?.agent_exit.take()
+    }
+
     pub fn take_notifications(&mut self) -> Vec<TerminalNotification> {
         self.notifications
             .as_mut()
@@ -507,6 +543,18 @@ impl HeadlessScreen {
         }
         self.parser.advance(&mut self.term, bytes);
         self.settle();
+    }
+
+    /// Synchronized updates (DECSET 2026) the child has closed with its ESU,
+    /// so far. A feed that raises it, and leaves no update open, ended on a
+    /// frame the child declared complete.
+    pub fn synchronized_updates_completed(&self) -> u64 {
+        self.parser.synchronized_updates_completed()
+    }
+
+    /// Whether a synchronized update is open (its bytes are held back).
+    pub fn in_synchronized_update(&self) -> bool {
+        self.parser.sync_timeout().sync_timeout().is_some()
     }
 
     /// Ends a synchronized update (DECSET 2026) whose deadline has passed.
@@ -546,10 +594,11 @@ impl HeadlessScreen {
         self.current_damage_rows.resize(rows, false);
         self.current_damage_rows.fill(false);
         self.pending_damage_rows.resize(rows, false);
-        match self.term.damage() {
+        let full = match self.term.damage() {
             alacritty_terminal::term::TermDamage::Full => {
                 self.current_damage_rows.fill(true);
                 self.pending_damage_rows.fill(true);
+                true
             }
             alacritty_terminal::term::TermDamage::Partial(lines) => {
                 for damage in lines {
@@ -558,9 +607,9 @@ impl HeadlessScreen {
                         self.pending_damage_rows[damage.line] = true;
                     }
                 }
+                false
             }
-        }
-        self.term.reset_damage();
+        };
         // The title is compared where it is assigned, so settling costs no
         // clone of it per chunk of output.
         let mut content_changed = std::mem::take(&mut self.title_changed);
@@ -568,11 +617,43 @@ impl HeadlessScreen {
             self.rebuild_content_cache();
             content_changed = true;
         } else {
+            // Scrolling damages the whole screen but only moves most rows:
+            // a moved row keeps the fingerprint it had at the last settle.
+            // Rows that any write touched since then are hashed again.
+            let sources = self.term.damage_content_sources();
+            #[cfg(test)]
+            let sources = sources.filter(|_| self.reuse_moved_fingerprints);
+            let moved = if full && self.fingerprints_track_cells {
+                sources
+            } else {
+                None
+            };
+            if moved.is_some() {
+                self.moved_digests.clone_from(&self.row_digests);
+                self.moved_filled_cells.clone_from(&self.row_filled_cells);
+                self.moved_stale.clone_from(&self.stale_fingerprints);
+            }
+            if !full && sources.is_none() {
+                // Changes without line damage are unknown: hash every row at
+                // the next full damage.
+                self.fingerprints_track_cells = false;
+            }
             for row in 0..rows {
                 if !self.current_damage_rows[row] {
+                    // Only partial damage skips rows. A change there without
+                    // line damage leaves the fingerprint stale, as before.
+                    if sources.is_some_and(|sources| sources[row] == CONTENT_CHANGED) {
+                        self.stale_fingerprints[row] = true;
+                    }
                     continue;
                 }
-                let (digest, filled) = self.fingerprint_row(row);
+                let source = moved.map_or(usize::MAX, |sources| sources[row] as usize);
+                let (digest, filled) = if source < rows && !self.moved_stale[source] {
+                    (self.moved_digests[source], self.moved_filled_cells[source])
+                } else {
+                    self.fingerprint_row(row)
+                };
+                self.stale_fingerprints[row] = false;
                 if self.row_digests[row] != digest {
                     self.row_digests[row] = digest;
                     self.filled_cells = self
@@ -584,6 +665,9 @@ impl HeadlessScreen {
                 }
             }
         }
+        self.term.reset_damage();
+        // Full damage fingerprinted every row that was not only moved.
+        self.fingerprints_track_cells |= full;
         if content_changed {
             self.content_seq = self.content_seq.saturating_add(1);
         }
@@ -657,6 +741,14 @@ impl HeadlessScreen {
     }
 
     /// The current grid geometry.
+    /// Whether the child asked for focus in/out reports (DEC 1004): left on
+    /// under a shell, every window switch types `^[[I` / `^[[O` at its prompt.
+    pub fn focus_reporting(&self) -> bool {
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::FOCUS_IN_OUT)
+    }
+
     pub fn size(&self) -> (usize, usize) {
         (self.geometry.cols, self.geometry.rows)
     }
@@ -1069,6 +1161,10 @@ impl HeadlessScreen {
                 }
             }
         }
+        // Semantic flags and links were written after the parser settled;
+        // fingerprints catch up only when rows are hashed again, so a moved
+        // row must not keep its fingerprint until then.
+        self.fingerprints_track_cells = false;
         // Force the next grid_update to be a full frame: the diff baseline
         // predates the restore.
         self.last_grid_cols = 0;
@@ -1343,32 +1439,38 @@ impl HeadlessScreen {
 
     /// The visible grid as plain text, trailing blank lines removed.
     pub fn lines(&self) -> Vec<String> {
-        let grid = self.term.grid();
-        let mut lines: Vec<String> = Vec::with_capacity(self.geometry.rows);
-        for row in 0..self.geometry.rows {
-            let line = Line(row as i32);
-            let mut text = String::with_capacity(self.geometry.cols);
-            let source = &grid[line];
-            for column in 0..self.geometry.cols {
-                let cell = &source[Column(column)];
-                // These occupy terminal columns but are not textual spaces.
-                if cell
-                    .flags
-                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    continue;
-                }
-                text.push(cell.c);
-                if let Some(combining) = cell.zerowidth() {
-                    text.extend(combining.iter().copied());
-                }
-            }
-            lines.push(text.trim_end().to_string());
-        }
+        let mut lines: Vec<String> = (0..self.geometry.rows)
+            .map(|row| self.row_text(row))
+            .collect();
         while lines.last().is_some_and(|line| line.trim().is_empty()) {
             lines.pop();
         }
         lines
+    }
+
+    /// One visible row as plain text, trailing blanks removed; empty past
+    /// the bottom of the screen.
+    pub fn row_text(&self, row: usize) -> String {
+        if row >= self.geometry.rows {
+            return String::new();
+        }
+        let source = &self.term.grid()[Line(row as i32)];
+        let mut text = String::with_capacity(self.geometry.cols);
+        for column in 0..self.geometry.cols {
+            let cell = &source[Column(column)];
+            // These occupy terminal columns but are not textual spaces.
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            text.push(cell.c);
+            if let Some(combining) = cell.zerowidth() {
+                text.extend(combining.iter().copied());
+            }
+        }
+        text.trim_end().to_string()
     }
 
     /// What a link scanner needs from the screen and the newest `history_rows`
@@ -1438,6 +1540,13 @@ impl HeadlessScreen {
         Some((self.progress_state?, self.progress_value.unwrap_or(0)))
     }
 
+    /// Counts valid `OSC 9;4` reports, including repeats of the same value,
+    /// so a consumer can tell a program still reporting from one that went
+    /// quiet without clearing its progress. Wraps.
+    pub fn progress_reports(&self) -> u64 {
+        self.progress_reports
+    }
+
     fn drain_events(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
@@ -1493,6 +1602,9 @@ impl HeadlessScreen {
         //
         // Four independent lanes keep the multiplies from forming one serial
         // dependency chain across the row.
+        #[cfg(test)]
+        self.fingerprinted_rows
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let grid = self.term.grid();
         let source = &grid[Line(row as i32)];
         let cells = &source[..];
@@ -1530,6 +1642,8 @@ impl HeadlessScreen {
     }
 
     fn rebuild_content_cache(&mut self) {
+        self.stale_fingerprints.clear();
+        self.stale_fingerprints.resize(self.geometry.rows, false);
         self.row_digests.clear();
         self.row_filled_cells.clear();
         self.row_digests.reserve(self.geometry.rows);
@@ -1570,6 +1684,42 @@ impl HeadlessScreen {
         }
     }
 
+    /// Applies one `state;percent` payload. A state outside ConEmu's 0–4 or a
+    /// payload that is not two small numbers is ignored whole, so junk cannot
+    /// clear or invent progress. The percent is clamped to 0–100; an error or
+    /// pause without one keeps the percent it interrupts.
+    fn take_progress_report(&mut self, payload: &[u8]) {
+        let Ok(payload) = std::str::from_utf8(payload) else {
+            return;
+        };
+        let mut parts = payload.split(';');
+        let Some(Ok(state)) = parts.next().map(|value| value.trim().parse::<u8>()) else {
+            return;
+        };
+        if state > 4 {
+            return;
+        }
+        let value = match parts.next().map(str::trim) {
+            None | Some("") => None,
+            Some(value) => match value.parse::<u32>() {
+                Ok(value) => Some(i64::from(value.min(100))),
+                Err(_) => return,
+            },
+        };
+        if parts.next().is_some() {
+            return;
+        }
+        self.progress_value = match state {
+            1 => Some(value.unwrap_or(0)),
+            2 | 4 => value.or(self
+                .progress_value
+                .filter(|_| self.progress_state.is_some())),
+            _ => None,
+        };
+        self.progress_state = Some(i64::from(state));
+        self.progress_reports = self.progress_reports.wrapping_add(1);
+    }
+
     /// Scans one buffer for progress reports, returning where a carry for the
     /// next chunk should begin if the buffer ends mid-sequence.
     fn scan_progress_within(&mut self, haystack: &[u8]) -> Option<usize> {
@@ -1590,10 +1740,7 @@ impl HeadlessScreen {
                 incomplete = Some(prefix_start);
                 break;
             };
-            let payload = String::from_utf8_lossy(&haystack[start..end]);
-            let mut parts = payload.split(';');
-            self.progress_state = parts.next().and_then(|value| value.trim().parse().ok());
-            self.progress_value = parts.next().and_then(|value| value.trim().parse().ok());
+            self.take_progress_report(&haystack[start..end]);
             search_from = end;
         }
 
@@ -1938,6 +2085,161 @@ mod tests {
 
     use super::*;
 
+    impl HeadlessScreen {
+        /// Every kept row fingerprint and fill count equals a fresh walk.
+        fn assert_fingerprints_current(&self, step: usize) {
+            let mut filled = 0;
+            for row in 0..self.geometry.rows {
+                let (digest, row_filled) = self.fingerprint_row(row);
+                assert_eq!(self.row_digests[row], digest, "row {row} at step {step}");
+                assert_eq!(
+                    self.row_filled_cells[row], row_filled,
+                    "row {row} at {step}"
+                );
+                filled += row_filled;
+            }
+            assert_eq!(self.filled_cells, filled, "filled cells at step {step}");
+        }
+
+        fn take_fingerprinted_rows(&self) -> usize {
+            self.fingerprinted_rows
+                .swap(0, std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn scrolling_fingerprints_only_rows_that_changed() {
+        let mut screen = HeadlessScreen::new(40, 10);
+        for line in 0..10 {
+            screen.feed(format!("line {line}\r\n").as_bytes());
+        }
+        screen.take_fingerprinted_rows();
+        let seq = screen.content_seq();
+        // One scrolled line: the old cursor row and the new bottom row.
+        screen.feed(b"next\r\n");
+        assert_eq!(screen.take_fingerprinted_rows(), 2);
+        assert_eq!(screen.content_seq(), seq + 1);
+        screen.assert_fingerprints_current(0);
+        screen.take_fingerprinted_rows();
+        // A region scroll leaves rows outside the region alone and keeps
+        // the moved rows' fingerprints; the cursor rows are damaged.
+        screen.feed(b"\x1b[3;6r\x1b[2S\x1b[r\x1b[10;1H");
+        assert_eq!(screen.take_fingerprinted_rows(), 4);
+        screen.assert_fingerprints_current(1);
+        screen.take_fingerprinted_rows();
+        // Non-scroll full damage fingerprints every row.
+        screen.feed(b"\x1b[2J");
+        assert_eq!(screen.take_fingerprinted_rows(), 10);
+        screen.assert_fingerprints_current(2);
+    }
+
+    fn assert_same_fingerprints(screen: &HeadlessScreen, reference: &HeadlessScreen, step: usize) {
+        assert_eq!(
+            screen.row_digests, reference.row_digests,
+            "digests at step {step}"
+        );
+        assert_eq!(
+            screen.row_filled_cells, reference.row_filled_cells,
+            "filled at {step}"
+        );
+        assert_eq!(
+            screen.filled_cells, reference.filled_cells,
+            "filled cells at {step}"
+        );
+        assert_eq!(
+            screen.content_seq, reference.content_seq,
+            "content_seq at {step}"
+        );
+    }
+
+    /// Reusing moved fingerprints is exact: after every read, fingerprints,
+    /// fill counts and `content_seq` equal hashing every row after full
+    /// damage, which status detection and publication were built on.
+    #[test]
+    fn fingerprints_after_scrolling_match_the_cells() {
+        let actions: &[&str] = &[
+            "\x1b[31;1m",
+            "\x1b[38;2;1;2;3;48;5;17m",
+            "\x1b[0m",
+            "\x1b[7m",
+            "\x1b[44m\x1b[K\x1b[0m",
+            "\x1b[42m\x1b[2K\r\n",
+            "\x1b]8;id=a;https://example.invalid/a\x07",
+            "\x1b]8;;\x07",
+            "\x1b]133;A\x07$ ",
+            "\x1b[2;6r",
+            "\x1b[r",
+            "\x1b[3S",
+            "\x1b[2T",
+            "\x1b[2L",
+            "\x1b[1M",
+            "\x1b[3@",
+            "\x1b[2P",
+            "\x1b[4X",
+            "\x1b[2J",
+            "\x1b[H",
+            "\x1b[5;7H",
+            "\x1b[99;99H",
+            "\x1b[4h",
+            "\x1b[4l",
+            "\x1b[?7l",
+            "\x1b[?7h",
+            "\x1b[?1049h",
+            "\x1b[?1049l",
+            "\x1b[?2026h",
+            "\x1b[?2026l",
+            "\x1b7",
+            "\x1b8",
+            "\x1bD",
+            "\x1bM",
+            "\x1bE",
+            "\n\n\n",
+            "\t",
+            "\x08",
+            "界面 e\u{301} 🦀",
+            "abc\x1b[3b",
+        ];
+        let mut screen = HeadlessScreen::new(20, 6);
+        let mut reference = HeadlessScreen::new(20, 6);
+        reference.reuse_moved_fingerprints = false;
+        let mut seed = 0x243f_6a88_85a3_08d3u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut reused = 0;
+        for step in 0..20_000 {
+            let random = next();
+            // Several pieces per read, so writes follow scrolls unsettled.
+            let mut bytes = String::new();
+            for piece in 0..1 + random % 4 {
+                let random = next();
+                bytes += &match random % 6 {
+                    0 | 1 => format!("{step}.{piece} {}", "x".repeat((random >> 8) as usize % 30)),
+                    2 => "\r\n".repeat(1 + (random >> 8) as usize % 4),
+                    _ => actions[(random >> 16) as usize % actions.len()].to_string(),
+                };
+            }
+            screen.take_fingerprinted_rows();
+            screen.feed(bytes.as_bytes());
+            reused += screen.geometry.rows - screen.take_fingerprinted_rows();
+            reference.feed(bytes.as_bytes());
+            assert_same_fingerprints(&screen, &reference, step);
+            if random % 997 == 0 {
+                let (cols, rows) = (
+                    10 + (random >> 24) as usize % 30,
+                    1 + (random >> 32) as usize % 8,
+                );
+                screen.resize(cols, rows);
+                reference.resize(cols, rows);
+                assert_same_fingerprints(&screen, &reference, step);
+            }
+        }
+        assert!(reused > 20_000, "{reused} fingerprints reused");
+    }
+
     fn screen_with(input: &[u8]) -> HeadlessScreen {
         let mut screen = HeadlessScreen::new(80, 24);
         screen.feed(input);
@@ -2028,6 +2330,68 @@ mod tests {
         screen.feed(b"\x1b]9;4;1");
         screen.feed(b";75\x07");
         assert_eq!(screen.progress(), Some((1, 75)));
+    }
+
+    #[test]
+    fn progress_states_percent_and_junk() {
+        let mut screen = HeadlessScreen::new(80, 24);
+        // ST-terminated, whitespace tolerated, percent clamped to 100.
+        screen.feed(b"\x1b]9;4;1; 250 \x1b\\");
+        assert_eq!(screen.progress(), Some((1, 100)));
+        // An error or pause without a percent stops where the bar was.
+        screen.feed(b"\x1b]9;4;1;35\x07\x1b]9;4;2\x07");
+        assert_eq!(screen.progress(), Some((2, 35)));
+        screen.feed(b"\x1b]9;4;4;\x07");
+        assert_eq!(screen.progress(), Some((4, 35)));
+        // Indeterminate carries no percent; 0 clears.
+        screen.feed(b"\x1b]9;4;3;90\x07");
+        assert_eq!(screen.progress(), Some((3, 0)));
+        screen.feed(b"\x1b]9;4;0\x07");
+        assert_eq!(screen.progress(), Some((0, 0)));
+        screen.feed(b"\x1b]9;4;1\x07");
+        assert_eq!(screen.progress(), Some((1, 0)));
+
+        let reports = screen.progress_reports();
+        for junk in [
+            &b"\x1b]9;4;5;10\x07"[..],
+            b"\x1b]9;4;x;10\x07",
+            b"\x1b]9;4;1;-4\x07",
+            b"\x1b]9;4;1;12.5\x07",
+            b"\x1b]9;4;1;10;extra\x07",
+            b"\x1b]9;4;\x07",
+            b"\x1b]9;4;1;99999999999999999999\x07",
+        ] {
+            screen.feed(junk);
+            assert_eq!(screen.progress(), Some((1, 0)), "{junk:?}");
+        }
+        assert_eq!(screen.progress_reports(), reports, "junk is not a report");
+        // A repeat of the same value still counts as a report.
+        screen.feed(b"\x1b]9;4;1\x07");
+        assert_eq!(screen.progress_reports(), reports + 1);
+    }
+
+    #[test]
+    fn progress_and_osc_9_notifications_never_cross() {
+        let mut screen = HeadlessScreen::new(80, 24).with_notifications();
+        screen.feed(b"\x1b]9;4;1;40\x07");
+        assert!(!screen.has_notifications());
+        assert_eq!(screen.progress(), Some((1, 40)));
+        // `9;` followed by anything but `4;` is a notification, even one
+        // whose text starts with a 4.
+        screen.feed(b"\x1b]9;42 tests passed\x07\x1b]9;4\x07");
+        let bodies: Vec<_> = screen
+            .take_notifications()
+            .into_iter()
+            .map(|message| message.body)
+            .collect();
+        assert_eq!(bodies, ["42 tests passed", "4"]);
+        assert_eq!(screen.progress(), Some((1, 40)));
+        // Progress is parsed on screens that never opted into notifications
+        // (the remote Holder), and drawn nowhere.
+        let mut holder = HeadlessScreen::new(20, 2);
+        holder.feed(b"a\x1b]9;4;1;7\x07b");
+        assert_eq!(holder.progress(), Some((1, 7)));
+        assert!(holder.lines()[0].starts_with("ab"));
     }
 
     #[test]

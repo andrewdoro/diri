@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Notes · Diri docs</title>
+  <meta name="description" content="Write plans and to-dos in diri Notes, hand any to-do to an agent with the note as context, follow its progress live, and let agents write back.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/notes/">
+  <link rel="alternate" type="text/markdown" href="/docs/notes.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Notes">
+  <meta property="og:description" content="Write plans and to-dos in diri Notes, hand any to-do to an agent with the note as context, follow its progress live, and let agents write back.">
+  <meta property="og:url" content="https://diri.sh/docs/notes/">
+  <meta property="og:image" content="https://diri.sh/og/docs-notes.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Notes: diri documentation">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Notes","description":"Write plans and to-dos in diri Notes, hand any to-do to an agent with the note as context, follow its progress live, and let agents write back.","url":"https://diri.sh/docs/notes/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Working with agents<span class="docs-menu-sep">/</span><strong>Notes</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/" aria-current="page"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Schedules</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/notes.md">
+        <header class="docs-heading"><span class="eyebrow">Working with agents</span><h1>Notes</h1><p>Write plans and to-dos in diri Notes, hand any to-do to an agent with the note as context, follow its progress live, and let agents write back.</p></header>
+        <article class="docs-content">
+<p>Notes are plain Markdown documents that live next to your agents. Write a plan, break it into to-dos, and send any to-do to an agent. The agent gets the note as context, its progress shows under the to-do, and it can write its findings back into the note.</p>
+<h2 id="create-a-note"><a class="anchor" href="#create-a-note" aria-hidden="true" tabindex="-1">#</a>Create a note</h2>
+<ul><li>Press <kbd>⌥</kbd><kbd>⌘</kbd><kbd>N</kbd>, or run <strong>New Note</strong> from the command palette.</li><li>Or choose <strong>Note</strong> in the sidebar's new-session menu.</li></ul>
+<p>A note is a session. It sits in the sidebar with your agents and terminals, and it sorts, pins, archives and nests the same way. An agent started from a note appears as the note's child. The first line is the title; a note with no title shows as &quot;Untitled&quot;.</p>
+<h2 id="write"><a class="anchor" href="#write" aria-hidden="true" tabindex="-1">#</a>Write</h2>
+<p>Type <kbd>/</kbd> for the block menu or <kbd>@</kbd> to mention something. Markdown shortcuts also work as you type.</p>
+<div class="table-wrap"><table><thead><tr><th>Block</th><th>Type this</th><th>Or turn into</th></tr></thead><tbody><tr><td>Heading 1, 2, 3</td><td><code># </code>, <code>## </code>, <code>### </code></td><td><kbd>⌥</kbd><kbd>⌘</kbd><kbd>1</kbd> … <kbd>3</kbd></td></tr><tr><td>Bulleted list</td><td><code>- </code>, <code>* </code> or <code>+ </code></td><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>8</kbd></td></tr><tr><td>Numbered list</td><td><code>1. </code> or <code>1) </code></td><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>7</kbd></td></tr><tr><td>To-do</td><td><code>[] </code>, <code>[ ] </code> or <code>[x] </code></td><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>9</kbd></td></tr><tr><td>Quote</td><td><code>&gt; </code></td><td><kbd>⌥</kbd><kbd>⌘</kbd><kbd>Q</kbd></td></tr><tr><td>Code</td><td>three backticks</td><td><kbd>⌥</kbd><kbd>⌘</kbd><kbd>C</kbd></td></tr><tr><td>Divider</td><td><code>---</code></td><td></td></tr></tbody></table></div>
+<p>The <code>/</code> menu adds <strong>Callout</strong>, <strong>Table</strong> and <strong>Image</strong>. Callouts are stored as GitHub alerts such as <code>&gt; [!NOTE]</code>. Tables are GFM tables; <kbd>⌃</kbd><kbd>↵</kbd> opens the table menu for inserting rows and columns, alignment and deleting. Pasted or dropped images are saved next to the note, up to 25 MB each.</p>
+<p>Tick a to-do with <kbd>⌘</kbd><kbd>↵</kbd>. Move a block with <kbd>⌥</kbd><kbd>⇧</kbd><kbd>↑</kbd> / <kbd>↓</kbd>. The full list is in <a href="/docs/keyboard-shortcuts/#notes">Keyboard shortcuts</a>.</p>
+<h3 id="mentions-and-links"><a class="anchor" href="#mentions-and-links" aria-hidden="true" tabindex="-1">#</a>Mentions and links</h3>
+<p>Type <kbd>@</kbd> to mention a diri session or another note. A mention is stored as an ordinary Markdown link, for example <code>[@Release plan](diri://note/&lt;id&gt;)</code>, and shown as a chip. Pasted links to tools such as GitHub pull requests, Linear, Figma, Notion, Google Docs and Slack show as chips too. diri does not fetch their contents.</p>
+<h2 id="to-dos"><a class="anchor" href="#to-dos" aria-hidden="true" tabindex="-1">#</a>To-dos</h2>
+<p>Press <kbd>⌃</kbd><kbd>⌘</kbd><kbd>T</kbd>, or click <strong>To-dos</strong> in the sidebar, to see every open to-do across your notes. Ticking one there writes it back to its note.</p>
+<h2 id="start-an-agent-from-a-to-do"><a class="anchor" href="#start-an-agent-from-a-to-do" aria-hidden="true" tabindex="-1">#</a>Start an agent from a to-do</h2>
+<ol><li>Put the caret on an open to-do, or hover it, and click <strong>Start</strong> (<kbd>⌃</kbd><kbd>⌘</kbd><kbd>↵</kbd>).</li><li>Under <strong>Start with</strong>, choose an agent. The default is marked.</li><li><strong>What the agent gets</strong> shows the exact brief before you send it.</li></ol>
+<p>The brief contains the to-do, the indented lines under it, the heading section it sits in, short excerpts of notes it mentions, the sessions it mentions with their status, and any earlier attempt's report. It is capped at 24 KB. The agent is told to report back and not to tick the to-do itself.</p>
+<h3 id="follow-it-live"><a class="anchor" href="#follow-it-live" aria-hidden="true" tabindex="-1">#</a>Follow it live</h3>
+<p>The new session's chip is added to the to-do, and a status line appears under it:</p>
+<div class="table-wrap"><table><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody><tr><td>Starting…</td><td>The session is launching</td></tr><tr><td>Working on it</td><td>The agent is busy</td></tr><tr><td>Needs you</td><td>It asked a question; <strong>Answer in session</strong> opens it</td></tr><tr><td>Ready to review</td><td>It finished a turn or exited cleanly; shows an open PR if there is one</td></tr><tr><td>Stopped</td><td>The session ended; <strong>Start again</strong> tries once more</td></tr><tr><td>Couldn't start</td><td>The launch failed; <strong>Try again</strong></td></tr></tbody></table></div>
+<p>This status comes live from the Engine and is never written into the file. Each attempt adds one more chip, newest last. The agent's session shows the note's title above its own; click it to jump back to the to-do.</p>
+<p>When you are happy with the work, tick the to-do. If the agent is still running, diri asks whether to <strong>Tick and stop the agent</strong> or <strong>Tick, keep it running</strong>.</p>
+<h2 id="how-agents-write-back"><a class="anchor" href="#how-agents-write-back" aria-hidden="true" tabindex="-1">#</a>How agents write back</h2>
+<p>diri's MCP server gives agents tools for notes. Agents are asked to add short entries (decisions, findings, blockers, results, links) rather than progress chatter, to prefer adding over rewriting, and never to delete silently.</p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>What it does</th></tr></thead><tbody><tr><td><code>list_notes</code></td><td>Find notes in this project, all projects, or ones that mention the agent</td></tr><tr><td><code>read_note</code></td><td>Read a note as Markdown, with to-dos, linked sessions and their live status</td></tr><tr><td><code>write_note</code></td><td>Add an entry, tick a to-do, link a session, or append Markdown</td></tr><tr><td><code>edit_note</code></td><td>Replace an exact piece of text</td></tr><tr><td><code>replace_section</code></td><td>Replace everything under one heading</td></tr><tr><td><code>create_note</code></td><td>Write a new note; it appears under the agent in the sidebar</td></tr><tr><td><code>start_from_note</code></td><td>Start another agent from a note or one of its to-dos</td></tr><tr><td><code>note_history</code></td><td>List or read earlier versions (read-only)</td></tr></tbody></table></div>
+<p>A report from a to-do's own agent lands as a bullet under that to-do. Anything else goes into an <code>## Updates</code> section, created if missing, with the agent's chip and a timestamp. An agent started from a note may only write to that note or to notes that mention it.</p>
+<h3 id="from-the-command-line"><a class="anchor" href="#from-the-command-line" aria-hidden="true" tabindex="-1">#</a>From the command line</h3>
+<p>The <code>dirijor note</code> command does the same from any shell:</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">dirijor</span> note <span class="tk-str">&quot;Ship the beta&quot;</span>                    # quick note; first line is the title
+<span class="tk-cmd">dirijor</span> note todo <span class="tk-str">&quot;Write release notes&quot;</span>         # add to this project's To-dos note
+<span class="tk-cmd">dirijor</span> note list <span class="tk-flag">--all</span>
+<span class="tk-cmd">dirijor</span> note show <span class="tk-str">&quot;Release plan&quot;</span>
+<span class="tk-cmd">dirijor</span> note check <span class="tk-str">&quot;Release plan&quot;</span> <span class="tk-str">&quot;Write release notes&quot;</span>
+<span class="tk-cmd">dirijor</span> note append <span class="tk-str">&quot;Release plan&quot;</span> <span class="tk-str">&quot;Beta is out&quot;</span>
+<span class="tk-cmd">dirijor</span> note history <span class="tk-str">&quot;Release plan&quot;</span>
+<span class="tk-cmd">dirijor</span> note path                               # print the notes folder</code></pre></div>
+<p>Run <code>dirijor note help</code> for every subcommand and flag, including <code>add --pin --open</code>, <code>edit --old --new</code>, <code>replace-section</code> and <code>link</code>.</p>
+<h2 id="search"><a class="anchor" href="#search" aria-hidden="true" tabindex="-1">#</a>Search</h2>
+<p>Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>F</kbd> for <strong>Search notes</strong>. It searches titles and the whole body, including to-dos, table cells and mention labels, across live and archived notes. Every word you type must appear. Archived notes show dimmed, and opening one unarchives it. The command palette also shows up to three matching notes while you type.</p>
+<h2 id="version-history"><a class="anchor" href="#version-history" aria-hidden="true" tabindex="-1">#</a>Version history</h2>
+<p>diri keeps earlier versions of every note. With a note open, run <strong>Version History…</strong> from the command palette. Pick a version to preview it, then <strong>Restore This Version…</strong>. The text you replace stays in history.</p>
+<div class="table-wrap"><table><thead><tr><th>When</th><th>Versions kept</th></tr></thead><tbody><tr><td>While you type</td><td>At most one per minute</td></tr><tr><td>Before an agent, the CLI or another editor changes the note</td><td>Always</td></tr><tr><td>Last hour</td><td>All of them</td></tr><tr><td>Last day</td><td>One per 10 minutes</td></tr><tr><td>Last month</td><td>One per day</td></tr><tr><td>Older</td><td>One per week</td></tr></tbody></table></div>
+<p>Each note keeps up to 200 versions or 20 MB. Only you can restore a version; agents can read history but not restore it.</p>
+<h2 id="edits-from-elsewhere"><a class="anchor" href="#edits-from-elsewhere" aria-hidden="true" tabindex="-1">#</a>Edits from elsewhere</h2>
+<p>Agents, the CLI and other editors can change a note while you have it open. With no unsaved typing, the note simply reloads. Otherwise diri merges block by block: additions from both sides are kept, and if both changed the same block your text wins while an outside tick or chip is kept. The losing edit stays in version history.</p>
+<h2 id="where-notes-live"><a class="anchor" href="#where-notes-live" aria-hidden="true" tabindex="-1">#</a>Where notes live</h2>
+<p>Each note is one Markdown file with a small front matter block.</p>
+<div class="table-wrap"><table><thead><tr><th>Platform</th><th>Folder</th></tr></thead><tbody><tr><td>macOS</td><td><code>~/Library/Application Support/Dirijor/notes</code></td></tr><tr><td>Linux</td><td><code>~/.local/share/diri/notes</code></td></tr></tbody></table></div>
+<p>You can edit the files with any editor; diri notices and records a version. Images live in <code>assets/</code>, history in <code>.history/</code>, and deleted notes in <code>.trash/</code> inside the same folder.</p>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><a class="prev" href="/docs/worktrees/"><span>Previous</span>Worktrees and review</a><a class="next" href="/docs/scheduled-tasks/"><span>Next</span>Recipes and schedules</a></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#create-a-note">Create a note</a><a href="#write">Write</a><a href="#to-dos">To-dos</a><a href="#start-an-agent-from-a-to-do">Start an agent from a to-do</a><a href="#how-agents-write-back">How agents write back</a><a href="#search">Search</a><a href="#version-history">Version history</a><a href="#edits-from-elsewhere">Edits from elsewhere</a><a href="#where-notes-live">Where notes live</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/notes.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Fnotes.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/notes.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a><a href="/agents/">Agents</a><a href="/compare/">Compare</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>

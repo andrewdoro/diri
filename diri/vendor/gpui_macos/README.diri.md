@@ -42,7 +42,7 @@ of closing. Three-button alerts keep upstream's focus on the middle button.
 
 The scene capture patch (`MetalRenderer::capture_scene_region`, used by
 `MacWindow::capture_scene_region` and `MetalHeadlessRenderer`) implements
-GPUI's `Window::capture_region` (see `vendor/gpui/DIRI_PATCHES.md` section 3).
+GPUI's `Window::capture_region` (see `vendor/gpui/DIRI_PATCHES.md` section 4).
 It re-renders the last frame's scene into a transient private offscreen
 target the size of the drawable (it never touches the layer's drawables or
 presents), blits the requested region into a private mipmapped texture,

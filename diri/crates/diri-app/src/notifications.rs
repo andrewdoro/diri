@@ -9,6 +9,9 @@ use diri_proto::{
 
 #[cfg(target_os = "macos")]
 pub const OPEN_ACTION_ID: &str = "open-session";
+/// Text-input action on needs-input banners; see `reply_refusal`.
+#[cfg(target_os = "macos")]
+pub const REPLY_ACTION_ID: &str = "reply";
 #[cfg(test)]
 pub const APPROVE_ACTION_ID: &str = "approve";
 #[cfg(test)]
@@ -54,6 +57,10 @@ pub struct NotificationRequest {
     pub thread_identifier: Option<String>,
     pub action_data: Option<ActionData>,
     pub use_system_sound: bool,
+    /// Offer an inline Reply field. Only set for a session waiting on a
+    /// free-form answer when the banner is posted; `reply_refusal` re-checks
+    /// when the text arrives.
+    pub reply: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +110,7 @@ fn plain_banner(prefix: &str, title: String, body: String) -> StatusTransition {
             thread_identifier: None,
             action_data: None,
             use_system_sound: true,
+            reply: false,
         }),
         in_app_banner: Some(InAppBanner { title, body }),
     }
@@ -250,6 +258,7 @@ pub fn reach_failure_transition() -> StatusTransition {
             thread_identifier: None,
             action_data: None,
             use_system_sound: true,
+            reply: false,
         }),
         in_app_banner: None,
     }
@@ -419,6 +428,7 @@ fn memory_pressure_request(
         thread_identifier: Some(session.id.0.clone()),
         action_data: None,
         use_system_sound: false,
+        reply: false,
     }
 }
 
@@ -444,9 +454,197 @@ where
     }
 }
 
+/// Whether text typed into a banner may be pasted and submitted into this
+/// session right now. Only a live session holding a free-form question
+/// qualifies: at a permission prompt the pasted text is ignored and the Enter
+/// picks whatever option is highlighted, which is exactly the delayed
+/// approval keystroke notifications must never send. Nor does a terminal's
+/// password prompt: the banner's field would show the password as typed.
+#[must_use]
+pub fn accepts_reply(session: &SessionRecord) -> bool {
+    !session.is_archived()
+        && matches!(
+            session.status,
+            diri_proto::SessionStatus::NeedsInput(NeedsInputKind::Question)
+        )
+        && !session
+            .needs_input
+            .as_ref()
+            .is_some_and(|detail| detail.secret)
+}
+
+#[cfg(any(target_os = "macos", test))]
+/// Why a banner reply was not typed into its session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplyRefusal {
+    /// Closed, removed, or replaced by a new incarnation under the same id.
+    Gone,
+    Exited,
+    /// Answered in the app, resolved, or now at a different kind of prompt.
+    MovedOn,
+}
+
+#[cfg(any(target_os = "macos", test))]
+/// Re-check a reply against the state when it arrives, not when the banner
+/// was posted. The target is the banner's own session (`claimed`, from the
+/// delivered notification) and must agree with the inbox entry that posted
+/// it; the selected session never enters into it.
+#[must_use]
+pub fn reply_refusal(
+    entry: Option<&crate::notification_feed::NotificationEntry>,
+    claimed: &SessionId,
+    session: Option<&SessionRecord>,
+) -> Option<ReplyRefusal> {
+    let Some(session) = session else {
+        return Some(ReplyRefusal::Gone);
+    };
+    let Some(entry) = entry.filter(|entry| &entry.session_id == claimed && &session.id == claimed)
+    else {
+        return Some(ReplyRefusal::MovedOn);
+    };
+    if entry.incarnation != session.created_at.0.to_bits() {
+        return Some(ReplyRefusal::Gone);
+    }
+    if matches!(session.status, diri_proto::SessionStatus::Exited(_)) {
+        return Some(ReplyRefusal::Exited);
+    }
+    if entry.resolved || !accepts_reply(session) {
+        return Some(ReplyRefusal::MovedOn);
+    }
+    None
+}
+
+#[cfg(any(target_os = "macos", test))]
+/// The notice for a reply that was not sent. It never repeats the reply
+/// text: that is a prompt, and prompts stay out of logs and banners.
+#[must_use]
+pub fn reply_refused_transition(
+    session_title: Option<&str>,
+    refusal: ReplyRefusal,
+) -> StatusTransition {
+    let subject = session_title
+        .filter(|title| !title.is_empty())
+        .map_or_else(|| "The session".to_owned(), |title| format!("“{title}”"));
+    let body = match refusal {
+        ReplyRefusal::Gone => format!("{subject} is no longer open."),
+        ReplyRefusal::Exited => format!("{subject} has exited."),
+        ReplyRefusal::MovedOn => {
+            format!("{subject} is no longer waiting for an answer. Open it to continue.")
+        }
+    };
+    plain_banner("reply-not-sent", "Reply not sent".to_owned(), body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_reach_only_the_same_session_still_waiting_on_a_question() {
+        use crate::notification_feed::{NotificationEntry, NotificationKind};
+        let mut waiting = session(
+            AgentKind::CLAUDE_CODE,
+            SessionStatus::NeedsInput(NeedsInputKind::Question),
+        );
+        let entry = NotificationEntry {
+            id: "attention-v1-1-1".to_owned(),
+            session_id: waiting.id.clone(),
+            incarnation: waiting.created_at.0.to_bits(),
+            kind: NotificationKind::NeedsInput,
+            title: "Claude Code needs you".to_owned(),
+            body: String::new(),
+            created_at_ms: 1,
+            read: false,
+            resolved: false,
+            blocker: String::new(),
+        };
+        let id = waiting.id.clone();
+        assert!(accepts_reply(&waiting));
+        assert_eq!(reply_refusal(Some(&entry), &id, Some(&waiting)), None);
+
+        // The banner's session, never another one.
+        let other = SessionId::new("session-2");
+        assert_eq!(
+            reply_refusal(Some(&entry), &other, Some(&waiting)),
+            Some(ReplyRefusal::MovedOn)
+        );
+        assert_eq!(
+            reply_refusal(Some(&entry), &id, None),
+            Some(ReplyRefusal::Gone)
+        );
+        assert_eq!(
+            reply_refusal(None, &id, Some(&waiting)),
+            Some(ReplyRefusal::MovedOn)
+        );
+
+        let mut resolved = entry.clone();
+        resolved.resolved = true;
+        assert_eq!(
+            reply_refusal(Some(&resolved), &id, Some(&waiting)),
+            Some(ReplyRefusal::MovedOn)
+        );
+
+        let mut respawned = waiting.clone();
+        respawned.created_at = DateMillis(9.0);
+        assert_eq!(
+            reply_refusal(Some(&entry), &id, Some(&respawned)),
+            Some(ReplyRefusal::Gone)
+        );
+
+        // A permission prompt would take the Enter as "approve".
+        waiting.status = SessionStatus::NeedsInput(NeedsInputKind::Permission);
+        assert!(!accepts_reply(&waiting));
+        assert_eq!(
+            reply_refusal(Some(&entry), &id, Some(&waiting)),
+            Some(ReplyRefusal::MovedOn)
+        );
+        waiting.status = SessionStatus::Working;
+        assert_eq!(
+            reply_refusal(Some(&entry), &id, Some(&waiting)),
+            Some(ReplyRefusal::MovedOn)
+        );
+    }
+
+    /// A terminal's line question takes a typed reply; its password
+    /// prompt never does.
+    #[test]
+    fn a_terminal_password_prompt_takes_no_banner_reply() {
+        let mut terminal = session(
+            AgentKind::SHELL,
+            SessionStatus::NeedsInput(NeedsInputKind::Question),
+        );
+        let mut detail = NeedsInputDetail {
+            kind: NeedsInputKind::Question,
+            source: NeedsInputSource::TerminalLine,
+            tool_name: None,
+            summary: "Proceed? [y/N]".to_owned(),
+            prompt_excerpt: Some("Proceed? [y/N]".to_owned()),
+            options: None,
+            risk_hint: RiskHint::Neutral,
+            occurred_at: DateMillis(1.0),
+            secret: false,
+        };
+        terminal.needs_input = Some(detail.clone());
+        assert!(accepts_reply(&terminal));
+        detail.secret = true;
+        detail.summary = "Waiting for a password".to_owned();
+        detail.prompt_excerpt = None;
+        terminal.needs_input = Some(detail);
+        assert!(!accepts_reply(&terminal));
+    }
+
+    #[test]
+    fn refused_reply_notice_names_the_session_not_the_text() {
+        let notice = reply_refused_transition(Some("Refactor parser"), ReplyRefusal::Exited);
+        let banner = notice.in_app_banner.expect("in-app notice");
+        assert_eq!(banner.title, "Reply not sent");
+        assert_eq!(banner.body, "“Refactor parser” has exited.");
+        assert!(notice.notification.is_some_and(|request| !request.reply));
+        let banner = reply_refused_transition(None, ReplyRefusal::Gone)
+            .in_app_banner
+            .expect("in-app notice");
+        assert_eq!(banner.body, "The session is no longer open.");
+    }
 
     #[test]
     fn non_persistent_remote_capability_is_user_visible_once() {
@@ -494,6 +692,7 @@ mod tests {
                 prompt_excerpt: None,
                 options: None,
                 risk_hint: RiskHint::Neutral,
+                secret: false,
                 occurred_at: DateMillis(1.0),
             }),
             resumability: Resumability::NotResumable,
@@ -514,6 +713,11 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            terminal_cwd: None,
+            note_id: None,
+            foreground_ports: None,
+            terminal_progress: None,
+            scheduled_run: None,
         }
     }
 

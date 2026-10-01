@@ -6,6 +6,8 @@ mod held_hint_tests;
 #[path = "root/peek_profile.rs"]
 mod peek_profile;
 #[cfg(all(test, target_os = "macos"))]
+mod progress_frames;
+#[cfg(all(test, target_os = "macos"))]
 mod project_agent_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod row_motion_frames;
@@ -13,6 +15,10 @@ mod row_motion_frames;
 mod theme_fade_frames;
 #[cfg(all(test, target_os = "macos"))]
 mod title_settle_frames;
+#[cfg(all(test, target_os = "macos"))]
+mod whats_new_clips;
+#[cfg(test)]
+mod whats_new_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod window_navigation_tests;
 mod workspace_launches;
@@ -42,13 +48,13 @@ use crate::AppServices;
 use crate::commands::{
     self, APP_CONTEXT, ArchiveSelectedSession, CheckForUpdates, CloseSession, CommandId,
     DelegateSelectedSession, FocusSidebar, MoveSelectedSessionDown, MoveSelectedSessionUp,
-    NewCodexSession, NewDefaultSession, NewTerminal, OpenLauncher, OpenSettings, OpenWorktrees,
-    QuoteSelection, QuoteSelectionToSession, RenameSelectedSession, ReopenSession,
-    SESSION_NAVIGATION_CONTEXT, SelectLastSession, SelectNextAttentionSession, SelectNextSession,
-    SelectPreviousSession, SelectSession1, SelectSession2, SelectSession3, SelectSession4,
-    SelectSession5, SelectSession6, SelectSession7, SelectSession8, ToggleAuxiliaryTerminal,
-    ToggleCommandPalette, ToggleHistory, ToggleInspector, ToggleOverview, ToggleQuickOpen,
-    ToggleSidebar, ToggleTabPeek,
+    NewCodexSession, NewDefaultSession, NewNote, NewTerminal, OpenLauncher, OpenSettings,
+    OpenWorktrees, QuoteSelection, QuoteSelectionToSession, RenameSelectedSession, ReopenSession,
+    SESSION_NAVIGATION_CONTEXT, SearchNotes, SelectLastSession, SelectNextAttentionSession,
+    SelectNextSession, SelectPreviousSession, SelectSession1, SelectSession2, SelectSession3,
+    SelectSession4, SelectSession5, SelectSession6, SelectSession7, SelectSession8, ShowTodos,
+    ShowWhatsNew, ToggleAuxiliaryTerminal, ToggleCommandPalette, ToggleHistory, ToggleInspector,
+    ToggleOverview, ToggleQuickOpen, ToggleSidebar, ToggleTabPeek,
 };
 use crate::external_drop::ExternalDropAction;
 use crate::haptics::{self, Haptic};
@@ -238,7 +244,8 @@ pub struct RootView {
     launch_cursor: Option<u64>,
     launch_scroll: gpui::ScrollHandle,
     active_workspace: Option<diri_proto::workspace::WorkspaceId>,
-    workspace_error: Option<String>,
+    /// The last workspace failure shown, and the layout revision it failed at.
+    workspace_error: Option<(u64, String)>,
     workspace_workbench: Option<Entity<crate::workspace_workbench::WorkspaceWorkbench>>,
     sidebar: Entity<Sidebar>,
     terminal: Option<Entity<TerminalPane>>,
@@ -278,6 +285,10 @@ pub struct RootView {
     /// preference change re-applies it exactly once.
     applied_material: Option<WindowMaterial>,
     auxiliary_terminal: Option<Entity<TerminalPane>>,
+    /// The To-dos page covers the workbench while open; selecting any
+    /// session closes it.
+    todos_open: bool,
+    todos_page: Option<Entity<crate::notes::todos::TodosPage>>,
     auxiliary_id: Option<SessionId>,
     auxiliary_parent: Option<SessionId>,
     auxiliary_spawn_parent: Option<SessionId>,
@@ -304,10 +315,14 @@ pub struct RootView {
     window_bounds_save: Option<Task<()>>,
     status_banner: Option<InAppBanner>,
     status_banner_generation: u64,
+    /// Records this window's open and close for the flight recorder.
+    _telemetry_window: crate::telemetry::WindowGuard,
     quote_target_picker: Option<QuoteTargetPicker>,
     notification_panel_open: bool,
     /// The system alert asking whether to close sessions, while it is up.
     close_prompt: Option<Task<()>>,
+    /// The What's New sheet, while open.
+    whats_new: Option<Entity<crate::whats_new::WhatsNewSheet>>,
     /// The main window's viewport, for content that sizes to it while a
     /// panel paints it elsewhere.
     main_viewport: gpui::Size<gpui::Pixels>,
@@ -448,6 +463,10 @@ impl RootView {
             sidebar.set_surface_in_parent();
             sidebar
         });
+        if !preview {
+            let todos = crate::notes::todos::TodosModel::global(&services.store, cx);
+            sidebar.update(cx, |sidebar, cx| sidebar.set_todos(todos, cx));
+        }
         let window_store = if preview {
             crate::store::WindowStore::from_canonical(services.store.store.clone())
         } else {
@@ -534,20 +553,14 @@ impl RootView {
                         });
                     }
                 }
-                TerminalPaneEvent::OpenFileReference { reference, cwd, .. } => {
-                    let inspector = this.inspector.clone();
-                    this.reveal_inspector(cx);
-                    if let Some(inspector) = inspector {
-                        inspector.update(cx, |inspector, cx| {
-                            inspector.open_file_reference(cwd.clone(), reference.clone(), cx);
-                        });
-                    }
-                }
                 TerminalPaneEvent::Feedback { message } => {
                     this.show_quote_feedback("Terminal", message.clone(), cx);
                 }
                 TerminalPaneEvent::ExternalDropFeedback { message } => {
                     this.show_quote_feedback("Dropped files", message.clone(), cx);
+                }
+                TerminalPaneEvent::RevealSession(id) => {
+                    this.open_workspace_launch_session(id.clone(), window, cx);
                 }
             })
             .detach();
@@ -569,6 +582,14 @@ impl RootView {
                     }
                 },
             ).detach();
+            cx.subscribe_in(
+                navigation,
+                window,
+                |this, _, opened: &crate::navigation::NoteOpened, window, cx| {
+                    this.show_opened_note(opened, window, cx);
+                },
+            )
+            .detach();
         }
         cx.observe(&sidebar, |_, sidebar, cx| {
             if sidebar.read(cx).project_picker_active() {
@@ -653,6 +674,12 @@ impl RootView {
                     launcher.update(cx, |launcher, cx| launcher.focus(window, cx));
                 });
             }
+            if matches!(event, SidebarEvent::OpenTodos) {
+                this.open_todos(window, cx);
+            }
+            if matches!(event, SidebarEvent::SessionActivated) {
+                this.close_todos(cx);
+            }
             if matches!(
                 event,
                 SidebarEvent::SessionActivated | SidebarEvent::ProjectLayoutUnavailable
@@ -680,6 +707,9 @@ impl RootView {
             }
             if let SidebarEvent::Update(command) = event {
                 this.services.updates.send(command.clone());
+            }
+            if matches!(event, SidebarEvent::OpenWhatsNew) {
+                this.open_whats_new(window, cx);
             }
             if let SidebarEvent::OpenAgentSettings(host) = event
                 && let Some(surfaces) = &this.utility_surfaces
@@ -777,6 +807,16 @@ impl RootView {
             {
                 subscription.detach();
             }
+            cx.subscribe_in(
+                surfaces,
+                window,
+                |this, _, event: &crate::surface_shell::UtilitySurfacesEvent, window, cx| {
+                    if let crate::surface_shell::UtilitySurfacesEvent::ShowWhatsNew(page) = event {
+                        this.open_whats_new_at(*page, window, cx);
+                    }
+                },
+            )
+            .detach();
         }
         cx.subscribe_in(
             &launcher,
@@ -940,6 +980,21 @@ impl RootView {
             menu_bar.refresh();
         }
         crate::application_notifications::install(services.clone(), preview, preview_scenario, cx);
+        // Once, the first time a build that records runs: say so, and where
+        // to turn it off. The standard toast, held a little longer.
+        if !preview && crate::telemetry::take_first_run_notice() {
+            cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.show_banner(
+                        "diri shares diagnostics",
+                        "Crashes, hangs and errors help fix bugs; terminal contents never leave your Mac. Turn it off in Settings › General › Privacy.",
+                        Duration::from_secs(20),
+                        cx,
+                    );
+                });
+            })
+            .detach();
+        }
         #[cfg(target_os = "macos")]
         let notifier = crate::application_notifications::notifier(cx);
 
@@ -1175,22 +1230,25 @@ impl RootView {
                             this.sync_workspace_spawn_context(cx);
                             this.sync_inspector_context(cx);
                             this.sync_auxiliary_terminal(window, cx);
-                            let error = this
-                                .window_store
-                                .read()
-                                .expect("store")
-                                .workspace_catalog()
-                                .error
-                                .clone();
-                            if error != this.workspace_error {
-                                this.workspace_error = error.clone();
-                                if let Some(error) = error {
-                                    this.show_quote_feedback(
-                                        "Workspace change was not saved",
-                                        error,
-                                        cx,
-                                    );
-                                }
+                            let error = {
+                                let store = this.window_store.read().expect("store");
+                                let catalog = store.workspace_catalog();
+                                catalog.error.clone().map(|error| {
+                                    (catalog.snapshot().map_or(0, |s| s.revision), error)
+                                })
+                            };
+                            // Each edit clears the error, so one rejection
+                            // repeated per click would toast per click. Say it
+                            // once until the layout moves on.
+                            if let Some(error) = error
+                                && this.workspace_error.as_ref() != Some(&error)
+                            {
+                                this.workspace_error = Some(error.clone());
+                                this.show_quote_feedback(
+                                    "Workspace change was not saved",
+                                    error.1,
+                                    cx,
+                                );
                             }
                             cx.notify();
                         })
@@ -1343,6 +1401,8 @@ impl RootView {
             tabs_seam,
             tabs_target: tabs_seam,
             auxiliary_terminal: None,
+            todos_open: false,
+            todos_page: None,
             auxiliary_id: None,
             auxiliary_parent: None,
             auxiliary_spawn_parent: None,
@@ -1361,9 +1421,11 @@ impl RootView {
             window_bounds_save: None,
             status_banner: None,
             status_banner_generation: 0,
+            _telemetry_window: crate::telemetry::WindowGuard::new("main", window),
             quote_target_picker: None,
             notification_panel_open: false,
             close_prompt: None,
+            whats_new: None,
             main_viewport: gpui::Size::default(),
             notification_filter_unread: true,
             notification_selected: 0,
@@ -1510,19 +1572,8 @@ impl RootView {
                             )
                         }),
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
-                            TerminalPaneEvent::OpenFileReference { reference, cwd, .. },
-                        ) => {
-                            this.reveal_inspector(cx);
-                            if let Some(inspector) = &this.inspector {
-                                inspector.update(cx, |inspector, cx| {
-                                    inspector.open_file_reference(
-                                        cwd.clone(),
-                                        reference.clone(),
-                                        cx,
-                                    )
-                                });
-                            }
-                        }
+                            TerminalPaneEvent::RevealSession(id),
+                        ) => this.open_workspace_launch_session(id.clone(), window, cx),
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
                             TerminalPaneEvent::Feedback { message },
                         ) => this.show_quote_feedback("Terminal", message.clone(), cx),
@@ -1609,10 +1660,24 @@ impl RootView {
         self.applied_material = Some(material);
     }
 
+    /// The window's standard toast. `title` is always authored in code, so it
+    /// is what the flight recorder keeps; the body may carry runtime detail
+    /// and is never recorded.
     fn show_quote_feedback(
+        &mut self,
+        title: &'static str,
+        body: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        diri_telemetry::event!("ui.toast", title = title);
+        self.show_banner(title, body, Duration::from_secs(4), cx);
+    }
+
+    fn show_banner(
         &mut self,
         title: impl Into<String>,
         body: impl Into<String>,
+        visible_for: Duration,
         cx: &mut Context<Self>,
     ) {
         self.status_banner_generation = self.status_banner_generation.wrapping_add(1);
@@ -1623,7 +1688,7 @@ impl RootView {
         });
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(4)).await;
+            cx.background_executor().timer(visible_for).await;
             let _ = this.update(cx, |this, cx| {
                 if this.status_banner_generation == generation {
                     this.status_banner = None;
@@ -1632,6 +1697,30 @@ impl RootView {
             });
         })
         .detach();
+    }
+
+    fn frame_context(&self, cx: &App) -> crate::telemetry::FrameContext {
+        let surface = if self
+            .utility_surfaces
+            .as_ref()
+            .is_some_and(|surfaces| surfaces.read(cx).is_open())
+        {
+            "settings"
+        } else if self
+            .navigation
+            .as_ref()
+            .is_some_and(|navigation| navigation.read(cx).is_open())
+        {
+            "palette"
+        } else if self.launcher.read(cx).is_open() {
+            "launcher"
+        } else {
+            "workbench"
+        };
+        crate::telemetry::FrameContext {
+            surface,
+            workspace: self.active_workspace.is_some(),
+        }
     }
 
     fn preview_buffers(
@@ -2053,6 +2142,7 @@ impl RootView {
         {
             let global_overlay_command = [
                 CommandId::ToggleHistory,
+                CommandId::SearchNotes,
                 CommandId::OpenSettings,
                 CommandId::ToggleCommandPalette,
                 CommandId::ToggleQuickOpen,
@@ -2162,6 +2252,13 @@ impl RootView {
                     });
                 }
             }
+            CommandId::SearchNotes => {
+                if let Some(navigation) = &self.navigation {
+                    navigation.update(cx, |navigation, cx| {
+                        navigation.toggle_search_notes(&SearchNotes, window, cx)
+                    });
+                }
+            }
             CommandId::ReviewLaunches => {
                 self.launches_expanded = true;
                 window.focus(&self.launches_focus, cx);
@@ -2171,6 +2268,25 @@ impl RootView {
             CommandId::ToggleOverview => {
                 if let Some(surfaces) = &self.session_surfaces {
                     surfaces.update(cx, |surfaces, cx| surfaces.toggle_overview(cx));
+                }
+            }
+            CommandId::ShowTodos => {
+                if let Some(navigation) = &self.navigation {
+                    navigation.update(cx, |navigation, cx| navigation.dismiss(cx));
+                }
+                if self.todos_open {
+                    self.close_todos(cx);
+                    self.focus_active_terminal(window, cx);
+                } else {
+                    self.open_todos(window, cx);
+                }
+            }
+            CommandId::NewNote => {
+                if let Some(navigation) = &self.navigation {
+                    navigation.update(cx, |navigation, cx| navigation.dismiss(cx));
+                }
+                if self.spawn_note() {
+                    self.focus_spawned_session(window, cx);
                 }
             }
             CommandId::OpenWorktrees => {
@@ -2300,6 +2416,7 @@ impl RootView {
                     .update(cx, |sidebar, cx| sidebar.select_next_needing_input(cx));
             }
             CommandId::CheckForUpdates => self.services.updates.check(true),
+            CommandId::ShowWhatsNew => self.open_whats_new_at(0, window, cx),
             CommandId::SelectPreviousSession if !self.arrow_surface_visible() => {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.select_relative(-1, cx));
@@ -2374,6 +2491,153 @@ impl RootView {
             }),
         }
         true
+    }
+
+    /// ⌥⌘N: a note Session in the current project, created like ⌘T creates
+    /// a terminal. The Engine writes the note's file and the spawn reply
+    /// selects it.
+    fn spawn_note(&self) -> bool {
+        if self.preview {
+            return false;
+        }
+        self.window_store
+            .write()
+            .expect("session store lock poisoned")
+            .spawn_kind(AgentKind::NOTE, SpawnOptions::default());
+        true
+    }
+
+    /// Opens the What's New sheet on the releases not seen yet, or on the
+    /// newest one when opened with nothing new, and marks them seen.
+    pub(crate) fn open_whats_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_whats_new_at(0, window, cx);
+    }
+
+    /// [`Self::open_whats_new`] on highlight `page` (Settings' thumbnails).
+    pub(crate) fn open_whats_new_at(
+        &mut self,
+        page: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::whats_new::{WhatsNewEvent, WhatsNewSheet, current_version, latest, unseen};
+        if self.whats_new.is_some() {
+            return;
+        }
+        let current = current_version();
+        let runtime = Arc::clone(&self.services.store);
+        let releases = {
+            let store = runtime.store.read().expect("session store lock poisoned");
+            let unseen = unseen(&store.preferences().whats_new_seen_version, &current);
+            if unseen.is_empty() {
+                latest(&current)
+            } else {
+                unseen
+            }
+        };
+        self.sidebar.read(cx).mark_whats_new_seen();
+        if releases.is_empty() {
+            return;
+        }
+        let sheet = cx.new(|cx| WhatsNewSheet::new(&releases, runtime, cx));
+        if page > 0 {
+            sheet.update(cx, |sheet, cx| sheet.go(page, window, cx));
+        }
+        cx.subscribe_in(
+            &sheet,
+            window,
+            |this, _, event: &WhatsNewEvent, window, cx| {
+                this.close_whats_new(window, cx);
+                match event {
+                    WhatsNewEvent::Close => {}
+                    WhatsNewEvent::Run(command) => this.run_command(*command, window, cx),
+                    WhatsNewEvent::ReleaseNotes => {
+                        if let Some(surfaces) = &this.utility_surfaces {
+                            surfaces.update(cx, |surfaces, cx| {
+                                surfaces.open_settings(cx);
+                                surfaces
+                                    .open_settings_tab(crate::settings::SettingsTab::WhatsNew, cx);
+                                surfaces.focus_handle(cx).focus(window, cx);
+                            });
+                        }
+                    }
+                }
+            },
+        )
+        .detach();
+        sheet.read(cx).focus_handle(cx).focus(window, cx);
+        self.whats_new = Some(sheet);
+        self.sidebar.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    fn close_whats_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sheet) = self.whats_new.take() {
+            sheet.update(cx, |sheet, cx| sheet.release(window, cx));
+            self.focus_active_terminal(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn open_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.todos_page.is_none() {
+            let runtime = Arc::clone(&self.services.store);
+            let model = crate::notes::todos::TodosModel::global(&runtime, cx);
+            let page = cx.new(|cx| crate::notes::todos::TodosPage::new(runtime, model, cx));
+            cx.subscribe_in(&page, window, |this, _, event, window, cx| {
+                use crate::notes::todos::TodosEvent;
+                let (session, block) = match event {
+                    TodosEvent::OpenNote { session, block } => (session.clone(), Some(*block)),
+                    TodosEvent::OpenSession(session) => (session.clone(), None),
+                };
+                this.close_todos(cx);
+                this.window_store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .select(session);
+                if let (Some(block), Some(terminal)) = (block, &this.terminal) {
+                    terminal.update(cx, |terminal, _| terminal.reveal_note_block(block));
+                }
+                this.focus_active_terminal(window, cx);
+                cx.notify();
+            })
+            .detach();
+            self.todos_page = Some(page);
+        }
+        self.todos_open = true;
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_todos_active(true, cx));
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// A note the palette just opened (selected, unarchived or adopted):
+    /// leave the To-dos page, put the caret on the block that matched and
+    /// focus the editor.
+    fn show_opened_note(
+        &mut self,
+        opened: &crate::navigation::NoteOpened,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_todos(cx);
+        if let (Some(block), Some(terminal)) = (opened.block, &self.terminal) {
+            terminal.update(cx, |terminal, _| {
+                terminal.reveal_block_in_note(opened.note_id.clone(), block)
+            });
+        }
+        self.focus_active_terminal(window, cx);
+        cx.notify();
+    }
+
+    fn close_todos(&mut self, cx: &mut Context<Self>) {
+        if !self.todos_open {
+            return;
+        }
+        self.todos_open = false;
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_todos_active(false, cx));
+        cx.notify();
     }
 
     fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3560,7 +3824,7 @@ impl RootView {
                 });
             let strip = self.sidebar.update(cx, |sidebar, cx| {
                 sidebar.strip_held_hint = held_hint;
-                sidebar.render_horizontal_tabs(card_width, trailing, cx)
+                sidebar.render_horizontal_tabs(card_width, trailing, window, cx)
             });
             card = card.child(
                 div()
@@ -3592,7 +3856,9 @@ impl RootView {
             .h(px(card_height))
             .min_h(px(0.0))
             .bg(terminal.work_surface_nested());
-        if self.active_workspace.is_some() {
+        if let Some(page) = self.todos_page.clone().filter(|_| self.todos_open) {
+            body = body.child(page);
+        } else if self.active_workspace.is_some() {
             let tab = {
                 let store = self.window_store.read().expect("store");
                 store
@@ -4481,6 +4747,7 @@ impl RootView {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let frame_started = crate::telemetry::frame_start();
         self.main_viewport = window.viewport_size();
         if self.pending_notification_open.is_some()
             && self
@@ -4883,6 +5150,15 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &OpenWorktrees, window, cx| {
                 this.run_command(CommandId::OpenWorktrees, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &NewNote, window, cx| {
+                this.run_command(CommandId::NewNote, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowTodos, window, cx| {
+                this.run_command(CommandId::ShowTodos, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SearchNotes, window, cx| {
+                this.run_command(CommandId::SearchNotes, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.run_command(CommandId::OpenSettings, window, cx);
             }))
@@ -4953,6 +5229,9 @@ impl Render for RootView {
             )
             .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
                 this.run_command(CommandId::CheckForUpdates, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowWhatsNew, window, cx| {
+                this.run_command(CommandId::ShowWhatsNew, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SelectPreviousSession, window, cx| {
                 this.run_command(CommandId::SelectPreviousSession, window, cx);
@@ -5166,6 +5445,10 @@ impl Render for RootView {
         if let Some(navigation) = &self.navigation {
             root = root.child(cached_window_overlay(navigation.clone()));
         }
+        // Above Settings too: Settings › What's New opens it.
+        if let Some(sheet) = &self.whats_new {
+            root = root.child(div().absolute().inset_0().child(sheet.clone()));
+        }
         if let Some(picker) = self.quote_target_picker(colors, sidebar_width, cx) {
             root = root.child(deferred(picker));
         }
@@ -5181,7 +5464,10 @@ impl Render for RootView {
         if let Some(build) = &self.services.dev_build {
             root = root.child(dev_build_marker(build.marker_label(), colors, 10.0));
         }
-        root
+        root.child(crate::telemetry::frame_probe(
+            frame_started,
+            self.frame_context(cx),
+        ))
     }
 }
 
@@ -5429,6 +5715,601 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// What drawing one keystroke's echo costs in a whole workspace window:
+    /// the pane is a cached view, so the sidebar and strip should replay.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal CPU measurement; run explicitly on macOS"]
+    fn workspace_terminal_echo_redraw_cpu() {
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| {
+            crate::fonts::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (services, workspace) = workspace_cpu_fixture();
+        let window = cx
+            .open_window(size(px(1600.0), px(1000.0)), |window, cx| {
+                cx.new(|cx| {
+                    let root = RootView::new(services, false, PreviewScenario::Empty, window, cx);
+                    root.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.activate_workspace(Some(workspace), cx)
+                    });
+                    root
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let terminal = cx
+            .update_window(window.into(), |root, _, cx| {
+                let root = root.downcast::<RootView>().unwrap();
+                root.read(cx)
+                    .workspace_workbench
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .focused_terminal()
+                    .unwrap()
+            })
+            .unwrap();
+        cx.update(|cx| {
+            terminal.update(cx, |terminal, cx| {
+                let mut grid = diri_term::buffer::GridBuffer::new(160, 50);
+                for (index, cell) in grid.cells.iter_mut().enumerate() {
+                    cell.scalar = u32::from(b'a' + (index % 26) as u8);
+                }
+                terminal.seed_preview_grid_for_test(grid, cx);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let present = |cx: &mut HeadlessAppContext| {
+            cx.update_window(window.into(), |_, window, _| window.present_if_needed())
+                .unwrap();
+        };
+        let echo = |cx: &mut HeadlessAppContext, col: u16| {
+            cx.update_window(window.into(), |_, window, cx| {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.land_echo_for_test(col, window, cx)
+                })
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        for col in 0..20 {
+            echo(&mut cx, col);
+            present(&mut cx);
+        }
+        fn cpu_seconds() -> f64 {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+                0
+            );
+            let usage = unsafe { usage.assume_init() };
+            usage.ru_utime.tv_sec as f64
+                + usage.ru_utime.tv_usec as f64 / 1e6
+                + usage.ru_stime.tv_sec as f64
+                + usage.ru_stime.tv_usec as f64 / 1e6
+        }
+        const ECHOES: u16 = 300;
+        let before = cx.update(|cx| terminal.read(cx).render_count);
+        let mut draw = Vec::new();
+        let mut submit = Vec::new();
+        let start_cpu = cpu_seconds();
+        for index in 0..ECHOES {
+            let started = Instant::now();
+            echo(&mut cx, index % 150);
+            let drawn = Instant::now();
+            present(&mut cx);
+            draw.push(drawn - started);
+            submit.push(drawn.elapsed());
+        }
+        let cpu = cpu_seconds() - start_cpu;
+        let renders = cx.update(|cx| terminal.read(cx).render_count) - before;
+        draw.sort();
+        submit.sort();
+        let pick = |samples: &[Duration], q: f64| {
+            samples[((samples.len() - 1) as f64 * q).round() as usize].as_secs_f64() * 1000.0
+        };
+        eprintln!(
+            "workspace-echo: echoes={ECHOES} terminal_renders={renders} cpu_ms_per_echo={:.3} \
+             apply+draw p50={:.3}ms p95={:.3}ms metal-submit p50={:.3}ms p95={:.3}ms",
+            cpu * 1000.0 / f64::from(ECHOES),
+            pick(&draw, 0.5),
+            pick(&draw, 0.95),
+            pick(&submit, 0.5),
+            pick(&submit, 0.95),
+        );
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// A screen of agent-like TUI content: coloured prose, a boxed composer,
+    /// a status line with a spinner. `phase` scrolls the prose.
+    #[cfg(target_os = "macos")]
+    fn real_use_screen_rows(
+        cols: u16,
+        rows: u16,
+        phase: usize,
+    ) -> Vec<Vec<diri_proto::grid::GridCell>> {
+        use diri_proto::grid::{GridCell, TermColor, TermStyle};
+        const WORDS: [&str; 24] = [
+            "Reading",
+            "crates/diri-app/src/root.rs",
+            "fn",
+            "render(&mut",
+            "self)",
+            "->",
+            "impl",
+            "IntoElement",
+            "the",
+            "terminal",
+            "pane",
+            "is",
+            "cached;",
+            "updated",
+            "3",
+            "files",
+            "(+42",
+            "-7)",
+            "cargo",
+            "test",
+            "--release",
+            "passed",
+            "Ok(())",
+            "✓",
+        ];
+        let colors = [
+            TermColor::Default,
+            TermColor::Ansi(2),
+            TermColor::Ansi(4),
+            TermColor::Rgb(215, 119, 87),
+            TermColor::Ansi(8),
+            TermColor::Rgb(177, 185, 249),
+        ];
+        let cols = usize::from(cols);
+        let mut screen = Vec::with_capacity(usize::from(rows));
+        let text_row = |seed: usize| {
+            let mut cells = Vec::with_capacity(cols);
+            let mut word = seed;
+            while cells.len() + 1 < cols.saturating_sub(4) {
+                let text = WORDS[word % WORDS.len()];
+                let color = colors[(word / 3) % colors.len()];
+                let style = if word.is_multiple_of(11) {
+                    TermStyle::BOLD
+                } else {
+                    TermStyle::empty()
+                };
+                for character in text.chars() {
+                    cells.push(GridCell::new(
+                        character as u32,
+                        color,
+                        TermColor::DefaultInverted,
+                        style,
+                    ));
+                }
+                cells.push(GridCell::BLANK);
+                word = word.wrapping_mul(31).wrapping_add(7) % 997;
+                if word.is_multiple_of(9) {
+                    break;
+                }
+            }
+            cells.truncate(cols);
+            cells
+        };
+        let body = usize::from(rows).saturating_sub(6);
+        for row in 0..body {
+            screen.push(text_row(row + phase));
+        }
+        let border = |left: char, fill: char, right: char| {
+            let mut cells = vec![GridCell::new(
+                left as u32,
+                TermColor::Ansi(8),
+                TermColor::DefaultInverted,
+                TermStyle::empty(),
+            )];
+            cells.extend((2..cols).map(|_| {
+                GridCell::new(
+                    fill as u32,
+                    TermColor::Ansi(8),
+                    TermColor::DefaultInverted,
+                    TermStyle::empty(),
+                )
+            }));
+            cells.push(GridCell::new(
+                right as u32,
+                TermColor::Ansi(8),
+                TermColor::DefaultInverted,
+                TermStyle::empty(),
+            ));
+            cells
+        };
+        screen.push(vec![GridCell::BLANK; cols]);
+        screen.push(border('╭', '─', '╮'));
+        let mut prompt = border('│', ' ', '│');
+        for (index, character) in "> ".chars().enumerate() {
+            prompt[index + 2].scalar = character as u32;
+        }
+        screen.push(prompt);
+        screen.push(border('╰', '─', '╯'));
+        screen.push(real_use_status_row(cols, phase));
+        screen.push(vec![GridCell::BLANK; cols]);
+        screen.truncate(usize::from(rows));
+        screen
+    }
+
+    #[cfg(target_os = "macos")]
+    fn real_use_status_row(cols: usize, phase: usize) -> Vec<diri_proto::grid::GridCell> {
+        use diri_proto::grid::{GridCell, TermColor, TermStyle};
+        const SPINNER: [char; 6] = ['·', '✢', '✳', '✶', '✻', '✽'];
+        let text = format!(
+            "{} Thinking… ({}s · ↑ {} tokens · esc to interrupt)",
+            SPINNER[phase % SPINNER.len()],
+            phase / 10,
+            1_200 + phase * 7
+        );
+        let mut cells: Vec<GridCell> = text
+            .chars()
+            .map(|character| {
+                GridCell::new(
+                    character as u32,
+                    TermColor::Rgb(215, 119, 87),
+                    TermColor::DefaultInverted,
+                    TermStyle::empty(),
+                )
+            })
+            .collect();
+        cells.resize(cols, GridCell::BLANK);
+        cells.truncate(cols);
+        cells
+    }
+
+    /// Real sessions carry their pull requests: a description, CI checks and
+    /// the review discussion. Every third session gets one to three. The
+    /// sizes are illustrative, not measured from a real fleet: here row
+    /// comparison is under 1% of `Window::draw`, where a sample of the
+    /// installed app put it at 8%.
+    #[cfg(target_os = "macos")]
+    fn real_use_pull_requests(sessions: &mut [diri_proto::SessionRecord]) {
+        for (index, session) in sessions.iter_mut().enumerate() {
+            if !index.is_multiple_of(3) {
+                continue;
+            }
+            let prs = (0..1 + index % 3)
+                .map(|pr| {
+                    serde_json::from_value::<diri_proto::model::PullRequestStatus>(serde_json::json!({
+                        "url": format!("https://github.com/example/repo/pull/{}", 500 + index * 2 + pr),
+                        "number": 500 + index * 2 + pr,
+                        "title": format!("Make the thing faster, part {pr}"),
+                        "author": "someone",
+                        "body": "Summary of the change. ".repeat(700),
+                        "baseRefName": "main",
+                        "headRefName": format!("perf/branch-{index}-{pr}"),
+                        "state": "OPEN",
+                        "isDraft": false,
+                        "reviewDecision": "REVIEW_REQUIRED",
+                        "additions": 420,
+                        "deletions": 73,
+                        "changedFiles": 12,
+                        "commentCount": 18,
+                        "reviewCount": 3,
+                        "checksPassed": 9,
+                        "checksFailed": 0,
+                        "checksPending": 1,
+                        "checks": (0..10).map(|check| serde_json::json!({
+                            "name": format!("CI / job {check}"),
+                            "result": "success",
+                            "url": format!("https://github.com/example/repo/actions/runs/{check}"),
+                        })).collect::<Vec<_>>(),
+                        "discussion": (0..40).map(|comment| serde_json::json!({
+                            "kind": "comment",
+                            "author": "reviewer",
+                            "body": format!("Comment {comment}: ").repeat(50),
+                        })).collect::<Vec<_>>(),
+                        "fetchedAt": 1_750_000_000_000.0,
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            session.pull_requests = Some(prs);
+        }
+    }
+
+    /// Frame cost under heavy real use, the fixture behind the 2026-09-30
+    /// telemetry investigation: 51 sessions (four working) in the sidebar or
+    /// the horizontal strip, a workspace tab split into three busy agent
+    /// terminals, all driven at their real cadences on a 120 Hz tick: one
+    /// pane streaming (whole screen scrolls, 30 Hz), two spinners (10 and 8
+    /// Hz), the sidebar's 125 ms activity tick and a store publication every
+    /// 200 ms. Every tick with something due draws one frame, the way a
+    /// display link coalesces them. Prints the frame distribution and GPUI's
+    /// per-phase breakdown.
+    ///
+    /// `DIRI_BENCH_A11Y=1` attaches pretend assistive technology (what a Mac
+    /// running Rectangle, Raycast, Wispr Flow and the like does to every
+    /// app). `DIRI_BENCH_TABS=horizontal` swaps the sidebar for the strip.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal frame-distribution bench; run explicitly on macOS"]
+    fn real_use_frame_distribution() {
+        use diri_proto::workspace::*;
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        diri_ui::set_mark_rasterizer(bench_stand_in_raster);
+        let a11y = std::env::var("DIRI_BENCH_A11Y").is_ok_and(|value| value == "1");
+        let horizontal = std::env::var("DIRI_BENCH_TABS").is_ok_and(|value| value == "horizontal");
+        let ticks: usize = std::env::var("DIRI_BENCH_TICKS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2_400);
+        let services = test_services();
+        let workspace = WorkspaceId::new("real-use");
+        {
+            let mut store = services.store.store.write().unwrap();
+            let mut fleet = SidebarPreviewFixture::bench_fleet(51, 4).list;
+            if std::env::var("DIRI_BENCH_PRS").map_or(true, |value| value != "0") {
+                real_use_pull_requests(&mut fleet.sessions);
+            }
+            store.hydrate(fleet);
+            store
+                .update_preferences(|prefs| {
+                    if horizontal {
+                        prefs.tab_orientation = crate::store::TabOrientation::Horizontal;
+                        prefs.horizontal_tabs_visible = true;
+                        prefs.sidebar_visible = false;
+                    } else {
+                        prefs.sidebar_visible = true;
+                    }
+                })
+                .unwrap();
+            let pane = |name: &str, session: &str| LayoutNode::Pane {
+                id: PaneId::new(name),
+                session_id: SessionId::new(session),
+            };
+            store.seed_workspace_snapshot_for_test(WorkspaceSnapshot {
+                revision: 1,
+                workspaces: vec![WorkspaceRecord {
+                    project_id: None,
+                    id: workspace.clone(),
+                    name: "Real use".into(),
+                    selected_tab: Some(TabId::new("real-tab")),
+                    tabs: vec![WorkspaceTab {
+                        id: TabId::new("real-tab"),
+                        title: None,
+                        focused_pane: PaneId::new("a-stream"),
+                        zoomed_pane: None,
+                        layout: LayoutNode::Split {
+                            id: SplitId::new("outer"),
+                            axis: LayoutAxis::Horizontal,
+                            fraction: 0.55,
+                            first: Box::new(pane("a-stream", "bench-0")),
+                            second: Box::new(LayoutNode::Split {
+                                id: SplitId::new("inner"),
+                                axis: LayoutAxis::Vertical,
+                                fraction: 0.5,
+                                first: Box::new(pane("b-spinner", "bench-1")),
+                                second: Box::new(pane("c-spinner", "bench-2")),
+                            }),
+                        },
+                    }],
+                }],
+                ..Default::default()
+            });
+        }
+        let window: gpui::AnyWindowHandle = cx
+            .open_window(size(px(1728.0), px(1080.0)), |window, cx| {
+                cx.new(|cx| {
+                    let root = RootView::new(services, false, PreviewScenario::Empty, window, cx);
+                    root.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.activate_workspace(Some(workspace), cx)
+                    });
+                    root
+                })
+            })
+            .unwrap()
+            .into();
+        cx.run_until_parked();
+        let root = cx
+            .update_window(window, |root, _, _| root.downcast::<RootView>().unwrap())
+            .unwrap();
+        let (sidebar, terminals) = cx.update(|cx| {
+            let root = root.read(cx);
+            (
+                root.sidebar.clone(),
+                root.workspace_workbench
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .terminals_for_test(),
+            )
+        });
+        assert_eq!(terminals.len(), 3, "three mounted panes");
+        // Seed every pane with a full screen at its own size.
+        for terminal in &terminals {
+            cx.update(|cx| {
+                terminal.update(cx, |terminal, cx| {
+                    let (cols, rows) = terminal.selected_grid_size_for_test().unwrap_or((0, 0));
+                    let (cols, rows) = if cols < 20 || rows < 10 {
+                        // Not attached, so never sized: fill the pane at
+                        // Menlo 13's cell size.
+                        terminal
+                            .geometry_for_test()
+                            .0
+                            .map_or((120, 40), |viewport| {
+                                (
+                                    (viewport.width / 7.83) as u16,
+                                    ((viewport.height - 44.0) / 16.0) as u16,
+                                )
+                            })
+                    } else {
+                        (cols, rows)
+                    };
+                    let mut grid = diri_term::buffer::GridBuffer::new(cols, rows);
+                    for (row, cells) in real_use_screen_rows(cols, rows, 0).into_iter().enumerate()
+                    {
+                        let start = row * usize::from(cols);
+                        for (col, cell) in cells.into_iter().enumerate() {
+                            grid.cells[start + col] = cell;
+                        }
+                    }
+                    terminal.seed_preview_grid_for_test(grid, cx);
+                    cx.notify();
+                })
+            });
+        }
+        cx.run_until_parked();
+        if a11y {
+            cx.update_window(window, |_, window, _| {
+                window.set_accessibility_active_for_test(true)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+        let sizes: Vec<(u16, u16)> = cx.update(|cx| {
+            terminals
+                .iter()
+                .map(|terminal| {
+                    terminal
+                        .read(cx)
+                        .selected_grid_size_for_test()
+                        .unwrap_or((120, 40))
+                })
+                .collect()
+        });
+        // (period in 120 Hz ticks, what happens)
+        let step = |cx: &mut HeadlessAppContext, tick: usize| -> bool {
+            let stream = tick.is_multiple_of(4);
+            let spinner_b = tick.is_multiple_of(12);
+            let spinner_c = tick.is_multiple_of(15);
+            let activity = tick.is_multiple_of(15);
+            let publication = tick.is_multiple_of(24);
+            if !(stream || spinner_b || spinner_c || activity || publication) {
+                return false;
+            }
+            cx.update_window(window, |_, window, cx| {
+                if stream {
+                    let (cols, rows) = sizes[0];
+                    let screen = real_use_screen_rows(cols, rows, tick / 4);
+                    terminals[0].update(cx, |terminal, cx| {
+                        terminal.land_rows_for_test(
+                            screen
+                                .into_iter()
+                                .enumerate()
+                                .map(|(row, cells)| (row as u16, cells))
+                                .collect(),
+                            (4, rows.saturating_sub(4)),
+                            window,
+                            cx,
+                        )
+                    });
+                }
+                for (index, due) in [(1, spinner_b), (2, spinner_c)] {
+                    if due {
+                        let (cols, rows) = sizes[index];
+                        let status = real_use_status_row(usize::from(cols), tick / 12);
+                        terminals[index].update(cx, |terminal, cx| {
+                            terminal.land_rows_for_test(
+                                vec![(rows.saturating_sub(2), status)],
+                                (4, rows.saturating_sub(4)),
+                                window,
+                                cx,
+                            )
+                        });
+                    }
+                }
+                if activity {
+                    sidebar.update(cx, |sidebar, cx| {
+                        sidebar.advance_activity_frame_for_test(cx)
+                    });
+                }
+                if publication {
+                    sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+                    root.update(cx, |_, cx| cx.notify());
+                }
+            })
+            .unwrap();
+            cx.run_until_parked();
+            true
+        };
+        for tick in 0..240 {
+            step(&mut cx, tick);
+        }
+        let paints_before = diri_term::element::PaintTotals::now();
+        let mut frames: Vec<(Duration, gpui::FrameStats)> = Vec::new();
+        let start_cpu = bench_cpu_seconds();
+        for tick in 240..240 + ticks {
+            let started = Instant::now();
+            if step(&mut cx, tick) {
+                let elapsed = started.elapsed();
+                let stats = cx
+                    .update_window(window, |_, window, _| window.last_frame_stats())
+                    .unwrap();
+                frames.push((elapsed, stats));
+            }
+        }
+        let cpu = bench_cpu_seconds() - start_cpu;
+        let paints = diri_term::element::PaintTotals::now().since(paints_before);
+        let n = frames.len();
+        let mut walls: Vec<Duration> = frames.iter().map(|(wall, _)| *wall).collect();
+        let mut draws: Vec<Duration> = frames.iter().map(|(_, stats)| stats.total()).collect();
+        walls.sort();
+        draws.sort();
+        let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
+        let pick = |samples: &[Duration], q: f64| {
+            ms(samples[((samples.len() - 1) as f64 * q).round() as usize])
+        };
+        let mean = |f: &dyn Fn(&gpui::FrameStats) -> f64| {
+            frames.iter().map(|(_, stats)| f(stats)).sum::<f64>() / n as f64
+        };
+        eprintln!(
+            "real-use a11y={a11y} tabs={} frames={n} step_ms p50={:.3} p90={:.3} p99={:.3} max={:.3} \
+             draw_ms p50={:.3} p90={:.3} p99={:.3} cpu_ms_per_frame={:.3} \
+             layout={:.3} prepaint={:.3} paint={:.3} a11y={:.3} finish={:.3} views_rendered={:.1} views_reused={:.1} \
+             terminal_paints_per_frame={:.2} terminal_ms_per_frame={:.3} shape_misses={}",
+            if horizontal { "horizontal" } else { "sidebar" },
+            pick(&walls, 0.5),
+            pick(&walls, 0.9),
+            pick(&walls, 0.99),
+            pick(&walls, 1.0),
+            pick(&draws, 0.5),
+            pick(&draws, 0.9),
+            pick(&draws, 0.99),
+            cpu * 1000.0 / n as f64,
+            mean(&|stats| ms(stats.layout)),
+            mean(&|stats| ms(stats.prepaint)),
+            mean(&|stats| ms(stats.paint)),
+            mean(&|stats| ms(stats.a11y)),
+            mean(&|stats| ms(stats.finish)),
+            mean(&|stats| f64::from(stats.views_rendered)),
+            mean(&|stats| f64::from(stats.views_reused)),
+            paints.paints as f64 / n as f64,
+            paints.micros as f64 / 1000.0 / n as f64,
+            paints.shape_misses,
+        );
+        if let Ok(output) = std::env::var("DIRI_BENCH_SCREENSHOT") {
+            cx.capture_screenshot(window).unwrap().save(output).unwrap();
+        }
+        drop(root);
+        drop(sidebar);
+        drop(terminals);
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     /// Rows reused across activity ticks, no-op store publications and
     /// root-only frames paint exactly what a full re-render paints: after the
     /// ticks, a `window.refresh()` that rebuilds everything at the same mark
@@ -5523,6 +6404,54 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Process CPU time (user + system) so far, for render-cost benches.
+    #[cfg(target_os = "macos")]
+    fn bench_cpu_seconds() -> f64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+            0
+        );
+        let usage = unsafe { usage.assume_init() };
+        usage.ru_utime.tv_sec as f64
+            + usage.ru_utime.tv_usec as f64 / 1e6
+            + usage.ru_stime.tv_sec as f64
+            + usage.ru_stime.tv_usec as f64 / 1e6
+    }
+
+    // Production draws solid brand marks as cached CoreGraphics rasters
+    // (an `img` per row), not tessellated paths. AppKit drawing needs the
+    // main thread, which a test does not own, so stand in with a cached
+    // blank raster of the same size to keep the element shape identical.
+    #[cfg(target_os = "macos")]
+    fn bench_stand_in_raster(
+        _: diri_ui::BrandMarkKind,
+        size: f32,
+        _: f32,
+        _: gpui::Rgba,
+    ) -> Option<AnyElement> {
+        use std::sync::{LazyLock, Mutex};
+        static CACHE: LazyLock<Mutex<std::collections::HashMap<u32, Arc<gpui::RenderImage>>>> =
+            LazyLock::new(Default::default);
+        let image = CACHE
+            .lock()
+            .unwrap()
+            .entry(size.to_bits())
+            .or_insert_with(|| {
+                let pixels = (size * 2.0).ceil() as u32;
+                Arc::new(gpui::RenderImage::new(smallvec::smallvec![
+                    image::Frame::new(image::RgbaImage::new(pixels, pixels))
+                ]))
+            })
+            .clone();
+        Some(
+            gpui::img(image)
+                .flex_none()
+                .size(px(size))
+                .into_any_element(),
+        )
+    }
+
     /// Render cost of the sidebar under a busy fleet: 51 sessions over five
     /// projects, four of them working, mounted in the real RootView and
     /// painted by headless Metal. Measures one activity-mark tick and one
@@ -5540,38 +6469,7 @@ mod tests {
             gpui_platform::current_headless_renderer,
         );
         cx.update(|cx| crate::fonts::init(cx));
-        // Production draws solid brand marks as cached CoreGraphics rasters
-        // (an `img` per row), not tessellated paths. AppKit drawing needs the
-        // main thread, which a test does not own, so stand in with a cached
-        // blank raster of the same size to keep the element shape identical.
-        fn stand_in_raster(
-            _: diri_ui::BrandMarkKind,
-            size: f32,
-            _: f32,
-            _: gpui::Rgba,
-        ) -> Option<AnyElement> {
-            use std::sync::{LazyLock, Mutex};
-            static CACHE: LazyLock<Mutex<std::collections::HashMap<u32, Arc<gpui::RenderImage>>>> =
-                LazyLock::new(Default::default);
-            let image = CACHE
-                .lock()
-                .unwrap()
-                .entry(size.to_bits())
-                .or_insert_with(|| {
-                    let pixels = (size * 2.0).ceil() as u32;
-                    Arc::new(gpui::RenderImage::new(smallvec::smallvec![
-                        image::Frame::new(image::RgbaImage::new(pixels, pixels))
-                    ]))
-                })
-                .clone();
-            Some(
-                gpui::img(image)
-                    .flex_none()
-                    .size(px(size))
-                    .into_any_element(),
-            )
-        }
-        diri_ui::set_mark_rasterizer(stand_in_raster);
+        diri_ui::set_mark_rasterizer(bench_stand_in_raster);
         let services = test_services();
         services.store.store.write().unwrap().hydrate(
             SidebarPreviewFixture::bench_fleet(
@@ -5606,18 +6504,6 @@ mod tests {
             })
             .unwrap();
         cx.capture_screenshot(window.into()).unwrap();
-        fn cpu_seconds() -> f64 {
-            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-            assert_eq!(
-                unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
-                0
-            );
-            let usage = unsafe { usage.assume_init() };
-            usage.ru_utime.tv_sec as f64
-                + usage.ru_utime.tv_usec as f64 / 1e6
-                + usage.ru_stime.tv_sec as f64
-                + usage.ru_stime.tv_usec as f64 / 1e6
-        }
         let iterations: usize = std::env::var("DIRI_BENCH_ITERATIONS")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -5650,11 +6536,11 @@ mod tests {
             }
             render_probe::take();
             let mut draws = Vec::with_capacity(iterations);
-            let start_cpu = cpu_seconds();
+            let start_cpu = bench_cpu_seconds();
             for _ in 0..iterations {
                 draws.push(step(&mut cx));
             }
-            let cpu = cpu_seconds() - start_cpu;
+            let cpu = bench_cpu_seconds() - start_cpu;
             let (rows, renders, render_time) = render_probe::take();
             draws.sort();
             let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
@@ -5678,6 +6564,240 @@ mod tests {
                 .unwrap();
         }
         cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Strip tabs reused across terminal frames, activity ticks, no-op
+    /// store publications and a selection pill glide paint exactly what a
+    /// full re-render paints: after
+    /// the steps, a `window.refresh()` that rebuilds everything at the same
+    /// mark frame must match pixel for pixel. Eleven ticks leave the marks
+    /// mid-cycle, so a mark that failed to advance would differ too.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal pixel comparison; run explicitly on macOS"]
+    fn reused_strip_tabs_paint_like_a_full_render() {
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        let window = strip_bench_window(&mut cx, 51);
+        let root = cx
+            .update_window(window, |root, _, _| root.downcast::<RootView>().unwrap())
+            .unwrap();
+        let (sidebar, terminal) = cx.update(|cx| {
+            let root = root.read(cx);
+            (root.sidebar.clone(), root.terminal.clone())
+        });
+        // Let the strip's entry slide finish.
+        std::thread::sleep(Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.capture_screenshot(window).unwrap();
+        let draw = |cx: &mut HeadlessAppContext| {
+            cx.run_until_parked();
+            cx.update_window(window, |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        };
+        for tick in 0..11 {
+            if tick == 3 {
+                // Select the next tab and let the pill glide there over
+                // reused tabs, drawing frames the way a display link would.
+                cx.update(|cx| {
+                    root.read(cx)
+                        .window_store
+                        .write()
+                        .unwrap()
+                        .select(SessionId::new("bench-5"));
+                    sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+                });
+                draw(&mut cx);
+                let glide = Instant::now();
+                while glide.elapsed() < diri_ui::Motion::ROW_SELECT_TIME + Duration::from_millis(60)
+                {
+                    std::thread::sleep(Duration::from_millis(16));
+                    if let Some(terminal) = &terminal {
+                        cx.update(|cx| terminal.update(cx, |_, cx| cx.notify()));
+                    }
+                    draw(&mut cx);
+                }
+            }
+            cx.update(|cx| {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.advance_activity_frame_for_test(cx)
+                })
+            });
+            draw(&mut cx);
+            if tick % 2 == 0 {
+                cx.update(|cx| sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx)));
+            } else {
+                cx.update(|cx| root.update(cx, |_, cx| cx.notify()));
+            }
+            draw(&mut cx);
+            if let Some(terminal) = &terminal {
+                cx.update(|cx| terminal.update(cx, |_, cx| cx.notify()));
+                draw(&mut cx);
+            }
+        }
+        let reused = cx.capture_screenshot(window).unwrap();
+        cx.update_window(window, |_, window, _| window.refresh())
+            .unwrap();
+        cx.run_until_parked();
+        let fresh = cx.capture_screenshot(window).unwrap();
+        if let Ok(dir) = std::env::var("DIRI_VISUAL_OUTPUT_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            reused.save(dir.join("strip-reused.png")).unwrap();
+            fresh.save(dir.join("strip-fresh.png")).unwrap();
+        }
+        assert_eq!(reused.dimensions(), fresh.dimensions());
+        let differing = reused
+            .pixels()
+            .zip(fresh.pixels())
+            .filter(|(left, right)| left != right)
+            .count();
+        assert_eq!(differing, 0, "reused strip tabs painted differently");
+        drop(root);
+        drop(sidebar);
+        drop(terminal);
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Horizontal tabs for the fleet `sidebar_fleet_render_cost` uses: the
+    /// sidebar hidden, sessions as tabs across the top, the selected project
+    /// holding a working session.
+    #[cfg(target_os = "macos")]
+    fn strip_bench_window(
+        cx: &mut gpui::HeadlessAppContext,
+        sessions: usize,
+    ) -> gpui::AnyWindowHandle {
+        let services = test_services();
+        {
+            let mut store = services.store.store.write().unwrap();
+            store.hydrate(SidebarPreviewFixture::bench_fleet(sessions, 4).list);
+            store
+                .update_preferences(|prefs| {
+                    prefs.tab_orientation = crate::store::TabOrientation::Horizontal;
+                    prefs.horizontal_tabs_visible = true;
+                    prefs.sidebar_visible = false;
+                })
+                .unwrap();
+            // Project 0 of five: bench-0 (working), bench-5, bench-10, ...
+            store.select(SessionId::new("bench-0"));
+        }
+        let window = cx
+            .open_window(size(px(1600.0), px(1000.0)), |window, cx| {
+                cx.new(|cx| RootView::new(services, false, PreviewScenario::Empty, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window.into()
+    }
+
+    /// Render cost of the horizontal tab strip under a busy fleet. RootView
+    /// paints the strip inline, so every window frame renders it: a terminal
+    /// output frame, a working mark's tick, a store publication that changes
+    /// nothing, and a bare root frame. Counts tabs built per frame and the
+    /// time spent building the strip (its tabs included).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal render-cost bench; run explicitly on macOS"]
+    fn strip_fleet_render_cost() {
+        use crate::sidebar::render_probe;
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        diri_ui::set_mark_rasterizer(bench_stand_in_raster);
+        let sessions = std::env::var("DIRI_BENCH_SESSIONS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(51);
+        let window = strip_bench_window(&mut cx, sessions);
+        let root = cx
+            .update_window(window, |root, _, _| root.downcast::<RootView>().unwrap())
+            .unwrap();
+        let (sidebar, terminal) = cx.update(|cx| {
+            let root = root.read(cx);
+            (root.sidebar.clone(), root.terminal.clone())
+        });
+        // Let the strip's entry slide finish before measuring.
+        std::thread::sleep(Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.capture_screenshot(window).unwrap();
+        let tabs = cx.update(|cx| sidebar.read(cx).strip_tab_count_for_test());
+        let iterations: usize = std::env::var("DIRI_BENCH_ITERATIONS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300);
+        let cases: [&str; 4] = [
+            "terminal-output-frame",
+            "activity-tick",
+            "noop-store-change",
+            "root-only-frame",
+        ];
+        for name in cases {
+            let step = |cx: &mut HeadlessAppContext| {
+                let start = Instant::now();
+                cx.update(|cx| match name {
+                    "terminal-output-frame" => match &terminal {
+                        Some(terminal) => terminal.update(cx, |_, cx| cx.notify()),
+                        None => root.update(cx, |_, cx| cx.notify()),
+                    },
+                    "activity-tick" => sidebar.update(cx, |sidebar, cx| {
+                        sidebar.advance_activity_frame_for_test(cx)
+                    }),
+                    "noop-store-change" => {
+                        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx))
+                    }
+                    _ => root.update(cx, |_, cx| cx.notify()),
+                });
+                cx.run_until_parked();
+                cx.update_window(window, |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+                start.elapsed()
+            };
+            for _ in 0..20 {
+                step(&mut cx);
+            }
+            render_probe::take_strip();
+            let mut draws = Vec::with_capacity(iterations);
+            let start_cpu = bench_cpu_seconds();
+            for _ in 0..iterations {
+                draws.push(step(&mut cx));
+            }
+            let cpu = bench_cpu_seconds() - start_cpu;
+            let (built, renders, strip_time) = render_probe::take_strip();
+            draws.sort();
+            let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
+            eprintln!(
+                "strip-fleet {name}: tabs={tabs} terminal={} steps={iterations} strip_renders={renders} \
+                 tabs_built_per_step={:.2} strip_render_ms={:.3} \
+                 step_ms_median={:.3} step_ms_p90={:.3} cpu_ms_per_step={:.3}",
+                terminal.is_some(),
+                built as f64 / iterations as f64,
+                ms(strip_time) / iterations as f64,
+                ms(draws[iterations / 2]),
+                ms(draws[iterations * 9 / 10]),
+                cpu * 1000.0 / iterations as f64,
+            );
+        }
+        drop(root);
+        drop(sidebar);
+        drop(terminal);
+        if let Ok(output) = std::env::var("DIRI_STRIP_BENCH_SCREENSHOT") {
+            cx.capture_screenshot(window).unwrap().save(output).unwrap();
+        }
+        cx.update_window(window, |_, window, _| window.remove_window())
             .unwrap();
         cx.run_until_parked();
     }
@@ -8683,6 +9803,640 @@ mod tests {
                 .unwrap();
             cx.run_until_parked();
         }
+    }
+
+    /// A note Session selected in the real window: the sidebar lists it among
+    /// agents and terminals (one agent is its child), and the main area shows
+    /// the note editor. `DIRI_VISUAL_OUTPUT=<png>`, `DIRI_VISUAL_THEME=<id>`.
+    /// To-dos as agent work inside a note, in the real window: a
+    /// marketing launch plan whose to-dos are being worked on by agents.
+    /// `DIRI_VISUAL_OUTPUT=<png>`, `DIRI_VISUAL_THEME=<id>`,
+    /// `DIRI_WORK_SCENE=tracking|start|tick`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes the note work-item screenshot artifact"]
+    fn render_note_work_screenshot() {
+        use diri_notes::edit::Pos;
+        use gpui::{AppContext as _, HeadlessAppContext};
+        let output = std::env::var("DIRI_VISUAL_OUTPUT").expect("DIRI_VISUAL_OUTPUT");
+        let scene = std::env::var("DIRI_WORK_SCENE").unwrap_or_else(|_| "tracking".into());
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| {
+            crate::fonts::init(cx);
+            cx.set_reduce_motion(true);
+            cx.bind_keys(crate::notes::key_bindings());
+        });
+        let notes_dir = tempfile::tempdir().unwrap();
+        let note_store =
+            Arc::new(diri_notes::store::NoteStore::open(notes_dir.path().join("notes")).unwrap());
+        let (_, doc) = diri_notes::markdown::parse(crate::notes::work_item_tests::TRACKING);
+        let (note_id, _) = note_store.create(doc, None).unwrap();
+
+        let services = test_services();
+        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::from_env(None));
+        let template = fixture.list.sessions[0].clone();
+        let mut note = template.clone();
+        note.id = SessionId::new("s_note_launch");
+        note.kind = AgentKind::NOTE;
+        note.title = "Launch plan".into();
+        note.title_source = diri_proto::TitleSource::DirijorAssigned;
+        note.status = diri_proto::SessionStatus::Idle;
+        note.needs_input = None;
+        note.resumability = diri_proto::Resumability::NotResumable;
+        note.note_id = Some(note_id);
+        note.parent = None;
+        note.pinned = false;
+        note.archived_at = None;
+        note.git_branch = None;
+        note.foreground_agent = None;
+        note.pull_requests = None;
+        note.worktree_path = None;
+        let child = |id: &str, kind: AgentKind, title: &str| {
+            let mut s = template.clone();
+            s.id = SessionId::new(id);
+            s.kind = kind;
+            s.title = title.into();
+            s.parent = Some(note.id.clone());
+            s.archived_at = None;
+            s.pinned = false;
+            s.needs_input = None;
+            s.pull_requests = None;
+            s.foreground_agent = None;
+            s.last_turn_completed_at = None;
+            s
+        };
+        let mut posts = child("s_posts", AgentKind::CLAUDE_CODE, "Draft 3 LinkedIn posts");
+        posts.status = diri_proto::SessionStatus::Working;
+        let mut pricing = child("s_pricing", AgentKind::CODEX, "Pick the pricing headline");
+        pricing.status =
+            diri_proto::SessionStatus::NeedsInput(diri_proto::NeedsInputKind::Question);
+        pricing.needs_input = Some(diri_proto::NeedsInputDetail {
+            kind: diri_proto::NeedsInputKind::Question,
+            source: diri_proto::NeedsInputSource::CodexNotify,
+            tool_name: None,
+            summary: "Should the headline lead with price or with time saved?".into(),
+            prompt_excerpt: None,
+            options: None,
+            risk_hint: diri_proto::RiskHint::Neutral,
+            occurred_at: diri_proto::DateMillis(1.0),
+            secret: false,
+        });
+        let mut faq = child("s_faq", AgentKind::CLAUDE_CODE, "Write the launch FAQ");
+        faq.status = diri_proto::SessionStatus::Idle;
+        faq.last_turn_completed_at = Some(diri_proto::DateMillis(2.0));
+        let mut redirect = child(
+            "s_redirect",
+            AgentKind::CODEX,
+            "Fix the signup redirect loop",
+        );
+        redirect.status = diri_proto::SessionStatus::Idle;
+        redirect.last_turn_completed_at = Some(diri_proto::DateMillis(2.0));
+        redirect.pull_requests = Some(vec![
+            serde_json::from_value(serde_json::json!({
+                "url": "https://github.com/acme/app/pull/612", "number": 612,
+                "state": "OPEN", "isDraft": false, "additions": 18, "deletions": 4,
+                "changedFiles": 2, "commentCount": 0, "reviewCount": 0,
+                "checksPassed": 3, "checksFailed": 0, "checksPending": 0,
+                "fetchedAt": 0.0
+            }))
+            .unwrap(),
+        ]);
+        fixture.list.sessions.insert(1, note);
+        for session in [posts, pricing, faq, redirect] {
+            fixture.list.sessions.insert(2, session);
+        }
+        {
+            let mut store = services.store.store.write().unwrap();
+            store.hydrate(fixture.list);
+            store.set_agent_catalog(crate::agent_setup::bundled_catalog(&[
+                "claude-code",
+                "codex",
+                "gemini",
+            ]));
+            store.select(SessionId::new("s_note_launch"));
+            store
+                .update_preferences(|prefs| {
+                    prefs.sidebar_visible = true;
+                    prefs.terminal_theme = std::env::var("DIRI_VISUAL_THEME")
+                        .unwrap_or_else(|_| "dirijor-light".into());
+                })
+                .unwrap();
+        }
+        let runtime = Arc::clone(&services.store);
+        let note_pane = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let window = cx
+            .open_window(size(px(1240.0), px(780.0)), {
+                let note_pane = note_pane.clone();
+                move |window, cx| {
+                    cx.new(|cx| {
+                        let root =
+                            RootView::new(services, false, PreviewScenario::Empty, window, cx);
+                        let pane = cx.new(|cx| {
+                            crate::notes::NotePane::with_store(runtime, Some(note_store), false, cx)
+                        });
+                        *note_pane.borrow_mut() = Some(pane.clone());
+                        if let Some(terminal) = &root.terminal {
+                            terminal
+                                .update(cx, |terminal, _| terminal.set_note_pane_for_test(pane));
+                        }
+                        root
+                    })
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let pane = note_pane.borrow().clone().expect("note pane");
+        let editor = cx
+            .update(|cx| pane.read(cx).editor_for_test())
+            .expect("open note editor");
+        let find = |cx: &mut HeadlessAppContext, text: &'static str| {
+            cx.update(|cx| {
+                editor
+                    .read(cx)
+                    .editor
+                    .blocks()
+                    .iter()
+                    .position(|b| b.text.starts_with(text))
+                    .expect(text)
+            })
+        };
+        let posts = find(&mut cx, "Draft 3 LinkedIn");
+        let venue = find(&mut cx, "Book the venue");
+        cx.update(|cx| pane.update(cx, |pane, cx| pane.push_work(cx)));
+        cx.update_window(window.into(), |_, window, cx| {
+            editor.update(cx, |view, cx| {
+                // Show one started to-do open, with its context and report.
+                view.set_folded(posts, false, cx);
+                let end = view.editor.block(venue).text.len();
+                view.editor.set_caret(Pos::new(venue, end));
+                let focus = gpui::Focusable::focus_handle(view, cx);
+                window.focus(&focus, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+        }
+        match scene.as_str() {
+            "start" => {
+                let block = cx.update(|cx| editor.read(cx).editor.block(venue).id);
+                cx.update(|cx| {
+                    pane.update(cx, |pane, cx| {
+                        pane.on_work(&crate::notes::work_item::WorkRequest::Prepare { block }, cx)
+                    })
+                });
+            }
+            "tick" => {
+                cx.update(|cx| {
+                    editor.update(cx, |view, cx| {
+                        view.editor.set_caret(Pos::new(posts, 0));
+                        view.guard_tick(posts, cx);
+                    })
+                });
+            }
+            _ => {}
+        }
+        cx.run_until_parked();
+        for _ in 0..3 {
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+        }
+        cx.capture_screenshot(window.into())
+            .unwrap()
+            .save(&output)
+            .unwrap();
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes the notes-in-window screenshot artifact"]
+    fn render_notes_in_window_screenshot() {
+        use gpui::{AppContext as _, HeadlessAppContext};
+        let output = std::env::var("DIRI_VISUAL_OUTPUT").expect("DIRI_VISUAL_OUTPUT");
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| {
+            crate::fonts::init(cx);
+            cx.set_reduce_motion(true);
+            cx.bind_keys(crate::notes::key_bindings());
+        });
+        let notes_dir = tempfile::tempdir().unwrap();
+        let note_store =
+            Arc::new(diri_notes::store::NoteStore::open(notes_dir.path().join("notes")).unwrap());
+        let (_, doc) = diri_notes::markdown::parse(crate::notes::tests::PLAN);
+        let (note_id, _) = note_store.create(doc, None).unwrap();
+        let history_note_id = note_id.clone();
+
+        let services = test_services();
+        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::from_env(None));
+        let template = fixture.list.sessions[0].clone();
+        let mut note = template.clone();
+        note.id = SessionId::new("s_note_plan");
+        note.kind = AgentKind::NOTE;
+        note.title = "Notes launch plan".into();
+        note.title_source = diri_proto::TitleSource::DirijorAssigned;
+        note.status = diri_proto::SessionStatus::Idle;
+        note.needs_input = None;
+        note.resumability = diri_proto::Resumability::NotResumable;
+        note.note_id = Some(note_id);
+        note.parent = None;
+        note.pinned = false;
+        note.archived_at = None;
+        note.agent_session_id = None;
+        note.transcript_path = None;
+        note.git_branch = None;
+        note.foreground_agent = None;
+        note.pull_requests = None;
+        note.listening_ports = None;
+        note.artifacts = None;
+        note.worktree_path = None;
+        note.created_at = template.created_at;
+        // One agent in the same project works for the note.
+        if let Some(child) =
+            fixture.list.sessions.iter_mut().find(|s| {
+                s.project_id == note.project_id && s.id != template.id && !s.is_archived()
+            })
+        {
+            child.parent = Some(note.id.clone());
+        }
+        let history_agent = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|s| s.parent.as_ref() == Some(&note.id))
+            .map_or_else(|| template.id.0.clone(), |s| s.id.0.clone());
+        fixture.list.sessions.insert(1, note);
+        {
+            let mut store = services.store.store.write().unwrap();
+            store.hydrate(fixture.list);
+            store.select(SessionId::new("s_note_plan"));
+            store
+                .update_preferences(|prefs| {
+                    prefs.sidebar_visible = true;
+                    prefs.terminal_theme = std::env::var("DIRI_VISUAL_THEME")
+                        .unwrap_or_else(|_| "dirijor-light".into());
+                })
+                .unwrap();
+        }
+        let runtime = Arc::clone(&services.store);
+        cx.update(|cx| {
+            let model = cx.new(|cx| {
+                crate::notes::todos::TodosModel::with_store(
+                    Arc::clone(&runtime),
+                    Some(Arc::clone(&note_store)),
+                    false,
+                    cx,
+                )
+            });
+            crate::notes::todos::TodosModel::install(model, cx);
+        });
+        let note_pane = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let window = cx
+            .open_window(size(px(1240.0), px(780.0)), {
+                let note_pane = note_pane.clone();
+                move |window, cx| {
+                    cx.new(|cx| {
+                        let root =
+                            RootView::new(services, false, PreviewScenario::Empty, window, cx);
+                        let pane = cx.new(|cx| {
+                            crate::notes::NotePane::with_store(runtime, Some(note_store), false, cx)
+                        });
+                        *note_pane.borrow_mut() = Some(pane.clone());
+                        if let Some(terminal) = &root.terminal {
+                            terminal
+                                .update(cx, |terminal, _| terminal.set_note_pane_for_test(pane));
+                        }
+                        root
+                    })
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // `DIRI_VISUAL_TODOS=1` opens the To-dos page from the sidebar row.
+        if std::env::var_os("DIRI_VISUAL_TODOS").is_some() {
+            cx.update_window(window.into(), |root, window, cx| {
+                let root = root.downcast::<RootView>().unwrap();
+                root.update(cx, |root, cx| root.open_todos(window, cx));
+            })
+            .unwrap();
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(50));
+            cx.run_until_parked();
+        }
+        // `DIRI_VISUAL_NOTE_MENU=slash|mention|chips|fold|links|link-editor|media|big|select|empty|table|table-wide|table-menu` types
+        // into the note:
+        // mention chips beside a to-do, then the `/` or `@` menu open at the
+        // caret, to judge the menus beside the rest of diri's chrome.
+        if let Ok(scene) = std::env::var("DIRI_VISUAL_NOTE_MENU") {
+            let pane = note_pane.borrow().clone().expect("note pane");
+            let editor = cx
+                .update(|cx| pane.read(cx).editor_for_test())
+                .expect("open note editor");
+            cx.update_window(window.into(), |_, window, cx| {
+                use diri_notes::edit::Pos;
+                use diri_notes::mention::MentionTarget;
+                use gpui::EntityInputHandler as _;
+                editor.update(cx, |view, cx| {
+                    view.set_mentions(
+                        crate::notes::editor_view::MentionDirectory {
+                            entries: crate::notes::tests::fixture_mentions(),
+                        },
+                        cx,
+                    );
+                    let row = view
+                        .editor
+                        .blocks()
+                        .iter()
+                        .position(|b| b.text.starts_with("Agents can"))
+                        .expect("fixture to-do");
+                    let end = view.editor.block(row).text.len();
+                    view.editor.set_caret(Pos::new(row, end));
+                    view.replace_text_in_range(None, " — waiting on ", window, cx);
+                    let at = view.editor.selection.head.offset;
+                    view.editor.insert_mention(
+                        at..at,
+                        &MentionTarget::Session("s_codex".into()),
+                        "@Codex: fix resize flicker",
+                        0,
+                    );
+                    view.replace_text_in_range(None, "and ", window, cx);
+                    let at = view.editor.selection.head.offset;
+                    view.editor.insert_mention(
+                        at..at,
+                        &MentionTarget::Note("n-q4".into()),
+                        "@Q4 campaign brief",
+                        0,
+                    );
+                    let quick = view
+                        .editor
+                        .blocks()
+                        .iter()
+                        .position(|b| b.text.starts_with("Quick capture"))
+                        .expect("fixture to-do");
+                    let end = view.editor.block(quick).text.len();
+                    view.editor.set_caret(Pos::new(quick, end));
+                    match scene.as_str() {
+                        "select" => {
+                            // A selection across blocks, over bold, a link
+                            // and chips.
+                            let intro = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.text.starts_with("A rich"))
+                                .expect("intro");
+                            view.editor.set_selection(diri_notes::edit::Selection {
+                                anchor: Pos::new(intro, 2),
+                                head: Pos::new(row, 30),
+                            });
+                            window.focus(&view.focus_handle(cx), cx);
+                        }
+                        "empty" => {
+                            view.reload(
+                                diri_notes::edit::Editor::new(&diri_notes::doc::Document::new(
+                                    "",
+                                    Vec::new(),
+                                )),
+                                cx,
+                            );
+                            view.editor.set_caret(Pos::new(1, 0));
+                            window.focus(&view.focus_handle(cx), cx);
+                        }
+                        "table" | "table-wide" | "table-menu" => {
+                            // The user's screenshot: an agent's gap analysis,
+                            // once raw pipes, now a table.
+                            let source = match scene.as_str() {
+                                "table-wide" => crate::notes::tests::WIDE_TABLE,
+                                _ => crate::notes::tests::AGENT_GAPS,
+                            };
+                            let (_, doc) = diri_notes::markdown::parse(source);
+                            view.reload(diri_notes::edit::Editor::new(&doc), cx);
+                            let first = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.kind.is_cell())
+                                .expect("a table");
+                            if scene == "table-menu" {
+                                // Editing: caret in a body cell, menu open.
+                                let cell = first + 3 * 2 + 1;
+                                let len = view.editor.block(cell).text.len();
+                                view.editor.set_caret(Pos::new(cell, len));
+                                window.focus(&view.focus_handle(cx), cx);
+                                view.open_table_menu(cx);
+                            } else {
+                                view.editor.set_caret(Pos::new(0, 0));
+                            }
+                        }
+                        "big" => {
+                            // A long note, scrolled deep: only nearby blocks
+                            // are laid out.
+                            let (_, doc) = diri_notes::markdown::parse(
+                                &crate::notes::tests::big_note_markdown(2000),
+                            );
+                            view.reload(diri_notes::edit::Editor::new(&doc), cx);
+                            view.editor.set_caret(Pos::new(0, 0));
+                        }
+                        "media" => {
+                            // A picture and every callout tone.
+                            let picture = notes_dir.path().join("funnel.png");
+                            std::fs::write(&picture, crate::notes::tests::chart_png(1200, 520))
+                                .expect("fixture picture");
+                            view.editor.enter(0);
+                            view.editor.turn_into(
+                                diri_notes::edit::Turn::Kind(diri_notes::doc::BlockKind::Paragraph),
+                                0,
+                            );
+                            view.insert_image_files(&[picture], "drop", cx);
+                            for (tone, text) in [
+                                (diri_notes::doc::Tone::Tip, "Paste a screenshot straight into a note."),
+                                (diri_notes::doc::Tone::Warning, "Q4 budget is capped at $5k."),
+                            ] {
+                                view.editor.insert_text(text, 0);
+                                view.editor.turn_into(
+                                    diri_notes::edit::Turn::Kind(diri_notes::doc::BlockKind::Callout(tone)),
+                                    0,
+                                );
+                                view.editor.enter(0);
+                            }
+                            let first = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.kind == diri_notes::doc::BlockKind::Image)
+                                .expect("image");
+                            view.editor.set_caret(Pos::new(first, 0));
+                        }
+                        "link-editor" => {
+                            // ⌘K on "calm" with a Notion URL typed in.
+                            let intro = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.text.starts_with("A rich"))
+                                .expect("intro");
+                            let calm = view.editor.block(intro).text.find("calm").unwrap_or(0);
+                            view.editor.set_selection(diri_notes::edit::Selection {
+                                anchor: Pos::new(intro, calm),
+                                head: Pos::new(intro, calm + 4),
+                            });
+                            view.link(&crate::notes::editor_view::Link, window, cx);
+                            view.replace_text_in_range(
+                                None,
+                                "notion.so/acme/Calm-writing-1f2e3d4c5b6a79881f2e3d4c5b6a7988",
+                                window,
+                                cx,
+                            );
+                        }
+                        "links" => {
+                            // A research line a PM would write: tool links
+                            // pasted bare become titled chips.
+                            view.editor.enter(0);
+                            view.editor.turn_into(diri_notes::edit::Turn::Kind(diri_notes::doc::BlockKind::Paragraph), 0);
+                            view.editor.insert_text("Sources: ", 0);
+                            for url in [
+                                "https://www.notion.so/acme/Q4-campaign-brief-1f2e3d4c5b6a79881f2e3d4c5b6a7988",
+                                "https://docs.google.com/spreadsheets/d/1AbC/edit",
+                                "https://linear.app/acme/issue/GRO-42/launch-email",
+                                "https://www.figma.com/design/AbC123/Onboarding-v2",
+                                "https://app.hubspot.com/contacts/1/record/0-3/2",
+                                "https://acme.slack.com/archives/C024BE91L/p1700000000000100",
+                                "https://app.amplitude.com/analytics/acme/chart/abc",
+                                "https://github.com/cristicretu/diri/pull/600",
+                            ] {
+                                view.editor.paste_url(url, 0);
+                                view.editor.insert_text(" ", 0);
+                            }
+                        }
+                        "fold" => {
+                            // Two nested items under "Quick capture", folded
+                            // under "Agents can append".
+                            view.editor.enter(0);
+                            view.editor.indent(false, 0);
+                            view.editor.insert_text("Global hotkey", 0);
+                            view.editor.enter(0);
+                            view.editor.insert_text("Capture panel", 0);
+                            let agents = view
+                                .editor
+                                .blocks()
+                                .iter()
+                                .position(|b| b.text.starts_with("Agents can"))
+                                .expect("fixture to-do");
+                            view.editor.set_caret(Pos::new(agents, 0));
+                            let end = view.editor.block(agents).text.len();
+                            view.editor.set_caret(Pos::new(agents, end));
+                            view.editor.enter(0);
+                            view.editor.indent(false, 0);
+                            view.editor.insert_text("Hidden while folded", 0);
+                            view.set_folded(agents, true, cx);
+                        }
+                        "slash" => {
+                            view.editor.enter(0);
+                            view.editor
+                                .backspace(diri_notes::edit::Granularity::Grapheme, 0);
+                            view.replace_text_in_range(None, "/", window, cx);
+                        }
+                        "mention" => {
+                            view.replace_text_in_range(None, " — ask ", window, cx);
+                            view.replace_text_in_range(None, "@", window, cx);
+                        }
+                        _ => {}
+                    }
+                    cx.notify();
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+        // `DIRI_VISUAL_NOTE_HISTORY=1` opens Version History with earlier
+        // versions a person, an agent, and the person again wrote.
+        if std::env::var_os("DIRI_VISUAL_NOTE_HISTORY").is_some() {
+            use diri_notes::history::{Author, History, Reason, now_ms};
+            let pane = note_pane.borrow().clone().expect("note pane");
+            let history = History::new(&notes_dir.path().join("notes"));
+            let note_id = history_note_id.clone();
+            // Replace the creation version with a believable past.
+            let _ = std::fs::remove_dir_all(notes_dir.path().join("notes/.history").join(&note_id));
+            let base = crate::notes::tests::PLAN;
+            let now = now_ms();
+            let agent = Author::Session(history_agent.clone());
+            for (age_ms, author, text) in [
+                (
+                    3 * 86_400_000,
+                    Author::User,
+                    base.replace("\n## Open questions", "\n## Open questions\n\n> Draft"),
+                ),
+                (
+                    2 * 3_600_000,
+                    agent,
+                    format!("{base}\n- Finding: quick capture needs a global hotkey\n"),
+                ),
+                (
+                    20 * 60_000,
+                    Author::User,
+                    format!(
+                        "{base}\n- Finding: quick capture needs a global hotkey\n- [ ] Pick the hotkey\n"
+                    ),
+                ),
+            ] {
+                history
+                    .record(&note_id, &text, &author, Reason::Write, now - age_ms)
+                    .unwrap();
+            }
+            cx.update_window(window.into(), |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.open_versions(&crate::commands::NoteVersionHistory, window, cx);
+                    pane.select_version(1, cx);
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+        if std::env::var("DIRI_VISUAL_NOTE_MENU").as_deref() == Ok("big") {
+            let pane = note_pane.borrow().clone().expect("note pane");
+            let editor = cx
+                .update(|cx| pane.read(cx).editor_for_test())
+                .expect("open note editor");
+            // Scroll like a trackpad: many steps, a frame each, so heights
+            // are measured as blocks come into view.
+            for _ in 0..150 {
+                cx.update_window(window.into(), |_, _, cx| {
+                    editor.update(cx, |view, cx| view.scroll_by_for_test(px(-120.0), cx));
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+            }
+        }
+        for _ in 0..3 {
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+        }
+        cx.capture_screenshot(window.into())
+            .unwrap()
+            .save(&output)
+            .unwrap();
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
     }
 
     /// The first-run and resting pages inside the real window, so they are

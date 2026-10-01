@@ -213,10 +213,16 @@ impl RemoteManager {
     /// warm host needs one multiplexed `probe` round trip; a version change or
     /// failed probe falls through to the full platform-select/install path.
     pub fn ensure_helper(&self, host: &HostEntry) -> io::Result<InstalledHelper> {
-        if let Some(helper) = self.verify_cached_current(host)? {
-            return Ok(helper);
-        }
-        self.bootstrap_helper(host, false)
+        let started = Instant::now();
+        let result = match self.verify_cached_current(host) {
+            Ok(Some(helper)) => Ok((helper, "cached")),
+            Ok(None) => self
+                .bootstrap_helper(host, false)
+                .map(|helper| (helper, "bootstrap")),
+            Err(error) => Err(error),
+        };
+        record_helper_outcome(host, &result, started.elapsed(), false);
+        result.map(|(helper, _)| helper)
     }
 
     /// Forces the packaged bytes through upload, temporary verification and
@@ -231,7 +237,12 @@ impl RemoteManager {
             .lock()
             .expect("persistence cache")
             .remove(&persistence_key(host));
-        self.bootstrap_helper(host, true)
+        let started = Instant::now();
+        let result = self
+            .bootstrap_helper(host, true)
+            .map(|helper| (helper, "reinstall"));
+        record_helper_outcome(host, &result, started.elapsed(), true);
+        result.map(|(helper, _)| helper)
     }
 
     /// Closes finite-lived OpenSSH multiplexers after the owning Engine has
@@ -403,6 +414,8 @@ impl RemoteManager {
         let layout =
             RemoteInstallLayout::new(&artifact.build_id, nonce).map_err(io::Error::other)?;
         let upload = fs::read(&artifact.path)?;
+        let upload_started = Instant::now();
+        let upload_bytes = upload.len();
         let install: io::Result<HelperProbe> = (|| {
             self.executor
                 .run(
@@ -455,6 +468,14 @@ impl RemoteManager {
             }
             Ok(final_probe)
         })();
+        diri_telemetry::event!(
+            "remote.helper_upload",
+            host = diri_telemetry::id(&host.id),
+            target = platform.target.artifact_name(),
+            bytes = upload_bytes,
+            ok = install.is_ok(),
+            ms = upload_started.elapsed(),
+        );
         if install.is_err() {
             let _ = self.executor.run(
                 transport.cleanup_upload(&layout),
@@ -517,19 +538,102 @@ impl RemoteManager {
         host: &HostEntry,
         request: &diri_proto::remote_pty::TranscriptUsageRequest,
     ) -> io::Result<diri_proto::remote_pty::TranscriptUsageResult> {
+        const USAGE_TIMEOUT: Duration = Duration::from_secs(45);
         request.validate().map_err(io::Error::other)?;
         // Automatic accounting must never prompt for credentials or host keys.
         let mut background = self.clone();
         background.batch_mode = true;
-        let helper = background.ensure_helper(host)?;
-        let result: diri_proto::remote_pty::TranscriptUsageResult = background.rpc(
-            &helper,
-            HelperCommand::Usage,
-            request,
-            Duration::from_secs(45),
-        )?;
+        let input = serde_json::to_vec(request)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        // A warm host answers the periodic poll with one SSH command: the
+        // exact-build probe and the scan share a channel. Anything the fused
+        // path cannot verify falls back to the full verified bootstrap path.
+        let result: diri_proto::remote_pty::TranscriptUsageResult = match background
+            .probed_rpc_input(host, HelperCommand::Usage, input.clone(), USAGE_TIMEOUT)?
+        {
+            Some(result) => result,
+            None => {
+                let helper = background.ensure_helper(host)?;
+                background.rpc_input(&helper, HelperCommand::Usage, input, USAGE_TIMEOUT)?
+            }
+        };
         result.validate().map_err(io::Error::other)?;
         Ok(result)
+    }
+
+    /// `ensure_helper` + one read-only RPC in a single channel, for a host
+    /// whose current Helper target is already known. The probe line is
+    /// verified exactly as [`Self::verify_cached_current`] verifies it before
+    /// the response is accepted. `Ok(None)` means the fused path could not
+    /// vouch for the installed build (no cached target, failed or mismatched
+    /// probe); the caller then takes the full bootstrap path. A command that
+    /// fails after a verified probe returns its own structured error.
+    fn probed_rpc_input<R: serde::de::DeserializeOwned>(
+        &self,
+        host: &HostEntry,
+        command: HelperCommand,
+        input: Vec<u8>,
+        timeout: Duration,
+    ) -> io::Result<Option<R>> {
+        let started = Instant::now();
+        let cached = self
+            .current_helpers
+            .lock()
+            .expect("current Helper cache")
+            .get(&host.ssh)
+            .cloned();
+        let Some(cached) = cached else {
+            return Ok(None);
+        };
+        let artifact = self.artifacts.artifact(cached.target)?;
+        artifact.verify().map_err(io::Error::other)?;
+        if artifact.build_id != cached.helper.build_id {
+            self.forget_current_helper(host);
+            return Ok(None);
+        }
+        let transport = self.transport(host);
+        let output = self.executor.run(
+            transport
+                .helper_probe_then(&artifact.build_id, command)
+                .map_err(io::Error::other)?,
+            input,
+            timeout,
+            MAX_RPC_OUTPUT,
+        )?;
+        let split = output
+            .stdout
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(output.stdout.len());
+        let probe = serde_json::from_slice::<HelperProbe>(&output.stdout[..split])
+            .ok()
+            .filter(|probe| {
+                verify_required_helper_probe(artifact, probe).is_ok() && probe.holder_available
+            });
+        let Some(probe) = probe else {
+            self.forget_current_helper(host);
+            return Ok(None);
+        };
+        let helper = InstalledHelper {
+            target: artifact.target,
+            build_id: artifact.build_id.clone(),
+            protocol: probe.protocol,
+            transport,
+        };
+        self.remember_current_helper(host, cached.target, &helper);
+        record_helper_outcome(host, &Ok((helper, "fused")), started.elapsed(), false);
+        let response = CommandOutput {
+            stdout: output.stdout.get(split + 1..).unwrap_or_default().to_vec(),
+            ..output
+        };
+        let response = require_rpc_success(response)?;
+        if response.stdout_truncated {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "remote Helper response was truncated",
+            ));
+        }
+        parse_json_line(&response.stdout).map(Some)
     }
 
     /// Executes an Engine-owned fixed POSIX script over the host's multiplexed
@@ -662,6 +766,11 @@ impl RemoteManager {
             self.probe_persistence_mode(helper, PersistenceProbeAction::BeginSupervisor)?
         };
         let capability = classify_persistence(native, supervised);
+        diri_telemetry::event!(
+            "remote.persistence",
+            host = diri_telemetry::id(&host.id),
+            capability = crate::telemetry::persistence_name(capability),
+        );
         self.persistence
             .lock()
             .expect("persistence cache")
@@ -938,6 +1047,33 @@ impl RemoteManager {
         SshTransport::new(host, self.control_dir.join(name))
             .with_executable(self.executor.ssh_executable().to_os_string())
             .with_batch_mode(self.batch_mode)
+    }
+}
+
+/// `remote.helper_ready` / `remote.helper_failed`: how a host's Helper was
+/// made ready (a cached build re-probed, a bootstrap, a forced reinstall).
+fn record_helper_outcome(
+    host: &HostEntry,
+    result: &io::Result<(InstalledHelper, &'static str)>,
+    elapsed: Duration,
+    forced: bool,
+) {
+    match result {
+        Ok((helper, path)) => diri_telemetry::event!(
+            "remote.helper_ready",
+            host = diri_telemetry::id(&host.id),
+            path = *path,
+            target = helper.target.artifact_name(),
+            protocol = helper.protocol.major,
+            ms = elapsed,
+        ),
+        Err(error) => diri_telemetry::incident!(
+            "remote.helper_failed",
+            host = diri_telemetry::id(&host.id),
+            forced = forced,
+            io = diri_telemetry::io_error(error),
+            ms = elapsed,
+        ),
     }
 }
 

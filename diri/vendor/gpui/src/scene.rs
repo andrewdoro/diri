@@ -50,11 +50,23 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    /// Consecutive clears that found the vectors mostly empty; see
+    /// [`Scene::release_idle_capacity`].
+    sparse_clears: u32,
+    /// DIRI PATCH (sprite sort): `(key, index)` scratch for [`sort_sprites`].
+    sort_keys: Vec<(u64, u32)>,
 }
+
+/// Below this much reserved primitive storage a scene keeps whatever it grew.
+const SCENE_RETAIN_BYTES: usize = 1 << 20;
+/// How many consecutive sparse frames (about two seconds at 60 Hz) must pass
+/// before a scene gives back capacity one large frame left behind.
+const SCENE_SHRINK_AFTER_CLEARS: u32 = 120;
 
 #[expect(missing_docs)]
 impl Scene {
     pub fn clear(&mut self) {
+        self.release_idle_capacity();
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
@@ -70,6 +82,58 @@ impl Scene {
 
     pub fn len(&self) -> usize {
         self.paint_operations.len()
+    }
+
+    /// Vectors are cleared, not freed, between frames, so one very large
+    /// frame (an overview of every session, a huge paste) used to pin its
+    /// peak size for the life of the window. Once frames have used under a
+    /// quarter of the reserved bytes for a sustained run, shrink each vector
+    /// to twice what the latest frame used. Steady frames never reallocate.
+    /// (Diri patch; see DIRI_PATCHES.md.)
+    fn release_idle_capacity(&mut self) {
+        fn bytes<T>(vec: &Vec<T>) -> (usize, usize) {
+            let size = std::mem::size_of::<T>();
+            (vec.len() * size, vec.capacity() * size)
+        }
+        let parts = [
+            bytes(&self.paint_operations),
+            bytes(&self.layer_stack),
+            bytes(&self.shadows),
+            bytes(&self.quads),
+            bytes(&self.paths),
+            bytes(&self.underlines),
+            bytes(&self.monochrome_sprites),
+            bytes(&self.subpixel_sprites),
+            bytes(&self.polychrome_sprites),
+            bytes(&self.surfaces),
+            bytes(&self.sort_keys),
+        ];
+        let used: usize = parts.iter().map(|part| part.0).sum();
+        let reserved: usize = parts.iter().map(|part| part.1).sum();
+        if reserved > SCENE_RETAIN_BYTES && used.saturating_mul(4) < reserved {
+            self.sparse_clears += 1;
+        } else {
+            self.sparse_clears = 0;
+        }
+        if self.sparse_clears < SCENE_SHRINK_AFTER_CLEARS {
+            return;
+        }
+        self.sparse_clears = 0;
+        fn shrink<T>(vec: &mut Vec<T>) {
+            vec.shrink_to(vec.len().saturating_mul(2));
+        }
+        shrink(&mut self.paint_operations);
+        shrink(&mut self.layer_stack);
+        shrink(&mut self.shadows);
+        shrink(&mut self.quads);
+        shrink(&mut self.paths);
+        shrink(&mut self.underlines);
+        shrink(&mut self.monochrome_sprites);
+        shrink(&mut self.subpixel_sprites);
+        shrink(&mut self.polychrome_sprites);
+        shrink(&mut self.surfaces);
+        self.sort_keys.clear();
+        shrink(&mut self.sort_keys);
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
@@ -153,12 +217,22 @@ impl Scene {
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
         self.underlines.sort_by_key(|underline| underline.order);
-        self.monochrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.subpixel_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.polychrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+        let key = |order: DrawOrder, tile: &AtlasTile| {
+            (u64::from(order) << 32) | u64::from(tile.tile_id.0)
+        };
+        sort_sprites(
+            &mut self.monochrome_sprites,
+            &mut self.sort_keys,
+            |sprite| key(sprite.order, &sprite.tile),
+        );
+        sort_sprites(&mut self.subpixel_sprites, &mut self.sort_keys, |sprite| {
+            key(sprite.order, &sprite.tile)
+        });
+        sort_sprites(
+            &mut self.polychrome_sprites,
+            &mut self.sort_keys,
+            |sprite| key(sprite.order, &sprite.tile),
+        );
         self.surfaces.sort_by_key(|surface| surface.order);
     }
 
@@ -946,4 +1020,56 @@ impl PathVertex<Pixels> {
             content_mask: self.content_mask.scale(factor),
         }
     }
+}
+
+/// DIRI PATCH (sprite sort): the same order as a stable sort of `items` by
+/// `key`, without moving each sprite (over 100 bytes) through every pass of
+/// a merge sort. Sorts `(key, index)` pairs, which breaks ties by position
+/// exactly as a stable sort does, then moves every sprite once, along the
+/// permutation's cycles. A frame already in order moves nothing.
+fn sort_sprites<T: Copy>(items: &mut [T], keys: &mut Vec<(u64, u32)>, key: impl Fn(&T) -> u64) {
+    const DONE: u32 = u32::MAX;
+    if items.len() < 32 || items.len() >= DONE as usize {
+        items.sort_by_key(key);
+        return;
+    }
+    keys.clear();
+    keys.extend(
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (key(item), index as u32)),
+    );
+    if keys.is_sorted() {
+        return;
+    }
+    keys.sort_unstable();
+    // `keys[destination].1` is the source index for `destination`.
+    for start in 0..items.len() {
+        let source = keys[start].1;
+        if source == DONE {
+            continue;
+        }
+        keys[start].1 = DONE;
+        if source as usize == start {
+            continue;
+        }
+        let first = items[start];
+        let mut destination = start;
+        let mut source = source as usize;
+        while source != start {
+            items[destination] = items[source];
+            destination = source;
+            source = keys[destination].1 as usize;
+            keys[destination].1 = DONE;
+        }
+        items[destination] = first;
+    }
+}
+
+/// DIRI PATCH (sprite sort): exposed for `gpui_view_cache_tests`, which
+/// checks it against the standard library's stable sort.
+#[doc(hidden)]
+pub fn sort_sprites_for_test<T: Copy>(items: &mut [T], key: impl Fn(&T) -> u64) {
+    sort_sprites(items, &mut Vec::new(), key);
 }

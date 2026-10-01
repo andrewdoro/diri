@@ -119,6 +119,7 @@ impl HolderManagerServer {
         };
 
         let state = Arc::new(State::new(listen_fd));
+        diri_telemetry::event!("holder.manager_start", guard = guard.is_some());
 
         write_pid_file(&self.paths.pid_file())?;
 
@@ -160,6 +161,7 @@ impl HolderManagerServer {
             }
         }
 
+        diri_telemetry::event!("holder.manager_exit", ok = result.is_ok());
         state.stop_watchdog();
         let _ = watchdog.join();
         self.cleanup_control_files();
@@ -224,6 +226,11 @@ impl HolderManagerServer {
                     .spawn(move || {
                         if let Err(error) = HolderServer::run_guarded(spec, guard) {
                             eprintln!("diri-holder manager: session {session_id}: {error}");
+                            diri_telemetry::error_event!(
+                                "holder.session_failed",
+                                session = diri_telemetry::id(&session_id),
+                                kind = crate::telemetry::holder_error_kind(&error),
+                            );
                         }
                         let mut active = state.active.lock().expect("active");
                         active.remove(&session_id);

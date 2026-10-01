@@ -9,15 +9,25 @@
 #   GH_REPO             GitHub repo to publish to (default: cristicretu/diri)
 #   TAP_DIR             Homebrew tap checkout (default: ../../homebrew-diri)
 #   SKIP_CASK=1         explicitly publish without updating the Homebrew cask
-#   SKIP_GATES=1        skip cargo test/clippy (for re-running a failed publish)
+#   SKIP_GATES=1        skip the CI gate (for re-running a failed publish)
+#   DIRI_LOCAL_GATES=1  run cargo clippy/test here instead of trusting CI's run
 #   SKIP_PERF_GATE=1   skip packaged app memory/idle-CPU probe
-#   DIRI_LINUX_DIST     downloaded Linux CI artifact for this source commit
+#   DIRI_LINUX_DIST     use this Linux CI artifact directory instead of fetching
+#                       (it must carry CI's .sigstore.json signature bundles)
+#   DIRI_RELEASE_TARGET_DIR  build cache (default: diri/target/release-pipeline)
+#
+# Speed: the macOS build runs locally while two things wait on GitHub Actions in
+# the background — CI's clippy/test run on the source commit (the gate), and a
+# Nightly run's Linux packages (dispatched if none exists; ~40 minutes). Both
+# are joined before anything is published. See scripts/await-ci.sh.
 #
 # This publishes two notarized macOS artifacts plus the CI-built Linux
 # AppImage and Debian package:
 #   diri-<version>-universal.dmg  what people download by hand
 #   diri-<version>-universal.zip  what the in-app updater fetches
 # plus appcast.json, SHA256SUMS, and the reviewed dependency-license inventory.
+# The Linux files carry the Sigstore bundles CI signed them with
+# (<file>.sigstore.json); they are verified here before anything is published.
 # All are attached to a GitHub Release, so the updater feed has a stable URL.
 # See diri/UPDATING.md for the trust model and one-time setup.
 set -euo pipefail
@@ -64,7 +74,15 @@ else
     export RUSTUP_HOME="${RUSTUP_HOME:-/tmp/diri-rustup-home}"
 fi
 export PATH="$CARGO_HOME/bin:$PATH"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
+# A build cache only release builds write to, deliberately ignoring an inherited
+# CARGO_TARGET_DIR. Agent worktrees are told to share $WORKSPACE/target, and a
+# worktree whose sources differ writes artifacts cargo then considers fresh there
+# -- a cross-workspace fingerprint collision that once linked an x86_64 diri-term
+# missing a method its source had. Releases used to defend against that by
+# cleaning every first-party crate, recompiling all of diri for both slices each
+# time. A cache nothing else touches makes the clean unnecessary, so a release
+# rebuilds only what changed since the last one.
+export CARGO_TARGET_DIR="${DIRI_RELEASE_TARGET_DIR:-$WORKSPACE/target/release-pipeline}"
 
 if [ -z "${DIRI_SIGN_IDENTITY:-}" ]; then
     # `|| true`: grep exits 1 with no match, which pipefail would turn into an
@@ -91,6 +109,12 @@ echo "    Publishing to : $GH_REPO"
 
 if ! command -v gh >/dev/null 2>&1; then
     echo "error: the GitHub CLI (gh) is required to publish" >&2
+    exit 1
+fi
+# Checked now rather than after a 40-minute build: the Linux signatures are
+# verified before publishing, and an unverifiable release must not ship.
+if ! command -v cosign >/dev/null 2>&1; then
+    echo "error: cosign is required to verify the Linux signatures (brew install cosign)" >&2
     exit 1
 fi
 if [ "${SKIP_CASK:-0}" != "1" ] && [ ! -f "$TAP_DIR/Casks/diri.rb" ]; then
@@ -147,18 +171,114 @@ if git -C "$ROOT" rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
 fi
 echo "    source commit : $SOURCE_COMMIT"
 
-if [ -z "${DIRI_LINUX_DIST:-}" ] || [ ! -d "$DIRI_LINUX_DIST" ]; then
-    cat >&2 <<EOF
-error: DIRI_LINUX_DIST must name the downloaded linux-packages CI artifact
-for source commit $SOURCE_COMMIT.
+# ----------------------------------------------------------------------------
+# Background CI work, joined before publishing
+# ----------------------------------------------------------------------------
+CI_LOG_DIR="$CARGO_TARGET_DIR/release-logs"
+mkdir -p "$CI_LOG_DIR"
+BACKGROUND_PIDS=()
+# `|| true` on each kill: this runs under set -e, and a job that already
+# finished makes kill fail, which would abort the trap before the remaining
+# jobs are stopped and turn a successful release into exit 1.
+trap 'for pid in "${BACKGROUND_PIDS[@]:-}"; do if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi; done' EXIT
 
-The release is created atomically with macOS and Linux assets. Download the
-Linux package artifact from the successful CI run for this commit, set
-DIRI_LINUX_DIST to that directory, and re-run.
-EOF
-    exit 1
+# Waits for a background step; on failure prints its log and aborts.
+join_background() {
+    local pid="$1" label="$2" log="$3"
+    if ! wait "$pid"; then
+        echo "error: $label failed:" >&2
+        sed 's/^/    /' "$log" >&2
+        exit 1
+    fi
+    echo "==> $label: done ($(tail -n 1 "$log"))"
+}
+
+# Aborts early if a background step has already failed; otherwise returns.
+check_background() {
+    local pid="$1" label="$2" log="$3"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        join_background "$pid" "$label" "$log"
+    fi
+}
+
+GATES_PID=""
+GATES_LOG="$CI_LOG_DIR/gates.log"
+if [ "${SKIP_GATES:-0}" = "1" ]; then
+    echo "==> Skipping the CI gate (SKIP_GATES=1)"
+elif [ "${DIRI_LOCAL_GATES:-0}" = "1" ]; then
+    echo "==> Running release gates locally (DIRI_LOCAL_GATES=1)"
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
+else
+    echo "==> Waiting on CI's clippy/test run for $SOURCE_COMMIT (background, log: $GATES_LOG)"
+    GH_REPO="$GH_REPO" "$WORKSPACE/scripts/await-ci.sh" gates "$SOURCE_COMMIT" \
+        > "$GATES_LOG" 2>&1 &
+    GATES_PID=$!
+    BACKGROUND_PIDS+=("$GATES_PID")
 fi
 
+LINUX_PID=""
+LINUX_LOG="$CI_LOG_DIR/linux.log"
+if [ -n "${DIRI_LINUX_DIST:-}" ]; then
+    if [ ! -d "$DIRI_LINUX_DIST" ]; then
+        echo "error: DIRI_LINUX_DIST is not a directory: $DIRI_LINUX_DIST" >&2
+        exit 1
+    fi
+    echo "==> Using Linux packages from $DIRI_LINUX_DIST"
+else
+    DIRI_LINUX_DIST="$CARGO_TARGET_DIR/linux-packages-$SOURCE_COMMIT"
+    echo "==> Fetching Linux packages for $SOURCE_COMMIT (background, log: $LINUX_LOG)"
+    GH_REPO="$GH_REPO" "$WORKSPACE/scripts/await-ci.sh" linux "$SOURCE_COMMIT" \
+        "$DIRI_LINUX_DIST" > "$LINUX_LOG" 2>&1 &
+    LINUX_PID=$!
+    BACKGROUND_PIDS+=("$LINUX_PID")
+fi
+
+# ----------------------------------------------------------------------------
+# 2. Build, sign, notarize, staple (app first, then DMG — see package.sh)
+# ----------------------------------------------------------------------------
+if [ -n "$GATES_PID" ]; then
+    check_background "$GATES_PID" "CI gate" "$GATES_LOG"
+fi
+echo "==> Packaging (notarization can take a few minutes)"
+DIRI_VERSION="$VERSION" \
+DIRI_SIGN_IDENTITY="$DIRI_SIGN_IDENTITY" \
+DIRI_CREATE_DMG=1 \
+DIRI_CREATE_ZIP=1 \
+APPLE_NOTARIZATION_KEYCHAIN_PROFILE="$NOTARY_PROFILE" \
+    "$WORKSPACE/scripts/package.sh"
+
+for artifact in "$APP" "$DMG" "$ZIP"; do
+    if [ ! -e "$artifact" ]; then
+        echo "error: packaging did not produce $artifact" >&2
+        exit 1
+    fi
+done
+
+# The updater refuses a download whose ticket does not validate offline, so
+# check that here rather than discovering it from a user's failed update.
+echo "==> Verifying the stapled bundle the updater will install"
+xcrun stapler validate "$APP"
+spctl --assess --type execute -vv "$APP"
+
+# The regression probe must run against this exact signed/notarized bundle.
+# It owns and terminates only the two Diri processes it launches.
+if [ "${SKIP_PERF_GATE:-0}" != "1" ]; then
+    echo "==> Running packaged memory/idle-CPU gate"
+    "$WORKSPACE/scripts/perf-gate.sh" --app "$APP" --scenario all
+fi
+
+# ----------------------------------------------------------------------------
+# 3. Join CI: the gate must have passed and the Linux packages must be here
+# ----------------------------------------------------------------------------
+if [ -n "$GATES_PID" ]; then
+    echo "==> Waiting for the CI gate"
+    join_background "$GATES_PID" "CI gate" "$GATES_LOG"
+fi
+if [ -n "$LINUX_PID" ]; then
+    echo "==> Waiting for the Linux packages (Nightly run)"
+    join_background "$LINUX_PID" "Linux packages" "$LINUX_LOG"
+fi
 LINUX_APPIMAGE_SOURCE="$(find "$DIRI_LINUX_DIST" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
 LINUX_DEB_SOURCE="$(find "$DIRI_LINUX_DIST" -maxdepth 1 -type f -name '*.deb' -print -quit)"
 LINUX_MANIFEST_SOURCE="$DIRI_LINUX_DIST/linux-release.json"
@@ -191,74 +311,41 @@ for name in artifact_names:
         raise SystemExit(f"Linux artifact digest mismatch: {path.name}")
 PYLINUX
 
+# The packages must carry signatures from main's Nightly workflow. Overrides a
+# maintainer may have exported for a rehearsal are dropped so the pinned
+# identity, not the environment, decides what is accepted.
+echo "==> Verifying Linux Sigstore signatures"
+env -u DIRI_COSIGN_PUBLIC_KEY -u DIRI_SIGNING_IDENTITY -u DIRI_SIGNING_OIDC_ISSUER \
+    GH_REPO="$GH_REPO" "$WORKSPACE/scripts/linux-signatures.sh" verify "$DIRI_LINUX_DIST"
+
 LINUX_APPIMAGE="$DIST/$(basename "$LINUX_APPIMAGE_SOURCE")"
 LINUX_DEB="$DIST/$(basename "$LINUX_DEB_SOURCE")"
 LINUX_MANIFEST="$DIST/linux-release.json"
+# The release-wide SHA256SUMS below covers every platform and is written here,
+# so it cannot carry CI's signature. CI's signed Linux-only list ships beside it
+# under its own name; the bundle signs bytes, not a filename.
+LINUX_CHECKSUMS="$DIST/SHA256SUMS-linux"
 mkdir -p "$DIST"
-if [ "$LINUX_APPIMAGE_SOURCE" != "$LINUX_APPIMAGE" ]; then
-    cp "$LINUX_APPIMAGE_SOURCE" "$LINUX_APPIMAGE"
-fi
-if [ "$LINUX_DEB_SOURCE" != "$LINUX_DEB" ]; then
-    cp "$LINUX_DEB_SOURCE" "$LINUX_DEB"
-fi
-if [ "$LINUX_MANIFEST_SOURCE" != "$LINUX_MANIFEST" ]; then
-    cp "$LINUX_MANIFEST_SOURCE" "$LINUX_MANIFEST"
-fi
-
-# ----------------------------------------------------------------------------
-# 2. Gates
-# ----------------------------------------------------------------------------
-if [ "${SKIP_GATES:-0}" != "1" ]; then
-    echo "==> Running release gates"
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo test --workspace
-fi
-
-# ----------------------------------------------------------------------------
-# 3. Build, sign, notarize, staple (app first, then DMG — see package.sh)
-# ----------------------------------------------------------------------------
-# Agent worktrees are told to share this target dir (see the warning in
-# package.sh). A build from a worktree whose sources differ writes artifacts
-# that cargo then considers fresh here -- a cross-workspace fingerprint
-# collision -- so a stale crate from another checkout can be linked in silently.
-# It has happened: an x86_64 diri-term with a NEWER mtime than its source but
-# missing a method the source had. A compile error is the lucky outcome; the
-# unlucky one is a signed, notarized build shipping someone else's code. Third-
-# party deps cannot collide this way (they are immutable at a given version), so
-# only first-party crates are purged and the expensive GPUI build stays cached.
-echo "==> Purging first-party build artifacts (cross-worktree cache safety)"
-FIRST_PARTY=(-p diri-app -p diri-client -p diri-proto -p diri-term -p diri-ui -p diri-updater)
-for release_target in aarch64-apple-darwin x86_64-apple-darwin; do
-    cargo clean "${FIRST_PARTY[@]}" --release --target "$release_target"
-done
-
-echo "==> Packaging (notarization can take a few minutes)"
-DIRI_VERSION="$VERSION" \
-DIRI_SIGN_IDENTITY="$DIRI_SIGN_IDENTITY" \
-DIRI_CREATE_DMG=1 \
-DIRI_CREATE_ZIP=1 \
-APPLE_NOTARIZATION_KEYCHAIN_PROFILE="$NOTARY_PROFILE" \
-    "$WORKSPACE/scripts/package.sh"
-
-for artifact in "$APP" "$DMG" "$ZIP"; do
-    if [ ! -e "$artifact" ]; then
-        echo "error: packaging did not produce $artifact" >&2
-        exit 1
+copy_linux_asset() {
+    if [ "$1" != "$2" ]; then
+        cp "$1" "$2"
     fi
-done
-
-# The updater refuses a download whose ticket does not validate offline, so
-# check that here rather than discovering it from a user's failed update.
-echo "==> Verifying the stapled bundle the updater will install"
-xcrun stapler validate "$APP"
-spctl --assess --type execute -vv "$APP"
-
-# The regression probe must run against this exact signed/notarized bundle.
-# It owns and terminates only the two Diri processes it launches.
-if [ "${SKIP_PERF_GATE:-0}" != "1" ]; then
-    echo "==> Running packaged memory/idle-CPU gate"
-    "$WORKSPACE/scripts/perf-gate.sh" --app "$APP" --scenario all
-fi
+}
+copy_linux_asset "$LINUX_APPIMAGE_SOURCE" "$LINUX_APPIMAGE"
+copy_linux_asset "$LINUX_DEB_SOURCE" "$LINUX_DEB"
+copy_linux_asset "$LINUX_MANIFEST_SOURCE" "$LINUX_MANIFEST"
+copy_linux_asset "$DIRI_LINUX_DIST/SHA256SUMS" "$LINUX_CHECKSUMS"
+copy_linux_asset "$LINUX_APPIMAGE_SOURCE.sigstore.json" "$LINUX_APPIMAGE.sigstore.json"
+copy_linux_asset "$LINUX_DEB_SOURCE.sigstore.json" "$LINUX_DEB.sigstore.json"
+copy_linux_asset "$LINUX_MANIFEST_SOURCE.sigstore.json" "$LINUX_MANIFEST.sigstore.json"
+copy_linux_asset "$DIRI_LINUX_DIST/SHA256SUMS.sigstore.json" "$LINUX_CHECKSUMS.sigstore.json"
+LINUX_SIGNATURES=(
+    "$LINUX_CHECKSUMS"
+    "$LINUX_APPIMAGE.sigstore.json"
+    "$LINUX_DEB.sigstore.json"
+    "$LINUX_MANIFEST.sigstore.json"
+    "$LINUX_CHECKSUMS.sigstore.json"
+)
 
 # ----------------------------------------------------------------------------
 # 4. Build the update feed
@@ -364,7 +451,9 @@ a Gatekeeper prompt.
 and 24.04 are supported under X11 and Wayland. Linux updates use a newer
 package/download rather than the in-app macOS updater.
 
-See \`SHA256SUMS\` and \`linux-release.json\` for artifact metadata. The macOS
+See \`SHA256SUMS\` and \`linux-release.json\` for artifact metadata. Each Linux
+file has a Sigstore \`.sigstore.json\` signature from this repository's CI;
+\`diri/LINUX.md\` shows how to verify it. The macOS
 app updates itself from the \`appcast.json\` feed attached here.
 NOTES
     echo "==> Wrote default notes to $NOTES_FILE (edit and re-run to customize)"
@@ -374,7 +463,7 @@ echo "==> Publishing $TAG to $GH_REPO"
 GH_REPO="$GH_REPO" SOURCE_COMMIT="$SOURCE_COMMIT" \
     "$WORKSPACE/scripts/publish-github-release.sh" \
     "$VERSION" "$NOTES_FILE" "$DMG" "$ZIP" \
-    "$LINUX_APPIMAGE" "$LINUX_DEB" "$LINUX_MANIFEST" \
+    "$LINUX_APPIMAGE" "$LINUX_DEB" "$LINUX_MANIFEST" "${LINUX_SIGNATURES[@]}" \
     "$FEED" "$CHECKSUMS" "$INVENTORY"
 
 # ----------------------------------------------------------------------------

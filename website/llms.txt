@@ -1,0 +1,76 @@
+# Diri
+
+> Diri is a native desktop app for running many coding agents (Claude Code, Codex, Cursor, Gemini and 16 more) side by side, with live status, git worktrees, review, notes, remote SSH hosts, and an MCP server that lets agents start and coordinate other agents. Free and open source (Apache-2.0).
+
+Each page is available as Markdown at the URL below. The docs are concatenated in https://diri.sh/llms-full.txt. A read-only docs MCP server is at https://diri.sh/mcp.
+
+
+## Getting started
+
+- [Diri documentation](https://diri.sh/docs/index.md): How to install diri, run coding agents side by side, keep their work apart, review it, and let agents start and coordinate other agents over MCP.
+- [Install](https://diri.sh/docs/install.md): Install diri on macOS with the DMG or Homebrew, understand how updates arrive, try the Linux and iPhone betas, and remove every local file.
+- [Quickstart](https://diri.sh/docs/quickstart.md): Go from a fresh install to a running agent in diri: install an agent, pick a folder, start a session, read its status, and answer when it asks.
+- [Keyboard shortcuts](https://diri.sh/docs/keyboard-shortcuts.md): Every diri keyboard shortcut grouped by task, plus which surface wins a contested key, how to rebind, and the Linux equivalents.
+
+## Working with agents
+
+- [Sessions](https://diri.sh/docs/sessions.md): How diri sessions work: status colors, notifications, the sidebar, searching and resuming past chats, persistence across quits, hibernation and terminal features.
+- [Worktrees and review](https://diri.sh/docs/worktrees.md): Give each diri agent its own git worktree and branch, review its diff in the Review panel, commit, follow pull request checks, and clean up afterwards.
+- [Notes](https://diri.sh/docs/notes.md): Write plans and to-dos in diri Notes, hand any to-do to an agent with the note as context, follow its progress live, and let agents write back.
+- [Recipes and schedules](https://diri.sh/docs/scheduled-tasks.md): Start an agent at a set time with a schedule that catches up after sleep and can wake the Mac, or save a launch as a recipe and rerun it in one click.
+- [Accounts and usage](https://diri.sh/docs/accounts.md): Save Claude Code and Codex logins as profiles, switch every open tab to another account in one click, and see estimated cost, tokens and plan limits.
+
+## Automation
+
+- [MCP server](https://diri.sh/docs/mcp.md): diri's built-in MCP server lets agents start other agents, assign tracked tasks, wait for results, review diffs and merge branches. Set it up and use it well.
+- [MCP tool reference](https://diri.sh/docs/mcp-tools.md): Every tool the dirijor MCP server exposes, with its arguments, types and defaults. Generated from the server's own catalog, so it always matches the app.
+- [dirijor CLI](https://diri.sh/docs/cli.md): Reference for the dirijor command-line tool. List, read, start and drive diri sessions, manage worktrees, layouts and notes, and script diri from a shell.
+- [Supported agents](https://diri.sh/docs/agents.md): Every coding agent diri ships a manifest for, what each supports for status, resume, fork and MCP, and how to add your own agent with a custom manifest.
+
+## Remote
+
+- [Remote hosts](https://diri.sh/docs/remote-hosts.md): Run agents on your own servers over SSH. diri reuses your OpenSSH setup and needs no tmux, sudo or remote service. Learn what survives a dropped connection.
+
+## Reference
+
+- [Security model](https://diri.sh/docs/security.md): What diri protects and what it does not. Agent privileges, MCP and CLI authority, lineage rules, remote trust, diagnostics and privacy, and how to report a vulnerability.
+- [Troubleshooting](https://diri.sh/docs/troubleshooting.md): Diagnose diri problems with dirijor doctor, find logs and state on macOS and Linux, fix common agent and remote issues, and file a useful bug report.
+
+## Agents
+
+- [Run Claude Code in parallel](https://diri.sh/agents/claude-code.md): Run several Claude Code sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Codex in parallel](https://diri.sh/agents/codex.md): Run several Codex sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Antigravity in parallel](https://diri.sh/agents/antigravity.md): Run several Antigravity sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Cursor in parallel](https://diri.sh/agents/cursor.md): Run several Cursor sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Gemini in parallel](https://diri.sh/agents/gemini.md): Run several Gemini sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Aider in parallel](https://diri.sh/agents/aider.md): Run several Aider sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Amp in parallel](https://diri.sh/agents/amp.md): Run several Amp sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Cline CLI in parallel](https://diri.sh/agents/cline.md): Run several Cline CLI sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Copilot CLI in parallel](https://diri.sh/agents/copilot.md): Run several Copilot CLI sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Devin in parallel](https://diri.sh/agents/devin.md): Run several Devin sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Droid in parallel](https://diri.sh/agents/droid.md): Run several Droid sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Grok in parallel](https://diri.sh/agents/grok.md): Run several Grok sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Hermes in parallel](https://diri.sh/agents/hermes.md): Run several Hermes sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Kilo Code in parallel](https://diri.sh/agents/kilo.md): Run several Kilo Code sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Kimi in parallel](https://diri.sh/agents/kimi.md): Run several Kimi sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Kiro in parallel](https://diri.sh/agents/kiro.md): Run several Kiro sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Maki in parallel](https://diri.sh/agents/maki.md): Run several Maki sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run OpenCode in parallel](https://diri.sh/agents/opencode.md): Run several OpenCode sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Pi in parallel](https://diri.sh/agents/pi.md): Run several Pi sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+- [Run Qoder CLI in parallel](https://diri.sh/agents/qoder.md): Run several Qoder CLI sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.
+
+## Compare
+
+- [diri vs cmux](https://diri.sh/compare/cmux.md): cmux is a free, scriptable Ghostty-based Mac terminal for agents; diri adds agent status, worktrees, review and agent-to-agent tasks, with sessions that outlive the app.
+- [diri vs Conductor](https://diri.sh/compare/conductor.md): Conductor runs four agents behind a Mac chat interface with a PR flow and paid cloud workspaces; diri runs 20 agent CLIs as real terminals, free and open source.
+- [diri vs herdr](https://diri.sh/compare/herdr.md): herdr is a cross-platform terminal multiplexer for agents with a socket API; diri is a native GUI with review, notes and MCP tasks, and sessions that survive Engine restarts.
+- [diri vs Superset](https://diri.sh/compare/superset.md): Both run many terminal agents in parallel; Superset adds an in-app browser, a hosted MCP and paid remote access, while diri is native, Apache-2.0 and uses plain SSH.
+
+## Releases
+
+- [diri 0.9.0: Notes, and to-dos that start agents](https://diri.sh/whats-new/0.9.0/): diri 0.9.0 adds Notes: plans and to-do lists that sit next to your agents, where any to-do can start an agent with the note as its brief.
+
+## Optional
+
+- [Guides](https://diri.sh/guides/): Beginner walkthroughs with screenshots.
+- [Source code](https://github.com/cristicretu/diri): Apache-2.0.

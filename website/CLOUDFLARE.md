@@ -24,7 +24,7 @@ See Cloudflare's [GitHub integration](https://developers.cloudflare.com/pages/co
 
 There are no install-time or runtime dependencies. The build copies only public files, fingerprints CSS/JavaScript, and generates Cloudflare `_headers`. Keep Cloudflare's default HTML caching; immutable caching applies only to fingerprinted files.
 
-Downloads stay synced through a browser request to GitHub's public latest-release API, independent of Cloudflare builds. No release webhook, Pages Function, or secret is required. Preserve the generated CSP's `connect-src https://api.github.com` allowance (alongside `'self'`) if overriding headers. The page retains GitHub release links when JavaScript or the API is unavailable; see [Release downloads](README.md#release-downloads).
+Downloads stay synced through a browser request to GitHub's public latest-release API, independent of Cloudflare builds. No release webhook or secret is required. Preserve the generated CSP's `connect-src https://api.github.com` allowance (alongside `'self'`) if overriding headers. The page retains GitHub release links when JavaScript or the API is unavailable; see [Release downloads](README.md#release-downloads).
 
 For Direct Upload, run `npm --prefix website run build` from the repository root and upload the **contents** of `website/dist`. The directory is self-contained. Do not upload the whole repository or `website/` source directory.
 
@@ -32,6 +32,16 @@ To reproduce Cloudflare's routing locally, run from `website/`:
 
 ```sh
 npx wrangler pages dev dist --compatibility-date=2026-09-03
+```
+
+## Docs MCP function
+
+`functions/mcp.js` is the only Pages Function. Cloudflare picks it up from the `functions/` directory beside the build output and serves it at `https://diri.sh/mcp`: a read-only, stateless MCP server (streamable HTTP, JSON responses) with `search_docs`, `read_doc`, and `list_docs`. It reads only the published `docs/search.json` and `docs/*.md` through `env.ASSETS`, so it has no bindings, secrets, or storage. Every other path stays a static asset. `npm test` exercises it without network access.
+
+After deploying, check it with:
+
+```sh
+curl -s https://diri.sh/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
 ## Domain setup

@@ -15,7 +15,7 @@ use super::{Prefs, SidebarOrdering, is_auxiliary_terminal};
 const UNRANKED: usize = usize::MAX;
 
 /// One rendered session line inside a project group.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct SidebarRow {
     pub session: Arc<SessionRecord>,
     /// Nesting level inside the group. Zero is a session a human started;
@@ -36,6 +36,22 @@ pub struct SidebarRow {
 impl SidebarRow {
     pub fn id(&self) -> &SessionId {
         &self.session.id
+    }
+}
+
+/// Pointer first: every sidebar render compares each row's props with the
+/// last ones, and a record carries its pull requests (descriptions, checks,
+/// review threads). A store publication keeps the same `Arc` for a session
+/// that did not change, so that comparison is usually one pointer test
+/// instead of a walk through kilobytes of text.
+impl PartialEq for SidebarRow {
+    fn eq(&self, other: &Self) -> bool {
+        (Arc::ptr_eq(&self.session, &other.session) || self.session == other.session)
+            && self.depth == other.depth
+            && self.has_children == other.has_children
+            && self.collapsed == other.collapsed
+            && self.pinned == other.pinned
+            && self.rails == other.rails
     }
 }
 
@@ -389,5 +405,46 @@ fn synthetic_project(id: &ProjectId, sessions: &[Arc<SessionRecord>]) -> Project
         name,
         pinned_order: None,
         host: sessions.first().and_then(|session| session.host.clone()),
+    }
+}
+
+#[cfg(test)]
+mod row_equality_tests {
+    use super::*;
+
+    /// Comparing a row with itself must not walk the record: the same `Arc`
+    /// is equal without reading it. A record that would not even equal itself
+    /// field by field (a NaN timestamp) shows the walk was skipped.
+    #[test]
+    fn a_row_holding_the_same_record_is_equal_without_walking_it() {
+        let mut record =
+            crate::sidebar::SidebarPreviewFixture::make(crate::sidebar::PreviewScenario::Typical)
+                .list
+                .sessions
+                .remove(0);
+        record.created_at = diri_proto::DateMillis(f64::NAN);
+        let row = SidebarRow {
+            session: Arc::new(record),
+            depth: 0,
+            has_children: false,
+            collapsed: false,
+            pinned: false,
+            rails: 0,
+        };
+        assert!(
+            row.session != row.session.clone(),
+            "NaN never equals itself"
+        );
+        assert_eq!(row, row.clone());
+        let copy = SidebarRow {
+            session: Arc::new((*row.session).clone()),
+            ..row.clone()
+        };
+        assert_ne!(row, copy, "a different record is still compared by value");
+        let moved = SidebarRow {
+            depth: 1,
+            ..row.clone()
+        };
+        assert_ne!(row, moved);
     }
 }

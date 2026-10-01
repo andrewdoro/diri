@@ -259,6 +259,8 @@ impl Api {
             host: body.get("host").and_then(Value::as_str).map(str::to_string),
             account_profile_id: None,
             same_repo_as: None,
+            start_directory: None,
+            note_id: None,
         };
 
         match self

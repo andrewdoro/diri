@@ -292,6 +292,55 @@ fn a_blocker_survives_one_stray_non_blocker_frame() {
 }
 
 #[test]
+fn a_dismissed_blocker_clears_when_the_composer_stops_redrawing() {
+    // Kimi paints the idle composer once after workspace trust, then goes
+    // quiet. A second changed content sequence may never arrive.
+    for authority in [Authority::ScreenPrimary, Authority::HooksPrimary] {
+        let mut reducer = StatusReducer::new(authority, t0());
+        let now = settled(&mut reducer, t0());
+        if authority == Authority::HooksPrimary {
+            reducer.reduce(hook(ClaudeHook::UserPromptSubmit), now);
+        }
+        reducer.reduce(StatusSignal::Screen(blocker(1, "Trust this folder?")), now);
+        let idle_at = now + Duration::from_millis(100);
+        reducer.reduce(
+            StatusSignal::Screen(observation(ManifestState::Idle, 2)),
+            idle_at,
+        );
+        reducer.reduce(StatusSignal::Tick, idle_at + Duration::from_millis(100));
+        assert!(matches!(reducer.status(), SessionStatus::NeedsInput(_)));
+        let outcome = reducer.reduce(StatusSignal::Tick, idle_at + Duration::from_millis(701));
+        assert_eq!(
+            outcome.status_change,
+            Some(if authority == Authority::HooksPrimary {
+                SessionStatus::Working // An unfinished hook-owned turn stays alive.
+            } else {
+                SessionStatus::Idle
+            })
+        );
+    }
+}
+
+#[test]
+fn a_reappearing_or_hidden_blocker_cancels_the_quiet_clear() {
+    for state in [ManifestState::BlockedPermission, ManifestState::Skip] {
+        let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
+        let now = settled(&mut reducer, t0());
+        reducer.reduce(StatusSignal::Screen(blocker(1, "proceed?")), now);
+        reducer.reduce(
+            StatusSignal::Screen(observation(ManifestState::Idle, 2)),
+            now,
+        );
+        reducer.reduce(
+            StatusSignal::Screen(observation(state, 3)),
+            now + Duration::from_millis(100),
+        );
+        reducer.reduce(StatusSignal::Tick, now + Duration::from_secs(2));
+        assert!(matches!(reducer.status(), SessionStatus::NeedsInput(_)));
+    }
+}
+
+#[test]
 fn a_skip_screen_holds_the_current_state() {
     // The transcript viewer covers the prompt; the session has not changed.
     let mut reducer = StatusReducer::new(Authority::HooksPrimary, t0());
@@ -581,6 +630,232 @@ fn a_shell_is_idle_at_a_prompt_and_working_only_for_a_foreground_job() {
     );
     assert_eq!(outcome.status_change, Some(SessionStatus::Idle));
     assert!(!outcome.turn_completed);
+}
+
+/// `claude` typed at a shell prompt has no hooks, so while it holds the
+/// foreground the shell's status is read from Claude's screen rules. Being
+/// recognised is not a finished turn; a turn it then runs is.
+#[test]
+fn a_shell_lends_its_status_to_an_agent_in_its_foreground() {
+    let mut reducer =
+        StatusReducer::new(Authority::ProcessOnly, t0()).with_manifest("shell", Some("1"));
+    let now = t0() + Duration::from_secs(1);
+    reducer.reduce(StatusSignal::ForegroundJob { running: true }, now);
+    assert_eq!(reducer.status(), &SessionStatus::Working);
+
+    let outcome = reducer.lend_to_agent("claude-code", Some("7"), now);
+    assert_eq!(outcome.status_change, Some(SessionStatus::Idle));
+    assert!(!outcome.turn_completed);
+    assert_eq!(reducer.foreground_agent(), Some("claude-code"));
+    assert_eq!(reducer.authority(), Authority::ScreenPrimary);
+    let evidence = reducer.evidence().expect("evidence");
+    assert_eq!(evidence.manifest_id.as_deref(), Some("claude-code"));
+    // Lending twice to the same Agent changes nothing.
+    assert_eq!(
+        reducer.lend_to_agent("claude-code", Some("7"), now),
+        ReducerOutcome::default()
+    );
+    // Job samples belong to the shell; the Agent's screen decides now.
+    let outcome = reducer.reduce(StatusSignal::ForegroundJob { running: true }, now);
+    assert_eq!(outcome.status_change, None);
+
+    let mut at = now + Duration::from_millis(100);
+    let outcome = reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Working, 1)),
+        at,
+    );
+    assert_eq!(outcome.status_change, Some(SessionStatus::Working));
+    let mut completed = false;
+    for seq in 2..20 {
+        at += Duration::from_millis(200);
+        completed |= reducer
+            .reduce(
+                StatusSignal::Screen(observation(ManifestState::Idle, seq)),
+                at,
+            )
+            .turn_completed;
+        completed |= reducer.reduce(StatusSignal::Tick, at).turn_completed;
+    }
+    assert_eq!(reducer.status(), &SessionStatus::Idle);
+    assert!(completed, "the Agent's own turn completes");
+
+    let outcome = reducer.return_from_agent(false, at);
+    assert_eq!(reducer.foreground_agent(), None);
+    assert_eq!(reducer.authority(), Authority::ProcessOnly);
+    assert_eq!(outcome.status_change, None, "already idle at the prompt");
+    let evidence = reducer.evidence().expect("evidence");
+    assert_eq!(evidence.manifest_id.as_deref(), Some("shell"));
+    let outcome = reducer.reduce(StatusSignal::ForegroundJob { running: true }, at);
+    assert_eq!(outcome.status_change, Some(SessionStatus::Working));
+}
+
+fn shell_running_a_job(now: SystemTime) -> StatusReducer {
+    let mut reducer =
+        StatusReducer::new(Authority::ProcessOnly, t0()).with_manifest("shell", Some("1"));
+    reducer.reduce(StatusSignal::PtyOutputActivity, now);
+    reducer.reduce(StatusSignal::ForegroundJob { running: true }, now);
+    assert_eq!(reducer.status(), &SessionStatus::Working);
+    reducer
+}
+
+fn line(text: &str) -> StatusSignal {
+    StatusSignal::TerminalLine(Some(TerminalPrompt {
+        line: Some(text.into()),
+        secret: false,
+    }))
+}
+
+fn open_requests(reducer: &StatusReducer) -> usize {
+    reducer
+        .attention_state()
+        .expect("attention")
+        .active_requests()
+        .count()
+}
+
+fn requests(reducer: &StatusReducer) -> usize {
+    reducer
+        .attention_state()
+        .expect("attention")
+        .events
+        .iter()
+        .filter(|event| event.kind == diri_proto::attention::AttentionKind::Request)
+        .count()
+}
+
+/// `Proceed? [y/N]` in a terminal flags it the way a permission prompt flags
+/// an Agent, and only once its output has settled. Typing clears the mark at
+/// once; a pause mid-answer marks it again without a second request, and
+/// Enter settles the request.
+#[test]
+fn a_shell_job_reading_a_line_needs_input_until_it_is_answered() {
+    let now = t0() + Duration::from_secs(1);
+    let mut reducer = shell_running_a_job(now);
+    let settle = ReducerTiming::default().line_prompt_settle;
+
+    // Still printing: a read between bursts of output is not a question.
+    assert!(!reducer.wants_line_probe(now + settle / 2));
+    let outcome = reducer.reduce(line("Proceed? [y/N]"), now + settle / 2);
+    assert_eq!(outcome.status_change, None);
+
+    let at = now + settle;
+    assert!(reducer.wants_line_probe(at));
+    let outcome = reducer.reduce(line("  Proceed? [y/N]"), at);
+    assert_eq!(
+        outcome.status_change,
+        Some(SessionStatus::NeedsInput(NeedsInputKind::Question))
+    );
+    let detail = outcome.needs_input.expect("detail");
+    assert_eq!(detail.source, NeedsInputSource::TerminalLine);
+    assert_eq!(detail.summary, "Proceed? [y/N]");
+    assert_eq!(detail.prompt_excerpt.as_deref(), Some("Proceed? [y/N]"));
+    assert!(!detail.secret);
+    assert_eq!(open_requests(&reducer), 1);
+
+    // The same question sampled again, and the job still in the
+    // foreground, change nothing.
+    let later = at + Duration::from_millis(100);
+    assert!(reducer.wants_line_probe(later));
+    assert_eq!(
+        reducer.reduce(line("Proceed? [y/N]"), later),
+        ReducerOutcome::default()
+    );
+    let outcome = reducer.reduce(StatusSignal::ForegroundJob { running: true }, later);
+    assert_eq!(outcome.status_change, None);
+
+    // A keystroke is the user answering: the mark goes at once.
+    let typed = later + Duration::from_millis(100);
+    let outcome = reducer.reduce(StatusSignal::UserKeystroke, typed);
+    assert_eq!(outcome.status_change, Some(SessionStatus::Working));
+    assert_eq!(open_requests(&reducer), 1, "not answered until Enter");
+
+    // They stop half way: marked again, still one request.
+    let paused = typed + settle;
+    let outcome = reducer.reduce(line("Proceed? [y/N] y"), paused);
+    assert!(matches!(
+        outcome.status_change,
+        Some(SessionStatus::NeedsInput(_))
+    ));
+    assert_eq!(requests(&reducer), 1);
+
+    let outcome = reducer.reduce(StatusSignal::UserSubmission, paused);
+    assert_eq!(outcome.status_change, Some(SessionStatus::Working));
+    assert_eq!(open_requests(&reducer), 0);
+    assert!(!outcome.turn_completed);
+}
+
+/// A password prompt is flagged with no terminal text at all.
+#[test]
+fn a_secret_line_prompt_carries_no_text() {
+    let now = t0() + Duration::from_secs(1);
+    let mut reducer = shell_running_a_job(now);
+    let at = now + ReducerTiming::default().line_prompt_settle;
+    let outcome = reducer.reduce(
+        StatusSignal::TerminalLine(Some(TerminalPrompt {
+            // Whatever the screen says, echo is off.
+            line: Some("Password: hunter2".into()),
+            secret: true,
+        })),
+        at,
+    );
+    let detail = outcome.needs_input.expect("detail");
+    assert_eq!(detail.summary, "Waiting for a password");
+    assert_eq!(detail.prompt_excerpt, None);
+    assert!(detail.secret);
+    assert_eq!(detail.risk_hint, RiskHint::Neutral);
+}
+
+/// The question ends without a keystroke here: the job read something
+/// else, timed out, or left. Either way the request is settled.
+#[test]
+fn a_line_prompt_ends_when_the_job_stops_reading_or_leaves() {
+    let now = t0() + Duration::from_secs(1);
+    let settle = ReducerTiming::default().line_prompt_settle;
+
+    let mut reducer = shell_running_a_job(now);
+    reducer.reduce(line("Continue?"), now + settle);
+    let outcome = reducer.reduce(StatusSignal::TerminalLine(None), now + settle * 2);
+    assert_eq!(outcome.status_change, Some(SessionStatus::Working));
+    assert!(outcome.line_prompt_ended);
+    assert_eq!(open_requests(&reducer), 0);
+    // A job that is not waiting and never was: nothing to end.
+    let outcome = reducer.reduce(StatusSignal::TerminalLine(None), now + settle * 3);
+    assert_eq!(outcome, ReducerOutcome::default());
+
+    let mut reducer = shell_running_a_job(now);
+    reducer.reduce(line("Continue?"), now + settle);
+    let outcome = reducer.reduce(
+        StatusSignal::ForegroundJob { running: false },
+        now + settle * 2,
+    );
+    assert_eq!(outcome.status_change, Some(SessionStatus::Idle));
+    assert_eq!(open_requests(&reducer), 0);
+    assert!(!reducer.wants_line_probe(now + settle * 3));
+}
+
+/// Only a shell's own job is read this way: not the shell at its prompt,
+/// not an Agent lent the reducer, not an Agent session.
+#[test]
+fn only_a_shells_own_job_is_asked_about_its_line() {
+    let now = t0() + Duration::from_secs(1);
+    let settle = ReducerTiming::default().line_prompt_settle;
+
+    let mut idle =
+        StatusReducer::new(Authority::ProcessOnly, t0()).with_manifest("shell", Some("1"));
+    idle.reduce(StatusSignal::PtyOutputActivity, now);
+    assert!(!idle.wants_line_probe(now + settle));
+    assert_eq!(idle.reduce(line("$"), now + settle).status_change, None);
+
+    let mut lent = shell_running_a_job(now);
+    lent.lend_to_agent("claude-code", Some("7"), now);
+    assert!(!lent.wants_line_probe(now + settle));
+    assert_eq!(lent.reduce(line("> "), now + settle).status_change, None);
+
+    let mut agent =
+        StatusReducer::new(Authority::ProcessOnly, t0()).with_manifest("aider", Some("1"));
+    agent.reduce(StatusSignal::PtyOutputActivity, now);
+    assert!(!agent.wants_line_probe(now + settle));
+    assert_eq!(agent.reduce(line("> "), now + settle).status_change, None);
 }
 
 #[test]
@@ -961,4 +1236,59 @@ fn unavailable_transport_is_not_a_process_exit_and_cannot_complete_a_turn() {
     assert!(
         matches!(actual.status_change, Some(SessionStatus::Exited(info)) if info.code == Some(126))
     );
+}
+
+#[test]
+fn answered_cursor_trust_can_settle_on_one_unchanged_idle_frame() {
+    let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
+    let now = settled(&mut reducer, t0());
+    reducer.reduce(
+        StatusSignal::Screen(blocker(1, "Workspace Trust Required")),
+        now,
+    );
+    reducer.reduce(StatusSignal::UserKeystroke, now + Duration::from_millis(10));
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Idle, 2)),
+        now + Duration::from_millis(20),
+    );
+    reducer.reduce(StatusSignal::Tick, now + Duration::from_millis(100));
+    assert!(matches!(reducer.status(), SessionStatus::NeedsInput(_)));
+    reducer.reduce(StatusSignal::Tick, now + Duration::from_secs(1));
+    assert_eq!(reducer.status(), &SessionStatus::Idle);
+}
+
+#[test]
+fn a_reappearing_blocker_cancels_the_quiet_idle_frame() {
+    let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
+    let now = settled(&mut reducer, t0());
+    reducer.reduce(
+        StatusSignal::Screen(blocker(1, "Workspace Trust Required")),
+        now,
+    );
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Idle, 2)),
+        now + Duration::from_millis(20),
+    );
+    reducer.reduce(
+        StatusSignal::Screen(blocker(3, "Workspace Trust Required")),
+        now + Duration::from_millis(40),
+    );
+    reducer.reduce(StatusSignal::Tick, now + Duration::from_secs(1));
+    assert!(matches!(reducer.status(), SessionStatus::NeedsInput(_)));
+}
+
+#[test]
+fn cursor_transcript_cannot_finish_a_live_spinner() {
+    let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
+    let now = settled(&mut reducer, t0());
+    let mut working = observation(ManifestState::Working, 1);
+    working.matched_rule_id = "working-status-line".into();
+    reducer.reduce(StatusSignal::Screen(working), now);
+    reducer.reduce(
+        StatusSignal::CursorTranscriptIdle,
+        now + Duration::from_millis(100),
+    );
+    let outcome = reducer.reduce(StatusSignal::Tick, now + Duration::from_secs(1));
+    assert_eq!(reducer.status(), &SessionStatus::Working);
+    assert!(!outcome.turn_completed);
 }

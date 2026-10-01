@@ -429,7 +429,9 @@ impl WindowWrite<'_> {
             self.canonical.focused_window_session = session.clone();
             if self.navigation.notification_surface_visible
                 && let Some(id) = session
+                && self.canonical.is_open(&id)
             {
+                self.canonical.unread_holds.remove(&id);
                 self.canonical.mark_notifications_read(&id);
                 self.canonical.emit(StoreEffect::MarkSeen(id));
             }
@@ -493,6 +495,10 @@ impl WindowWrite<'_> {
     pub fn spawn_kind(&mut self, kind: AgentKind, options: SpawnOptions) {
         let options = self.scoped_spawn_options(options);
         self.canonical.spawn_kind(kind, options);
+    }
+    pub fn open_note_file(&mut self, note_id: String) {
+        let options = self.scoped_spawn_options(SpawnOptions::default());
+        self.canonical.open_note_file(note_id, options);
     }
     pub(crate) fn install_agent(&mut self, option: &crate::agent_catalog::AgentOption) -> bool {
         let target = self.spawn_target();
@@ -639,16 +645,29 @@ impl WindowWrite<'_> {
                 }
             });
             self.canonical.focused_window = Some(self.owner);
-            self.canonical.focused_window_session = self
-                .navigation
-                .visible_session
-                .clone()
-                .unwrap_or_else(|| self.navigation.selected_session_id.clone());
+            // `visible_session` only resyncs on the next render, so right
+            // after a close (confirmed in a sheet that took key status) it
+            // still names the removed session; selection already moved on.
+            self.canonical.focused_window_session = match self.navigation.visible_session.clone() {
+                Some(Some(id)) if !self.canonical.is_open(&id) => {
+                    self.navigation.selected_session_id.clone()
+                }
+                Some(visible) => visible,
+                None => self.navigation.selected_session_id.clone(),
+            };
             let visible = self.navigation.notification_surface_visible;
             // Install this window's visibility before activation can mark read.
             self.canonical.notification_surface_visible = visible;
+            let was_active = self.canonical.app_is_active;
             self.canonical.set_active(true);
-            if visible && let Some(id) = self.canonical.focused_window_session.clone() {
+            // Waking the app already marked the focused session read above;
+            // only a switch between windows of an active app lands here.
+            if was_active
+                && visible
+                && let Some(id) = self.canonical.focused_window_session.clone()
+                && self.canonical.reads_passively(&id)
+                && self.canonical.is_open(&id)
+            {
                 self.canonical.mark_notifications_read(&id);
                 self.canonical.emit(StoreEffect::MarkSeen(id));
             }
@@ -716,6 +735,7 @@ impl WindowWrite<'_> {
         self.sidebar_projection().display_order.clone()
     }
     fn focus_session(&mut self, id: SessionId) {
+        self.canonical.unread_holds.remove(&id);
         self.navigation.revision = self.navigation.revision.wrapping_add(1);
         self.navigation.selected_session_id = Some(id.clone());
         self.navigation
@@ -1386,6 +1406,99 @@ mod tests {
             first.canonical.read().unwrap().closing,
             HashSet::from([ids[0].clone(), terminal_id])
         );
+    }
+
+    #[test]
+    fn window_activation_leaves_a_session_marked_unread_unread() {
+        let fixture =
+            crate::sidebar::SidebarPreviewFixture::make(crate::sidebar::PreviewScenario::Typical);
+        let (mut canonical, mut effects) = SessionStore::headless(fixture.prefs);
+        canonical.hydrate(fixture.list);
+        let ids = canonical
+            .ordered_sessions()
+            .iter()
+            .filter(|s| !s.is_archived())
+            .map(|s| s.id.clone())
+            .take(2)
+            .collect::<Vec<_>>();
+        let window = WindowStore::new(Arc::new(RwLock::new(canonical)), Some(ids[0].clone()));
+        window.write().unwrap().select(ids[0].clone());
+        window.write().unwrap().set_active(true);
+        let mut marks_seen = || {
+            let mut seen = false;
+            while let Ok(effect) = effects.try_recv() {
+                seen |= matches!(effect, StoreEffect::MarkSeen(id) if id == ids[0]);
+            }
+            seen
+        };
+        marks_seen();
+
+        window.write().unwrap().mark_session_unread(ids[0].clone());
+        window.write().unwrap().set_active(false);
+        window.write().unwrap().set_active(true);
+        assert!(!marks_seen(), "activation is not a read");
+
+        window.write().unwrap().select(ids[1].clone());
+        window.write().unwrap().select(ids[0].clone());
+        assert!(marks_seen(), "opening it again is");
+    }
+
+    #[test]
+    fn reactivation_after_a_sheet_confirmed_close_marks_only_the_survivor_seen_once() {
+        let fixture =
+            crate::sidebar::SidebarPreviewFixture::make(crate::sidebar::PreviewScenario::Typical);
+        let (mut canonical, mut effects) = SessionStore::headless(fixture.prefs);
+        canonical.hydrate(fixture.list);
+        let ids = canonical
+            .ordered_sessions()
+            .iter()
+            .filter(|s| !s.is_archived())
+            .map(|s| s.id.clone())
+            .take(2)
+            .collect::<Vec<_>>();
+        let window = WindowStore::new(Arc::new(RwLock::new(canonical)), Some(ids[1].clone()));
+        window.write().unwrap().select(ids[1].clone());
+        window.write().unwrap().select(ids[0].clone());
+        window.write().unwrap().set_active(true);
+        window
+            .write()
+            .unwrap()
+            .set_visible_session(Some(ids[0].clone()));
+        let mut marked_seen = || {
+            let mut marked = Vec::new();
+            while let Ok(effect) = effects.try_recv() {
+                if let StoreEffect::MarkSeen(id) = effect {
+                    marked.push(id);
+                }
+            }
+            marked
+        };
+        marked_seen();
+
+        // Plain reactivation reads the visible session once, not twice.
+        window.write().unwrap().set_active(false);
+        window.write().unwrap().set_active(true);
+        assert_eq!(marked_seen(), vec![ids[0].clone()]);
+
+        // The close sheet takes key status; confirming it removes the
+        // session before the window is key again, and before the next render
+        // resyncs `visible_session`.
+        window.write().unwrap().set_active(false);
+        window
+            .write()
+            .unwrap()
+            .remove_sessions(vec![ids[0].clone()]);
+        window.write().unwrap().set_active(true);
+        assert_eq!(
+            marked_seen(),
+            vec![ids[1].clone()],
+            "the closed session is never marked seen; the survivor is, once"
+        );
+        window
+            .write()
+            .unwrap()
+            .set_visible_session(Some(ids[0].clone()));
+        assert!(marked_seen().is_empty());
     }
 
     #[test]

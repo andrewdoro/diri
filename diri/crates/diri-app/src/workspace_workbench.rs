@@ -486,6 +486,17 @@ impl WorkspaceWorkbench {
             .and_then(|id| self.mounted.get(id))
             .map(|pane| pane.session.clone())
     }
+    /// Every mounted pane's terminal, for multi-pane fixtures.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn terminals_for_test(&self) -> Vec<Entity<TerminalPane>> {
+        let mut panes: Vec<_> = self.mounted.iter().collect();
+        panes.sort_by(|left, right| left.0.0.cmp(&right.0.0));
+        panes
+            .into_iter()
+            .map(|(_, pane)| pane.terminal.clone())
+            .collect()
+    }
+
     pub(crate) fn focused_terminal(&self) -> Option<Entity<TerminalPane>> {
         if !self.enabled {
             return None;

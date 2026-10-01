@@ -181,6 +181,11 @@ impl WindowInvalidator {
         self.inner.borrow_mut().draw_phase = phase
     }
 
+    /// DIRI PATCH (frame statistics).
+    pub fn phase(&self) -> DrawPhase {
+        self.inner.borrow().draw_phase
+    }
+
     pub fn update_count(&self) -> usize {
         self.inner.borrow().update_count
     }
@@ -1107,6 +1112,10 @@ pub struct Window {
     /// passes. See [`CachedViewBase`].
     pub(crate) cached_view_prepaint_bases: Vec<CachedViewBase<PrepaintStateIndex>>,
     pub(crate) cached_view_paint_bases: Vec<CachedViewBase<PaintIndex>>,
+    /// DIRI PATCH (frame statistics): the frame being drawn and the last one
+    /// finished. See [`crate::FrameStats`].
+    pub(crate) frame_stats: crate::frame_stats::FrameStatsBuilder,
+    last_frame_stats: crate::FrameStats,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
@@ -1132,6 +1141,8 @@ pub struct Window {
     active: Rc<Cell<bool>>,
     hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
+    #[cfg(any(test, feature = "test-support"))]
+    immediate_frame_requests: Cell<usize>,
     /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
     /// Used to selectively enable VRR optimization only when input rate exceeds 60fps.
     pub(crate) input_rate_tracker: Rc<RefCell<InputRateTracker>>,
@@ -1412,6 +1423,15 @@ impl Window {
             .as_ref()
             .and_then(|titlebar| titlebar.title.clone());
 
+        // DIRI PATCH (3): popups and floating panels are never the key window
+        // by design, so the inactive-window throttle below would hold every
+        // animation inside them to ~26 fps. See DIRI_PATCHES.md.
+        let exempt_from_inactive_throttle = matches!(
+            kind,
+            crate::WindowKind::PopUp
+                | crate::WindowKind::AnchoredPopup(_)
+                | crate::WindowKind::Floating
+        );
         let window_bounds = window_bounds.unwrap_or_else(|| default_bounds(display_id, cx));
         let mut platform_window = cx.platform.open_window(
             handle,
@@ -1581,7 +1601,7 @@ impl Window {
                     && next_frame_callbacks.borrow().is_empty()
                 {
                     None
-                } else if !active.get() {
+                } else if !active.get() && !exempt_from_inactive_throttle {
                     Some(Duration::from_micros(33333))
                 } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
                     Some(Duration::from_micros(16667))
@@ -1821,6 +1841,8 @@ impl Window {
             element_opacity: 1.0,
             cached_view_prepaint_bases: Vec::new(),
             cached_view_paint_bases: Vec::new(),
+            frame_stats: Default::default(),
+            last_frame_stats: Default::default(),
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -1844,6 +1866,8 @@ impl Window {
             active,
             hovered,
             needs_present,
+            #[cfg(any(test, feature = "test-support"))]
+            immediate_frame_requests: Cell::new(0),
             input_rate_tracker,
             #[cfg(feature = "input-latency-histogram")]
             input_latency_tracker: InputLatencyTracker::new()?,
@@ -1993,6 +2017,30 @@ impl Window {
             self.refreshing = true;
             self.invalidator.set_dirty(true);
         }
+    }
+
+    /// Draws the window's next frame as soon as the main thread is free
+    /// instead of at the display's next refresh.
+    ///
+    /// For latency-critical changes that arrive while the window is idle,
+    /// such as a terminal's keystroke echo: waiting for the display link
+    /// costs up to a whole refresh interval before drawing starts, and a
+    /// frame presented mid-interval can reach the screen a refresh earlier.
+    /// Call it after invalidating the view. The platform ignores the request
+    /// while a recent frame may still be queued for display, so it never
+    /// stacks frames between refreshes, and several requests before the
+    /// frame runs collapse into one.
+    pub fn request_immediate_frame(&self) {
+        #[cfg(any(test, feature = "test-support"))]
+        self.immediate_frame_requests
+            .set(self.immediate_frame_requests.get() + 1);
+        self.platform_window.request_immediate_frame();
+    }
+
+    /// How many times [`Self::request_immediate_frame`] was called.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn immediate_frame_requests(&self) -> usize {
+        self.immediate_frame_requests.get()
     }
 
     /// Close this window.
@@ -2830,7 +2878,12 @@ impl Window {
         // Drain unconditionally so a stale first-invalidation timestamp can't
         // leak into a later frame across enable/disable of frame tracing.
         let frame_dirty = self.invalidator.take_frame_dirty();
+        self.frame_stats.start(Instant::now());
         let draw_started_at = profiler::frame_trace_enabled().then(Instant::now);
+        let observer = crate::frame_observer();
+        if let Some(observer) = observer {
+            observer(crate::FrameStage::DrawStart, Instant::now());
+        }
 
         // Set up the per-App arena for element allocation during this draw.
         // This ensures that multiple test Apps have isolated arenas.
@@ -2862,6 +2915,7 @@ impl Window {
         if !cx.mode.skip_drawing() {
             self.draw_roots(cx);
         }
+        self.frame_stats.a11y_done = Some(Instant::now());
         self.dirty_views.clear();
         self.next_frame.window_active = self.active.get();
 
@@ -2937,6 +2991,10 @@ impl Window {
             self.refresh();
         }
         self.needs_present.set(true);
+        self.last_frame_stats = self.frame_stats.snapshot(Instant::now());
+        if let Some(observer) = observer {
+            observer(crate::FrameStage::DrawEnd, Instant::now());
+        }
 
         if let Some(draw_start) = draw_started_at {
             profiler::record_frame_timing(profiler::FrameTiming {
@@ -2949,6 +3007,28 @@ impl Window {
         }
 
         ArenaClearNeeded::new(&cx.element_arena)
+    }
+
+    /// DIRI PATCH (frame statistics): behave as if assistive technology were
+    /// attached (`true`) or detached, from the next frame on.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_accessibility_active_for_test(&mut self, active: bool) {
+        self.a11y.set_active_for_test(active);
+        self.refresh();
+    }
+
+    /// DIRI PATCH (frame statistics): the last finished frame.
+    pub fn last_frame_stats(&self) -> crate::FrameStats {
+        self.last_frame_stats
+    }
+
+    /// DIRI PATCH (frame statistics): the frame being drawn, up to now. Its
+    /// unfinished phase runs to the call. Outside a draw, the last frame.
+    pub fn frame_stats_so_far(&self) -> crate::FrameStats {
+        if self.invalidator.phase() == DrawPhase::None {
+            return self.last_frame_stats;
+        }
+        self.frame_stats.snapshot(Instant::now())
     }
 
     fn record_entities_accessed(&mut self, cx: &mut App) {
@@ -3005,6 +3085,7 @@ impl Window {
         self.tooltip_bounds.take();
 
         self.a11y.sync_active_flag();
+        self.frame_stats.a11y_active = self.a11y.is_active();
         if self.a11y.is_active() {
             self.a11y.begin_frame();
         }
@@ -3033,6 +3114,7 @@ impl Window {
         let scale_factor = self.scale_factor();
         let mut root_element = self.root.as_ref().unwrap().clone().into_any_element();
         let root_layout_id = root_element.request_layout(self, cx);
+        self.frame_stats.laid_out = Some(Instant::now());
         self.layout_engine
             .as_mut()
             .unwrap()
@@ -3068,6 +3150,7 @@ impl Window {
         }
 
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+        self.frame_stats.prepainted = Some(Instant::now());
 
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
@@ -3088,6 +3171,7 @@ impl Window {
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector_hitbox(cx);
+        self.frame_stats.painted = Some(Instant::now());
 
         // a11y may have been activated/deactivated halfway through the frame
         let a11y_active_start_of_frame = self.a11y.is_active();

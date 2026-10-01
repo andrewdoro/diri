@@ -2,7 +2,7 @@
   "_notice": "Screen-detection predicates adapted from the herdr project (https://github.com/herdrdev/herdr, src/detect/manifests/*.toml), licensed Apache-2.0. Translated from herdr's TOML rule schema into Dirijor's JSON predicate schema and re-prioritised for this engine; the agent capability block is Dirijor's own.",
   "schemaVersion": 2,
   "id": "copilot",
-  "version": "2026.07.31.1",
+  "version": "2026.10.01.1",
   "statusModel": "full",
   "agent": {
     "id": "copilot",
@@ -35,14 +35,38 @@
     "envScrubPrefixes": [
       "DIRI_",
       "DIRIJOR_"
-    ]
+    ],
+    "approve": {
+      "text": "",
+      "submit": true
+    }
   },
   "rules": [
+    {
+      "id": "login-account-picker",
+      "state": "blockedQuestion",
+      "priority": 310,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 6,
+      "when": {
+        "all": [
+          {
+            "contains": "What account do you want to log into?"
+          },
+          {
+            "contains": "enter to select"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ]
+    },
     {
       "id": "blocked-confirm-dialog",
       "state": "blockedPermission",
       "priority": 300,
-      "region": "whole_recent",
+      "region": "bottom_non_empty_lines",
       "when": {
         "all": [
           {
@@ -80,13 +104,14 @@
         "region": "bottom_non_empty_lines",
         "regionLines": 12,
         "maxChars": 400
-      }
+      },
+      "regionLines": 3
     },
     {
       "id": "working-cancel-hint",
       "state": "working",
       "priority": 100,
-      "region": "whole_recent",
+      "region": "bottom_non_empty_lines",
       "when": {
         "any": [
           {
@@ -100,9 +125,31 @@
           },
           {
             "contains": "esc interrupt"
+          },
+          {
+            "contains": "esc edit prompt"
+          }
+        ]
+      },
+      "regionLines": 3
+    },
+    {
+      "id": "idle-footer",
+      "state": "idle",
+      "priority": 50,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 3,
+      "when": {
+        "all": [
+          {
+            "contains": "/ commands"
+          },
+          {
+            "contains": "? help"
           }
         ]
       }
     }
-  ]
+  ],
+  "_statusNotice": "Verified with Copilot CLI 1.0.90 in tests/copilot_real.rs. Activity and idle hints live below the composer; dialog hints are scoped to the bottom to avoid matching old transcript text."
 }

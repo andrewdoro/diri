@@ -542,7 +542,6 @@ impl UtilitySurfaces {
             usage_chart::series_range(&self.chart_visible_series(providers, target_days, end));
         if reduce {
             self.usage_chart_window.snap(target_days, target_range);
-            self.usage_chart_tick = None;
         } else {
             self.usage_chart_window
                 .begin(current_days, target_days, current_range, target_range);
@@ -599,7 +598,6 @@ impl UtilitySurfaces {
             usage_chart::series_range(&self.chart_visible_series(&providers, current_days, end));
         if reduce {
             self.usage_chart_window.snap(current_days, target_range);
-            self.usage_chart_tick = None;
         } else {
             self.usage_chart_window
                 .begin(current_days, current_days, current_range, target_range);
@@ -624,7 +622,6 @@ impl UtilitySurfaces {
             usage_chart::series_range(&self.chart_visible_series(&providers, current_days, end));
         if reduce {
             self.usage_chart_window.snap(current_days, target_range);
-            self.usage_chart_tick = None;
         } else {
             self.usage_chart_window
                 .begin(current_days, current_days, current_range, target_range);
@@ -667,7 +664,6 @@ impl UtilitySurfaces {
             usage_chart::series_range(&self.chart_visible_series(&providers, current_days, end));
         if reduce {
             self.usage_chart_window.snap(current_days, target_range);
-            self.usage_chart_tick = None;
         } else {
             self.usage_chart_window
                 .begin(current_days, current_days, current_range, target_range);
@@ -1488,28 +1484,25 @@ impl UtilitySurfaces {
             )
     }
 
+    /// Keeps frames coming while the chart window or a number flow is
+    /// moving. Both are sampled from elapsed time, so the display link paces
+    /// them (120 Hz on ProMotion) instead of a 16 ms timer that beat against
+    /// vsync; the chain lapses on the frame where both have landed.
     pub(super) fn ensure_chart_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.usage_chart_tick.is_some() {
+        if self.usage_chart_frame_pending {
             return;
         }
-        self.usage_chart_tick = Some(cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let done = crate::floating::update_in_owner(&this, cx, |this, _, cx| {
-                    cx.notify();
-                    this.usage_chart_window.finished() && !this.usage_numbers.running()
-                })
-                .unwrap_or(true);
-                if done {
-                    let _ = crate::floating::update_in_owner(&this, cx, |this, _, _| {
-                        this.usage_chart_tick = None
-                    });
-                    break;
+        self.usage_chart_frame_pending = true;
+        let this = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            let _ = this.update(cx, |this, cx| {
+                this.usage_chart_frame_pending = false;
+                cx.notify();
+                if !this.usage_chart_window.finished() || this.usage_numbers.running() {
+                    this.ensure_chart_tick(window, cx);
                 }
-            }
-        }));
+            });
+        });
     }
 
     fn usage_chart(

@@ -78,6 +78,7 @@ impl WorkspaceStore {
                     ));
                 }
                 mutate(&mut next, params.mutation, sessions, project_agent)?;
+                reclaim_unavailable_tabs(&mut next, sessions);
                 tree::repair(&mut next);
                 validate(&next)?;
                 next.revision = next
@@ -167,7 +168,10 @@ fn validate(state: &WorkspaceSnapshot) -> Result<(), ControlError> {
     if state.workspaces.len() > MAX_WORKSPACES
         || state.workspaces.iter().map(|w| w.tabs.len()).sum::<usize>() > MAX_WORKSPACE_TABS
     {
-        return Err(invalid("workspace or tab count exceeds the limit"));
+        return Err(ControlError::new(
+            "workspace_limit_reached",
+            "workspace or tab count exceeds the limit",
+        ));
     }
     let mut seen = HashSet::new();
     let mut project_ids = HashSet::new();
@@ -291,6 +295,34 @@ fn existing(session: &SessionId, sessions: &HashSet<SessionId>) -> Result<(), Co
             "workspace_session_unavailable",
             "the session is absent from the Engine inventory",
         ))
+    }
+}
+/// A placement outlives its deleted session and stays visible as unavailable.
+/// Nothing removes those tabs, so a long-used install fills the tab limit with
+/// them and then rejects every new placement (opening an agent, or placing a
+/// spawned child). Only when an edit would exceed the limit are the tabs whose
+/// every pane is unavailable dropped; this runs after the edit, so it can still
+/// target them. A split that keeps one live pane is never dropped.
+///
+/// The inventory was read before the file lock, but the revision check makes
+/// that sound: a session created after the read can only be placed by an edit
+/// that commits first, and that commit rejects this edit's expected revision.
+fn reclaim_unavailable_tabs(state: &mut WorkspaceSnapshot, sessions: &HashSet<SessionId>) {
+    fn available(node: &LayoutNode, sessions: &HashSet<SessionId>) -> bool {
+        match node {
+            LayoutNode::Pane { session_id, .. } => sessions.contains(session_id),
+            LayoutNode::Split { first, second, .. } => {
+                available(first, sessions) || available(second, sessions)
+            }
+        }
+    }
+    if state.workspaces.iter().map(|w| w.tabs.len()).sum::<usize>() <= MAX_WORKSPACE_TABS {
+        return;
+    }
+    for workspace in &mut state.workspaces {
+        workspace
+            .tabs
+            .retain(|tab| available(&tab.layout, sessions));
     }
 }
 fn require_pane(tab: &WorkspaceTab, id: &PaneId) -> Result<(), ControlError> {

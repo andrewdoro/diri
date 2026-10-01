@@ -79,6 +79,20 @@ pub fn enumerate_in(table: &ProcessTable, root: i32) -> Vec<HolderProcessSample>
     walk(&table.0, vec![root])
 }
 
+/// Whether `pid` has at least one live direct child.
+///
+/// A foreground group alone cannot tell "the shell is running a command"
+/// from "the shell is idle": a non-interactive `fish -c` or `sh -c` runs the
+/// command in the shell's own process group, so the shell's pid is the
+/// foreground group either way. A child process is the tie-breaker.
+pub fn has_children(pid: i32) -> bool {
+    pid > 1
+        && ProcessTable::capture()
+            .0
+            .iter()
+            .any(|process| process.ppid == pid)
+}
+
 /// Children transitively, plus every member of any process group a visited
 /// process belongs to, starting from `seeds`. The holder itself is excluded.
 fn walk(all: &[Observed], seeds: Vec<i32>) -> Vec<HolderProcessSample> {
@@ -214,10 +228,18 @@ pub fn kill_stragglers(leader: i32, frozen: &[HolderProcessSample]) -> Vec<Holde
     killed
 }
 
-/// SIGTERM the tree (waking stopped members with SIGCONT so the TERM is
-/// deliverable), give it half a second, then SIGKILL whatever survived.
+/// Hang up and SIGTERM the tree (waking stopped members with SIGCONT so both
+/// are deliverable), give it half a second, then SIGKILL whatever survived.
+///
+/// The hangup is what closing a terminal sends, and it is the signal the
+/// usual session leader actually obeys: every local session runs under an
+/// interactive shell (`$SHELL -l`, or the `-i -l -c` wrapper that returns an
+/// agent to a prompt), and interactive zsh and bash ignore SIGTERM. With
+/// SIGTERM alone the leader outlived every grace and each close waited the
+/// full half second for the SIGKILL.
 pub fn kill_tree(root: i32) {
     let mut tree = enumerate(root);
+    let _ = signal(root, libc::SIGHUP);
     let _ = signal(root, libc::SIGTERM);
     let _ = signal(root, libc::SIGCONT);
 

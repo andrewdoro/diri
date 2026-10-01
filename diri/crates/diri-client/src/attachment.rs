@@ -197,7 +197,7 @@ impl SessionPreview {
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "preview handshake timed out"))??;
         let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let (chunk_tx, receiver) = mpsc::channel(1);
-        let task = tokio::spawn(run_connection(stream, command_rx, chunk_tx, false));
+        let task = tokio::spawn(run_connection(stream, command_rx, chunk_tx, None));
         Ok(Self {
             session_id,
             _commands: commands,
@@ -353,7 +353,7 @@ impl SessionAttachment {
     ) -> Result<Self, AttachmentError> {
         let request = AttachRequest {
             enhanced_keyboard: options.enhanced_keyboard,
-            attach: session_id,
+            attach: session_id.clone(),
             from_offset: None,
             token: None,
             role: ClientRole::Desktop,
@@ -368,7 +368,12 @@ impl SessionAttachment {
         // backpressure only the attach writer instead of growing client memory
         // without limit.
         let (chunk_tx, chunk_rx) = mpsc::channel(CHUNK_QUEUE_CAPACITY);
-        let task = tokio::spawn(run_connection(stream, command_rx, chunk_tx, true));
+        let task = tokio::spawn(run_connection(
+            stream,
+            command_rx,
+            chunk_tx,
+            Some(session_id),
+        ));
 
         Ok(Self {
             commands: command_tx,
@@ -470,12 +475,33 @@ enum Command {
     Close,
 }
 
+/// Runs one data connection; `true` when it ended at a queued `Close`.
+/// An interactive attachment records why any other ending happened.
 async fn run_connection(
+    stream: UnixStream,
+    commands: mpsc::Receiver<Command>,
+    chunks: mpsc::Sender<TerminalChunk>,
+    attached: Option<SessionId>,
+) -> bool {
+    let started = Instant::now();
+    let keepalive_enabled = attached.is_some();
+    let ended = serve_connection(stream, commands, chunks, keepalive_enabled).await;
+    match (ended, attached) {
+        (Ok(()), _) => true,
+        (Err(reason), Some(session)) => {
+            crate::telemetry::attachment_ended(&session, reason, started.elapsed());
+            false
+        }
+        (Err(_), None) => false,
+    }
+}
+
+async fn serve_connection(
     mut stream: UnixStream,
     mut commands: mpsc::Receiver<Command>,
     chunks: mpsc::Sender<TerminalChunk>,
     keepalive_enabled: bool,
-) -> bool {
+) -> Result<(), &'static str> {
     let mut codec = FrameCodec::new();
     let mut read_buffer = vec![0_u8; READ_BUFFER_BYTES];
     let mut last_received = Instant::now();
@@ -491,27 +517,28 @@ async fn run_connection(
     loop {
         tokio::select! {
             read = stream.read(&mut read_buffer) => {
-                let Ok(read) = read else { return false };
+                let Ok(read) = read else { return Err("read_error") };
                 if read == 0 {
-                    return false;
+                    return Err("eof");
                 }
                 last_received = Instant::now();
-                let Ok(frames) = codec.feed(&read_buffer[..read]) else { return false };
+                let Ok(frames) = codec.feed(&read_buffer[..read]) else { return Err("decode_error") };
                 for frame in frames {
-                    if process_incoming(frame, &mut stream, &chunks).await.is_err() {
-                        return false;
-                    }
+                    process_incoming(frame, &mut stream, &chunks, keepalive_enabled).await?;
                 }
             }
             command = commands.recv() => {
                 match command {
                     Some(Command::Frame(frame, _permit)) => {
                         if write_frame(&mut stream, &frame).await.is_err() {
-                            return false;
+                            return Err("write_error");
+                        }
+                        if frame.frame_type == FrameType::Input {
+                            crate::latency_trace::mark(crate::latency_trace::Hop::SocketWritten);
                         }
                     }
-                    Some(Command::Close) => return true,
-                    None => return false,
+                    Some(Command::Close) => return Ok(()),
+                    None => return Err("commands_closed"),
                 }
             }
             _ = async {
@@ -522,10 +549,10 @@ async fn run_connection(
             } => {
                 let idle = Instant::now().duration_since(last_received);
                 if idle >= DEAD_AFTER {
-                    return false;
+                    return Err("keepalive_timeout");
                 }
                 if idle >= PING_AFTER && write_frame(&mut stream, &Frame::ping()).await.is_err() {
-                    return false;
+                    return Err("write_error");
                 }
             }
         }
@@ -536,30 +563,43 @@ async fn process_incoming(
     frame: Frame,
     stream: &mut UnixStream,
     chunks: &mpsc::Sender<TerminalChunk>,
-) -> Result<(), ()> {
+    interactive: bool,
+) -> Result<(), &'static str> {
     match frame.frame_type {
         FrameType::Grid => {
-            let update = frame.grid_payload().map_err(|_| ())?.ok_or(())?;
+            let update = frame
+                .grid_payload()
+                .map_err(|_| "bad_grid")?
+                .ok_or("bad_grid")?;
+            if interactive {
+                crate::latency_trace::mark(crate::latency_trace::Hop::EchoDecoded);
+            }
             chunks
                 .send(TerminalChunk::Grid(update))
                 .await
-                .map_err(|_| ())?;
+                .map_err(|_| "receiver_closed")?;
         }
         FrameType::Modes => {
-            let (alt_screen, bracketed_paste, mouse) = frame.terminal_modes_payload().ok_or(())?;
+            let (alt_screen, bracketed_paste, mouse) =
+                frame.terminal_modes_payload().ok_or("bad_modes")?;
             chunks
                 .send(TerminalChunk::Modes {
-                    keyboard: frame.keyboard_state_payload().map_err(|_| ())?,
+                    keyboard: frame.keyboard_state_payload().map_err(|_| "bad_modes")?,
                     alt_screen,
                     bracketed_paste,
                     mouse,
                     secret_input: frame.secret_input_payload().unwrap_or(false),
                 })
                 .await
-                .map_err(|_| ())?;
+                .map_err(|_| "receiver_closed")?;
         }
-        FrameType::Ping => write_frame(stream, &Frame::pong()).await.map_err(|_| ())?,
-        FrameType::Pong => chunks.send(TerminalChunk::Pong).await.map_err(|_| ())?,
+        FrameType::Ping => write_frame(stream, &Frame::pong())
+            .await
+            .map_err(|_| "write_error")?,
+        FrameType::Pong => chunks
+            .send(TerminalChunk::Pong)
+            .await
+            .map_err(|_| "receiver_closed")?,
         // These byte-replay frames belong to the retired VT-parsing client.
         FrameType::Output | FrameType::ReplayBegin | FrameType::ReplayEnd => {}
         // The daemon does not send client-to-daemon frame types.
@@ -856,6 +896,7 @@ mod tests {
             Frame::modes_with_bracketed_paste(true, true, mouse),
             &mut stream,
             &tx,
+            false,
         )
         .await
         .expect("valid modes frame");
@@ -877,6 +918,7 @@ mod tests {
                 .with_secret_input(true),
             &mut stream,
             &tx,
+            false,
         )
         .await
         .expect("valid modes frame");
@@ -1133,6 +1175,8 @@ mod tests {
             host: None,
             account_profile_id: None,
             same_repo_as: None,
+            start_directory: None,
+            note_id: None,
         };
         let session: SessionRecord = control.request(Method::SESSION_SPAWN, &spawn).await?;
         let session_id = session.id;

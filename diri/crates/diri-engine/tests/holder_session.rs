@@ -331,6 +331,11 @@ fn record(id: &str) -> diri_proto::SessionRecord {
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        terminal_cwd: None,
+        note_id: None,
+        foreground_ports: None,
+        terminal_progress: None,
+        scheduled_run: None,
     }
 }
 
@@ -484,13 +489,25 @@ fn completed_terminal_survives_engine_replacement() {
         .spawn(
             shell_spec(
                 id,
-                "printf 'retained line\\n'; printf 'final prompt'; exit 3",
+                // The child stays until it is told to go. A run is retained
+                // only if the launch handshake bound it to the Holder's
+                // verified child, and a child that exits inside that
+                // handshake is legitimately unbound and unpublished: on a
+                // loaded runner an instant `exit 3` lost that race and this
+                // test then waited for a publication that was never due.
+                "printf 'retained line\\n'; printf 'final prompt'; read _; exit 3",
                 &logs,
                 Some(holder.clone()),
             ),
             record.clone(),
         )
         .expect("spawn held");
+    let session = registry.get(id).expect("the spawned session");
+    assert!(
+        session.holder_run().is_some(),
+        "a live held child is bound to its Holder run at launch"
+    );
+    session.write_input(b"\n").expect("release the child");
     let mut published = HashMap::new();
     let mut publications = Vec::new();
     wait_until(
@@ -677,4 +694,76 @@ fn local_reset_survives_engine_replacement() {
     );
     assert!(!screen(&restored).contains("before reset"));
     restored.terminate(id, Duration::from_millis(500)).unwrap();
+}
+
+#[test]
+fn a_resumed_session_never_shows_the_previous_childs_output() {
+    let root = holders_dir("resume");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let engine = engine();
+
+    // The previous child dies mid-repaint: alt screen, mouse reporting, and a
+    // spinner frame left on screen, no reset — a killed Claude Code.
+    let first = Session::spawn(
+        shell_spec(
+            "s_resume",
+            "printf 'OLD-BANNER\\033[?1049h\\033[?1000h\\033[H\\033[5BOLD-SPINNER'; exit 0",
+            &logs,
+            Some(holder.clone()),
+        ),
+        Arc::clone(&engine),
+    )
+    .expect("first incarnation");
+    wait_until("first incarnation exits", Duration::from_secs(5), || {
+        first.view().exited
+    });
+    drop(first);
+    assert!(log_contains(&logs, "s_resume", b"OLD-SPINNER"));
+
+    // Resume reuses the session id, so the new holder appends to the same
+    // log. The new child is slow to draw, like an agent loading history.
+    let resumed = Session::spawn(
+        shell_spec(
+            "s_resume",
+            "sleep 0.5; printf 'NEW-CHILD'; exec cat",
+            &logs,
+            Some(holder.clone()),
+        ),
+        engine,
+    )
+    .expect("resume");
+    let shows_old = |session: &Session| {
+        session
+            .screen_lines()
+            .iter()
+            .any(|line| line.contains("OLD-"))
+    };
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        assert!(
+            !shows_old(&resumed),
+            "the dead child's frames painted the resumed screen: {:?}",
+            resumed.screen_lines()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    wait_until("new child draws", Duration::from_secs(5), || {
+        resumed
+            .screen_lines()
+            .iter()
+            .any(|line| line.contains("NEW-CHILD"))
+    });
+    assert!(!shows_old(&resumed), "{:?}", resumed.screen_lines());
+    let (alt_screen, _, mouse) = resumed.modes();
+    assert!(
+        !alt_screen,
+        "the dead child's alt screen does not carry over"
+    );
+    assert_eq!(mouse, Default::default(), "nor its mouse reporting");
+
+    let mut resumed = resumed;
+    resumed
+        .terminate(Duration::from_secs(2))
+        .expect("terminate");
 }

@@ -299,3 +299,71 @@ fn nested_cached_view_still_rerenders_when_it_must(cx: &mut TestAppContext) {
     assert_eq!(counters.leaf_renders.get(), renders + 3);
     assert_leaf_live(cx, &counters, "after refresh");
 }
+
+/// Diri's vendored-GPUI scene patch: one huge frame must not pin its peak
+/// primitive storage forever, and steady frames must never reallocate.
+#[test]
+fn a_scene_gives_back_capacity_a_single_large_frame_left_behind() {
+    let quad = gpui::Quad::default();
+    let mut scene = gpui::Scene::default();
+    scene.quads.extend(std::iter::repeat_n(quad, 50_000));
+    scene.clear();
+    let peak = scene.quads.capacity();
+    assert!(peak >= 50_000);
+
+    // Steady large frames keep their storage.
+    for _ in 0..300 {
+        scene.quads.extend(std::iter::repeat_n(quad, 40_000));
+        scene.clear();
+    }
+    assert_eq!(scene.quads.capacity(), peak);
+
+    // A long run of small frames eventually releases it.
+    for _ in 0..119 {
+        scene.quads.extend(std::iter::repeat_n(quad, 10));
+        scene.clear();
+    }
+    assert_eq!(
+        scene.quads.capacity(),
+        peak,
+        "not before two seconds of sparse frames"
+    );
+    scene.quads.extend(std::iter::repeat_n(quad, 10));
+    scene.clear();
+    assert!(
+        scene.quads.capacity() <= 64,
+        "shrunk to about twice the last frame"
+    );
+}
+
+/// Diri's vendored-GPUI sprite sort must order sprites exactly as the stable
+/// sort it replaced: by key, ties kept in the order they were painted. Sprites
+/// sharing an order and a tile are indistinguishable on screen only if they
+/// stay put, so ties are checked by payload.
+#[test]
+fn the_sprite_sort_matches_a_stable_sort_by_key() {
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for len in [0usize, 1, 5, 31, 32, 33, 100, 1_000, 20_000] {
+        for distinct in [1u64, 3, 40, 1 << 40] {
+            let items: Vec<(u64, usize)> =
+                (0..len).map(|index| (next() % distinct, index)).collect();
+            let mut expected = items.clone();
+            expected.sort_by_key(|item| item.0);
+            let mut sorted = items.clone();
+            gpui::sort_sprites_for_test(&mut sorted, |item| item.0);
+            assert_eq!(sorted, expected, "len {len}, {distinct} distinct keys");
+        }
+        // Already in order: nothing moves.
+        let mut ordered: Vec<(u64, usize)> =
+            (0..len).map(|index| (index as u64 / 3, index)).collect();
+        let expected = ordered.clone();
+        gpui::sort_sprites_for_test(&mut ordered, |item| item.0);
+        assert_eq!(ordered, expected);
+    }
+}

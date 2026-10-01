@@ -237,6 +237,7 @@ fn method_name_set_is_complete() {
         Method::SESSION_READ_SCROLLBACK_CELLS,
         Method::SESSION_READ_DIFF,
         Method::SESSION_MARK_SEEN,
+        Method::SESSION_MARK_UNREAD,
         Method::SESSION_HIBERNATE,
         Method::SESSION_WAKE,
         Method::SESSION_ARCHIVE,
@@ -261,7 +262,7 @@ fn method_name_set_is_complete() {
         Method::DAEMON_SHUTDOWN_IF_IDLE,
         Method::DAEMON_SHUTDOWN,
     ];
-    assert_eq!(methods.len(), 37);
+    assert_eq!(methods.len(), 38);
     assert_eq!(methods[0], "hello");
     assert_eq!(methods.last().copied(), Some("daemon.shutdown"));
 }

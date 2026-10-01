@@ -5,6 +5,7 @@ mod prefs;
 mod projection;
 mod residency;
 mod window_navigation;
+mod work_items;
 mod workspace_spawn;
 mod workspaces;
 
@@ -36,12 +37,13 @@ use crate::switcher::{
 };
 
 pub use prefs::{
-    InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
+    FileEditor, InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
     WindowMaterial, WindowMode, WindowPlacement,
 };
 pub use projection::{SidebarProject, SidebarProjection, SidebarRow};
 pub use residency::{ResidencyUpdate, TerminalResidency};
 pub(crate) use window_navigation::{WindowAction, WindowStore, WindowWrite};
+pub use work_items::WorkLink;
 pub use workspace_spawn::{
     SpawnDestination, SpawnOwner, WindowSpawnTarget, WorkspaceSpawnReceipt, WorkspaceSpawnState,
     WorkspaceSpawnTarget,
@@ -72,6 +74,10 @@ const UI_PUBLISH_INTERVAL: Duration = Duration::from_millis(50);
 // that, repeated Refresh clicks would queue daemon-side scans that each hold a
 // thread behind the same per-target single-flight lock.
 const MAX_AGENT_CATALOG_SCANS: u32 = 2;
+/// Repository lookups on the wire at once. Each can sit on an unreachable host
+/// until the client's timeout, and reopening the launcher asks again, so the
+/// rest wait for a permit instead of piling onto the daemon.
+const MAX_REPO_LOOKUPS: usize = 4;
 
 // A started install is watched for ten minutes: long enough for a slow
 // download, short enough that a closed installer tab stops costing scans.
@@ -155,6 +161,7 @@ pub enum StoreEffect {
     /// rebuilds while hidden, so opening it asks for a current snapshot.
     PublishSnapshot,
     MarkSeen(SessionId),
+    MarkUnread(SessionId),
     Remove(SessionId),
     Resume {
         id: SessionId,
@@ -167,6 +174,13 @@ pub enum StoreEffect {
         title: String,
     },
     Spawn(SessionSpawnParams),
+    /// An agent started from a note's to-do: spawned without selecting it,
+    /// its id linked back into the to-do (see `work_items`).
+    StartWorkItem {
+        ticket: u64,
+        params: SessionSpawnParams,
+        link: WorkLink,
+    },
     /// Read herdr's saved sessions off the main thread.
     ScanHerdr {
         tracked: HashSet<String>,
@@ -380,11 +394,15 @@ pub struct SessionStore {
     sessions: HashMap<SessionId, Arc<SessionRecord>>,
     auxiliary_slots: HashMap<(SessionId, usize), SessionId>,
     auxiliary_pending: HashSet<(SessionId, usize)>,
+    work_items: work_items::WorkItems,
     projects: HashMap<ProjectId, Project>,
     /// Projects in the order the Engine first saw them. Its list is
     /// append-only, which makes this the one order here that never reshuffles.
     project_seniority: Vec<ProjectId>,
     selected_session_id: Option<SessionId>,
+    /// The local terminal most recently focused, whose directory a new
+    /// terminal can start in.
+    last_terminal: Option<SessionId>,
     sidebar_selection: HashSet<SessionId>,
     pending_close: Option<PendingClose>,
     /// Sessions with a `session.remove` in flight. The daemon terminates the
@@ -413,6 +431,9 @@ pub struct SessionStore {
     window_navigation_enabled: bool,
     focused_window_session: Option<SessionId>,
     notification_surface_visible: bool,
+    /// Sessions the user marked unread. Only opening one again reads it:
+    /// app or window activation leaves it unread even while it is visible.
+    unread_holds: HashSet<SessionId>,
     last_action_failure: Option<ActionFailure>,
     sidebar_selection_anchor: Option<SessionId>,
     mru_order: Vec<SessionId>,
@@ -501,9 +522,11 @@ impl SessionStore {
                 sessions: HashMap::new(),
                 auxiliary_slots: HashMap::new(),
                 auxiliary_pending: HashSet::new(),
+                work_items: work_items::WorkItems::default(),
                 projects: HashMap::new(),
                 project_seniority: Vec::new(),
                 selected_session_id: selected_session_id.clone(),
+                last_terminal: None,
                 sidebar_selection: HashSet::new(),
                 pending_close: None,
                 closing: HashSet::new(),
@@ -523,6 +546,7 @@ impl SessionStore {
                 window_navigation_enabled: false,
                 focused_window_session: None,
                 notification_surface_visible: true,
+                unread_holds: HashSet::new(),
                 last_action_failure: None,
                 sidebar_selection_anchor: None,
                 mru_order: selected_session_id.into_iter().collect(),
@@ -567,8 +591,33 @@ impl SessionStore {
         let known = self.sessions.get(&event.session_id).is_some_and(|session| {
             !session.is_archived() && session.created_at == event.session_created_at
         });
-        let fresh = (now_millis().0 - event.occurred_at.0).abs() <= MAX_AGE_MS;
-        known && fresh && self.app_is_active && self.terminal_clipboard.send(event.text).is_ok()
+        let age_ms = now_millis().0 - event.occurred_at.0;
+        let fresh = age_ms.abs() <= MAX_AGE_MS;
+        let size = crate::telemetry::size_bucket(event.text.len());
+        let session = diri_telemetry::id(&event.session_id.0);
+        let accepted = known
+            && fresh
+            && self.app_is_active
+            && self.terminal_clipboard.send(event.text).is_ok();
+        diri_telemetry::event!(
+            "clipboard.copy",
+            source = "osc52",
+            outcome = if accepted {
+                "relayed"
+            } else if !known {
+                "unknown_session"
+            } else if !fresh {
+                "stale"
+            } else if !self.app_is_active {
+                "app_inactive"
+            } else {
+                "no_listener"
+            },
+            size = size,
+            age_ms = age_ms,
+            session = session
+        );
+        accepted
     }
 
     fn notification_change(&self, dismiss: Vec<String>) {
@@ -683,10 +732,44 @@ impl SessionStore {
         if visible
             && self.app_is_active
             && let Some(id) = self.notification_selected_session().cloned()
+            && !self.unread_holds.contains(&id)
+            && self.is_open(&id)
         {
             self.mark_notifications_read(&id);
             self.emit(StoreEffect::MarkSeen(id));
         }
+    }
+
+    /// Like marking a chat unread: the last completed turn reads "done ·
+    /// unseen" again, and stays so until the session is next opened.
+    pub fn mark_session_unread(&mut self, id: SessionId) {
+        if !self.sessions.contains_key(&id) {
+            return;
+        }
+        self.unread_holds.insert(id.clone());
+        self.emit(StoreEffect::MarkUnread(id));
+        self.emit(StoreEffect::UiChanged);
+    }
+
+    pub fn mark_session_read(&mut self, id: SessionId) {
+        if !self.sessions.contains_key(&id) {
+            return;
+        }
+        self.unread_holds.remove(&id);
+        self.mark_notifications_read(&id);
+        self.emit(StoreEffect::MarkSeen(id));
+        self.emit(StoreEffect::UiChanged);
+    }
+
+    /// Whether activation may read `id` passively; see `unread_holds`.
+    pub(crate) fn reads_passively(&self, id: &SessionId) -> bool {
+        !self.unread_holds.contains(id)
+    }
+
+    /// Whether the Engine still knows `id`: a closing session is already
+    /// being removed, so marking it seen can only fail with `not_found`.
+    pub(crate) fn is_open(&self, id: &SessionId) -> bool {
+        self.sessions.contains_key(id) && !self.closing.contains(id)
     }
 
     fn notification_is_focused(&self, id: &SessionId) -> bool {
@@ -729,6 +812,9 @@ impl SessionStore {
     /// Installs the agent catalog fetched on connect.
     pub fn set_agent_catalog(&mut self, agents: AgentReadinessResult) {
         let local = agents.host.is_none();
+        if local {
+            crate::telemetry::agent_catalog_seen(self.agent_install.as_ref(), &agents);
+        }
         let key = agent_target_key(agents.host.as_deref());
         self.agent_catalog_errors.remove(&key);
         self.agents.insert(key, agents);
@@ -1652,6 +1738,12 @@ impl SessionStore {
                     self.refresh_workspaces();
                 }
             }
+            EventName::SESSION_REVEAL => {
+                if let Ok(p) = serde_json::from_value::<diri_proto::SessionIdParams>(event.params) {
+                    self.select(p.session_id);
+                }
+                return StoreEventChange::Model;
+            }
             EventName::SESSION_CLIPBOARD => {
                 if let Ok(event) =
                     serde_json::from_value::<diri_proto::SessionClipboardEvent>(event.params)
@@ -1693,6 +1785,7 @@ impl SessionStore {
                                     thread_identifier: Some(event.session_id.0),
                                     action_data: None,
                                     use_system_sound: false,
+                                    reply: false,
                                 }),
                             }));
                         }
@@ -1895,7 +1988,55 @@ impl SessionStore {
                     .as_ref()
                     .is_some_and(|request| self.should_deliver_notification(request))
             })
+            .map(|mut effect| {
+                if let Some(request) = effect.notification.as_mut() {
+                    request.reply = request.thread_identifier.as_ref().is_some_and(|id| {
+                        self.sessions
+                            .get(&SessionId::new(id.clone()))
+                            .is_some_and(|session| crate::notifications::accepts_reply(session))
+                    });
+                }
+                effect
+            })
             .collect()
+    }
+
+    /// A reply typed into a needs-input banner. Returns the command to type
+    /// it, or `None` after posting a notice when the session moved on; the
+    /// text itself never leaves this call except inside the command.
+    #[cfg(target_os = "macos")]
+    pub fn take_notification_reply(
+        &mut self,
+        notification_id: &str,
+        session_id: &SessionId,
+        text: String,
+    ) -> Option<SendTextCommand> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        let session = self.sessions.get(session_id).cloned();
+        let entry = self
+            .notification_feed
+            .entries()
+            .iter()
+            .find(|entry| entry.id == notification_id);
+        if let Some(refusal) =
+            crate::notifications::reply_refusal(entry, session_id, session.as_deref())
+        {
+            self.emit(StoreEffect::StatusTransition(
+                crate::notifications::reply_refused_transition(
+                    session.as_deref().map(|session| session.title.as_str()),
+                    refusal,
+                ),
+            ));
+            return None;
+        }
+        self.set_notification_read(notification_id, true);
+        Some(SendTextCommand {
+            session_id: session_id.clone(),
+            text,
+            submit: true,
+        })
     }
 
     pub fn remove_session_record(&mut self, id: &SessionId) {
@@ -2569,18 +2710,36 @@ impl SessionStore {
                 host: session.host.clone(),
                 account_profile_id: None,
                 same_repo_as: None,
+                start_directory: None,
+                note_id: None,
             },
         });
         true
     }
 
     pub fn spawn_kind(&mut self, kind: AgentKind, options: SpawnOptions) {
+        self.spawn_kind_adopting(kind, options, None);
+    }
+
+    /// Opens a notes file no Session claims as a note Session. The Engine
+    /// adopts by note id, so a repeat lands on the same Session.
+    pub fn open_note_file(&mut self, note_id: String, options: SpawnOptions) {
+        self.spawn_kind_adopting(AgentKind::NOTE, options, Some(note_id));
+    }
+
+    fn spawn_kind_adopting(
+        &mut self,
+        kind: AgentKind,
+        options: SpawnOptions,
+        note_id: Option<String>,
+    ) {
         let target = options
             .workspace_target
             .clone()
             .map(SpawnDestination::Workspace)
             .or_else(|| options.window_target.clone().map(SpawnDestination::Window));
-        let params = self.spawn_params(kind, options);
+        let mut params = self.spawn_params(kind, options);
+        params.note_id = note_id;
         if let Some(target) = target {
             self.request_workspace_spawn(target, params);
         } else {
@@ -2594,7 +2753,7 @@ impl SessionStore {
         kind: AgentKind,
         options: SpawnOptions,
     ) -> SessionSpawnParams {
-        let local_context = options
+        let source = options
             .workspace_target
             .as_ref()
             .and_then(|target| self.workspace_spawn_source(target))
@@ -2605,14 +2764,22 @@ impl SessionStore {
                     .and_then(|target| target.selected_session.as_ref())
                     .and_then(|id| self.sessions.get(id))
                     .map(Arc::as_ref)
-            })
-            .map(|session| {
-                if session.host.is_none() {
-                    session.cwd.clone()
-                } else {
-                    self.local_fallback_directory_for(Some(session))
-                }
             });
+        let followed = (kind == AgentKind::SHELL
+            && options.host.is_none()
+            && options.cwd.is_none()
+            && options.worktree.is_none()
+            && self.prefs.terminal_follows_last_directory)
+            .then(|| self.terminal_to_follow(source.or_else(|| self.selected_session())))
+            .flatten();
+        let start_directory = followed.and_then(|terminal| terminal.terminal_cwd.clone());
+        let local_context = followed.or(source).map(|session| {
+            if session.host.is_none() {
+                session.cwd.clone()
+            } else {
+                self.local_fallback_directory_for(Some(session))
+            }
+        });
         let host = options.host;
         let cwd = if let Some(host_id) = &host {
             // Remote spawn: local directories are meaningless — use the
@@ -2651,7 +2818,28 @@ impl SessionStore {
             host,
             account_profile_id: options.account_profile_id,
             same_repo_as: options.same_repo_as,
+            start_directory,
+            note_id: None,
         }
+    }
+
+    /// The terminal a new terminal starts beside: the focused one, else the
+    /// last one used in the same project, else, with nothing focused, the
+    /// last one used at all. It opens in that terminal's project and in the
+    /// directory it had `cd`'d to.
+    fn terminal_to_follow<'a>(
+        &'a self,
+        source: Option<&'a SessionRecord>,
+    ) -> Option<&'a SessionRecord> {
+        if let Some(source) = source.filter(|session| is_local_terminal(session)) {
+            return Some(source);
+        }
+        self.last_terminal
+            .as_ref()
+            .and_then(|id| self.sessions.get(id))
+            .map(Arc::as_ref)
+            .filter(|terminal| is_local_terminal(terminal) && !terminal.is_archived())
+            .filter(|terminal| source.is_none_or(|source| source.project_id == terminal.project_id))
     }
 
     pub fn reparent_worktree(&self, params: diri_proto::SessionReparentWorktreeParams) {
@@ -2742,6 +2930,8 @@ impl SessionStore {
         if active
             && self.notification_surface_visible
             && let Some(id) = self.notification_selected_session().cloned()
+            && !self.unread_holds.contains(&id)
+            && self.is_open(&id)
         {
             self.mark_notifications_read(&id);
             self.emit(StoreEffect::MarkSeen(id));
@@ -2752,6 +2942,14 @@ impl SessionStore {
     fn focus_session(&mut self, id: SessionId) {
         let selection_changed = self.selected_session_id.as_ref() != Some(&id);
         self.selected_session_id = Some(id.clone());
+        if self
+            .sessions
+            .get(&id)
+            .is_some_and(|session| is_local_terminal(session))
+        {
+            self.last_terminal = Some(id.clone());
+        }
+        self.unread_holds.remove(&id);
         if self.window_navigation_enabled {
             self.invalidate_projection();
             return;
@@ -3080,6 +3278,15 @@ impl StoreRuntime {
             action_tx,
             tasks: Mutex::new(Vec::new()),
         }
+    }
+
+    /// [`Self::inert`] talking to a private test Engine instead of the
+    /// default socket, which may be the user's real Engine.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn inert_with_client(client: Arc<DaemonClient>) -> Self {
+        let mut runtime = Self::inert();
+        runtime.client = client;
+        runtime
     }
 
     fn start_with_store(
@@ -3461,6 +3668,7 @@ async fn run_effects(
     resync_tx: mpsc::Sender<()>,
 ) {
     let mut workspace_tasks = tokio::task::JoinSet::new();
+    let repo_lookups = Arc::new(tokio::sync::Semaphore::new(MAX_REPO_LOOKUPS));
     loop {
         // Reap completed handles before admitting another effect, so a burst
         // of fast launches cannot retain an unbounded completed task set.
@@ -3507,6 +3715,7 @@ async fn run_effects(
                 Ok(())
             }
             StoreEffect::MarkSeen(id) => client.mark_seen(&id).await,
+            StoreEffect::MarkUnread(id) => client.mark_unread(&id).await,
             StoreEffect::Remove(id) => {
                 let result = client.remove(&id).await;
                 if let Err(error) = &result
@@ -3553,6 +3762,20 @@ async fn run_effects(
                 }
                 Err(error) => Err(error),
             },
+            StoreEffect::StartWorkItem {
+                ticket,
+                params,
+                link,
+            } => {
+                tokio::spawn(work_items::run(
+                    Arc::clone(&client),
+                    Arc::clone(&store),
+                    ticket,
+                    params,
+                    link,
+                ));
+                Ok(())
+            }
             StoreEffect::SpawnAuxiliary { params, slot } => {
                 let parent = params.parent.clone().expect("auxiliary parent");
                 let result = client.spawn(params).await;
@@ -3628,29 +3851,46 @@ async fn run_effects(
                 host,
                 session_id,
             } => {
-                let result = client
-                    .locate_repo(diri_proto::HostLocateRepoParams {
-                        host,
-                        origin_url: None,
-                        session_id: Some(session_id),
-                    })
-                    .await;
-                let target = match &result {
-                    Ok(found) => match (&found.path, &found.origin_url) {
-                        (Some(path), _) => RepoTarget::Resolved(path.clone()),
-                        (None, Some(_)) => RepoTarget::NotCloned,
-                        (None, None) => RepoTarget::NoOrigin,
-                    },
-                    // Resolution is best-effort UI sugar: fall back to the
-                    // default directory instead of surfacing an error.
-                    Err(_) => RepoTarget::NoOrigin,
-                };
-                let mut store = store.write().expect("session store lock poisoned");
-                if let Some((owner, generation)) = owner {
-                    store.finish_window_repo_target(owner, generation, key, target);
-                } else {
-                    store.set_repo_target(key, target);
-                }
+                // A read that mutates no session, and can take as long as a
+                // slow host does: it must not sit between a close and the
+                // daemon, so it leaves the serial loop like the listings below.
+                let client = Arc::clone(&client);
+                let store = Arc::clone(&store);
+                let change_tx = change_tx.clone();
+                let repo_lookups = Arc::clone(&repo_lookups);
+                tokio::spawn(async move {
+                    let Ok(_permit) = repo_lookups.acquire_owned().await else {
+                        return;
+                    };
+                    let result = client
+                        .locate_repo(diri_proto::HostLocateRepoParams {
+                            host,
+                            origin_url: None,
+                            session_id: Some(session_id.clone()),
+                        })
+                        .await;
+                    let target = match &result {
+                        Ok(found) => match (&found.path, &found.origin_url) {
+                            (Some(path), _) => RepoTarget::Resolved(path.clone()),
+                            (None, Some(_)) => RepoTarget::NotCloned,
+                            (None, None) => RepoTarget::NoOrigin,
+                        },
+                        // Resolution is best-effort UI sugar: fall back to the
+                        // default directory instead of surfacing an error.
+                        Err(_) => RepoTarget::NoOrigin,
+                    };
+                    let mut store = store.write().expect("session store lock poisoned");
+                    if let Some((owner, generation)) = owner {
+                        store.finish_window_repo_target(owner, generation, key, target);
+                    } else if store.repo_target_session.as_ref() == Some(&session_id) {
+                        // Lookups finish in any order now: one for a session
+                        // the launcher has since left must not land on top of
+                        // its successor's answer. Windows check a generation.
+                        store.set_repo_target(key, target);
+                    }
+                    drop(store);
+                    let _ = change_tx.send(());
+                });
                 Ok(())
             }
             StoreEffect::ListDirectories {
@@ -3869,7 +4109,9 @@ fn action_context(effect: &StoreEffect) -> Option<ActionContext> {
                 title: title.clone(),
             }),
         ),
-        StoreEffect::Spawn(_) => ("Create session failed", None),
+        StoreEffect::Spawn(_) | StoreEffect::StartWorkItem { .. } => {
+            ("Create session failed", None)
+        }
         StoreEffect::SpawnAuxiliary { .. } => ("Open terminal failed", None),
         StoreEffect::Migrate { .. } => ("Move session failed", None),
         StoreEffect::ReparentWorktree(_) => ("Move session to worktree failed", None),
@@ -3887,6 +4129,7 @@ fn action_context(effect: &StoreEffect) -> Option<ActionContext> {
         | StoreEffect::MutateWorkspace { .. }
         | StoreEffect::PublishSnapshot
         | StoreEffect::MarkSeen(_)
+        | StoreEffect::MarkUnread(_)
         | StoreEffect::RetryConnection
         | StoreEffect::LocateRepo { .. }
         | StoreEffect::ListDirectories { .. }
@@ -3912,3 +4155,8 @@ pub fn prefs_path_in_home(home: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests;
+
+/// A shell on this machine, whose live directory the Engine can read.
+fn is_local_terminal(session: &SessionRecord) -> bool {
+    session.kind == AgentKind::SHELL && session.host.is_none()
+}

@@ -58,7 +58,46 @@ fn tool_content(result: Result<Value, String>) -> Value {
         || serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned()),
         str::to_owned,
     );
+    // Typed results for clients that read structuredContent (MCP 2025-06-18);
+    // the text block stays for every other client.
+    if value.is_object() && !is_error {
+        return json!({"content":[{"type":"text","text":text}],"structuredContent":value,"isError":false});
+    }
     json!({"content":[{"type":"text","text":text}],"isError":is_error})
+}
+
+/// Claude Code keeps only the first 2048 characters of server instructions
+/// and silently drops the rest, so these only route: the detailed rules live
+/// in Diri's skills (`diri_proto::skills`), which Claude Code loads natively
+/// and every other agent reads with `get_skill`.
+#[cfg(test)]
+const INSTRUCTIONS_LIMIT: usize = 2048;
+
+fn instructions(browser: &str) -> String {
+    format!(
+        "This session runs INSIDE Diri, a desktop orchestrator for coding agents; these \
+         tools control it. Use them proactively, without asking, when the user wants to \
+         open/spawn/close an agent, session, tab, or terminal (Claude Code, Codex, Cursor, \
+         Gemini, shell), see or message other sessions, or parallelize across worktrees.\n\n\
+         Diri skills hold the detailed rules. Read the one that applies before acting: as \
+         the Claude Code skill diri:<name>, or with get_skill {{\"name\":\"<name>\"}}.\n\
+         - scheduling: anything to run later, at a time, or repeatedly. ALWAYS use \
+         diri:scheduling and schedule_agent, never the built-in schedule skill, \
+         CronCreate, /loop, reminders, or a sleeping shell; wake_mac:true wakes a \
+         sleeping Mac for the run.\n\
+         - notes: if whoami shows origin_note, read_note {{\"note\":\"origin\"}} first; it \
+         is your brief.\n\
+         - orchestration: parallel agents in worktrees, tasks you assign or receive, \
+         waiting, retries.\n\n\
+         To spawn an agent use its native kind (e.g. `claude`, `codex`; default your own) \
+         with the task as `prompt`. Never use `shell` to launch an agent CLI (`claude`, \
+         `codex`, ...): a child `shell` is a raw terminal in the parent's Cmd+J pane whose \
+         prompt runs as shell commands.\n\n\
+         A Diri task you receive: report_task acknowledged first, then completed/failed for \
+         that task_id after verifying (JSON matching result_schema if given), or blocked \
+         with your question. Delivery is at most once: reuse message_id/operation_id/\
+         request_id on retries, never resend under a new identity.{browser}"
+    )
 }
 
 fn initialize(params: &Value) -> Value {
@@ -76,30 +115,7 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": {"tools":{}},
         "serverInfo": {"name":"dirijor","version":"0.1.0"},
-        "instructions": format!(
-            "This session is running INSIDE Diri, a desktop orchestrator for coding agents. \
-             These tools control it. Use them proactively whenever the user asks to \
-             open/start/spawn/close another agent, session, tab, or terminal (Claude Code, \
-             Codex, Cursor, Gemini, or a shell), to check what other sessions are doing, to \
-             talk to another session, or to parallelize work across git worktrees — no \
-             extra confirmation of intent needed.\n\nAgent vs terminal rule: when asked to spawn \
-             another agent, select that agent's native kind (for example `claude` or `codex`) \
-             and pass its task as `prompt`. If no agent is named, use your own native kind when \
-             it is available. Never use `shell` to launch an agent CLI such as `claude`, \
-             `codex`, `cursor`, or `gemini`. A child `shell` is an interactive terminal shown \
-             in the parent's Cmd+J pane, and its prompt is executed as shell commands; use it \
-             only when the user explicitly wants a terminal or raw commands.\n\nFor delegated work needing reliable completion, spawn_agent without an initial prompt, then submit_task, wait_for_task, and inspect its result. When receiving a Diri task, call report_task acknowledged before starting and report_task completed or failed for that exact task_id after verification. These are explicit Agent reports, not automated proof that the work is correct.\n\nFor untracked interaction: spawn_agent \
-             (optionally worktree:true and an initial prompt) → wait_for_agent(until:\"done\") \
-             → read_output → send_prompt for follow-ups → release_agent when finished. \
-             Messages are delivered at most once. Reuse message_id on retries; never send a new copy because the agent is slow or its screen has not changed. Inspect unknown delivery outcomes. A delivery receipt does not mean the agent finished. Waits observe current status and may return immediately; verify output for the submitted task before treating it as completed. \
-             get_artifacts returns PR/Linear/preview URLs and listening ports a session has \
-             produced; PR entries include live GitHub status (state, review decision, checks, \
-             comment counts, +/- lines). Quick Open skips hidden folders unless they match \
-             ~/.diri-include. When the user wants extra folders in Cmd+P (for example \
-             `.worktrees`), use get_quick_open_include and add_quick_open_include with \
-             gitignore-style patterns such as `**/.worktrees/`. set_quick_open_include \
-             replaces or clears the list.{browser}"
-        )
+        "instructions": instructions(browser),
     })
 }
 
@@ -169,6 +185,28 @@ fn main() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn instructions_fit_the_client_cap_and_route_to_every_skill() {
+        let longest = instructions(
+            " To test a web feature, use test_run with a preview URL from get_artifacts.",
+        );
+        assert!(
+            longest.chars().count() <= INSTRUCTIONS_LIMIT,
+            "{} chars: Claude Code drops everything past {INSTRUCTIONS_LIMIT}",
+            longest.chars().count()
+        );
+        for skill in diri_proto::skills::ALL {
+            assert!(
+                longest.contains(&format!("- {}:", skill.name)),
+                "instructions must route to {}",
+                skill.name
+            );
+        }
+        assert!(longest.find("schedule_agent").unwrap() < 1024);
+        assert!(longest.contains("wake_mac"));
+        assert!(longest.contains("get_skill"));
+    }
+
     struct Fake;
 
     impl ToolBackend for Fake {
@@ -216,5 +254,31 @@ mod tests {
         assert!(instructions.contains("native kind"));
         assert!(instructions.contains("Never use `shell` to launch an agent CLI"));
         assert!(instructions.contains("Cmd+J"));
+    }
+
+    #[test]
+    fn the_notes_skill_teaches_the_whole_contract() {
+        // The contract moved out of the instructions, which Claude Code cut
+        // before it ever arrived; the kept prefix routes to the skill.
+        let initialized = initialize(&json!({}));
+        let routing = initialized["instructions"].as_str().expect("instructions");
+        assert!(routing.contains("- notes:") && routing.contains("origin_note"));
+        let instructions = diri_proto::skills::NOTES.markdown;
+        for step in [
+            "read it first with read_note {\"note\":\"origin\"}",
+            "a decision, a finding, a blocker, a result, a link",
+            "no progress chatter",
+            "Prefer adding",
+            "Never silently delete the person's writing",
+            "edit_note",
+            "replace_section",
+            "Tick your own sub-tasks",
+            "the person reviews your work and ticks it",
+            "Finish with a one-paragraph result",
+            "create_note",
+            "open:true",
+        ] {
+            assert!(instructions.contains(step), "missing: {step}");
+        }
     }
 }

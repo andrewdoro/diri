@@ -135,7 +135,7 @@ impl ClientCore {
     /// IF YOU ADD AN EVENT KIND THAT DIRI NEEDS, ADD IT HERE TOO. Server-side
     /// filtering means an unlisted kind never reaches `route_message`, and the
     /// symptom is silence, not an error.
-    const EVENT_KINDS: [&'static str; 7] = [
+    const EVENT_KINDS: [&'static str; 8] = [
         EventName::SESSION_UPDATED,
         EventName::SESSION_NOTIFICATION,
         EventName::SESSION_CLIPBOARD,
@@ -143,6 +143,7 @@ impl ClientCore {
         EventName::SESSION_REMOVED,
         EventName::PROJECT_UPDATED,
         EventName::WORKSPACE_UPDATED,
+        EventName::SCHEDULE_UPDATED,
     ];
 
     async fn request<P: Serialize + ?Sized>(
@@ -156,6 +157,19 @@ impl ClientCore {
     }
 
     async fn request_on_connection<P: Serialize + ?Sized>(
+        &self,
+        method: &str,
+        params: Option<&P>,
+        timeout: Option<Duration>,
+        connection: Option<u64>,
+    ) -> Result<JsonValue, ClientError> {
+        let started = std::time::Instant::now();
+        let result = self.send_request(method, params, timeout, connection).await;
+        crate::telemetry::rpc_finished(method, started, result.as_ref().err());
+        result
+    }
+
+    async fn send_request<P: Serialize + ?Sized>(
         &self,
         method: &str,
         params: Option<&P>,
@@ -252,6 +266,12 @@ impl ClientCore {
             || invalid_instance
             || (cursor.verified && cursor.engine_instance_id != hello.engine_instance_id)
         {
+            crate::telemetry::identity_rejected(
+                cursor.rejected,
+                hello.engine_kind.as_deref(),
+                invalid_instance,
+                &hello,
+            );
             cursor.rejected = true;
             cursor.verified = false;
             cursor.subscribed = false;
@@ -842,6 +862,11 @@ impl DaemonClient {
             .await
     }
 
+    pub async fn mark_unread(&self, session_id: &SessionId) -> Result<(), ClientError> {
+        self.empty(Method::SESSION_MARK_UNREAD, &session_params(session_id))
+            .await
+    }
+
     pub async fn read_diff(
         &self,
         session_id: &SessionId,
@@ -927,6 +952,45 @@ impl DaemonClient {
         params: WorktreeListParams,
     ) -> Result<Vec<WorktreeInfo>, ClientError> {
         self.typed(Method::WORKTREE_LIST, &params).await
+    }
+
+    pub async fn schedules(
+        &self,
+    ) -> Result<diri_proto::schedules::ScheduleListResult, ClientError> {
+        self.no_params(Method::SCHEDULE_LIST).await
+    }
+
+    pub async fn create_schedule(
+        &self,
+        spec: &diri_proto::schedules::ScheduleSpec,
+    ) -> Result<diri_proto::schedules::ScheduleRecord, ClientError> {
+        self.typed(Method::SCHEDULE_CREATE, spec).await
+    }
+
+    pub async fn update_schedule(
+        &self,
+        params: &diri_proto::schedules::ScheduleUpdateParams,
+    ) -> Result<diri_proto::schedules::ScheduleRecord, ClientError> {
+        self.typed(Method::SCHEDULE_UPDATE, params).await
+    }
+
+    pub async fn delete_schedule(&self, id: &str) -> Result<(), ClientError> {
+        self.empty(
+            Method::SCHEDULE_DELETE,
+            &diri_proto::schedules::ScheduleIdParams { id: id.to_owned() },
+        )
+        .await
+    }
+
+    pub async fn run_schedule_now(
+        &self,
+        id: &str,
+    ) -> Result<diri_proto::schedules::ScheduleRecord, ClientError> {
+        self.typed(
+            Method::SCHEDULE_RUN_NOW,
+            &diri_proto::schedules::ScheduleIdParams { id: id.to_owned() },
+        )
+        .await
     }
 
     pub async fn worktree_cleanup(&self, params: WorktreeCleanupParams) -> Result<(), ClientError> {
@@ -1025,6 +1089,20 @@ impl DaemonClient {
     /// no live session and no other control client still needs it.
     pub async fn shutdown_daemon_if_idle(&self) -> Result<DaemonShutdownIfIdleResult, ClientError> {
         self.no_params(Method::DAEMON_SHUTDOWN_IF_IDLE).await
+    }
+
+    /// Uploads recorded diagnostics now (even with sharing off: the user
+    /// asked). The Engine waits up to 45 s for the upload.
+    pub async fn telemetry_upload_now(
+        &self,
+    ) -> Result<diri_proto::TelemetryUploadNowResult, ClientError> {
+        self.core
+            .request_typed::<EmptyParams, diri_proto::TelemetryUploadNowResult>(
+                Method::TELEMETRY_UPLOAD_NOW,
+                None,
+                Some(Duration::from_secs(60)),
+            )
+            .await
     }
 
     pub async fn account_profiles(&self) -> Result<diri_proto::AgentAccountCatalog, ClientError> {
@@ -1185,9 +1263,11 @@ async fn run_lifecycle(core: Arc<ClientCore>) {
     let mut backoff = INITIAL_BACKOFF;
     let mut shutdown = core.shutdown_tx.subscribe();
     let mut retries = core.retry_tx.subscribe();
+    let mut recorder = crate::telemetry::ConnectionRecorder::default();
     while !*shutdown.borrow() {
         core.set_state(ConnectionState::Connecting);
-        let outcome = run_once(Arc::clone(&core), &mut shutdown).await;
+        let outcome = run_once(Arc::clone(&core), &mut shutdown, &mut recorder).await;
+        recorder.attempt_ended(&outcome.error, outcome.established, *shutdown.borrow());
         {
             let mut cursor = core.event_cursor.lock().expect("event cursor");
             cursor.connection = cursor.connection.wrapping_add(1);
@@ -1220,7 +1300,12 @@ async fn run_lifecycle(core: Arc<ClientCore>) {
     }
 }
 
-async fn run_once(core: Arc<ClientCore>, shutdown: &mut watch::Receiver<bool>) -> AttemptOutcome {
+async fn run_once(
+    core: Arc<ClientCore>,
+    shutdown: &mut watch::Receiver<bool>,
+    recorder: &mut crate::telemetry::ConnectionRecorder,
+) -> AttemptOutcome {
+    recorder.attempt_started();
     let generation = {
         let mut cursor = core.event_cursor.lock().expect("event cursor");
         cursor.connection = cursor.connection.wrapping_add(1);
@@ -1244,6 +1329,7 @@ async fn run_once(core: Arc<ClientCore>, shutdown: &mut watch::Receiver<bool>) -
         connection: generation,
         sender: connection.sender(),
     });
+    recorder.socket_opened();
 
     let hello = tokio::select! {
         result = core.hello(Some(HEARTBEAT_TIMEOUT)) => result,
@@ -1283,6 +1369,7 @@ async fn run_once(core: Arc<ClientCore>, shutdown: &mut watch::Receiver<bool>) -
             };
         }
     }
+    recorder.connected(&hello);
     core.set_state(ConnectionState::Connected(hello));
 
     loop {
@@ -1669,6 +1756,8 @@ mod tests {
                     host: None,
                     account_profile_id: None,
                     same_repo_as: None,
+                    start_directory: None,
+                    note_id: None,
                 })
                 .await?;
 

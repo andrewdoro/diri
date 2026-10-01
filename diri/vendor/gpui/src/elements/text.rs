@@ -827,14 +827,19 @@ impl TextLayout {
     }
 
     /// Get the byte index into the input of the pixel position.
+    ///
+    /// Before this frame's layout has run there is nothing to hit: `Err(0)`.
+    /// (Diri: a view may ask during its own render, while the element from
+    /// the previous frame has already been reset; panicking there aborts the
+    /// whole app from inside an AppKit callback.)
     pub fn index_for_position(&self, mut position: Point<Pixels>) -> Result<usize, usize> {
         let element_state = self.0.borrow();
-        let element_state = element_state
-            .as_ref()
-            .expect("measurement has not been performed");
-        let bounds = element_state
-            .bounds
-            .expect("prepaint has not been performed");
+        let Some(element_state) = element_state.as_ref() else {
+            return Err(0);
+        };
+        let Some(bounds) = element_state.bounds else {
+            return Err(0);
+        };
 
         if position.y < bounds.top() {
             return Err(0);
@@ -861,14 +866,13 @@ impl TextLayout {
     }
 
     /// Get the pixel position for the given byte index.
+    ///
+    /// `None` until this frame's layout and prepaint have run (see
+    /// [`Self::index_for_position`]).
     pub fn position_for_index(&self, index: usize) -> Option<Point<Pixels>> {
         let element_state = self.0.borrow();
-        let element_state = element_state
-            .as_ref()
-            .expect("measurement has not been performed");
-        let bounds = element_state
-            .bounds
-            .expect("prepaint has not been performed");
+        let element_state = element_state.as_ref()?;
+        let bounds = element_state.bounds?;
         let line_height = element_state.line_height;
 
         let mut line_origin = bounds.origin;
@@ -894,9 +898,7 @@ impl TextLayout {
     /// Retrieve the layout for the line containing the given byte index.
     pub fn line_layout_for_index(&self, index: usize) -> Option<Arc<WrappedLineLayout>> {
         let element_state = self.0.borrow();
-        let element_state = element_state
-            .as_ref()
-            .expect("measurement has not been performed");
+        let element_state = element_state.as_ref()?;
         let mut line_start_ix = 0;
 
         for line in &element_state.lines {
@@ -915,15 +917,13 @@ impl TextLayout {
     }
 
     /// Retrieve all line layouts in source order.
+    /// Empty until this frame's layout has run.
     pub fn line_layouts(&self) -> SmallVec<[Arc<WrappedLineLayout>; 1]> {
         self.0
             .borrow()
             .as_ref()
-            .expect("measurement has not been performed")
-            .lines
-            .iter()
-            .map(|line| line.layout.clone())
-            .collect()
+            .map(|state| state.lines.iter().map(|line| line.layout.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// The bounds of this layout.
@@ -1280,6 +1280,7 @@ impl IntoElement for InteractiveText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn test_into_element_for() {

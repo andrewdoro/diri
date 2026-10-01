@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Install · Diri docs</title>
+  <meta name="description" content="Install diri on macOS with the DMG or Homebrew, understand how updates arrive, try the Linux and iPhone betas, and remove every local file.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/docs/install/">
+  <link rel="alternate" type="text/markdown" href="/docs/install.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Install">
+  <meta property="og:description" content="Install diri on macOS with the DMG or Homebrew, understand how updates arrive, try the Linux and iPhone betas, and remove every local file.">
+  <meta property="og:url" content="https://diri.sh/docs/install/">
+  <meta property="og:image" content="https://diri.sh/og/docs-install.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Install: diri documentation">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Install","description":"Install diri on macOS with the DMG or Homebrew, understand how updates arrive, try the Linux and iPhone betas, and remove every local file.","url":"https://diri.sh/docs/install/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"isPartOf":{"@type":"WebSite","name":"Diri","url":"https://diri.sh/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page docs-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/" aria-current="page">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <div class="docs-shell">
+      <button class="docs-menu" type="button" aria-expanded="false" aria-controls="docs-sidebar"><span class="icon" data-icon="sidebar" aria-hidden="true"></span>Getting started<span class="docs-menu-sep">/</span><strong>Install</strong></button>
+      <nav class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+          <button class="docs-search" type="button" data-open-search><span class="icon" data-icon="search" aria-hidden="true"></span><span>Search docs</span><kbd>⌘K</kbd></button>
+          <div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Getting started</div><ul><li><a class="docs-row" href="/docs/"><span class="icon" data-icon="file" aria-hidden="true"></span><span>Introduction</span></a></li><li><a class="docs-row" href="/docs/install/" aria-current="page"><span class="icon" data-icon="download" aria-hidden="true"></span><span>Install</span></a></li><li><a class="docs-row" href="/docs/quickstart/"><span class="icon" data-icon="new-agent" aria-hidden="true"></span><span>Quickstart</span></a></li><li><a class="docs-row" href="/docs/keyboard-shortcuts/"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><span>Keyboard shortcuts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Working with agents</div><ul><li><a class="docs-row" href="/docs/sessions/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>Sessions</span></a></li><li><a class="docs-row" href="/docs/worktrees/"><span class="icon" data-icon="branch" aria-hidden="true"></span><span>Worktrees and review</span></a></li><li><a class="docs-row" href="/docs/notes/"><span class="icon" data-icon="note" aria-hidden="true"></span><span>Notes</span></a></li><li><a class="docs-row" href="/docs/scheduled-tasks/"><span class="icon" data-icon="clock" aria-hidden="true"></span><span>Schedules</span></a></li><li><a class="docs-row" href="/docs/accounts/"><span class="icon" data-icon="user" aria-hidden="true"></span><span>Accounts and usage</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Automation</div><ul><li><a class="docs-row" href="/docs/mcp/"><span class="icon" data-icon="plug" aria-hidden="true"></span><span>MCP server</span></a></li><li><a class="docs-row" href="/docs/mcp-tools/"><span class="icon" data-icon="code" aria-hidden="true"></span><span>MCP tools</span></a></li><li><a class="docs-row" href="/docs/cli/"><span class="icon" data-icon="terminal" aria-hidden="true"></span><span>dirijor CLI</span></a></li><li><a class="docs-row" href="/docs/agents/"><span class="icon" data-icon="apps" aria-hidden="true"></span><span>Supported agents</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Remote</div><ul><li><a class="docs-row" href="/docs/remote-hosts/"><span class="icon" data-icon="server" aria-hidden="true"></span><span>Remote hosts</span></a></li></ul></div><div class="docs-group"><div class="docs-group-head"><span class="icon" data-icon="chevron-down" aria-hidden="true"></span>Reference</div><ul><li><a class="docs-row" href="/docs/security/"><span class="icon" data-icon="shield" aria-hidden="true"></span><span>Security model</span></a></li><li><a class="docs-row" href="/docs/troubleshooting/"><span class="icon" data-icon="lifebuoy" aria-hidden="true"></span><span>Troubleshooting</span></a></li></ul></div>
+          <div class="docs-sidebar-foot"><a href="/llms.txt"><span class="icon" data-icon="markdown" aria-hidden="true"></span>llms.txt</a><a href="/docs/mcp/#docs-mcp"><span class="icon" data-icon="plug" aria-hidden="true"></span>Docs MCP</a></div>
+        </nav>
+      <main id="main" class="docs-main" data-raw="/docs/install.md">
+        <header class="docs-heading"><span class="eyebrow">Getting started</span><h1>Install</h1><p>Install diri on macOS with the DMG or Homebrew, understand how updates arrive, try the Linux and iPhone betas, and remove every local file.</p></header>
+        <article class="docs-content">
+<p>diri is a native app for macOS 15 or newer. A Linux beta runs on x86_64 Ubuntu, and an iPhone companion is in beta. Agents are installed separately; diri runs the CLIs and accounts already on your machine.</p>
+<h2 id="macos"><a class="anchor" href="#macos" aria-hidden="true" tabindex="-1">#</a>macOS</h2>
+<p>The macOS build is universal (Apple silicon and Intel), signed with a Developer ID, and notarized.</p>
+<h3 id="homebrew"><a class="anchor" href="#homebrew" aria-hidden="true" tabindex="-1">#</a>Homebrew</h3>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">brew</span> install <span class="tk-flag">--cask</span> cristicretu/diri/diri</code></pre></div>
+<h3 id="dmg"><a class="anchor" href="#dmg" aria-hidden="true" tabindex="-1">#</a>DMG</h3>
+<ol><li>Download the latest DMG from <a href="https://github.com/cristicretu/diri/releases/latest" rel="noopener">GitHub Releases</a>.</li><li>Open it and drag diri to Applications.</li><li>Open diri. The first launch checks which agents are installed and offers to install one if none are. See the <a href="/docs/quickstart/">Quickstart</a>.</li></ol>
+<div class="table-wrap"><table><thead><tr><th>Requirement</th><th>Value</th></tr></thead><tbody><tr><td>macOS</td><td>15 or newer</td></tr><tr><td>Architecture</td><td>Apple silicon or Intel (one universal app)</td></tr><tr><td>Agents</td><td>Installed separately, for example Claude Code or Codex</td></tr></tbody></table></div>
+<h2 id="updates"><a class="anchor" href="#updates" aria-hidden="true" tabindex="-1">#</a>Updates</h2>
+<p>diri updates itself from the same GitHub release feed. It checks 20 seconds after launch and then every 6 hours. Downloads are verified before they are offered: the code signature, the Team ID and bundle identifier must match the running app, Gatekeeper must accept the notarization, and the version must match the one the feed promised. Only newer versions are offered.</p>
+<p>diri never quits or relaunches by itself, because it is holding your sessions. When an update is ready:</p>
+<ol><li>The sidebar footer shows <strong>Restart to update to</strong> followed by the version.</li><li>Click it to install and relaunch now, or just quit diri normally. A normal quit installs the update without reopening the app.</li><li>Running agents keep running. The background Engine is replaced with the new one, and every session reconnects.</li></ol>
+<p>To check by hand, open the command palette (<kbd>⌘</kbd><kbd>K</kbd>) and run <strong>Check for Updates…</strong>. It reports &quot;up to date&quot; instead of staying silent.</p>
+<h3 id="update-settings"><a class="anchor" href="#update-settings" aria-hidden="true" tabindex="-1">#</a>Update settings</h3>
+<p>Open <strong>Settings → General → Software updates</strong>.</p>
+<div class="table-wrap"><table><thead><tr><th>Setting</th><th>What it does</th></tr></thead><tbody><tr><td>Update automatically</td><td>Download verified GitHub releases and install when diri quits.</td></tr><tr><td>Check Now</td><td>Run a check right away. Becomes <strong>Download</strong> or <strong>Restart</strong> when an update is waiting.</td></tr><tr><td>Skip this version</td><td>Hide the offered release until a newer one is available.</td></tr></tbody></table></div>
+<p>To install a specific release, including an older one, <strong>Option-click</strong> the update button. A <strong>Switch version</strong> list shows the releases the feed still carries, with <strong>Install</strong> next to each. Choosing one turns off <strong>Update automatically</strong> so it is not replaced on the next check. Turn it back on to return to the latest release.</p>
+<aside class="callout note"><strong>Note</strong><p>A build that is not inside a signed <code>.app</code>, such as one you built from source, shows &quot;Updates off for this build&quot;. If diri sits in a folder your user cannot write to, download the DMG by hand instead.</p></aside>
+<h2 id="linux-beta"><a class="anchor" href="#linux-beta" aria-hidden="true" tabindex="-1">#</a>Linux beta</h2>
+<p>diri runs on x86_64 Ubuntu 22.04 and 24.04 under Wayland or X11. Linux packages are not included in every release, so check the <a href="https://github.com/cristicretu/diri/releases" rel="noopener">release list</a> for one with Linux assets.</p>
+<div class="table-wrap"><table><thead><tr><th>Requirement</th><th>Value</th></tr></thead><tbody><tr><td>Distribution</td><td>Ubuntu 22.04 or 24.04, x86_64 (glibc 2.35 or newer)</td></tr><tr><td>Display</td><td>Wayland or X11</td></tr><tr><td>Graphics</td><td>A Vulkan 1.3 driver</td></tr><tr><td>Packages</td><td><code>.deb</code> and <code>.AppImage</code></td></tr></tbody></table></div>
+<p>Verify the download against the <code>SHA256SUMS</code> file from the same release:</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">sha256sum</span> <span class="tk-flag">--ignore-missing</span> <span class="tk-flag">--check</span> SHA256SUMS</code></pre></div>
+<p>Each Linux file also has a Sigstore bundle. The <a href="https://github.com/cristicretu/diri/blob/main/diri/LINUX.md" rel="noopener">Linux guide</a> has the <code>cosign verify-blob</code> command that proves a file was built by the project's CI.</p>
+<p>Install the Debian package with APT so its dependencies resolve. It adds the desktop entry and the <code>diri</code>, <code>dirijor</code> and <code>dirijor-mcp</code> commands:</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">sudo</span> apt install ./diri_&lt;version&gt;_amd64.deb</code></pre></div>
+<p>Or run the AppImage directly:</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">chmod</span> +x diri_&lt;version&gt;_amd64.AppImage
+<span class="tk-cmd">./diri_</span>&lt;version&gt;_amd64.AppImage</code></pre></div>
+<p>diri does not update itself on Linux. Settings shows the installed version; update by installing a newer package the same way.</p>
+<h3 id="linux-limits"><a class="anchor" href="#linux-limits" aria-hidden="true" tabindex="-1">#</a>Linux limits</h3>
+<ul><li>No aarch64 packages.</li><li>No native tray or notification actions. Approvals and status still work inside diri.</li><li>No automatic in-app updates.</li><li>No iPhone companion or remote port forwarding.</li><li>Start at login is hidden.</li></ul>
+<p>Shortcuts use Ctrl where macOS uses ⌘. See <a href="/docs/keyboard-shortcuts/">Keyboard shortcuts</a>.</p>
+<h2 id="iphone-companion-beta"><a class="anchor" href="#iphone-companion-beta" aria-hidden="true" tabindex="-1">#</a>iPhone companion (beta)</h2>
+<p>The iPhone app starts, watches and answers sessions on your Mac over <a href="https://tailscale.com" rel="noopener">Tailscale</a>. It needs a signed build of the app; there is no App Store release.</p>
+<ol><li>On the Mac, open <strong>Settings → Phone access</strong> and click <strong>Check this Mac</strong>. Follow the Tailscale guidance until the check passes.</li><li>On the iPhone, install Tailscale and sign in with the same account.</li><li>On the Mac, click <strong>Enable phone access &amp; show code</strong>. On the iPhone, tap <strong>Scan pairing code</strong>, or paste the link from <strong>Copy pairing link</strong>.</li><li>Keep diri open and the Mac plugged in with the lid open. Closing the lid or quitting diri disconnects the phone.</li></ol>
+<p>The pairing code controls every session on that Mac, so do not share it. Turning access off closes existing connections, and enabling it again makes a new code. Build details are in <a href="https://github.com/cristicretu/diri/blob/main/ios/README.md" rel="noopener">ios/README.md</a>.</p>
+<h2 id="local-data"><a class="anchor" href="#local-data" aria-hidden="true" tabindex="-1">#</a>Local data</h2>
+<div class="table-wrap"><table><thead><tr><th>Platform</th><th>Path</th><th>Contents</th></tr></thead><tbody><tr><td>macOS</td><td><code>~/Library/Application Support/Dirijor</code></td><td>Engine state, session records, logs</td></tr><tr><td>macOS</td><td><code>~/Library/Application Support/diri</code></td><td>App data</td></tr><tr><td>macOS</td><td><code>~/Library/Caches/diri/updates</code></td><td>Downloaded updates and <code>install.log</code></td></tr><tr><td>Linux</td><td><code>~/.local/share/diri</code></td><td>Data and PTY holders</td></tr><tr><td>Linux</td><td><code>~/.local/state/diri</code></td><td>Session state and logs</td></tr><tr><td>Linux</td><td><code>~/.config/diri</code></td><td>Host config and manifest overrides</td></tr><tr><td>Linux</td><td><code>~/.cache/diri</code></td><td>Cache</td></tr></tbody></table></div>
+<p>On Linux the usual <code>XDG_*</code> variables override these roots.</p>
+<p>To check the Engine, agent discovery and state file without opening the window, run <code>dirijor doctor</code>. On macOS the command lives inside the app:</p>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">/Applications/diri.app/Contents/Resources/bin/dirijor</span> doctor</code></pre></div>
+<aside class="callout warning"><strong>Warning</strong><p>Logs can contain terminal output, paths and anything a process printed, including secrets. Redact them before attaching them to an issue.</p></aside>
+<h2 id="uninstall"><a class="anchor" href="#uninstall" aria-hidden="true" tabindex="-1">#</a>Uninstall</h2>
+<p>Quitting diri does not stop your agents. Each session runs in its own background process so it survives the app closing.</p>
+<ol><li>Close the sessions you want to stop (<kbd>⌘</kbd><kbd>W</kbd>), then quit diri.</li><li>On macOS, delete diri from Applications, or run <code>brew uninstall --cask diri</code> if you used Homebrew. On Linux, run <code>sudo apt remove diri</code> or delete the AppImage.</li><li>To remove your sessions and settings too, delete the data folders listed above.</li></ol>
+<p>Package removal never deletes your sessions or preferences on its own. Your project folders and any git worktrees are not touched.</p>
+        </article>
+        <nav class="docs-pager" aria-label="Previous and next"><a class="prev" href="/docs/"><span>Previous</span>Diri documentation</a><a class="next" href="/docs/quickstart/"><span>Next</span>Quickstart</a></nav>
+      </main>
+      <aside class="docs-rail" aria-label="On this page">
+        <div class="docs-rail-inner"><nav class="docs-toc"><span>On this page</span><a href="#macos">macOS</a><a href="#updates">Updates</a><a href="#linux-beta">Linux beta</a><a href="#iphone-companion-beta">iPhone companion (beta)</a><a href="#local-data">Local data</a><a href="#uninstall">Uninstall</a></nav>
+          <div class="docs-actions"><button type="button" data-copy-page><span class="icon" data-icon="copy" aria-hidden="true"></span><span>Copy as Markdown</span></button><a href="/docs/install.md"><span class="icon" data-icon="markdown" aria-hidden="true"></span>View Markdown</a><a href="https://claude.ai/new?q=Read%20https%3A%2F%2Fdiri.sh%2Fdocs%2Finstall.md%20and%20help%20me%20with%20diri." rel="noopener"><span class="icon" data-icon="external-link" aria-hidden="true"></span>Ask Claude</a><a href="https://github.com/cristicretu/diri/edit/main/website/docs-src/install.md" rel="noopener"><span class="icon" data-icon="github" aria-hidden="true"></span>Edit on GitHub</a></div>
+        </div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a><a href="/agents/">Agents</a><a href="/compare/">Compare</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+  <div class="docs-search-dialog" hidden>
+    <div class="docs-search-scrim" data-close-search></div>
+    <div class="docs-search-panel" role="dialog" aria-modal="true" aria-label="Search documentation">
+      <label class="docs-search-input"><span class="icon" data-icon="search" aria-hidden="true"></span><input type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-controls="docs-search-results"><kbd>esc</kbd></label>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox"></ul>
+      <div class="docs-search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span></div>
+    </div>
+  </div>
+</body>
+</html>

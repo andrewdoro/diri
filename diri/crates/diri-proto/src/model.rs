@@ -83,12 +83,17 @@ impl AgentKind {
     pub const GEMINI_ID: &'static str = "gemini";
     pub const SHELL_ID: &'static str = "shell";
     pub const GENERIC_ID: &'static str = "generic";
+    /// A Diri note: a Session with no process whose content is a Markdown
+    /// file in the notes store (`SessionRecord::note_id`). It lives in the
+    /// sidebar, lineage, and workspaces like any other Session.
+    pub const NOTE_ID: &'static str = "note";
 
     pub const CLAUDE_CODE: Self = Self::builtin(Self::CLAUDE_CODE_ID);
     pub const CODEX: Self = Self::builtin(Self::CODEX_ID);
     pub const CURSOR: Self = Self::builtin(Self::CURSOR_ID);
     pub const GEMINI: Self = Self::builtin(Self::GEMINI_ID);
     pub const SHELL: Self = Self::builtin(Self::SHELL_ID);
+    pub const NOTE: Self = Self::builtin(Self::NOTE_ID);
     /// A kind we could not parse at all. Distinct from a manifest agent the
     /// client simply hasn't heard of, which keeps its real id.
     pub const UNKNOWN: Self = Self::builtin("unknown");
@@ -315,11 +320,14 @@ string_enum! {
 }
 
 string_enum! {
+    /// Where a needs-input detail came from. `TerminalLine` is a terminal's
+    /// foreground job blocked reading a line.
     pub enum NeedsInputSource {
         ClaudePermissionHook => "claudePermissionHook",
         ClaudeNotificationHook => "claudeNotificationHook",
         CodexNotify => "codexNotify",
         ScreenScrape => "screenScrape",
+        TerminalLine => "terminalLine",
     }
 }
 
@@ -390,6 +398,11 @@ pub struct NeedsInputDetail {
     pub options: Option<Vec<String>>,
     pub risk_hint: RiskHint,
     pub occurred_at: DateMillis,
+    /// The prompt reads with echo off, so it is asking for a password: the
+    /// detail carries no terminal text, and no reply may be typed into it
+    /// from a notification, where the answer would show in plain text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret: bool,
 }
 
 string_enum! {
@@ -699,6 +712,32 @@ pub struct PortInfo {
     pub process_name: String,
 }
 
+/// What a program reported with `OSC 9;4` (ConEmu's progress sequence, which
+/// Windows Terminal, Ghostty and cargo speak), as the Engine last published it.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalProgress {
+    pub state: TerminalProgressState,
+    /// Whole percent, 0–100. Zero for an indeterminate report.
+    pub percent: u8,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalProgressState {
+    /// `9;4;1`: running, `percent` done.
+    Normal,
+    /// `9;4;2`: failed; the percent is where it stopped.
+    Error,
+    /// `9;4;3`: busy with no known end.
+    Indeterminate,
+    /// `9;4;4`: paused, or a warning; the percent is where it stands.
+    Paused,
+    /// A state a newer Engine sends that this client does not know.
+    #[serde(other)]
+    Unknown,
+}
+
 /// Verbs the authoritative Engine has resolved for one concrete session.
 ///
 /// Clients consume this value instead of re-parsing commands or hard-coding
@@ -815,11 +854,39 @@ pub struct SessionRecord {
     pub pull_requests: Option<Vec<PullRequestStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub listening_ports: Option<Vec<PortInfo>>,
+    /// An Agent recognised in a shell's foreground, started there by hand.
+    /// It borrows the Agent's icon and status reading, not its identity:
+    /// `kind` stays `shell`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreground_agent: Option<AgentKind>,
+    /// A local shell's live working directory, which `cd` moves. `cwd` stays
+    /// the launch directory, which owns the Session's project and worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_cwd: Option<String>,
+    /// For a note Session (`kind` = [`AgentKind::NOTE_ID`]): the id of its
+    /// Markdown file in the notes store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_id: Option<String>,
+    /// The TCP ports a local shell's foreground job listens on, read live: a
+    /// dev server, which names the tab after its address. Also counted in
+    /// `listening_ports`, which it keeps current between governor scans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_ports: Option<Vec<PortInfo>>,
+    /// The progress a terminal's program last reported (`OSC 9;4`), while it
+    /// still stands. Live state: it is cleared on load and when the job ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_progress: Option<TerminalProgress>,
+    /// Present when a Diri schedule opened this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_run: Option<crate::schedules::ScheduledRunInfo>,
 }
 
 impl SessionRecord {
+    /// A note has no process: nothing to attach, send to, resume, or reap.
+    pub fn is_note(&self) -> bool {
+        self.kind.id() == AgentKind::NOTE_ID
+    }
+
     pub fn effective_kind(&self) -> &AgentKind {
         self.foreground_agent.as_ref().unwrap_or(&self.kind)
     }

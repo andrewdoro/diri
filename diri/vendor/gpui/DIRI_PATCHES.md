@@ -102,7 +102,34 @@ notify the child: a notify during a draw only takes effect in the next frame.
 if the child were dirty, and keeps its cache state for later frames. The sidebar
 uses it for rows whose props changed (`crates/diri-app/src/sidebar/view/rows.rs`).
 
-## 3. Scene region capture (`Window::capture_region`)
+## 3. Floating panels are not throttled as inactive windows
+
+**Upstream behavior.** `Window::new` wires `on_request_frame` so that, while a
+frame is actually wanted (forced render, presentation, or a pending
+`on_next_frame` callback), a window that is not active draws at most one frame
+per 33.3 ms, "to save energy". On macOS "active" means the key window.
+
+Diri's menus, popovers, the command palette and picture-in-picture are
+`WindowKind::PopUp` panels that deliberately never become key
+(`becomesKeyOnlyIfNeeded`, see `crates/diri-app/src/floating.rs`). So every
+animation inside them, including their own appear fade, ran through that
+throttle: replaying real 120 Hz display-link ticks through the rule measured
+26.3 fps, because jitter often stretches the gap from four vsyncs to five
+(PR #540 has the measurement).
+
+**Patch.** `Window::new` records whether the window is a `PopUp`,
+`AnchoredPopup` or `Floating` window, and the inactive-window cap skips those.
+Normal windows keep upstream's behavior, and the thermal-pressure cap still
+applies to every window. A panel only asks for frames while something in it
+is moving, so this spends no energy at rest.
+
+A narrower alternative, reporting these panels as active from `gpui_macos`,
+was rejected: GPUI treats an active window as hovered and sets the app-wide
+cursor from it, so a panel and the window under it would fight over the
+cursor (an arrow against an I-beam while a terminal streams beneath the
+palette).
+
+## 4. Scene region capture (`Window::capture_region`)
 
 Upstream can only read a rendered frame back in test builds
 (`render_to_image`, behind `test-support`), and only as a whole-window RGBA
@@ -137,7 +164,8 @@ frame.
    `force_render_if`,
    `ViewElementState`, `ViewElementCacheKey`), `window.rs` (index
    `relative_to`/`rebased_on`, `CachedViewBase*`, base stacks, deferred-draw
-   bases, `insert_debug_bounds`, `debug_bounds_history` replay),
+   bases, `insert_debug_bounds`, `debug_bounds_history` replay, and the
+   `exempt_from_inactive_throttle` frame-rate exemption),
    `text_system/line_layout.rs` (`LineLayoutIndex` arithmetic),
    `elements/div.rs` (prepaint opacity, `insert_debug_bounds`), and the scene
    capture: `platform.rs` (`capture_scene_region`, `SceneCapture`),
@@ -147,3 +175,67 @@ frame.
    copies element for element.
 5. Run `cargo test -p diri-app --bin diri gpui_view_cache` and the sidebar
    tests.
+
+## Scene storage released after sustained sparse frames
+
+`Scene::clear` kept every primitive vector at its high-water capacity, so one
+very large frame (the session overview, a huge paste) pinned tens of MB for the
+life of the window (≈36 MB measured on the installed app). `clear` now counts
+consecutive frames that used under a quarter of the reserved bytes (with at
+least 1 MiB reserved) and, after 120 of them, shrinks each vector to twice the
+latest frame's length. Steady frames never reallocate. Files: `src/scene.rs`.
+Test: `a_scene_gives_back_capacity_a_single_large_frame_left_behind` in
+`crates/diri-app/src/gpui_view_cache_tests.rs`. Re-apply on a GPUI bump by
+re-adding `release_idle_capacity` and its call at the top of `Scene::clear`.
+
+## Immediate frames and a frame-timing observer
+
+`Window::request_immediate_frame` (and `PlatformWindow::request_immediate_frame`,
+a default no-op) lets a latency-critical change, a terminal's keystroke echo,
+draw as soon as the main thread is free instead of at the next display-link
+tick. `gpui_macos` implements it by merging one request into the window's
+display-link dispatch source (`WindowFrameSource::request_now`), refused
+while the last present is under two refresh intervals old
+(`immediate_frame_allowed`, refresh from `NSScreen.maximumFramesPerSecond`).
+`src/frame_observer.rs` adds an optional process-wide observer of draw start
+and end (`Window::draw`), Metal commit, GPU completion and present
+(`metal_renderer.rs`), installed by Diri only under `DIRI_LATENCY_TRACE=1`.
+Files: `src/platform.rs`, `src/window.rs`, `src/frame_observer.rs`,
+`src/gpui.rs`; in `vendor/gpui_macos`: `window.rs`, `display_link.rs`,
+`metal_renderer.rs`. Tests: `immediate_frames_wait_until_the_last_present_is_on_screen`
+(gpui_macos) and `only_a_keystroke_echo_asks_for_an_immediate_frame` (diri-app).
+
+## Frame statistics
+
+`Window::draw` stamps its phases into `FrameStats` (`src/frame_stats.rs`):
+`layout` (root and uncached renders, layout requests), `prepaint` (Taffy,
+cached views that missed, element prepaint), `paint`, `a11y` (accessibility
+tree) and `finish` (scene sort, frame swap), plus the number of views
+rendered and cached views replayed, and whether assistive technology was
+attached. `Window::last_frame_stats` returns the last finished frame and
+`Window::frame_stats_so_far` the frame being drawn, up to the call (Diri's
+frame probe reads it from inside the root's paint). The cost is a few
+`Instant::now()` calls and counter increments per frame.
+`Window::set_accessibility_active_for_test` (test-support) attaches pretend
+assistive technology so headless benches can draw frames the way a Mac
+running an accessibility client does. Files: `src/frame_stats.rs`,
+`src/gpui.rs`, `src/window.rs` (`frame_stats` fields and stamps,
+`WindowInvalidator::phase`), `src/view.rs` (render/reuse counts),
+`src/window/a11y.rs`. Exercised by `real_use_frame_distribution` in
+`crates/diri-app/src/root.rs`.
+
+## Sprite sort by index
+
+`Scene::finish` stable-sorted the monochrome, subpixel and polychrome sprite
+vectors by `(order, tile_id)` with `sort_by_key`, moving each 100+ byte
+sprite through every merge pass; with a few terminals on screen that is tens
+of thousands of glyph sprites per frame (11% of `Window::draw` in a sample of
+the installed app). `sort_sprites` sorts `(key, index)` pairs instead, which
+breaks ties by position exactly as the stable sort did, then applies the
+permutation in place along its cycles, moving each sprite once; a frame
+already in order moves nothing. The pairs live in a reused `sort_keys`
+scratch that `release_idle_capacity` accounts for and shrinks with the rest.
+Draw order, and therefore pixels, are unchanged. Test:
+`the_sprite_sort_matches_a_stable_sort_by_key` in
+`crates/diri-app/src/gpui_view_cache_tests.rs`. Re-apply on a GPUI bump by
+replacing the three sprite `sort_by_key` calls in `Scene::finish`.
