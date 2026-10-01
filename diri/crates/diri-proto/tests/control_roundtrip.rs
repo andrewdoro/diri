@@ -329,6 +329,7 @@ fn spawn_params_host_field_is_wire_compatible() {
     assert!(encoded.get("host").is_none());
 
     let remote = diri_proto::SessionSpawnParams {
+        appearance: None,
         host: Some("forge".into()),
         ..legacy
     };
@@ -391,6 +392,7 @@ fn migration_and_host_methods_use_the_swift_wire_names() {
         serde_json::from_value(json!({"kind": {"shell": {}}, "cwd": "/tmp"})).unwrap();
     assert_eq!(legacy.same_repo_as, None);
     let preserving = diri_proto::SessionSpawnParams {
+        appearance: None,
         account_profile_id: None,
         same_repo_as: Some(diri_proto::SessionId::new("s_ref")),
         ..legacy

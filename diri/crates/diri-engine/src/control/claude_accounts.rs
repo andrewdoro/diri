@@ -234,6 +234,12 @@ fn has_login(store: Store<'_>, home: &Path) -> Result<bool, ControlError> {
     Ok(false)
 }
 
+/// Whether a store-less Claude launch would find a login; `None` when the
+/// Keychain will not answer.
+pub(super) fn default_login_present(config_home: &Path) -> Option<bool> {
+    has_login(Store::Default, config_home).ok()
+}
+
 /// Copy the active login of `from` into `to`. On macOS the secret moves
 /// between Keychain items through `security -i` so it never appears in argv;
 /// elsewhere the credentials file is copied with owner-only permissions.

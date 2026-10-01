@@ -589,6 +589,7 @@ pub(crate) mod plan {
             title,
             when,
             spawn: SessionSpawnParams {
+                appearance: None,
                 account_profile_id: None,
                 kind: agent,
                 cwd: folder.to_string_lossy().into_owned(),

@@ -27,6 +27,7 @@ use crate::registry::Registry;
 mod account_handoff;
 mod account_switch;
 mod agent_relaunch;
+mod agent_sign_in;
 mod claude_accounts;
 mod codex_accounts;
 mod hook_queue;
@@ -1360,6 +1361,7 @@ impl ControlServer {
         // raced Claude Code's boot and lost keystrokes into a composer that
         // did not exist yet.
         let prompt = p.initial_prompt.clone().filter(|prompt| !prompt.is_empty());
+        let appearance = p.appearance;
         let accept_claude_workspace = kind == diri_proto::AgentKind::CLAUDE_CODE_ID;
         let record = registry
             .record(&id)
@@ -1371,13 +1373,19 @@ impl ControlServer {
         // workspace-trust convenience remains background work so an ordinary
         // launch still returns as soon as its session exists.
         if let Some(prompt) = prompt {
-            prepare_agent_input(&self.registry, &id, accept_claude_workspace, Some(&prompt))
-                .map_err(|error| initial_prompt_control_error(&id, error))?;
+            prepare_agent_input(
+                &self.registry,
+                &id,
+                accept_claude_workspace,
+                appearance,
+                Some(&prompt),
+            )
+            .map_err(|error| initial_prompt_control_error(&id, error))?;
         } else if accept_claude_workspace {
             let registry = Arc::clone(&self.registry);
             let session_id = id.clone();
             std::thread::spawn(move || {
-                let _ = prepare_agent_input(&registry, &session_id, true, None);
+                let _ = prepare_agent_input(&registry, &session_id, true, appearance, None);
             });
         }
 
@@ -1860,6 +1868,7 @@ impl ControlServer {
         self.publish_updated(&registry, &id);
 
         let prompt = p.initial_prompt.filter(|prompt| !prompt.is_empty());
+        let appearance = p.appearance;
         let accept_claude_workspace = kind == diri_proto::AgentKind::CLAUDE_CODE_ID;
         let record = registry
             .record(&id)
@@ -1867,13 +1876,19 @@ impl ControlServer {
         drop(registry);
 
         if let Some(prompt) = prompt {
-            prepare_agent_input(&self.registry, &id, accept_claude_workspace, Some(&prompt))
-                .map_err(|error| initial_prompt_control_error(&id, error))?;
+            prepare_agent_input(
+                &self.registry,
+                &id,
+                accept_claude_workspace,
+                appearance,
+                Some(&prompt),
+            )
+            .map_err(|error| initial_prompt_control_error(&id, error))?;
         } else if accept_claude_workspace {
             let registry = Arc::clone(&self.registry);
             let session_id = id.clone();
             std::thread::spawn(move || {
-                let _ = prepare_agent_input(&registry, &session_id, true, None);
+                let _ = prepare_agent_input(&registry, &session_id, true, appearance, None);
             });
         }
         serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
@@ -3605,15 +3620,23 @@ impl ControlServer {
             .record(&id)
             .ok_or_else(|| ControlError::internal("the resumed session vanished"))?;
         drop(registry);
+        // A resumed conversation is past Claude's first run.
+        let appearance = None;
         let accept_claude_workspace = kind == diri_proto::AgentKind::CLAUDE_CODE_ID;
         if let Some(prompt) = prompt {
-            prepare_agent_input(&self.registry, &id, accept_claude_workspace, Some(&prompt))
-                .map_err(|error| initial_prompt_control_error(&id, error))?;
+            prepare_agent_input(
+                &self.registry,
+                &id,
+                accept_claude_workspace,
+                appearance,
+                Some(&prompt),
+            )
+            .map_err(|error| initial_prompt_control_error(&id, error))?;
         } else if accept_claude_workspace {
             let registry = Arc::clone(&self.registry);
             let session_id = id.clone();
             std::thread::spawn(move || {
-                let _ = prepare_agent_input(&registry, &session_id, true, None);
+                let _ = prepare_agent_input(&registry, &session_id, true, appearance, None);
             });
         }
         serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
@@ -4080,7 +4103,13 @@ impl ControlServer {
             let descriptor = raw_descriptor.and_then(|value| {
                 serde_json::from_value::<diri_proto::AgentDescriptor>(value).ok()
             });
+            let signed_in = if params.host.is_none() && path.is_some() {
+                self.agent_signed_in(&id)
+            } else {
+                None
+            };
             agents.push(diri_proto::AgentReadinessItem {
+                signed_in,
                 kind: diri_proto::AgentKind::new(id),
                 binary,
                 path,
@@ -4948,10 +4977,11 @@ fn prepare_agent_input(
     registry: &Arc<Mutex<Registry>>,
     session_id: &str,
     accept_claude_workspace: bool,
+    appearance: Option<diri_proto::TerminalAppearance>,
     prompt: Option<&str>,
 ) -> Result<(), InitialPromptFailure> {
     if accept_claude_workspace {
-        accept_claude_workspace_trust(registry, session_id);
+        accept_claude_workspace_trust(registry, session_id, appearance);
     }
     if let Some(prompt) = prompt {
         let gemini = with_session(registry, session_id, |session| {
@@ -5080,9 +5110,16 @@ fn initial_prompt_control_error(session_id: &str, failure: InitialPromptFailure)
 /// directory the session was pointed at. That is defensible when the user
 /// picked the directory in the UI, and weaker when they did not — an
 /// orchestrator spawning into a freshly cloned repository gets trust without
-/// anyone affirming it. The window is bounded (20s), but a session whose own
-/// output contains the matched phrases inside that window would also receive
-/// the keystroke.
+/// anyone affirming it. The window is bounded (20s, stretched to at most 30
+/// minutes while Claude's own first-run screens are up), but a session whose
+/// own output contains the matched phrases inside that window would also
+/// receive the keystroke.
+///
+/// The same watch answers the first run's "Choose the text style" question
+/// when the client said whether its window is light or dark: Diri's terminal
+/// cannot answer Claude's background-color query, so "Auto" would guess, and
+/// a newcomer should not have to pick a palette before they have typed
+/// anything. Sign-in and the safety notes are always left to the user.
 ///
 /// The watch ends as soon as a Claude hook reports: Claude runs no hooks
 /// until the workspace is trusted, so a hook proves the picker is not coming.
@@ -5097,10 +5134,18 @@ fn initial_prompt_control_error(session_id: &str, failure: InitialPromptFailure)
 /// Claude drops keys that arrive just as the picker mounts, so each key is
 /// judged by the screen it leaves: an arrow that did not move the focus, or
 /// an Enter that did not close the picker, is pressed again, within a budget.
-fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+fn accept_claude_workspace_trust(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+    appearance: Option<diri_proto::TerminalAppearance>,
+) {
+    let started = Instant::now();
+    let mut deadline = started + CLAUDE_TRUST_WATCH;
     let mut keys = 0;
     let mut seen = false;
-    for _ in 0..200 {
+    let mut theme_keys = 0;
+    let mut theme_seen = false;
+    while Instant::now() < deadline {
         let Some((exited, lines, hooked)) = with_session(registry, session_id, |session| {
             let view = session.view();
             (
@@ -5115,6 +5160,36 @@ fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &s
         };
         if exited {
             return;
+        }
+        // A first run puts its welcome, theme, sign-in and safety screens
+        // ahead of the picker, and signing in takes as long as the browser
+        // does. The watch outlasts them, or a newcomer meets the picker
+        // after it gave up, with "No, exit" focused.
+        if claude_first_run_screen(&lines) {
+            deadline = (Instant::now() + CLAUDE_TRUST_WATCH).min(started + CLAUDE_FIRST_RUN_LIMIT);
+        }
+        if let Some(appearance) = appearance
+            && theme_keys < CLAUDE_TRUST_MAX_KEYS
+            && let Some(key) = claude_theme_key(&lines, appearance)
+        {
+            if !theme_seen {
+                theme_seen = true;
+                std::thread::sleep(CLAUDE_TRUST_SETTLE);
+                continue;
+            }
+            press_claude_key(registry, session_id, key);
+            theme_keys += 1;
+            let answered = wait_for_claude_screen_change(registry, session_id, 20, |lines| {
+                claude_theme_key(lines, appearance) != Some(key)
+            });
+            if key == ClaudeTrustKey::Confirm && answered {
+                diri_telemetry::event!(
+                    "prompt.first_run_theme_answered",
+                    session = diri_telemetry::id(session_id),
+                    keys = theme_keys,
+                );
+            }
+            continue;
         }
         let Some(key) = claude_workspace_trust_key(&lines) else {
             if hooked {
@@ -5137,18 +5212,15 @@ fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &s
             );
             return;
         }
-        let bytes: &[u8] = match key {
-            ClaudeTrustKey::Confirm => b"\r",
-            ClaudeTrustKey::Down => b"\x1b[B",
-            ClaudeTrustKey::Up => b"\x1b[A",
-        };
-        let _ = with_session(registry, session_id, |session| session.write_input(bytes));
+        press_claude_key(registry, session_id, key);
         keys += 1;
         // Decide again only once the screen has answered, so a slow repaint
         // never earns a second arrow past "Yes". After Enter this also lets
         // Claude persist trust and replace the picker before a caller's
         // initial prompt starts its own readiness loop.
-        let answered = wait_for_claude_trust_key_change(registry, session_id, key, 20);
+        let answered = wait_for_claude_screen_change(registry, session_id, 20, |lines| {
+            claude_workspace_trust_key(lines) != Some(key)
+        });
         if key == ClaudeTrustKey::Confirm && answered {
             diri_telemetry::event!(
                 "prompt.workspace_trust_accepted",
@@ -5158,6 +5230,84 @@ fn accept_claude_workspace_trust(registry: &Arc<Mutex<Registry>>, session_id: &s
             return;
         }
     }
+}
+
+fn press_claude_key(registry: &Arc<Mutex<Registry>>, session_id: &str, key: ClaudeTrustKey) {
+    let bytes: &[u8] = match key {
+        ClaudeTrustKey::Confirm => b"\r",
+        ClaudeTrustKey::Down => b"\x1b[B",
+        ClaudeTrustKey::Up => b"\x1b[A",
+    };
+    let _ = with_session(registry, session_id, |session| session.write_input(bytes));
+}
+
+/// How long the trust watch waits for the picker once nothing else is
+/// on screen.
+const CLAUDE_TRUST_WATCH: Duration = Duration::from_secs(20);
+
+/// The longest a first run (sign-in included) may hold the trust watch open.
+const CLAUDE_FIRST_RUN_LIMIT: Duration = Duration::from_secs(30 * 60);
+
+/// Whether Claude is showing one of the screens of its first run, which come
+/// before the workspace-trust picker.
+fn claude_first_run_screen(lines: &[String]) -> bool {
+    const MARKERS: &[&str] = &[
+        "choose the text style",
+        "select login method",
+        "paste code here",
+        "browser didn't open",
+        "login successful",
+        "security notes:",
+        "use claude code's terminal setup",
+        "detected a custom api key",
+    ];
+    crate::detect::bottom_non_empty(lines, 40)
+        .iter()
+        .any(|line| {
+            let line = line.to_ascii_lowercase();
+            MARKERS.iter().any(|marker| line.contains(marker))
+        })
+}
+
+/// The key that moves Claude's first-run text-style picker to the plain
+/// light or dark style, or `None` when that picker is not showing.
+fn claude_theme_key(
+    lines: &[String],
+    appearance: diri_proto::TerminalAppearance,
+) -> Option<ClaudeTrustKey> {
+    let bottom = crate::detect::bottom_non_empty(lines, 30);
+    if !bottom
+        .iter()
+        .any(|line| line.to_ascii_lowercase().contains("choose the text style"))
+    {
+        return None;
+    }
+    let wanted = match appearance {
+        diri_proto::TerminalAppearance::Light => "light mode",
+        diri_proto::TerminalAppearance::Dark => "dark mode",
+    };
+    // "❯ ✔ Dark mode", "  Light mode", or numbered "2. Light mode".
+    let option = |line: &str| {
+        let line = line.trim_start();
+        let focused = line.starts_with('❯');
+        let label = line
+            .trim_start_matches('❯')
+            .trim_start()
+            .trim_start_matches('✔')
+            .trim_start();
+        let label = label
+            .split_once(". ")
+            .filter(|(number, _)| number.chars().all(|c| c.is_ascii_digit()))
+            .map_or(label, |(_, rest)| rest);
+        (focused, label.trim_end().to_ascii_lowercase())
+    };
+    let target = bottom.iter().position(|line| option(line).1 == wanted)?;
+    let focus = bottom.iter().position(|line| option(line).0)?;
+    Some(match focus.cmp(&target) {
+        std::cmp::Ordering::Equal => ClaudeTrustKey::Confirm,
+        std::cmp::Ordering::Less => ClaudeTrustKey::Down,
+        std::cmp::Ordering::Greater => ClaudeTrustKey::Up,
+    })
 }
 
 /// How long the picker stands before the first key, which Claude would
@@ -5203,20 +5353,21 @@ fn claude_workspace_trust_key(lines: &[String]) -> Option<ClaudeTrustKey> {
     }
 }
 
-/// Whether the picker moved off `key` (or closed) within `ticks` × 100 ms.
-fn wait_for_claude_trust_key_change(
+/// Whether the screen moved past what `unchanged` describes within
+/// `ticks` × 100 ms.
+fn wait_for_claude_screen_change(
     registry: &Arc<Mutex<Registry>>,
     session_id: &str,
-    key: ClaudeTrustKey,
     ticks: usize,
+    changed: impl Fn(&[String]) -> bool,
 ) -> bool {
     for _ in 0..ticks {
         std::thread::sleep(Duration::from_millis(100));
-        let changed = with_session(registry, session_id, |session| {
-            claude_workspace_trust_key(&session.screen_lines()) != Some(key)
+        let moved = with_session(registry, session_id, |session| {
+            changed(&session.screen_lines())
         })
         .unwrap_or(true);
-        if changed {
+        if moved {
             return true;
         }
     }
@@ -8934,6 +9085,70 @@ mod tests {
         // The phrases scrolled up out of the bottom of a busy screen.
         let scrolled = format!("{current}{}", "\noutput".repeat(12));
         assert_eq!(key(&scrolled), None);
+    }
+
+    /// Claude Code 2.1.287's first screen, as rendered in a fresh config.
+    const CLAUDE_THEME_PICKER: &str = " Let's get started.\n\n \
+        Choose the text style that looks best with your terminal\n \
+        To change this later, run /theme\n\n     \
+        Auto (match terminal)\n \
+        ❯ ✔ Dark mode\n     \
+        Light mode\n     \
+        Dark mode (colorblind-friendly)\n     \
+        Light mode (colorblind-friendly)\n     \
+        Dark mode (ANSI colors only)\n     \
+        Light mode (ANSI colors only)\n \
+        ╌╌╌╌╌╌╌╌\n  1  function greet() {\n \
+        ╌╌╌╌╌╌╌╌\n  Syntax theme: Monokai Extended (ctrl+t to disable)";
+
+    #[test]
+    fn the_first_run_text_style_follows_the_window_and_never_a_variant() {
+        use diri_proto::TerminalAppearance::{Dark, Light};
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let key = |screen: &str, appearance| claude_theme_key(&lines(screen), appearance);
+        assert_eq!(
+            key(CLAUDE_THEME_PICKER, Dark),
+            Some(ClaudeTrustKey::Confirm)
+        );
+        assert_eq!(key(CLAUDE_THEME_PICKER, Light), Some(ClaudeTrustKey::Down));
+        let on_light = CLAUDE_THEME_PICKER
+            .replace("❯ ✔ Dark mode", "  ✔ Dark mode")
+            .replace("     Light mode\n", " ❯   Light mode\n");
+        assert_eq!(key(&on_light, Light), Some(ClaudeTrustKey::Confirm));
+        assert_eq!(key(&on_light, Dark), Some(ClaudeTrustKey::Up));
+        // Past the colorblind variant: back up, never confirm it.
+        let past = CLAUDE_THEME_PICKER
+            .replace("❯ ✔ Dark mode", "  ✔ Dark mode")
+            .replace("     Light mode (colorblind", " ❯   Light mode (colorblind");
+        assert_eq!(key(&past, Light), Some(ClaudeTrustKey::Up));
+        // A numbered layout.
+        assert_eq!(
+            key(
+                "Choose the text style\n❯ 1. Dark mode\n  2. Light mode",
+                Light
+            ),
+            Some(ClaudeTrustKey::Down)
+        );
+        // Any other list that happens to say "Light mode" is not the picker.
+        assert_eq!(key("/theme\n❯ Dark mode\n  Light mode", Light), None);
+    }
+
+    #[test]
+    fn first_run_screens_hold_the_trust_watch_but_a_composer_does_not() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        assert!(claude_first_run_screen(&lines(CLAUDE_THEME_PICKER)));
+        assert!(claude_first_run_screen(&lines(
+            " Select login method:\n ❯ 1. Claude account with subscription"
+        )));
+        assert!(claude_first_run_screen(&lines(
+            " Browser didn't open? Use the url below to sign in\n Paste code here if prompted >"
+        )));
+        assert!(claude_first_run_screen(&lines(
+            " Security notes:\n 1. Claude can make mistakes.\n Press Enter to continue…"
+        )));
+        assert!(!claude_first_run_screen(&lines(
+            "╭────╮\n│ > │\n╰────╯\n  ? for shortcuts"
+        )));
     }
 
     #[test]

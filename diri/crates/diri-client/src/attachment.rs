@@ -1216,6 +1216,7 @@ mod tests {
         let scratch = tempfile::Builder::new().prefix("diri-t4-").tempdir()?;
         let mut control = TestControl::connect(&socket).await?;
         let spawn = SessionSpawnParams {
+            appearance: None,
             kind: AgentKind::SHELL,
             cwd: scratch.path().to_string_lossy().into_owned(),
             new_worktree: None,

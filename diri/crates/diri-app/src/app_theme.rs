@@ -19,6 +19,15 @@ fn catalog_theme(id: &str) -> TermTheme {
         .unwrap_or_default()
 }
 
+/// Whether a theme reads as light or dark, as an Agent's first-run "text
+/// style" question needs to know.
+pub(crate) fn spawn_appearance(id: &str) -> diri_proto::TerminalAppearance {
+    match catalog_theme(id).appearance {
+        ThemeAppearance::Light => diri_proto::TerminalAppearance::Light,
+        ThemeAppearance::Dark => diri_proto::TerminalAppearance::Dark,
+    }
+}
+
 /// The main window calls this as it renders. It follows the store's theme and
 /// keeps every window repainting for exactly as long as a fade is running.
 pub(crate) fn follow(store: &SessionStore, window: &mut gpui::Window, cx: &mut gpui::App) {

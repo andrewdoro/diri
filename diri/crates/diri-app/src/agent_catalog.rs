@@ -18,6 +18,8 @@ pub(crate) struct AgentOption {
     pub setup_url: Option<String>,
     pub install: Option<AgentInstall>,
     pub sign_in_hint: Option<String>,
+    /// The Engine's sign-in fact; `None` claims nothing.
+    pub signed_in: Option<bool>,
 }
 
 /// A vendor installer Diri may offer to run. The command only ever reaches a
@@ -249,6 +251,7 @@ pub(crate) fn option_from_readiness(item: &AgentReadinessItem) -> AgentOption {
             .map(str::trim)
             .filter(|hint| !hint.is_empty())
             .map(str::to_owned),
+        signed_in: item.signed_in,
     }
 }
 
@@ -293,6 +296,7 @@ fn terminal_option() -> AgentOption {
         setup_url: None,
         install: None,
         sign_in_hint: None,
+        signed_in: None,
     }
 }
 

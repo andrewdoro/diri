@@ -5481,10 +5481,16 @@ mod tests {
             installing: Option<AgentKind>,
             has_sessions: bool,
             herdr: Option<&'static str>,
+            signed_in: Option<bool>,
         }
         impl Render for Welcome {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let catalog = crate::agent_setup::bundled_catalog(self.installed);
+                let mut catalog = crate::agent_setup::bundled_catalog(self.installed);
+                for agent in &mut catalog.agents {
+                    if agent.path.is_some() {
+                        agent.signed_in = self.signed_in;
+                    }
+                }
                 div()
                     .size_full()
                     .bg(self.colors.background)
@@ -5497,6 +5503,7 @@ mod tests {
                             agents: crate::agent_setup::AgentSetupState::from_catalog(Some(
                                 &catalog,
                             )),
+                            default_agent: AgentKind::CLAUDE_CODE,
                             installing: self.installing.clone(),
                             scanning: false,
                             herdr: self.herdr.map(Into::into),
@@ -5507,6 +5514,7 @@ mod tests {
                             check_again: std::rc::Rc::new(|_, _| {}),
                             start_in_folder: std::rc::Rc::new(|_, _| {}),
                             import_herdr: std::rc::Rc::new(|_, _| {}),
+                            start_agent: std::rc::Rc::new(|_, _, _| {}),
                         },
                         self.colors,
                     ))
@@ -5531,24 +5539,27 @@ mod tests {
                 cx.set_reduce_motion(true);
             });
             let claude: &[&str] = &["claude-code", "codex"];
-            for (name, installed, installing, has_sessions, herdr) in [
-                ("welcome", &[][..], None, false, None),
+            for (name, installed, installing, has_sessions, herdr, signed_in) in [
+                ("welcome", &[][..], None, false, None, None),
                 (
                     "welcome-installing",
                     &[][..],
                     Some(AgentKind::CLAUDE_CODE),
                     false,
                     None,
+                    None,
                 ),
-                ("welcome-ready", claude, None, false, None),
+                ("welcome-ready", claude, None, false, None, Some(true)),
+                ("welcome-signed-out", claude, None, false, None, Some(false)),
                 (
                     "welcome-herdr",
                     claude,
                     None,
                     false,
                     Some("6 sessions from herdr"),
+                    None,
                 ),
-                ("resting", claude, None, true, None),
+                ("resting", claude, None, true, None, None),
             ] {
                 let welcome = cx
                     .open_window(gpui::size(px(width), px(height)), |_, cx| {
@@ -5558,6 +5569,7 @@ mod tests {
                             installing,
                             has_sessions,
                             herdr,
+                            signed_in,
                         })
                     })
                     .unwrap();

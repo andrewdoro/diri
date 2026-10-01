@@ -236,6 +236,9 @@ fn advance_seam(slide: &mut Option<SeamSlide>, settled: f32, now: Instant, windo
     }
 }
 
+/// How long a pending Engine connection goes unannounced.
+const CONNECTING_NOTICE_GRACE: Duration = Duration::from_millis(1500);
+
 pub struct RootView {
     spawn_owner: crate::store::SpawnOwner,
     window_store: crate::store::WindowStore,
@@ -333,6 +336,10 @@ pub struct RootView {
     notification_options_open: bool,
     notification_focus: FocusHandle,
     notification_health: String,
+    /// When this window first saw the Engine connection pending. A launch
+    /// connects in well under a second, so the notice waits out
+    /// [`CONNECTING_NOTICE_GRACE`] instead of greeting every launch.
+    connecting_since: Option<Instant>,
     pending_notification_open: Option<(SessionId, Option<String>)>,
     last_quote_surface: QuoteSurface,
     /// Set when opening settings had to reveal a hidden sidebar to put its
@@ -366,6 +373,38 @@ impl Focusable for RootView {
 }
 
 impl RootView {
+    /// The connecting notice, once the connection has been pending past the
+    /// grace. Until then the window simply shows its sessions, and a timer
+    /// brings the notice in if the Engine is genuinely slow.
+    fn hold_connecting_notice(
+        &mut self,
+        notice: Option<RecoveryNotice>,
+        connecting: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<RecoveryNotice> {
+        if !connecting {
+            self.connecting_since = None;
+            return notice;
+        }
+        let first = self.connecting_since.is_none();
+        let since = *self.connecting_since.get_or_insert_with(Instant::now);
+        let held = notice
+            .as_ref()
+            .is_some_and(|notice| notice.kind == crate::recovery::RecoveryKind::Connecting);
+        let remaining = CONNECTING_NOTICE_GRACE.saturating_sub(since.elapsed());
+        if !held || remaining.is_zero() {
+            return notice;
+        }
+        if first {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(remaining).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+        None
+    }
+
     pub(crate) fn new(
         services: Arc<AppServices>,
         preview: bool,
@@ -1434,6 +1473,7 @@ impl RootView {
             notification_options_open: false,
             notification_focus: cx.focus_handle(),
             pending_notification_open: None,
+            connecting_since: None,
             notification_health:
                 "Use Test alert to check macOS delivery. Notifications remain available here."
                     .into(),
@@ -4780,12 +4820,15 @@ impl Render for RootView {
                 .expect("session store lock poisoned");
             // The composer owns its inline failure while open. Once closed,
             // the same failure remains available here without duplicate copy.
-            RecoveryNotice::resolve(
+            let notice = RecoveryNotice::resolve(
                 store.daemon_state(),
                 store.action_failure().filter(|failure| {
                     !launcher_open || failure.title != crate::store::PROMPT_DELIVERY_FAILURE_TITLE
                 }),
-            )
+            );
+            let connecting = matches!(store.daemon_state(), crate::store::DaemonState::Connecting);
+            drop(store);
+            self.hold_connecting_notice(notice, connecting, cx)
         };
         #[cfg(target_os = "macos")]
         {
@@ -10462,11 +10505,13 @@ mod tests {
             cx.set_reduce_motion(true);
         });
         let ready: &[&str] = &["claude-code", "codex"];
-        for (name, installed, sessions, light) in [
-            ("no-agents-dark", &[][..], false, false),
-            ("ready-dark", ready, false, false),
-            ("ready-light", ready, false, true),
-            ("resting-dark", ready, true, false),
+        for (name, installed, sessions, light, signed_in) in [
+            ("no-agents-dark", &[][..], false, false, None),
+            ("ready-dark", ready, false, false, Some(true)),
+            ("ready-light", ready, false, true, Some(true)),
+            ("signed-out-dark", ready, false, false, Some(false)),
+            ("signed-out-light", ready, false, true, Some(false)),
+            ("resting-dark", ready, true, false, None),
         ] {
             let services = test_services();
             {
@@ -10474,7 +10519,13 @@ mod tests {
                 if sessions {
                     store.hydrate(SidebarPreviewFixture::make(PreviewScenario::Typical).list);
                 }
-                store.set_agent_catalog(crate::agent_setup::bundled_catalog(installed));
+                let mut catalog = crate::agent_setup::bundled_catalog(installed);
+                for agent in &mut catalog.agents {
+                    if agent.path.is_some() {
+                        agent.signed_in = signed_in;
+                    }
+                }
+                store.set_agent_catalog(catalog);
                 store
                     .update_preferences(|prefs| {
                         prefs.sidebar_visible = true;

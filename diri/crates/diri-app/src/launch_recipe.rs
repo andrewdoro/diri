@@ -866,6 +866,7 @@ mod tests {
         assert_eq!(
             effects.try_recv().expect("canonical spawn effect"),
             StoreEffect::Spawn(SessionSpawnParams {
+                appearance: Some(diri_proto::TerminalAppearance::Dark),
                 kind: AgentKind::CODEX,
                 cwd: root,
                 new_worktree: Some(true),

@@ -800,6 +800,7 @@ mod tests {
             path_source: available.then_some(AgentPathSource::SystemPath),
             show_in_quick_create: available,
             error: None,
+            signed_in: None,
             descriptor: Some(AgentDescriptor {
                 id: id.into(),
                 display_name: display_name.into(),

@@ -12457,6 +12457,7 @@ mod tests {
                         path_source: Some(diri_proto::AgentPathSource::SystemPath),
                         show_in_quick_create: true,
                         error: None,
+                        signed_in: None,
                         descriptor: Some(diri_proto::AgentDescriptor {
                             display_name: label.to_owned(),
                             ..Default::default()

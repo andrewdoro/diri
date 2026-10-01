@@ -2697,6 +2697,7 @@ impl SessionStore {
         self.emit(StoreEffect::SpawnAuxiliary {
             slot,
             params: SessionSpawnParams {
+                appearance: None,
                 kind: AgentKind::SHELL,
                 cwd: session.cwd.clone(),
                 new_worktree: None,
@@ -2805,6 +2806,7 @@ impl SessionStore {
             (Some(worktree.create), worktree.branch)
         });
         SessionSpawnParams {
+            appearance: Some(crate::app_theme::spawn_appearance(self.theme_id())),
             kind,
             cwd,
             new_worktree,

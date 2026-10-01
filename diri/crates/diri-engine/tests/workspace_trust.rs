@@ -285,3 +285,107 @@ fn real_claude_reaches_its_composer_in_an_untrusted_folder() {
         "Claude did not reach its composer: {screen} {listed}"
     );
 }
+
+/// Opt-in: a newcomer's whole first run against the real `claude` on PATH.
+/// Diri picks the light text style because the client said its window is
+/// light, the test plays the user and sits on the safety notes past the
+/// 20-second trust window (signing in takes at least that long), and the
+/// trust picker that follows must still be answered. Uses a throwaway
+/// `CLAUDE_CONFIG_DIR` with a fake API key, so it needs no sign-in and never
+/// touches `~/.claude`.
+/// `DIRI_REAL_CLAUDE=1 cargo test -p diri-engine --test workspace_trust -- --ignored --nocapture`
+#[test]
+#[ignore = "drives the real claude CLI; set DIRI_REAL_CLAUDE=1"]
+fn real_claude_first_run_is_guided_to_its_composer() {
+    if std::env::var_os("DIRI_REAL_CLAUDE").is_none() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("temp");
+    let config = temp.path().join("claude-config");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let key = "sk-ant-diri-test-0000000000000000";
+    std::fs::write(
+        config.join(".claude.json"),
+        serde_json::to_vec(&json!({
+            "customApiKeyResponses": { "approved": [&key[key.len() - 20..]], "rejected": [] },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let server = start_server(temp.path());
+    let mut control = Control::connect(server.socket_path());
+    let record = control
+        .request(
+            "session.spawn",
+            json!({
+                "kind": { "claude-code": {} }, "cwd": project,
+                "appearance": "light",
+                "argv": [
+                    "/usr/bin/env",
+                    format!("CLAUDE_CONFIG_DIR={}", config.display()),
+                    format!("ANTHROPIC_API_KEY={key}"),
+                    "DISABLE_AUTOUPDATER=1",
+                    "claude",
+                ],
+            }),
+        )
+        .expect("spawn");
+    let id = record["id"].as_str().expect("session id").to_owned();
+    let read = |control: &mut Control| {
+        control
+            .request("session.read_screen", json!({ "sessionID": id }))
+            .map(|result| result["text"].as_str().unwrap_or_default().to_owned())
+            .unwrap_or_default()
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let notes = loop {
+        let screen = read(&mut control);
+        if screen.contains("Security notes") || Instant::now() > deadline {
+            break screen;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        notes.contains("Security notes"),
+        "the text-style question was not answered: {notes}"
+    );
+    std::thread::sleep(Duration::from_secs(22));
+    control
+        .request(
+            "session.send_key",
+            json!({ "sessionID": id, "key": { "named": "enter" } }),
+        )
+        .expect("press Enter on the notes");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut asked = false;
+    let screen = loop {
+        let screen = read(&mut control);
+        asked |= screen.contains("trust this folder");
+        let composer = screen.contains("? for shortcuts") && !screen.contains("trust this folder");
+        if composer || Instant::now() > deadline {
+            break screen;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let _ = control.request("session.kill", json!({ "sessionID": id }));
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(config.join("settings.json")).unwrap()).unwrap();
+    eprintln!(
+        "trust picker seen: {asked}, theme: {}\n{screen}",
+        saved["theme"]
+    );
+
+    assert_eq!(saved["theme"], "light", "Claude saved another text style");
+    assert!(
+        asked,
+        "Claude never asked to trust a fresh folder: {screen}"
+    );
+    assert!(
+        screen.contains("? for shortcuts") && !screen.contains("trust this folder"),
+        "the trust picker after a long first run was left to the user: {screen}"
+    );
+}

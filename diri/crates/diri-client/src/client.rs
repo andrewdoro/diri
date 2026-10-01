@@ -1743,6 +1743,7 @@ mod tests {
 
             let spawned_id = client
                 .spawn(SessionSpawnParams {
+                    appearance: None,
                     kind: AgentKind::SHELL,
                     cwd: scratch.to_string_lossy().into_owned(),
                     new_worktree: None,

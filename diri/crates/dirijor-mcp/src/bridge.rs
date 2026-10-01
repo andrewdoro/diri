@@ -238,6 +238,7 @@ impl Bridge {
 
         let tracked = parent.is_some();
         let params = SessionSpawnParams {
+            appearance: None,
             kind,
             cwd: required_string(arguments, "cwd")?,
             new_worktree: optional_bool(arguments, "worktree"),

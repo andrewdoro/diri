@@ -365,6 +365,12 @@ pub struct AgentReadinessItem {
     /// must not invent additional supported or installed Agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<AgentDescriptor>,
+    /// Whether the installed Agent already has a login on this machine, read
+    /// from the CLI's own credential stores without touching a secret.
+    /// `None` means Diri cannot tell (unsupported Agent, remote host, or no
+    /// executable); clients must not ask anyone to sign in on `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
 }
 
 fn serialize_agent_kind_id<S>(kind: &AgentKind, serializer: S) -> Result<S::Ok, S::Error>
@@ -497,6 +503,20 @@ pub struct SessionSpawnParams {
     /// it already has one. The file keeps its id and created date.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_id: Option<String>,
+    /// Whether the window the Session opens in is light or dark. An Agent's
+    /// first-run "pick a text style" question is answered from this, since
+    /// Diri's terminal cannot report its background color itself. Absent
+    /// leaves that question to the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<TerminalAppearance>,
+}
+
+/// The light or dark family of the terminal theme a Session is shown in.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalAppearance {
+    Light,
+    Dark,
 }
 
 pub type SessionSpawnResult = SessionRecord;

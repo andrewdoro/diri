@@ -236,6 +236,7 @@ impl Api {
             .map(str::to_string);
 
         let params = SessionSpawnParams {
+            appearance: None,
             kind: AgentKind::new(kind),
             cwd: cwd.to_string(),
             new_worktree: body.get("worktree").and_then(Value::as_bool),

@@ -65,8 +65,8 @@ impl RecoveryNotice {
             DaemonState::Connected => None,
             DaemonState::Connecting => Some(Self {
                 kind: RecoveryKind::Connecting,
-                title: "Connecting to the Diri daemon".to_owned(),
-                body: "Sessions stay visible while the connection is established.".to_owned(),
+                title: "Connecting…".to_owned(),
+                body: "Diri is starting its engine. Sessions stay visible meanwhile.".to_owned(),
                 detail: None,
                 primary_action: None,
                 dismissible: false,

@@ -2690,6 +2690,10 @@ impl TerminalPane {
                 agents: crate::agent_setup::AgentSetupState::from_catalog(
                     store.agent_catalog(None),
                 ),
+                default_agent: crate::agent_catalog::resolved_target_agent(
+                    &store.preferences().default_agent,
+                    store.agent_catalog(None),
+                ),
                 installing: store.installing_agent().cloned(),
                 scanning: store.agent_catalog_is_loading(None),
                 herdr: store
@@ -2785,6 +2789,23 @@ impl TerminalPane {
                 cx.refresh_windows();
             });
         });
+        let canonical = Arc::clone(&self.runtime.store);
+        let window_store = self.window_store.clone();
+        let start_agent: crate::empty_workbench::AgentHandler = Rc::new(move |kind, _, cx| {
+            let options = crate::store::SpawnOptions::default();
+            if let Some(window_store) = &window_store {
+                window_store
+                    .write()
+                    .expect("window navigation lock poisoned")
+                    .spawn_kind(kind.clone(), options);
+            } else {
+                canonical
+                    .write()
+                    .expect("session store lock poisoned")
+                    .spawn_kind(kind.clone(), options);
+            }
+            cx.refresh_windows();
+        });
         crate::empty_workbench::render(
             state,
             crate::empty_workbench::EmptyWorkbenchActions {
@@ -2792,6 +2813,7 @@ impl TerminalPane {
                 check_again,
                 start_in_folder,
                 import_herdr,
+                start_agent,
             },
             colors,
         )
