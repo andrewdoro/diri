@@ -53,8 +53,8 @@ pub(super) struct ZoomSnapshot {
     /// `Page`: a picture of the page; `Overview`: of the resting card.
     pub(super) source: Landing,
     key: PageKey,
-    /// How long the capture took, for the frame budget (read by the tests).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// How long the capture took, for the frame budget (read by the macOS-only pixel test).
+    #[cfg_attr(not(all(test, target_os = "macos")), allow(dead_code))]
     pub(super) cost: std::time::Duration,
 }
 

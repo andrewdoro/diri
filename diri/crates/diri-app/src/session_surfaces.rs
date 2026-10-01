@@ -2708,11 +2708,14 @@ mod tests {
 
     /// The workbench a zoom flies out of: a pane (title bar over the grid,
     /// padded the way `TerminalPane` pads it) under the overview surfaces.
+    /// Only the macOS pixel test builds it.
+    #[cfg(target_os = "macos")]
     struct ZoomHarness {
         surfaces: Entity<SessionSurfaces>,
         page: TerminalElement,
     }
 
+    #[cfg(target_os = "macos")]
     impl Render for ZoomHarness {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let colors = self.surfaces.read(cx).colors();
