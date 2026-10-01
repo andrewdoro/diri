@@ -916,31 +916,10 @@ html { overflow-x: clip; }
 .star-count.loaded { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .cadence, .star-count { transition: none; } }
 
-/* Established hero: a release pill instead of commit cadence, a one-line headline that doesn't shout, agents named with their marks, quiet proof under the buttons. */
+/* Swarm lines fade in only when revealed during playback. */
 .scene-running [data-step], .scene-running [data-child-row] { animation: none; }
 .scene-in { animation: scene-line 320ms var(--ease) both; }
 @media (prefers-reduced-motion: reduce) { .scene-in { animation: none; } }
-.release-pill { display: inline-flex; align-items: center; gap: 10px; margin: 0 auto 26px; padding: 4px 10px 4px 4px; border-radius: 999px; font-size: 13px; color: #cfc8de; background: #ffffff08; border: 1px solid #ffffff14; transition: border-color 140ms ease, color 140ms ease; }
-.release-pill-tag { padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; color: #241c26; background: #ebbcba; }
-.release-pill .icon { width: 12px; height: 12px; margin-left: -4px; opacity: .7; }
-@media (hover: hover) and (pointer: fine) { .release-pill:hover { color: var(--rp-text); border-color: #ffffff2e; } }
-.intro-heading h1, .intro-heading h1 { max-width: none; font-size: clamp(34px, 4.6vw, 50px); line-height: 1.08; letter-spacing: -.035em; font-weight: 520; }
-.intro-heading > p { max-width: 640px; margin-top: 18px; font-size: 17px; line-height: 1.6; color: #c4bdd4; text-wrap: balance; }
-.inline-agent { display: inline-flex; align-items: baseline; gap: 6px; color: var(--rp-text); white-space: nowrap; }
-.inline-agent .agent-logo { width: 15px; height: 15px; align-self: center; color: var(--rp-text); }
-.intro-proof { display: flex; justify-content: center; flex-wrap: wrap; gap: 6px 12px; margin-top: 22px; font-size: 12.5px; color: #a9a2bc; }
-.intro-proof span + span::before { content: '·'; margin-right: 12px; color: #a9a2bc99; }
-@media (min-width: 851px) {
-  .intro-heading h1 { font-size: 46px; }
-  .intro-heading > p { max-width: 760px; font-size: 18px; }
-  .intro-line { display: block; }
-}
-@media (max-width: 600px) {
-  .release-pill { font-size: 12px; margin-bottom: 18px; }
-  .release-pill-text { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .intro-heading h1 { font-size: 34px; }
-  .intro-heading > p { font-size: 15.5px; }
-}
 
 /* Sidebar rows that only fill out the workspace: same look, no pointer affordance. */
 .chat-row.static { cursor: default; }
@@ -953,7 +932,6 @@ html { overflow-x: clip; }
 .closing .button.secondary .icon { width: 16px; height: 16px; }
 .closing .star-count { min-width: 0; margin-left: 2px; padding-left: 9px; border-left: 1px solid #ffffff24; }
 .closing .star-count:not(.loaded) { display: none; }
-@media (max-width: 600px) { .intro-proof span:nth-child(3) { display: none; } }
 /* The closing section ends on a low dawn, echoing the hero sky. */
 .closing { position: relative; isolation: isolate; }
 .closing::before { content: ''; position: absolute; z-index: -1; left: 50%; bottom: 0; width: min(1100px, 100vw); height: 100%; translate: -50% 0; pointer-events: none;
@@ -984,31 +962,6 @@ html { overflow-x: clip; }
 .sidebar-rows { flex: 1 1 0; min-height: 0; overflow: hidden; -webkit-mask-image: linear-gradient(#000 calc(100% - 36px), transparent); mask-image: linear-gradient(#000 calc(100% - 36px), transparent); }
 .sidebar-rows > * { flex-shrink: 0; }
 .app-sidebar .sidebar-bottom { position: static; flex: none; background: none; }
-
-/* Hero as one paragraph: the claim in full white, the detail in grey at the same size. Medium weight, normal tracking. */
-.intro-heading h1, .intro-heading > p { max-width: 780px !important; margin-inline: auto; font-size: 30px !important; line-height: 1.32 !important; letter-spacing: -.018em !important; font-weight: 500 !important; text-wrap: balance; }
-.intro-heading h1 { color: #f4f0fa; }
-.intro-heading > p { margin-top: 2px !important; color: #a9a2bc !important; }
-.intro-heading .inline-agent { color: #d9d3e6; gap: .28em; }
-.intro-heading .inline-agent .agent-logo { width: .8em; height: .8em; color: #d9d3e6; }
-.release-pill { margin-bottom: 30px; padding: 4px 12px 4px 5px; font-size: 13px; color: #b6afc9; background: #ffffff06; border-color: #ffffff12; }
-.release-pill-tag { color: #f4f0fa; background: #ffffff14; font-weight: 500; }
-.intro-actions { gap: 22px !important; margin-top: 34px !important; }
-.intro-actions .button.primary { color: #17151f; background: #f4f0fa; border-color: #f4f0fa; box-shadow: 0 1px 0 #ffffff inset, 0 10px 30px -12px #00000080; }
-.intro-actions .button.primary .button-mark { filter: brightness(0); }
-.intro-actions .button.secondary.text-link { height: auto; padding: 0; gap: 6px; background: none; border: 0; color: #cfc8de; font-weight: 450; }
-.intro-actions .button.secondary.text-link .icon { width: 12px; height: 12px; opacity: .7; }
-@media (hover: hover) and (pointer: fine) {
-  .intro-actions .button.primary:hover { background: #ffffff; border-color: #ffffff; }
-  .intro-actions .button.secondary.text-link:hover { color: #fff; background: none; }
-}
-@media (min-width: 851px) { .intro { padding-bottom: 72px !important; } }
-@media (max-width: 600px) {
-  .intro-heading h1, .intro-heading > p { font-size: 22px !important; }
-}
-
-/* Hero: agent names stay in the grey sentence so the white claim leads. */
-.intro-heading .inline-agent, .intro-heading .inline-agent .agent-logo { color: #c9c2d8; }
 
 /* Features as a bento: five cards that show a slice of the app, then a grid of short facts. */
 .bento, .bento-small { display: grid; gap: 14px; margin: 8px 0 0; }
@@ -1060,13 +1013,7 @@ html { overflow-x: clip; }
 .bento-card dt { margin-top: 0; }
 .mini-row.working { color: inherit; }
 @media (max-width: 600px) { .bento-visual { height: auto; } }
-.intro-heading > p, .intro-heading .inline-agent, .intro-heading .inline-agent .agent-logo { color: #9d96b1 !important; }
 .mini-tr span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-@media (max-width: 600px) {
-  .intro-heading h1, .intro-heading > p { font-size: 21px !important; line-height: 1.35 !important; }
-  .intro-heading .inline-agent .agent-logo { display: none; }
-  .intro-heading .inline-agent { gap: 0; }
-}
 
 /* Icons get their image from CSS, not app.js, so the first frame never shows bare squares. Regenerate when adding an icon. */
 [data-icon="apps"] { --icon: url('/assets/icons/apps.svg'); }
@@ -1142,3 +1089,32 @@ html { overflow-x: clip; }
 .faq-grid dt { font-size: 15.5px; font-weight: 500; color: #f4f0fa; }
 .faq-grid dd { margin: 8px 0 0; font-size: 14px; line-height: 1.6; color: #a9a2bc; text-wrap: pretty; }
 @media (max-width: 850px) { .faq-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* Hero: a calm statement, one grey line, a plain white download, then the agents diri runs as a quiet row. The window does the rest. */
+.intro { padding: 104px 0 0; }
+.intro-heading h1 { max-width: none; margin: 0; font-size: 40px; font-weight: 500; line-height: 1.15; letter-spacing: -.025em; color: #f4f0fa; text-wrap: balance; }
+.intro-heading > p { max-width: 520px; margin: 16px auto 0; font-size: 17px; line-height: 1.6; color: #a9a2bc; text-wrap: balance; }
+.intro-actions { gap: 22px; margin-top: 32px; }
+.intro-actions .button.primary { color: #17151f; background: #f4f0fa; border-color: #f4f0fa; box-shadow: 0 1px 0 #fff inset, 0 10px 30px -12px #00000080; }
+.intro-actions .button.primary .button-mark { filter: brightness(0); }
+.intro-actions .button.secondary.text-link { height: auto; padding: 0; gap: 6px; background: none; border: 0; color: #cfc8de; font-weight: 450; }
+.intro-actions .button.secondary.text-link .icon { width: 12px; height: 12px; opacity: .7; }
+@media (hover: hover) and (pointer: fine) {
+  .intro-actions .button.primary:hover { background: #fff; border-color: #fff; }
+  .intro-actions .button.secondary.text-link:hover { color: #fff; background: none; }
+}
+.works-with { padding: 56px 0 64px; border: 0; flex-direction: column; gap: 14px; }
+.works-with-label { font-size: 12.5px; color: #8f87a3; }
+.works-with > div { gap: 6px !important; flex-wrap: wrap; justify-content: center; }
+.works-with :is(.agent-switch, .agent-chip, .agent-more) { color: #b6afc9 !important; text-shadow: none !important; }
+.works-with .agent-logo { color: #b6afc9 !important; filter: none !important; }
+.works-with .agent-switch[aria-pressed="true"] { color: #f4f0fa !important; background: #ffffff12 !important; }
+.works-with .agent-switch[aria-pressed="true"] .agent-logo { color: #f4f0fa !important; }
+.works-with .agent-more { border-color: #ffffff1f !important; }
+@media (max-width: 600px) {
+  .intro { padding-top: 56px; }
+  .intro-heading h1 { font-size: 30px; }
+  .intro-heading > p { font-size: 15.5px; }
+  .works-with { padding: 36px 0 40px; }
+}
+.works-with .agent-more { border: 0 !important; padding-inline: 10px; text-decoration: underline; text-decoration-color: #ffffff2e; text-underline-offset: 4px; }
