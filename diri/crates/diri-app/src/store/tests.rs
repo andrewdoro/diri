@@ -3540,3 +3540,17 @@ fn a_reveal_request_selects_the_session() {
     });
     assert_eq!(store.selected_session_id(), Some(&note.id));
 }
+
+#[test]
+fn opening_a_note_file_spawns_a_note_session_that_adopts_it() {
+    let (mut store, mut effects) = SessionStore::headless(Prefs::default());
+    store.open_note_file(
+        "20261001-090000-abcd".into(),
+        crate::store::SpawnOptions::default(),
+    );
+    let Ok(StoreEffect::Spawn(params)) = effects.try_recv() else {
+        panic!("a note file opens through a spawn");
+    };
+    assert_eq!(params.kind, AgentKind::NOTE);
+    assert_eq!(params.note_id.as_deref(), Some("20261001-090000-abcd"));
+}

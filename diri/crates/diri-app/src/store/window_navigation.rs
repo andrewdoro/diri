@@ -496,6 +496,10 @@ impl WindowWrite<'_> {
         let options = self.scoped_spawn_options(options);
         self.canonical.spawn_kind(kind, options);
     }
+    pub fn open_note_file(&mut self, note_id: String) {
+        let options = self.scoped_spawn_options(SpawnOptions::default());
+        self.canonical.open_note_file(note_id, options);
+    }
     pub(crate) fn install_agent(&mut self, option: &crate::agent_catalog::AgentOption) -> bool {
         let target = self.spawn_target();
         self.canonical.install_agent(option, Some(target))

@@ -559,7 +559,7 @@ fn every_static_palette_action_dispatches_once_by_mouse_and_keyboard(cx: &mut Te
             None,
             &Default::default(),
         );
-        all.retain(|row| matches!(row.command, PaletteCommand::Action(id) if !matches!(id, CommandId::ToggleHistory | CommandId::ToggleQuickOpen | CommandId::OpenSettings)));
+        all.retain(|row| matches!(row.command, PaletteCommand::Action(id) if !matches!(id, CommandId::ToggleHistory | CommandId::SearchNotes | CommandId::ToggleQuickOpen | CommandId::OpenSettings)));
         all
     };
     assert_eq!(
@@ -910,4 +910,273 @@ fn project_picker_does_not_treat_remote_paths_as_local(cx: &mut TestAppContext) 
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].0, PathBuf::from("/work/project-0"));
     });
+}
+
+/// Search notes opens every kind of note: a live note Session is selected
+/// with the caret on the matching block, an archived one is restored, and a
+/// file no Session holds is adopted through a note spawn carrying its id.
+#[gpui::test]
+fn search_notes_opens_live_archived_and_orphan_notes(cx: &mut TestAppContext) {
+    use crate::notes::todos::TodosModel;
+    use crate::notes::work_item_tests::record;
+    use crate::store::StoreEffect;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let notes = Arc::new(diri_notes::store::NoteStore::open(dir.path().join("notes")).unwrap());
+    let create = |source: &str| {
+        let (_, doc) = diri_notes::markdown::parse(source);
+        notes.create(doc, Some("/work/launch")).unwrap().0
+    };
+    let live = create("# Launch plan\n\nIntro.\n\n- [ ] Book the venue\n");
+    let archived = create("# Pricing study\n\nCompare the venue quotes.\n");
+    let orphan = create("# Groceries\n\n- [ ] Oat milk\n");
+
+    let runtime = Arc::new(StoreRuntime::inert());
+    let (mut store, mut effects) = SessionStore::headless(Default::default());
+    let mut live_session = record("s_live_note", AgentKind::NOTE);
+    live_session.note_id = Some(live.clone());
+    let mut archived_session = record("s_archived_note", AgentKind::NOTE);
+    archived_session.note_id = Some(archived.clone());
+    archived_session.archived_at = Some(DateMillis(1.0));
+    store.upsert_session(live_session);
+    store.upsert_session(archived_session);
+    *runtime.store.write().unwrap() = store;
+    while effects.try_recv().is_ok() {}
+
+    let opened = Rc::new(RefCell::new(Vec::<NoteOpened>::new()));
+    let (overlay, cx) = cx.add_window_view(|_, cx| {
+        let model = cx.new(|cx| {
+            TodosModel::with_store(Arc::clone(&runtime), Some(Arc::clone(&notes)), false, cx)
+        });
+        TodosModel::install(model, cx);
+        let mut overlay = NavigationOverlay::opened_for_test(Arc::clone(&runtime), cx);
+        overlay.overlay = None;
+        overlay
+    });
+    let sink = Rc::clone(&opened);
+    cx.update(|_, cx| {
+        cx.subscribe(&overlay, move |_, event: &NoteOpened, _| {
+            sink.borrow_mut().push(event.clone())
+        })
+        .detach()
+    });
+
+    let open = |cx: &mut gpui::VisualTestContext, query: &str, keep_caret: bool| {
+        overlay.update_in(cx, |overlay, window, cx| {
+            overlay.toggle_search_notes(&SearchNotes, window, cx);
+        });
+        cx.run_until_parked();
+        overlay.update_in(cx, |overlay, window, cx| {
+            assert_eq!(overlay.overlay, Some(Overlay::Notes));
+            assert_eq!(overlay.notes.hits.len(), 3, "every note is listed");
+            overlay.query.insert(query);
+            overlay.query_changed(cx);
+            overlay.run_highlighted(keep_caret, window, cx);
+            assert!(!overlay.is_open(), "opening a note closes the palette");
+        });
+        cx.run_until_parked();
+    };
+
+    // Live, by a to-do in its body: selected, caret on that block.
+    open(cx, "venue book", false);
+    assert_eq!(
+        runtime.store.read().unwrap().selected_session_id(),
+        Some(&SessionId::new("s_live_note"))
+    );
+    assert_eq!(
+        opened.borrow().last(),
+        Some(&NoteOpened {
+            note_id: live.clone(),
+            block: Some(1),
+        })
+    );
+
+    // Archived, opened with ⌘Return: restored, caret left where it was.
+    open(cx, "pricing", true);
+    {
+        let store = runtime.store.read().unwrap();
+        let session = &store.sessions()[&SessionId::new("s_archived_note")];
+        assert!(!session.is_archived(), "opening restores an archived note");
+    }
+    assert!(
+        std::iter::from_fn(|| effects.try_recv().ok()).any(|effect| matches!(
+            effect,
+            StoreEffect::Unarchive(id) | StoreEffect::Resume { id, .. }
+                if id == SessionId::new("s_archived_note")
+        ))
+    );
+    assert_eq!(
+        opened.borrow().last(),
+        Some(&NoteOpened {
+            note_id: archived.clone(),
+            block: None,
+        })
+    );
+
+    // Orphan: adopted by a note spawn that names the file.
+    open(cx, "groceries", false);
+    let spawn = std::iter::from_fn(|| effects.try_recv().ok())
+        .find_map(|effect| match effect {
+            // The window's own launch path, or a plain spawn.
+            StoreEffect::WorkspaceSpawn {
+                params: Some(params),
+                ..
+            }
+            | StoreEffect::Spawn(params) => Some(params),
+            _ => None,
+        })
+        .expect("an orphan note is adopted by a spawn");
+    assert_eq!(spawn.kind, AgentKind::NOTE);
+    assert_eq!(spawn.note_id.as_deref(), Some(orphan.as_str()));
+}
+
+/// While typing in ⌘K, notes the query finds join the results above the
+/// commands, and a live note whose Session already matched is not repeated.
+#[gpui::test]
+fn command_palette_mixes_in_matching_notes(cx: &mut TestAppContext) {
+    use crate::notes::todos::TodosModel;
+
+    let dir = tempfile::tempdir().unwrap();
+    let notes = Arc::new(diri_notes::store::NoteStore::open(dir.path().join("notes")).unwrap());
+    let (_, doc) = diri_notes::markdown::parse("# Quarterly roadmap\n\nShip notes search.\n");
+    let id = notes.create(doc, None).unwrap().0;
+    let runtime = Arc::new(StoreRuntime::inert());
+    let (overlay, cx) = cx.add_window_view(|_, cx| {
+        let model = cx.new(|cx| {
+            TodosModel::with_store(Arc::clone(&runtime), Some(Arc::clone(&notes)), false, cx)
+        });
+        TodosModel::install(model, cx);
+        let mut overlay = NavigationOverlay::opened_for_test(Arc::clone(&runtime), cx);
+        overlay.overlay = None;
+        overlay
+    });
+    overlay.update_in(cx, |overlay, window, cx| {
+        overlay.open_overlay(Overlay::CommandPalette, window, cx);
+    });
+    cx.run_until_parked();
+    overlay.update(cx, |overlay, cx| {
+        overlay.query.insert("roadmap");
+        overlay.query_changed(cx);
+        let first = &overlay.ranked_actions[0].item;
+        assert_eq!(first.title, "Quarterly roadmap");
+        assert_eq!(
+            first.command,
+            PaletteCommand::OpenNote {
+                note_id: id.clone(),
+                block: None,
+            }
+        );
+        overlay.query.clear();
+        overlay.query_changed(cx);
+        assert!(
+            overlay
+                .ranked_actions
+                .iter()
+                .all(|row| !matches!(row.item.command, PaletteCommand::OpenNote { .. })),
+            "the landing page stays focused"
+        );
+    });
+}
+
+/// A notes folder for the Search notes screenshot: live notes, one archived
+/// and one no Session holds, with to-dos linking agents and edits spread
+/// over the last weeks. The folder outlives the test process on purpose.
+#[cfg(target_os = "macos")]
+pub(super) fn seed_notes(overlay: &mut NavigationOverlay, cx: &mut Context<NavigationOverlay>) {
+    use crate::notes::todos::TodosModel;
+    use diri_notes::store::NoteStore;
+
+    let dir = tempfile::tempdir().unwrap().keep();
+    let notes = Arc::new(NoteStore::open(dir.join("notes")).unwrap());
+    let agents: Vec<SessionId> = {
+        let mut store = overlay.store.write().unwrap();
+        store
+            .ordered_sessions()
+            .into_iter()
+            .filter(|session| !session.is_note())
+            .map(|session| session.id.clone())
+            .take(2)
+            .collect()
+    };
+    let link = |index: usize, label: &str| {
+        agents.get(index).map_or_else(String::new, |id| {
+            format!(" [@{label}](diri://session/{})", id.0)
+        })
+    };
+    let fixtures = [
+        (
+            "Q4 launch plan",
+            format!(
+                "Ship the onboarding email sequence before the pricing test.\n\n## Channels\n\n- [ ] Draft the launch email{}\n- [ ] Brief the pricing page{}\n- [x] Book the venue\n",
+                link(0, "Claude Code · Launch copy"),
+                link(1, "Codex · Pricing page"),
+            ),
+            "live",
+            0.2,
+        ),
+        (
+            "Weekly growth sync",
+            "## Pricing\n\nWe will A/B test the pricing page against the annual plan.\n\n| Channel | CPA |\n|---|---|\n| Search | $14 |\n| Social | $22 |\n".to_owned(),
+            "live",
+            3.0,
+        ),
+        (
+            "Customer interviews",
+            "Five teams asked for a cheaper starter plan; two mentioned pricing confusion on the checkout page.\n\n- [ ] Share the notes with design\n".to_owned(),
+            "live",
+            26.0,
+        ),
+        (
+            "Pricing study",
+            "Compare annual pricing with the three closest competitors.\n".to_owned(),
+            "archived",
+            24.0 * 9.0,
+        ),
+        (
+            "Brand refresh brief",
+            "Moodboard, type and the new pricing illustrations.\n".to_owned(),
+            "orphan",
+            24.0 * 15.0,
+        ),
+        (
+            "Hiring loop",
+            "Interview plan for the product designer role.\n\n- [ ] Write the take-home\n".to_owned(),
+            "live",
+            48.0,
+        ),
+        (
+            "Offsite agenda",
+            "Day one: roadmap. Day two: pricing and packaging workshop.\n".to_owned(),
+            "live",
+            24.0 * 20.0,
+        ),
+    ];
+    let now = std::time::SystemTime::now();
+    for (index, (title, body, home, hours_ago)) in fixtures.into_iter().enumerate() {
+        let (_, doc) = diri_notes::markdown::parse(&format!("# {title}\n\n{body}"));
+        let (id, _) = notes.create(doc, Some("/Users/demo/fun/growth")).unwrap();
+        let modified = now - Duration::from_secs_f64(hours_ago * 3600.0);
+        std::fs::File::options()
+            .write(true)
+            .open(notes.dir().join(format!("{id}.md")))
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        if home == "orphan" {
+            continue;
+        }
+        let mut record =
+            crate::notes::work_item_tests::record(&format!("s_note_{index}"), AgentKind::NOTE);
+        record.note_id = Some(id);
+        record.title = title.into();
+        if home == "archived" {
+            record.archived_at = Some(diri_proto::DateMillis(1.0));
+        }
+        overlay.store.write().unwrap().upsert_session(record);
+    }
+    let runtime = Arc::clone(&overlay._runtime);
+    let model = cx.new(|cx| TodosModel::with_store(runtime, Some(notes), false, cx));
+    TodosModel::install(model, cx);
 }

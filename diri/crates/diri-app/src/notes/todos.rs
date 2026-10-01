@@ -59,6 +59,11 @@ pub(crate) struct TodosModel {
     runtime: Arc<StoreRuntime>,
     store: Option<Arc<NoteStore>>,
     groups: Vec<TodoGroup>,
+    /// Every note in the folder, for "Search notes": built in the same
+    /// off-thread pass as the to-dos, reusing unchanged files.
+    notes: Arc<Vec<super::search::NoteEntry>>,
+    /// The index has been built at least once.
+    notes_ready: bool,
     signature: Vec<(SessionId, String)>,
     dirty: bool,
     refresh: Task<()>,
@@ -93,8 +98,8 @@ impl TodosModel {
         model
     }
 
-    /// Only the macOS window screenshots install a fixture model.
-    #[cfg(all(test, target_os = "macos"))]
+    /// Tests and the macOS window screenshots install a fixture model.
+    #[cfg(test)]
     pub(crate) fn install(model: Entity<Self>, cx: &mut App) {
         cx.set_global(TodosGlobal(model));
     }
@@ -113,6 +118,8 @@ impl TodosModel {
             runtime,
             store,
             groups: Vec::new(),
+            notes: Arc::default(),
+            notes_ready: false,
             signature: Vec::new(),
             dirty: true,
             refresh: Task::ready(()),
@@ -123,6 +130,16 @@ impl TodosModel {
 
     pub(crate) fn groups(&self) -> &[TodoGroup] {
         &self.groups
+    }
+
+    /// The notes index (live, archived and orphan files alike).
+    pub(crate) fn notes(&self) -> Arc<Vec<super::search::NoteEntry>> {
+        Arc::clone(&self.notes)
+    }
+
+    /// Whether the index has been read at least once, for loading states.
+    pub(crate) fn notes_ready(&self) -> bool {
+        self.notes_ready || self.store.is_none()
     }
 
     pub(crate) fn open_count(&self) -> usize {
@@ -152,16 +169,21 @@ impl TodosModel {
                 .filter_map(|(id, _)| sessions.sessions().get(id).map(|r| (**r).clone()))
                 .collect()
         };
+        let previous = Arc::clone(&self.notes);
         self.refresh = cx.spawn(async move |this, cx| {
-            let groups = cx
+            let (groups, notes) = cx
                 .background_executor()
-                .spawn(async move { read_groups(&store, &records) })
+                .spawn(async move {
+                    let groups = read_groups(&store, &records);
+                    let notes = super::search::build_index(&store, &previous);
+                    (groups, notes)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.groups != groups {
-                    this.groups = groups;
-                    cx.notify();
-                }
+                this.notes = Arc::new(notes);
+                this.notes_ready = true;
+                this.groups = groups;
+                cx.notify();
             });
         });
     }
@@ -411,7 +433,9 @@ impl Render for TodosPage {
                             .text_color(colors.tertiary)
                             .child(format!("{total} open")),
                     )
-                }),
+                })
+                .child(div().flex_1())
+                .child(search_notes_button(colors)),
         );
         if groups.is_empty() {
             column = column.child(
@@ -583,4 +607,38 @@ impl AlphaExt for gpui::Rgba {
             ..self
         }
     }
+}
+
+/// Every note, not only those with open to-dos, is a search away.
+fn search_notes_button(colors: SemanticColors) -> impl IntoElement {
+    let shortcut = crate::commands::command(crate::commands::CommandId::SearchNotes)
+        .shortcut_label()
+        .unwrap_or_default();
+    div()
+        .id("todos-search-notes")
+        .debug_selector(|| "todos-search-notes".into())
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(diri_ui::Radius::CHIP))
+        .cursor_pointer()
+        .hover(move |style| style.bg(diri_ui::Fill::hover(colors, true)))
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(crate::commands::SearchNotes), cx);
+        })
+        .child(sf_symbol("magnifyingglass", 12.0, colors.secondary))
+        .child(
+            div()
+                .text_size(px(12.5))
+                .text_color(colors.secondary)
+                .child("Search notes"),
+        )
+        .child(
+            div()
+                .text_size(px(12.5))
+                .text_color(colors.tertiary)
+                .child(shortcut),
+        )
 }

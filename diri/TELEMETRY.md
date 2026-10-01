@@ -314,6 +314,8 @@ note ids.
 | `notes.table.pasted` | info | `kind` (`markdown`\|`tsv`\|`csv`) | tables pasted, and from where (Sheets/Excel/Numbers arrive as TSV) |
 | `notes.table.row_added` | info | | rows added (menu, ⌃⇧↑/↓, Tab in the last cell, Return in a cell) |
 | `notes.table.col_added` | info | | columns added (menu, ⌃⇧←/→, a wider paste) |
+| `notes.search.opened` | info | | Search notes page opened (⇧⌘F, ⌘K, To-dos header) |
+| `notes.search.result_opened` | info | `kind` (`live`\|`archived`\|`orphan`) | which notes people go back to, and whether archived and Session-less files matter |
 
 ## Upload
 
