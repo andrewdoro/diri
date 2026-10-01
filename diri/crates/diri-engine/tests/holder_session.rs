@@ -694,3 +694,75 @@ fn local_reset_survives_engine_replacement() {
     assert!(!screen(&restored).contains("before reset"));
     restored.terminate(id, Duration::from_millis(500)).unwrap();
 }
+
+#[test]
+fn a_resumed_session_never_shows_the_previous_childs_output() {
+    let root = holders_dir("resume");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let engine = engine();
+
+    // The previous child dies mid-repaint: alt screen, mouse reporting, and a
+    // spinner frame left on screen, no reset — a killed Claude Code.
+    let first = Session::spawn(
+        shell_spec(
+            "s_resume",
+            "printf 'OLD-BANNER\\033[?1049h\\033[?1000h\\033[H\\033[5BOLD-SPINNER'; exit 0",
+            &logs,
+            Some(holder.clone()),
+        ),
+        Arc::clone(&engine),
+    )
+    .expect("first incarnation");
+    wait_until("first incarnation exits", Duration::from_secs(5), || {
+        first.view().exited
+    });
+    drop(first);
+    assert!(log_contains(&logs, "s_resume", b"OLD-SPINNER"));
+
+    // Resume reuses the session id, so the new holder appends to the same
+    // log. The new child is slow to draw, like an agent loading history.
+    let resumed = Session::spawn(
+        shell_spec(
+            "s_resume",
+            "sleep 0.5; printf 'NEW-CHILD'; exec cat",
+            &logs,
+            Some(holder.clone()),
+        ),
+        engine,
+    )
+    .expect("resume");
+    let shows_old = |session: &Session| {
+        session
+            .screen_lines()
+            .iter()
+            .any(|line| line.contains("OLD-"))
+    };
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        assert!(
+            !shows_old(&resumed),
+            "the dead child's frames painted the resumed screen: {:?}",
+            resumed.screen_lines()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    wait_until("new child draws", Duration::from_secs(5), || {
+        resumed
+            .screen_lines()
+            .iter()
+            .any(|line| line.contains("NEW-CHILD"))
+    });
+    assert!(!shows_old(&resumed), "{:?}", resumed.screen_lines());
+    let (alt_screen, _, mouse) = resumed.modes();
+    assert!(
+        !alt_screen,
+        "the dead child's alt screen does not carry over"
+    );
+    assert_eq!(mouse, Default::default(), "nor its mouse reporting");
+
+    let mut resumed = resumed;
+    resumed
+        .terminate(Duration::from_secs(2))
+        .expect("terminate");
+}
