@@ -46,38 +46,51 @@ fn text_width(text: &str) -> f32 {
         .sum()
 }
 
-/// A soft scroll shadow on the edge where a wide table has more to see, the
-/// way macOS lists show it: a cut-off column then reads as "scroll for more"
-/// rather than as the table's end. A shadow rather than a fade, because the
-/// note's surface is translucent under the glass material.
+/// How far the edge fade reaches into a wide table, and the scroll distance
+/// over which it comes to full strength (the sidebar's numbers, sideways).
+const EDGE_FADE: f32 = 28.0;
+const EDGE_RAMP: f32 = 14.0;
+
+/// The edge where a wide table has more to see dissolves into the surface,
+/// the way the sidebar's list does at its ends, so a cut column reads as
+/// "scroll for more". The mask lands on exactly the color the work surface
+/// settles to over the window, so it is invisible at rest and never a dark
+/// band on glass; cut columns also fade themselves (`column_alpha`) because a
+/// translucent mask alone cannot hide them there.
 fn scroll_fade(scroll: ScrollHandle, colors: SemanticColors) -> impl IntoElement {
+    let fill: gpui::Hsla = diri_ui::composite(colors.work_surface(), colors.window_fill()).into();
+    let opaque = colors.material() == diri_ui::Material::Opaque;
     canvas(
         |_, _, _| {},
         move |_, _, window, _| {
+            // Under glass the surface's settled color depends on whatever is
+            // behind the window, so a mask would paint a band; the cut
+            // columns fade themselves instead, as sidebar rows do.
+            if !opaque {
+                return;
+            }
             let viewport = scroll.bounds();
             let max = scroll.max_offset().x;
             if max <= px(0.0) || viewport.size.width <= px(0.0) {
                 return;
             }
-            let offset = -scroll.offset().x;
-            let strength = if colors.appearance == diri_ui::Appearance::Dark {
-                0.45
-            } else {
-                0.12
-            };
-            let shadow = gpui::hsla(0.0, 0.0, 0.0, strength);
-            let clear = gpui::hsla(0.0, 0.0, 0.0, 0.0);
-            let width = px(16.0);
-            let mut paint = |left: Pixels, toward_right: bool| {
+            let scrolled = f32::from(-scroll.offset().x).max(0.0);
+            let remaining = (f32::from(max) - scrolled).max(0.0);
+            let mut paint = |left: Pixels, toward_right: bool, strength: f32| {
+                if strength <= 0.01 {
+                    return;
+                }
+                let solid = fill.opacity(strength);
+                let clear = fill.opacity(0.0);
                 let (from, to) = if toward_right {
-                    (clear, shadow)
+                    (clear, solid)
                 } else {
-                    (shadow, clear)
+                    (solid, clear)
                 };
-                window.paint_quad(fill(
+                window.paint_quad(fill_quad(
                     Bounds::new(
                         point(left, viewport.top() + px(1.0)),
-                        size(width, viewport.size.height - px(2.0)),
+                        size(px(EDGE_FADE), viewport.size.height - px(2.0)),
                     ),
                     gpui::linear_gradient(
                         90.0,
@@ -86,16 +99,40 @@ fn scroll_fade(scroll: ScrollHandle, colors: SemanticColors) -> impl IntoElement
                     ),
                 ));
             };
-            if offset < max - px(1.0) {
-                paint(viewport.right() - width, true);
-            }
-            if offset > px(1.0) {
-                paint(viewport.left(), false);
-            }
+            paint(
+                viewport.right() - px(EDGE_FADE),
+                true,
+                (remaining / EDGE_RAMP).min(1.0),
+            );
+            paint(viewport.left(), false, (scrolled / EDGE_RAMP).min(1.0));
         },
     )
     .absolute()
     .inset_0()
+}
+
+fn fill_quad(bounds: Bounds<Pixels>, background: gpui::Background) -> gpui::PaintQuad {
+    fill(bounds, background)
+}
+
+/// Opacity for a column of a sideways-scrolled table: a column cut by an
+/// edge fades by how much of it is out of view, the way sidebar rows
+/// dissolve near the list's ends. Uses last frame's scroll geometry.
+fn column_alpha(scroll: &ScrollHandle, left: f32, width: f32) -> f32 {
+    let viewport = f32::from(scroll.bounds().size.width);
+    let max = f32::from(scroll.max_offset().x);
+    if max <= 0.0 || viewport <= 0.0 || width <= 0.0 {
+        return 1.0;
+    }
+    let scrolled = f32::from(-scroll.offset().x).max(0.0);
+    let remaining = (max - scrolled).max(0.0);
+    let visible_left = scrolled;
+    let visible_right = scrolled + viewport;
+    let right_cut = ((left + width) - visible_right).max(0.0).min(width) / width;
+    let left_cut = (visible_left - left).max(0.0).min(width) / width;
+    let right = 1.0 - (remaining / EDGE_RAMP).min(1.0) * right_cut;
+    let left_side = 1.0 - (scrolled / EDGE_RAMP).min(1.0) * left_cut;
+    right.min(left_side).max(0.0)
 }
 
 /// What a frame drew for one table.
@@ -323,7 +360,10 @@ impl NoteEditorView {
             if row + 1 < rows {
                 cells = cells.border_b_1().border_color(hairline);
             }
+            let mut column_left = 0.0;
             for (col, &width) in widths.iter().enumerate() {
+                let alpha = column_alpha(&scroll, column_left, width);
+                column_left += width;
                 let index = first + col;
                 let block = self.editor.block(index);
                 let shown = Shown::of(block);
@@ -366,6 +406,7 @@ impl NoteEditorView {
                     .child(styled);
                 let cell = div()
                     .relative()
+                    .opacity(alpha)
                     .w(px(width))
                     .flex_none()
                     .flex()
