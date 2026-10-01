@@ -61,15 +61,162 @@ pub(crate) fn caption_lane() -> f32 {
     }
 }
 
-/// Width that the toolbar reaching the window's top-left corner leaves free
-/// for macOS's traffic lights.
-pub(crate) fn traffic_light_lane() -> f32 {
-    if cfg!(target_os = "macos") && !draws_caption_buttons() {
+/// Windows places the 16 px window icon 16 px from the left edge and the
+/// next element 16 px after it.
+const WINDOW_ICON_SIZE: f32 = 16.0;
+const WINDOW_ICON_INSET: f32 = 16.0;
+const WINDOW_ICON_LANE: f32 = WINDOW_ICON_INSET + WINDOW_ICON_SIZE + 4.0;
+
+/// Whether macOS draws its traffic lights over the window's top-left corner.
+pub(crate) fn traffic_lights_visible() -> bool {
+    cfg!(target_os = "macos") && !draws_caption_buttons()
+}
+
+/// Width that a vertical-tabs toolbar reaching the window's top-left corner
+/// leaves free: macOS's traffic lights, or the Windows window icon.
+pub(crate) fn leading_lane() -> f32 {
+    if draws_caption_buttons() {
+        WINDOW_ICON_LANE
+    } else if traffic_lights_visible() {
         Metrics::TOOLBAR_TRAFFIC_LIGHT_LANE
     } else {
         0.0
     }
 }
+
+static WINDOW_ICON: std::sync::LazyLock<std::sync::Arc<gpui::Image>> =
+    std::sync::LazyLock::new(|| {
+        // `assets/icon.png` at 64 px, the same art `build.rs` packs into
+        // `diri.ico` for the taskbar.
+        std::sync::Arc::new(gpui::Image::from_bytes(
+            gpui::ImageFormat::Png,
+            include_bytes!("../../diri-ui/assets/brand/window-icon.png").to_vec(),
+        ))
+    });
+
+/// The app icon in the top-left corner, where Windows 11 apps with their own
+/// title bar put it (vertical tabs only: with horizontal tabs the strip is
+/// the title bar, the tab pattern Microsoft documents, and has none). A click
+/// or right-click opens the window's system menu. Windows' older
+/// double-click-to-close is left out: it fights the menu the first click
+/// opens.
+pub(crate) fn window_icon(window: &Window) -> Option<AnyElement> {
+    if !draws_caption_buttons() || window.is_fullscreen() {
+        return None;
+    }
+    let hit = 28.0;
+    let left = WINDOW_ICON_INSET - (hit - WINDOW_ICON_SIZE) / 2.0;
+    let top = (Metrics::TITLE_BAR - hit) / 2.0;
+    // The menu drops from the icon's bottom-left, as the native one does.
+    let anchor = gpui::point(px(WINDOW_ICON_INSET), px(top + hit));
+    let open_menu = move |window: &mut Window, cx: &mut gpui::App| {
+        // Not from inside this input callback: the menu runs a modal loop.
+        window
+            .spawn(cx, async move |cx| {
+                let _ = cx.update(|window, _| show_system_menu(window, anchor));
+            })
+            .detach();
+        cx.stop_propagation();
+    };
+    Some(
+        div()
+            .id("window-icon")
+            .debug_selector(|| "window-icon".into())
+            .role(gpui::Role::Button)
+            .aria_label("Window menu")
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .size(px(hit))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                open_menu(window, cx)
+            })
+            .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
+                open_menu(window, cx)
+            })
+            .child(
+                gpui::img(WINDOW_ICON.clone())
+                    .size(px(WINDOW_ICON_SIZE))
+                    .flex_none(),
+            )
+            .into_any_element(),
+    )
+}
+
+/// The window's system menu (Restore, Move, Size, Minimize, Maximize,
+/// Close) at `at` in window coordinates. GPUI's `show_window_menu` does
+/// nothing on Windows, so this asks Win32 directly.
+#[cfg(windows)]
+fn show_system_menu(window: &Window, at: gpui::Point<gpui::Pixels>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnableMenuItem, GetSystemMenu, IsZoomed, MF_BYCOMMAND, MF_ENABLED, MF_GRAYED,
+        PostMessageW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_MOVE, SC_RESTORE, SC_SIZE,
+        SetMenuDefaultItem, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN,
+        TrackPopupMenu, WM_SYSCOMMAND,
+    };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(handle.hwnd.get() as *mut std::ffi::c_void);
+    let scale = window.scale_factor();
+    let mut point = POINT {
+        x: (f32::from(at.x) * scale).round() as i32,
+        y: (f32::from(at.y) * scale).round() as i32,
+    };
+    // SAFETY: `hwnd` is this live window's handle, read on its UI thread;
+    // the menu belongs to the window and is not destroyed here.
+    unsafe {
+        let _ = ClientToScreen(hwnd, &mut point);
+        let menu = GetSystemMenu(hwnd, false);
+        if menu.is_invalid() {
+            return;
+        }
+        // DefWindowProc only updates these for its own caption, which this
+        // window does not have.
+        let maximized = IsZoomed(hwnd).as_bool();
+        for (command, enabled) in [
+            (SC_RESTORE, maximized),
+            (SC_MOVE, !maximized),
+            (SC_SIZE, !maximized),
+            (SC_MINIMIZE, true),
+            (SC_MAXIMIZE, !maximized),
+            (SC_CLOSE, true),
+        ] {
+            let state = if enabled { MF_ENABLED } else { MF_GRAYED };
+            let _ = EnableMenuItem(menu, command, MF_BYCOMMAND | state);
+        }
+        let _ = SetMenuDefaultItem(menu, SC_CLOSE, 0);
+        let command = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+            point.x,
+            point.y,
+            None,
+            hwnd,
+            None,
+        );
+        if command.0 != 0 {
+            let _ = PostMessageW(
+                Some(hwnd),
+                WM_SYSCOMMAND,
+                WPARAM(command.0 as usize),
+                LPARAM(0),
+            );
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn show_system_menu(_: &Window, _: gpui::Point<gpui::Pixels>) {}
 
 /// How much of the caption lane a toolbar must leave free at its trailing
 /// edge, given where it starts and how far its right edge stops short of the

@@ -3755,11 +3755,11 @@ impl TerminalPane {
             // frames imply, so this is an intentional optical safe area.
             .when(
                 self.occupies_window_titlebar()
-                    && crate::window_chrome::traffic_light_lane() > 0.0,
+                    && crate::window_chrome::leading_lane() > 0.0,
                 |control| {
                     control.child(
                         div()
-                            .w(px(crate::window_chrome::traffic_light_lane()))
+                            .w(px(crate::window_chrome::leading_lane()))
                             .flex_none(),
                     )
                 },

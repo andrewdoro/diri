@@ -5246,6 +5246,13 @@ impl Render for RootView {
         if let Some(caption) = crate::window_chrome::caption_buttons(window, colors) {
             root = root.child(caption);
         }
+        // With horizontal tabs the strip is the whole title bar and carries
+        // no window icon, as tabbed Windows apps do.
+        if self.tabs_seam <= 0.0
+            && let Some(icon) = crate::window_chrome::window_icon(window)
+        {
+            root = root.child(icon);
+        }
         root.child(crate::telemetry::frame_probe(
             frame_started,
             self.frame_context(cx),
@@ -9178,6 +9185,10 @@ mod tests {
                     if inspector {
                         root.set_inspector_open(true, cx);
                     }
+                    // Switching orientation brings the sidebar back.
+                    if !horizontal && !sidebar && root.sidebar.read(cx).is_visible() {
+                        root.run_command(CommandId::ToggleSidebar, window, cx);
+                    }
                 });
                 // The caption dims its glyphs for an inactive window.
                 window.activate_window();
@@ -9646,6 +9657,7 @@ mod tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         let services = test_services();
         let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+        let selected = fixture.selected_session_id.clone().unwrap();
         {
             let mut store = services.store.store.write().unwrap();
             store.hydrate(fixture.list);
@@ -9711,6 +9723,13 @@ mod tests {
             "so does the pane's title bar"
         );
         assert_eq!(area_at(cx, point(px(500.0), px(300.0))), None);
+        // The app icon opens the system menu at Windows' 16 px inset.
+        let icon = cx
+            .debug_bounds("window-icon")
+            .expect("vertical tabs show the window icon");
+        assert_eq!(icon.center().x, px(24.0));
+        assert_eq!(icon.center().y, px(Metrics::TITLE_BAR / 2.0));
+        assert_eq!(area_at(cx, icon.center()), None, "the icon is a button");
 
         // Horizontal tabs: the strip takes the title row and the corner.
         root.update_in(cx, |root, window, cx| {
@@ -9728,8 +9747,24 @@ mod tests {
             actions.right() <= caption.left() - px(10.0),
             "the hosted actions sit beside the caption: {actions:?} vs {caption:?}"
         );
+        assert!(
+            cx.debug_bounds("window-icon").is_none(),
+            "the tab strip is the title bar and carries no window icon"
+        );
         let new_tab = cx.debug_bounds("horizontal-new-tab").unwrap();
         assert_eq!(area_at(cx, new_tab.center()), None);
+        let tab_selector = format!("horizontal-tab-{}", selected.0);
+        let tab = cx
+            .debug_bounds(tab_selector.leak())
+            .expect("selected tab");
+        assert_eq!(area_at(cx, tab.center()), None, "tabs stay tabs");
+        assert!(
+            (1..24).any(|dx| {
+                area_at(cx, point(tab.right() + px(dx as f32), tab.center().y))
+                    == Some(WindowControlArea::Drag)
+            }),
+            "the gap after a tab moves the window"
+        );
         assert_eq!(
             area_at(cx, point(strip.left() + px(4.0), strip.center().y)),
             Some(WindowControlArea::Drag),
