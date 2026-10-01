@@ -550,6 +550,24 @@ impl NoteEditorView {
         self.colors
     }
 
+    /// Where the `/` or `@` that opened a menu sits. Menus hang from their
+    /// trigger character, not the caret: the caret's painted bounds lag a
+    /// frame behind the keystroke (the menu would open at the old caret, then
+    /// hop right by the `/`'s width) and move as the query is typed. The
+    /// trigger's start is the same in last frame's layout and this one.
+    fn trigger_anchor(&self) -> Option<Bounds<Pixels>> {
+        let (block_id, offset) = if let Some(menu) = &self.slash {
+            (menu.block_id, menu.slash)
+        } else if let Some(menu) = &self.mention {
+            (menu.block_id, menu.at)
+        } else {
+            return None;
+        };
+        let index = self.editor.blocks().iter().position(|b| b.id == block_id)?;
+        let (point, line) = self.caret_point(Pos::new(index, offset))?;
+        Some(Bounds::new(point, size(px(2.0), line)))
+    }
+
     /// Menus open under `pos` this frame, wherever the caret was painted.
     pub(super) fn anchor_menus_at(&mut self, pos: Pos) {
         if let Some((point, line)) = self.caret_point(pos) {
@@ -3462,7 +3480,7 @@ impl NoteEditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let caret = self.caret_bounds?;
+        let caret = self.trigger_anchor().or(self.caret_bounds)?;
         let viewport = window.viewport_size();
         let (position, anchor) = menu_placement(caret, viewport.height, height);
         let dismiss = move |this: &mut Self,
