@@ -165,7 +165,7 @@
   <script src="app.js" defer></script>
   <script type="module" src="downloads.js"></script>
   <script type="module" src="stats.js"></script>
-  <noscript><style>.cadence, .star-count { opacity: 1; }</style></noscript>
+  <noscript><style>.star-count { opacity: 1; }</style></noscript>
 </head>
 <body>
   <div class="page-sky" aria-hidden="true"></div>
@@ -179,9 +179,9 @@
     <main id="main">
       <section class="intro" aria-labelledby="page-title">
         <div class="intro-heading">
-          <a class="cadence" id="cadence" href="https://github.com/cristicretu/diri/commits/main"><span class="cadence-dot" aria-hidden="true"></span><span>Commits in the last 30 days</span></a>
+          <a class="release-pill" href="/whats-new/0.9.0/"><span class="release-pill-tag">New in 0.9</span><span class="release-pill-text">Notes, and to-dos that start agents</span><span class="icon" data-icon="chevron-right" aria-hidden="true"></span></a>
           <h1 id="page-title">The best way to work with coding agents</h1>
-          <p>Run Claude Code, Codex, and any other agent in parallel. Step in only when one needs you.</p>
+          <p>Run <span class="inline-agent"><i class="agent-logo claude" data-agent="claude"></i>Claude Code,</span> <span class="inline-agent"><i class="agent-logo" data-agent="codex"></i>Codex,</span> <span class="inline-agent"><i class="agent-logo" data-agent="cursor"></i>Cursor,</span> <span class="inline-agent"><i class="agent-logo gemini" data-agent="gemini"></i>Gemini</span> and 18&nbsp;more in parallel. <span class="intro-line">Step in only when one needs you.</span></p>
         </div>
         <div class="intro-actions">
           <a id="download-primary" class="button primary" href="https://github.com/cristicretu/diri/releases/latest"><img class="button-mark" src="/assets/brand/apple.svg" width="15" height="15" alt=""><span class="button-label">Download for macOS</span></a>
@@ -196,6 +196,7 @@
             </div>
           </details>
         </div>
+        <p class="intro-proof"><span>Free &amp; open source</span><span>Native, no Electron</span><span>Your accounts, your machines</span></p>
       </section>
 
       <section class="product" aria-label="Interactive Diri preview" data-nosnippet>
@@ -211,10 +212,13 @@
               <div class="chat-row child" data-child-row><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Verify the Linux build</span><span class="agent-logo claude" data-agent="claude"></span></div>
               <div class="chat-row child" data-child-row><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Test the updater</span><span class="agent-logo gemini" data-agent="gemini"></span></div>
             </div>
+            <div class="chat-row static"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Fix the flaky reconnect test</span><span class="agent-logo" data-agent="codex"></span></div>
+            <div class="chat-row static"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Review PR #412: session restore</span><span class="agent-logo claude" data-agent="claude"></span></div>
             <button class="chat-row" data-chat="website" aria-pressed="false"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Build the Diri website</span><span class="agent-logo" data-agent="codex"></span></button>
             <button class="chat-row" data-chat="notes" aria-pressed="false"><span class="chat-state needs-input" aria-label="Needs input"><span class="icon" data-icon="warning"></span></span><span>Weekly plan</span><span class="agent-logo claude" data-agent="claude"></span></button>
             <button class="chat-row" data-chat="details" aria-pressed="false"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Keyboard navigation</span><span class="agent-logo" data-agent="cursor"></span></button>
             <div class="sidebar-group second"><span class="group-chevron"><span class="icon" data-icon="chevron-down"></span></span>Experiments</div>
+            <div class="chat-row static"><span class="chat-state idle" aria-label="Hibernated"><span class="icon" data-icon="moon"></span></span><span>Benchmark the terminal parser</span><span class="agent-logo" data-agent="opencode"></span></div>
             <button class="chat-row" data-chat="weekend" aria-pressed="false"><span class="chat-state idle" aria-label="Hibernated"><span class="icon" data-icon="moon"></span></span><span>Travel map</span><span class="agent-logo gemini" data-agent="gemini"></span></button>
             <div class="sidebar-bottom">
               <div class="sidebar-filter"><span class="icon" data-icon="search"></span>Filter agents</div>
@@ -343,6 +347,15 @@
           <h3 id="feature-group-faq"><span class="icon" data-icon="more" aria-hidden="true"></span>Questions</h3>
           <dl class="feature-list"><div><dt>Is diri free?</dt><dd>Yes. diri is free and open source under Apache 2.0. You only pay for the agents you use, through your own Claude, ChatGPT or other accounts.</dd></div><div><dt>Which agents does it work with?</dt><dd>Claude Code, Codex, Cursor, Gemini, OpenCode, Pi, Copilot, Kimi and more: 22 agent definitions ship with the app, and any terminal agent can be added with a short JSON file.</dd></div><div><dt>Do I need to know how to code?</dt><dd>No. You describe tasks in plain English and the agents do the work. The guides are written for marketers and product managers as well as developers.</dd></div><div><dt>What happens when I close diri?</dt><dd>Your agents keep working. Reopen diri and every session is where you left it. Restarting your Mac stops them, but Claude Code, Codex and most others can resume the same conversation.</dd></div><div><dt>Can agents work together?</dt><dd>Yes. Claude Code, Codex and Cursor sessions started in diri can start other agents, hand them tasks, and collect their results. Ask in plain English, starting with “Use diri to…”.</dd></div><div><dt>Does diri see my code or prompts?</dt><dd>No. Agents run on your Mac or your own servers, with no diri account and no hosted relay. diri records crash and performance diagnostics, never terminal contents or prompts, and you can turn sharing off.</dd></div><div><dt>Which platforms are supported?</dt><dd>macOS 15 or newer on Apple silicon and Intel. Linux is in beta, and a Windows version is in progress.</dd></div></dl>
         </section>
+      </section>
+
+      <section class="closing" aria-labelledby="closing-title">
+        <h2 id="closing-title">Start your first agent in a minute</h2>
+        <p>Free and open source. Bring the Claude, ChatGPT or other accounts you already use.</p>
+        <div class="intro-actions">
+          <a id="download-final" class="button primary" href="https://github.com/cristicretu/diri/releases/latest"><img class="button-mark" src="/assets/brand/apple.svg" width="15" height="15" alt=""><span class="button-label">Download for macOS</span></a>
+          <a class="button secondary" href="https://github.com/cristicretu/diri"><span class="icon" data-icon="github" aria-hidden="true"></span>Star on GitHub<span class="star-count" aria-hidden="true"></span></a>
+        </div>
       </section>
     </main>
     <footer class="site-footer">
