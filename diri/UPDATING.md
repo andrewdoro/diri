@@ -98,33 +98,49 @@ One-time setup is the Developer ID cert and notary profile described in
 signatures. No Sparkle keys, and no Linux signing key: CI signs the Linux
 packages keylessly (see [PACKAGING.md](PACKAGING.md#linux-signatures)).
 
-First open and merge a normal pull request that updates the `diri-app` version
-and lockfile. Then check out the clean, current `main` branch and run:
+A release takes about five minutes from the bump to a published macOS build:
 
-```sh
-diri/scripts/release.sh 0.4.1
-```
+1. Open a pull request that only bumps the `diri-app` version and lockfile,
+   based on the current `main`.
+2. Check out that branch in a clean worktree and run
 
-While the macOS build runs locally, two things wait on GitHub Actions in the
-background (`scripts/await-ci.sh`): CI's clippy/test run on that commit, which
-is the release gate, and the `linux-packages-<commit>` artifact from a Nightly
-run on it. If no Nightly run exists for the commit, the script dispatches one
-(about 40 minutes, overlapping the macOS build and notarization). Both are
-joined before anything is published. Builds use `diri/target/release-pipeline`,
-a cache nothing else writes to, so a release recompiles only what changed.
+   ```sh
+   diri/scripts/release.sh 0.4.1 --wait-for-merge
+   ```
+
+3. While it builds, signs and notarizes, merge the pull request (squash).
+
+The script identifies the release by its source tree. A squash merge of a bump
+PR that is up to date with `main` has exactly the branch's tree, so the bundle
+built before the merge is the bundle the merge commit describes (the remote
+Helper's Build ID is the tree hash, so nothing in it names a commit). After
+the merge it finds that commit on `main`, passes the gate on a successful CI
+run for the same tree (the PR's own run counts, so it does not wait for
+`main`'s macOS queue), and publishes the DMG, update zip, feed and cask.
+
+The Linux packages are built and signed by the Nightly workflow, which starts
+its two Linux package jobs when the bump merges (about 15 minutes). If they are
+ready when the macOS side is, they ship together; otherwise the macOS release
+goes out first and the script attaches the Linux files to the same release
+when they arrive, after the same digest and Sigstore checks. Attaching only
+adds missing assets; it never replaces one.
+
+Without `--wait-for-merge`, run from a checkout whose tree is already on
+`main`. Builds use `diri/target/release-pipeline`, a cache nothing else writes
+to, so a release recompiles only what changed.
 
 The script refuses to release a version that does not match the manifest, a
-dirty checkout, or a commit other than the current `origin/main`. It requires
-CI's clippy + tests to have passed, builds the universal Rust executables, signs them,
-**notarizes and staples the .app first**, then builds and notarizes the DMG
-from that stapled bundle, produces the update zip, rebuilds `appcast.json` from
-the currently published feed, generates `SHA256SUMS` and a reviewed dependency
-license inventory, verifies the Linux manifest and artifact digests against
-that same source commit, verifies the Linux Sigstore signatures against the
-pinned `nightly.yml@refs/heads/main` identity, and creates one GitHub Release
-containing the macOS and Linux assets and the Linux `.sigstore.json` bundles.
-It then updates, commits, **pushes, and reads back** the Homebrew cask;
-the release does not report success until the remote cask checksum matches the
+dirty checkout, or a tree that never reaches `origin/main`. It requires a
+passing CI run on that tree, builds the universal Rust executables, signs them,
+builds the DMG and **notarizes it once** (Apple tickets the DMG and the app
+inside it), staples both the DMG and the app, produces the update zip from the
+stapled app, rebuilds `appcast.json` from the currently published feed,
+generates `SHA256SUMS` and a reviewed dependency license inventory, verifies
+the Linux manifest and artifact digests against the source commit, verifies
+the Linux Sigstore signatures against the pinned
+`nightly.yml@refs/heads/main` identity, and publishes the GitHub Release. It
+then updates, commits, **pushes, and reads back** the Homebrew cask; the
+release does not report success until the remote cask checksum matches the
 published DMG.
 
 Published asset bytes are immutable. If a rebuilt artifact differs from an
@@ -215,6 +231,8 @@ latest release.
 - `DIRI_LINUX_DIST` — use an already-downloaded Linux artifact directory. It
   must include CI's `.sigstore.json` bundles; a Nightly run that predates
   signing, or a pull-request run, has none and is refused.
+- `DIRI_MERGE_TIMEOUT_SECONDS` — how long `--wait-for-merge` waits for the
+  merge (default 3600).
 - `DIRI_RELEASE_TARGET_DIR` — release build cache (default `diri/target/release-pipeline`).
 
 ## Verifying a release

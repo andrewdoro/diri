@@ -279,17 +279,21 @@ if [[ "${notary_requested}" == "1" ]]; then
         exit 1
     fi
 
-    # The .app is notarized and stapled BEFORE the DMG is built, so both the
-    # DMG's copy and the update zip carry their own ticket. A ticket stapled
-    # only to the DMG would leave the extracted bundle needing an online
-    # Gatekeeper check, and the updater verifies downloads offline.
-    echo "==> Notarizing ${app_path}"
-    notarization_zip="$(mktemp -d "${TMPDIR:-/tmp}/diri-notarize.XXXXXX")/diri.zip"
-    ditto -c -k --keepParent "${app_path}" "${notarization_zip}"
-    submit_for_notarization "${notarization_zip}"
-    rm -rf "$(dirname "${notarization_zip}")"
-    xcrun stapler staple "${app_path}"
-    xcrun stapler validate "${app_path}"
+    # With a DMG, only the DMG is submitted (below): Apple tickets every
+    # nested item, so one round-trip covers both and the app is stapled from
+    # that ticket. The update zip is made from the stapled app, because the
+    # updater verifies downloads offline. The DMG's own copy of the app is
+    # not stapled; Gatekeeper checks it online on first launch, while the DMG
+    # itself carries a stapled ticket. Without a DMG the app goes alone.
+    if [[ "${DIRI_CREATE_DMG:-0}" != "1" ]]; then
+        echo "==> Notarizing ${app_path}"
+        notarization_zip="$(mktemp -d "${TMPDIR:-/tmp}/diri-notarize.XXXXXX")/diri.zip"
+        ditto -c -k --keepParent "${app_path}" "${notarization_zip}"
+        submit_for_notarization "${notarization_zip}"
+        rm -rf "$(dirname "${notarization_zip}")"
+        xcrun stapler staple "${app_path}"
+        xcrun stapler validate "${app_path}"
+    fi
 fi
 
 if [[ "${DIRI_CREATE_DMG:-0}" == "1" ]]; then
@@ -309,10 +313,12 @@ if [[ "${DIRI_CREATE_DMG:-0}" == "1" ]]; then
 fi
 
 if [[ "${DIRI_CREATE_DMG:-0}" == "1" && "${notary_requested}" == "1" ]]; then
-    echo "==> Notarizing ${dmg_path}"
+    echo "==> Notarizing ${dmg_path} (covers the app inside it)"
     submit_for_notarization "${dmg_path}"
     xcrun stapler staple "${dmg_path}"
     xcrun stapler validate "${dmg_path}"
+    xcrun stapler staple "${app_path}"
+    xcrun stapler validate "${app_path}"
 fi
 
 if [[ "${DIRI_CREATE_ZIP:-0}" == "1" || "${notary_requested}" == "1" ]]; then

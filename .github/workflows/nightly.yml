@@ -8,11 +8,21 @@ name: Nightly
 #
 # They still run: once a night against main, on demand, and on any pull
 # request that touches the packaging or CI machinery they exercise.
+#
+# A push to main that changes diri-app's manifest (every version bump does)
+# runs only the two Linux package jobs. diri/scripts/release.sh needs signed
+# Linux packages built by this workflow on main for the exact release commit;
+# starting them when the bump merges means they are ready by the time the
+# macOS build and notarization finish, instead of 40 minutes later.
 
 on:
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - diri/crates/diri-app/Cargo.toml
   pull_request:
     paths:
       - .github/workflows/nightly.yml
@@ -23,13 +33,16 @@ on:
 permissions:
   contents: read
 
+# A release's push run gets a group of its own, so a scheduled or dispatched
+# Nightly on main cannot cancel the packages a release is waiting for.
 concurrency:
-  group: nightly-${{ github.ref }}
+  group: nightly-${{ github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: true
 
 jobs:
   release-macos:
     name: Release build and perf gates (macOS)
+    if: github.event_name != 'push'
     runs-on: macos-15
     timeout-minutes: 60
     defaults:
@@ -58,6 +71,7 @@ jobs:
 
   app-linux:
     name: Full test suite, release build and GUI smokes (Linux x86_64)
+    if: github.event_name != 'push'
     runs-on: ubuntu-22.04
     timeout-minutes: 75
     defaults:
@@ -127,6 +141,7 @@ jobs:
 
   remote-helper-native:
     name: Remote Helper (${{ matrix.target }})
+    if: github.event_name != 'push'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -169,6 +184,7 @@ jobs:
 
   remote-ssh-soak:
     name: Remote OpenSSH detach/reconnect
+    if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
@@ -279,6 +295,7 @@ jobs:
 
   bundle:
     name: Package diri.app (unsigned)
+    if: github.event_name != 'push'
     runs-on: macos-15
     timeout-minutes: 60
     steps:
@@ -332,7 +349,9 @@ jobs:
 
   linux-package:
     name: Linux packages (Ubuntu 22.04)
-    needs: app-linux
+    # Not gated on app-linux: CI already tested the commit, and waiting for
+    # the full Linux suite added ~25 minutes (and its flakes) to every release.
+    # This job still installs, launches and smokes what it packages.
     runs-on: ubuntu-22.04
     timeout-minutes: 75
     # id-token lets cosign sign the packages keylessly: Sigstore issues a
@@ -473,6 +492,7 @@ jobs:
 
   browser-sidecar:
     name: Browser sidecar integration
+    if: github.event_name != 'push'
     runs-on: macos-15
     timeout-minutes: 20
     steps:

@@ -1,7 +1,15 @@
 #!/bin/bash
 # Build, sign, notarize, and publish a diri release.
 #
-# Usage: diri/scripts/release.sh <version>        e.g. diri/scripts/release.sh 0.2.0
+# Usage: diri/scripts/release.sh <version> [--wait-for-merge]
+#
+# The fast path (about five minutes, see diri/UPDATING.md): check out the
+# version-bump PR's branch and run with --wait-for-merge. The macOS app is
+# built, signed and notarized while the PR's CI runs; merge the PR meanwhile.
+# The script then finds the merge on main by its tree (a squash merge of an
+# up-to-date PR has the branch's exact tree), passes the gate on the PR's own
+# CI run, and publishes. Without the flag the checkout's tree must already be
+# on main.
 #
 # Env overrides:
 #   DIRI_SIGN_IDENTITY  "Developer ID Application: ..." (default: auto-detected)
@@ -14,12 +22,15 @@
 #   SKIP_PERF_GATE=1   skip packaged app memory/idle-CPU probe
 #   DIRI_LINUX_DIST     use this Linux CI artifact directory instead of fetching
 #                       (it must carry CI's .sigstore.json signature bundles)
+#   DIRI_MERGE_TIMEOUT_SECONDS  how long --wait-for-merge waits (default 3600)
 #   DIRI_RELEASE_TARGET_DIR  build cache (default: diri/target/release-pipeline)
 #
-# Speed: the macOS build runs locally while two things wait on GitHub Actions in
-# the background — CI's clippy/test run on the source commit (the gate), and a
-# Nightly run's Linux packages (dispatched if none exists; ~40 minutes). Both
-# are joined before anything is published. See scripts/await-ci.sh.
+# Speed: the macOS build runs locally while GitHub Actions work is awaited in
+# the background: the gate (a passing CI run on the release's exact tree) and
+# the signed Linux packages, which the Nightly workflow starts building when
+# the version bump merges. The macOS release, feed and cask go out as soon as
+# the gate passes; the Linux files are attached to the same release when they
+# arrive, verified the same way. See scripts/await-ci.sh.
 #
 # This publishes two notarized macOS artifacts plus the CI-built Linux
 # AppImage and Debian package:
@@ -32,11 +43,13 @@
 # See diri/UPDATING.md for the trust model and one-time setup.
 set -euo pipefail
 
-if [ $# -lt 1 ]; then
-    echo "usage: diri/scripts/release.sh <version>   (e.g. 0.2.0)" >&2
+if [ $# -lt 1 ] || [ $# -gt 2 ] || { [ $# -eq 2 ] && [ "$2" != "--wait-for-merge" ]; }; then
+    echo "usage: diri/scripts/release.sh <version> [--wait-for-merge]   (e.g. 0.2.0)" >&2
     exit 2
 fi
 VERSION="$1"
+WAIT_FOR_MERGE=0
+[ "${2:-}" = "--wait-for-merge" ] && WAIT_FOR_MERGE=1
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "error: version '$VERSION' is not X.Y.Z" >&2
     exit 2
@@ -146,30 +159,48 @@ EOF
     exit 1
 fi
 if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]; then
-    echo "error: tracked files are dirty; release from a clean main checkout" >&2
+    echo "error: tracked files are dirty; release from a clean checkout" >&2
     exit 1
 fi
-git -C "$ROOT" fetch --quiet origin main --tags
-SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
-REMOTE_MAIN="$(git -C "$ROOT" rev-parse origin/main)"
-if [ "$SOURCE_COMMIT" != "$REMOTE_MAIN" ]; then
+# A release ships a reviewed commit on main. It is identified by its source
+# tree, so the bump PR's branch (whose squash merge has the same tree) can be
+# built and notarized before the merge, and a merge landing after it does not
+# force a rebuild. SOURCE_COMMIT is the newest main commit with this tree.
+SOURCE_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+# The remote Helper's Build ID is the tree too, so a bundle built from the
+# branch is byte-for-byte the bundle the merge commit would produce.
+export DIRI_REMOTE_BUILD_ID="$SOURCE_TREE"
+find_source_commit() {
+    git -C "$ROOT" fetch --quiet origin main --tags
+    git -C "$ROOT" log --first-parent -50 --format='%H %T' origin/main \
+        | awk -v tree="$SOURCE_TREE" '$2 == tree { print $1; exit }'
+}
+SOURCE_COMMIT="$(find_source_commit)"
+if [ -z "$SOURCE_COMMIT" ] && [ "$WAIT_FOR_MERGE" != 1 ]; then
     cat >&2 <<EOF
-error: release source is not the current origin/main
-  local:  $SOURCE_COMMIT
-  remote: $REMOTE_MAIN
+error: this checkout's tree ($SOURCE_TREE) is not on origin/main
 
-Merge the source and version bump first, then check out and pull main.
+Merge the version bump first, or run from the bump PR's branch with
+--wait-for-merge to build while it merges.
 EOF
     exit 1
 fi
-if git -C "$ROOT" rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
-    TAG_COMMIT="$(git -C "$ROOT" rev-list -n 1 "$TAG")"
-    if [ "$TAG_COMMIT" != "$SOURCE_COMMIT" ]; then
-        echo "error: $TAG points to $TAG_COMMIT, not release source $SOURCE_COMMIT" >&2
-        exit 1
+check_tag() {
+    if git -C "$ROOT" rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+        local tag_commit
+        tag_commit="$(git -C "$ROOT" rev-list -n 1 "$TAG")"
+        if [ "$tag_commit" != "$SOURCE_COMMIT" ]; then
+            echo "error: $TAG points to $tag_commit, not release source $SOURCE_COMMIT" >&2
+            exit 1
+        fi
     fi
+}
+if [ -n "$SOURCE_COMMIT" ]; then
+    check_tag
+    echo "    source commit : $SOURCE_COMMIT"
+else
+    echo "    source tree   : $SOURCE_TREE (waiting for it to merge to main)"
 fi
-echo "    source commit : $SOURCE_COMMIT"
 
 # ----------------------------------------------------------------------------
 # Background CI work, joined before publishing
@@ -203,35 +234,43 @@ check_background() {
 
 GATES_PID=""
 GATES_LOG="$CI_LOG_DIR/gates.log"
-if [ "${SKIP_GATES:-0}" = "1" ]; then
-    echo "==> Skipping the CI gate (SKIP_GATES=1)"
-elif [ "${DIRI_LOCAL_GATES:-0}" = "1" ]; then
-    echo "==> Running release gates locally (DIRI_LOCAL_GATES=1)"
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo test --workspace
-else
-    echo "==> Waiting on CI's clippy/test run for $SOURCE_COMMIT (background, log: $GATES_LOG)"
-    GH_REPO="$GH_REPO" "$WORKSPACE/scripts/await-ci.sh" gates "$SOURCE_COMMIT" \
-        > "$GATES_LOG" 2>&1 &
-    GATES_PID=$!
-    BACKGROUND_PIDS+=("$GATES_PID")
-fi
-
 LINUX_PID=""
 LINUX_LOG="$CI_LOG_DIR/linux.log"
+LINUX_FROM_ENV=0
 if [ -n "${DIRI_LINUX_DIST:-}" ]; then
     if [ ! -d "$DIRI_LINUX_DIST" ]; then
         echo "error: DIRI_LINUX_DIST is not a directory: $DIRI_LINUX_DIST" >&2
         exit 1
     fi
-    echo "==> Using Linux packages from $DIRI_LINUX_DIST"
-else
-    DIRI_LINUX_DIST="$CARGO_TARGET_DIR/linux-packages-$SOURCE_COMMIT"
-    echo "==> Fetching Linux packages for $SOURCE_COMMIT (background, log: $LINUX_LOG)"
-    GH_REPO="$GH_REPO" "$WORKSPACE/scripts/await-ci.sh" linux "$SOURCE_COMMIT" \
-        "$DIRI_LINUX_DIST" > "$LINUX_LOG" 2>&1 &
-    LINUX_PID=$!
-    BACKGROUND_PIDS+=("$LINUX_PID")
+    LINUX_FROM_ENV=1
+fi
+start_ci_work() {
+    if [ "${SKIP_GATES:-0}" = "1" ]; then
+        echo "==> Skipping the CI gate (SKIP_GATES=1)"
+    elif [ "${DIRI_LOCAL_GATES:-0}" = "1" ]; then
+        echo "==> Running release gates locally (DIRI_LOCAL_GATES=1)"
+        cargo clippy --workspace --all-targets -- -D warnings
+        cargo test --workspace
+    else
+        echo "==> Waiting on a passing CI run for $SOURCE_COMMIT's tree (background, log: $GATES_LOG)"
+        GH_REPO="$GH_REPO" "$WORKSPACE/scripts/await-ci.sh" gates "$SOURCE_COMMIT" \
+            > "$GATES_LOG" 2>&1 &
+        GATES_PID=$!
+        BACKGROUND_PIDS+=("$GATES_PID")
+    fi
+    if [ "$LINUX_FROM_ENV" = 1 ]; then
+        echo "==> Using Linux packages from $DIRI_LINUX_DIST"
+    else
+        DIRI_LINUX_DIST="$CARGO_TARGET_DIR/linux-packages-$SOURCE_COMMIT"
+        echo "==> Fetching Linux packages for $SOURCE_COMMIT (background, log: $LINUX_LOG)"
+        GH_REPO="$GH_REPO" "$WORKSPACE/scripts/await-ci.sh" linux "$SOURCE_COMMIT" \
+            "$DIRI_LINUX_DIST" > "$LINUX_LOG" 2>&1 &
+        LINUX_PID=$!
+        BACKGROUND_PIDS+=("$LINUX_PID")
+    fi
+}
+if [ -n "$SOURCE_COMMIT" ]; then
+    start_ci_work
 fi
 
 # ----------------------------------------------------------------------------
@@ -269,26 +308,42 @@ if [ "${SKIP_PERF_GATE:-0}" != "1" ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# 3. Join CI: the gate must have passed and the Linux packages must be here
+# 3. Wait for the merge (--wait-for-merge), then the gate
 # ----------------------------------------------------------------------------
+if [ -z "$SOURCE_COMMIT" ]; then
+    echo "==> Built and notarized. Waiting for tree $SOURCE_TREE to merge to main"
+    merge_deadline=$((SECONDS + ${DIRI_MERGE_TIMEOUT_SECONDS:-3600}))
+    until SOURCE_COMMIT="$(find_source_commit)" && [ -n "$SOURCE_COMMIT" ]; do
+        if [ "$SECONDS" -ge "$merge_deadline" ]; then
+            echo "error: the bump never reached main with this tree; nothing was published" >&2
+            echo "  (a squash merge of a PR that is behind main has a different tree)" >&2
+            exit 1
+        fi
+        sleep 10
+    done
+    check_tag
+    echo "    source commit : $SOURCE_COMMIT"
+    start_ci_work
+fi
 if [ -n "$GATES_PID" ]; then
     echo "==> Waiting for the CI gate"
     join_background "$GATES_PID" "CI gate" "$GATES_LOG"
 fi
-if [ -n "$LINUX_PID" ]; then
-    echo "==> Waiting for the Linux packages (Nightly run)"
-    join_background "$LINUX_PID" "Linux packages" "$LINUX_LOG"
-fi
-LINUX_APPIMAGE_SOURCE="$(find "$DIRI_LINUX_DIST" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
-LINUX_DEB_SOURCE="$(find "$DIRI_LINUX_DIST" -maxdepth 1 -type f -name '*.deb' -print -quit)"
-LINUX_MANIFEST_SOURCE="$DIRI_LINUX_DIST/linux-release.json"
-if [ -z "$LINUX_APPIMAGE_SOURCE" ] || [ -z "$LINUX_DEB_SOURCE" ] || [ ! -f "$LINUX_MANIFEST_SOURCE" ]; then
-    echo "error: Linux CI artifact must contain one AppImage, one DEB, and linux-release.json" >&2
-    exit 1
-fi
 
-python3 - "$LINUX_MANIFEST_SOURCE" "$VERSION" "$SOURCE_COMMIT" \
-    "$LINUX_APPIMAGE_SOURCE" "$LINUX_DEB_SOURCE" <<'PYLINUX'
+# Validates the Linux CI artifact, verifies its Sigstore signatures against
+# main's Nightly identity, and stages it in $DIST. Fills LINUX_ASSETS.
+LINUX_ASSETS=()
+stage_linux() {
+    LINUX_APPIMAGE_SOURCE="$(find "$DIRI_LINUX_DIST" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+    LINUX_DEB_SOURCE="$(find "$DIRI_LINUX_DIST" -maxdepth 1 -type f -name '*.deb' -print -quit)"
+    LINUX_MANIFEST_SOURCE="$DIRI_LINUX_DIST/linux-release.json"
+    if [ -z "$LINUX_APPIMAGE_SOURCE" ] || [ -z "$LINUX_DEB_SOURCE" ] || [ ! -f "$LINUX_MANIFEST_SOURCE" ]; then
+        echo "error: Linux CI artifact must contain one AppImage, one DEB, and linux-release.json" >&2
+        exit 1
+    fi
+
+    python3 - "$LINUX_MANIFEST_SOURCE" "$VERSION" "$SOURCE_COMMIT" \
+        "$LINUX_APPIMAGE_SOURCE" "$LINUX_DEB_SOURCE" <<'PYLINUX'
 import hashlib
 import json
 import pathlib
@@ -311,41 +366,59 @@ for name in artifact_names:
         raise SystemExit(f"Linux artifact digest mismatch: {path.name}")
 PYLINUX
 
-# The packages must carry signatures from main's Nightly workflow. Overrides a
-# maintainer may have exported for a rehearsal are dropped so the pinned
-# identity, not the environment, decides what is accepted.
-echo "==> Verifying Linux Sigstore signatures"
-env -u DIRI_COSIGN_PUBLIC_KEY -u DIRI_SIGNING_IDENTITY -u DIRI_SIGNING_OIDC_ISSUER \
-    GH_REPO="$GH_REPO" "$WORKSPACE/scripts/linux-signatures.sh" verify "$DIRI_LINUX_DIST"
+    # The packages must carry signatures from main's Nightly workflow. Overrides a
+    # maintainer may have exported for a rehearsal are dropped so the pinned
+    # identity, not the environment, decides what is accepted.
+    echo "==> Verifying Linux Sigstore signatures"
+    env -u DIRI_COSIGN_PUBLIC_KEY -u DIRI_SIGNING_IDENTITY -u DIRI_SIGNING_OIDC_ISSUER \
+        GH_REPO="$GH_REPO" "$WORKSPACE/scripts/linux-signatures.sh" verify "$DIRI_LINUX_DIST"
 
-LINUX_APPIMAGE="$DIST/$(basename "$LINUX_APPIMAGE_SOURCE")"
-LINUX_DEB="$DIST/$(basename "$LINUX_DEB_SOURCE")"
-LINUX_MANIFEST="$DIST/linux-release.json"
-# The release-wide SHA256SUMS below covers every platform and is written here,
-# so it cannot carry CI's signature. CI's signed Linux-only list ships beside it
-# under its own name; the bundle signs bytes, not a filename.
-LINUX_CHECKSUMS="$DIST/SHA256SUMS-linux"
-mkdir -p "$DIST"
-copy_linux_asset() {
-    if [ "$1" != "$2" ]; then
-        cp "$1" "$2"
-    fi
+    LINUX_APPIMAGE="$DIST/$(basename "$LINUX_APPIMAGE_SOURCE")"
+    LINUX_DEB="$DIST/$(basename "$LINUX_DEB_SOURCE")"
+    LINUX_MANIFEST="$DIST/linux-release.json"
+    # The release-wide SHA256SUMS below covers every platform and is written here,
+    # so it cannot carry CI's signature. CI's signed Linux-only list ships beside it
+    # under its own name; the bundle signs bytes, not a filename.
+    LINUX_CHECKSUMS="$DIST/SHA256SUMS-linux"
+    mkdir -p "$DIST"
+    copy_linux_asset() {
+        if [ "$1" != "$2" ]; then
+            cp "$1" "$2"
+        fi
+    }
+    copy_linux_asset "$LINUX_APPIMAGE_SOURCE" "$LINUX_APPIMAGE"
+    copy_linux_asset "$LINUX_DEB_SOURCE" "$LINUX_DEB"
+    copy_linux_asset "$LINUX_MANIFEST_SOURCE" "$LINUX_MANIFEST"
+    copy_linux_asset "$DIRI_LINUX_DIST/SHA256SUMS" "$LINUX_CHECKSUMS"
+    copy_linux_asset "$LINUX_APPIMAGE_SOURCE.sigstore.json" "$LINUX_APPIMAGE.sigstore.json"
+    copy_linux_asset "$LINUX_DEB_SOURCE.sigstore.json" "$LINUX_DEB.sigstore.json"
+    copy_linux_asset "$LINUX_MANIFEST_SOURCE.sigstore.json" "$LINUX_MANIFEST.sigstore.json"
+    copy_linux_asset "$DIRI_LINUX_DIST/SHA256SUMS.sigstore.json" "$LINUX_CHECKSUMS.sigstore.json"
+    LINUX_SIGNATURES=(
+        "$LINUX_CHECKSUMS"
+        "$LINUX_APPIMAGE.sigstore.json"
+        "$LINUX_DEB.sigstore.json"
+        "$LINUX_MANIFEST.sigstore.json"
+        "$LINUX_CHECKSUMS.sigstore.json"
+    )
+    LINUX_ASSETS=(
+        "$LINUX_APPIMAGE" "$LINUX_DEB" "$LINUX_MANIFEST" "${LINUX_SIGNATURES[@]}"
+    )
 }
-copy_linux_asset "$LINUX_APPIMAGE_SOURCE" "$LINUX_APPIMAGE"
-copy_linux_asset "$LINUX_DEB_SOURCE" "$LINUX_DEB"
-copy_linux_asset "$LINUX_MANIFEST_SOURCE" "$LINUX_MANIFEST"
-copy_linux_asset "$DIRI_LINUX_DIST/SHA256SUMS" "$LINUX_CHECKSUMS"
-copy_linux_asset "$LINUX_APPIMAGE_SOURCE.sigstore.json" "$LINUX_APPIMAGE.sigstore.json"
-copy_linux_asset "$LINUX_DEB_SOURCE.sigstore.json" "$LINUX_DEB.sigstore.json"
-copy_linux_asset "$LINUX_MANIFEST_SOURCE.sigstore.json" "$LINUX_MANIFEST.sigstore.json"
-copy_linux_asset "$DIRI_LINUX_DIST/SHA256SUMS.sigstore.json" "$LINUX_CHECKSUMS.sigstore.json"
-LINUX_SIGNATURES=(
-    "$LINUX_CHECKSUMS"
-    "$LINUX_APPIMAGE.sigstore.json"
-    "$LINUX_DEB.sigstore.json"
-    "$LINUX_MANIFEST.sigstore.json"
-    "$LINUX_CHECKSUMS.sigstore.json"
-)
+
+# Linux packages that are already here ship with the release; otherwise the
+# macOS release goes out now and they are attached when the Nightly run that
+# the bump's merge started has built and signed them (~15 minutes).
+LINUX_DEFERRED=0
+if [ "$LINUX_FROM_ENV" = 1 ]; then
+    stage_linux
+elif [ -n "$LINUX_PID" ] && ! kill -0 "$LINUX_PID" 2>/dev/null; then
+    join_background "$LINUX_PID" "Linux packages" "$LINUX_LOG"
+    stage_linux
+else
+    LINUX_DEFERRED=1
+    echo "==> Linux packages are still building; publishing macOS first"
+fi
 
 # ----------------------------------------------------------------------------
 # 4. Build the update feed
@@ -418,17 +491,18 @@ if [ ! -f "$INVENTORY" ]; then
     exit 1
 fi
 
+# Covers the macOS files, the feed and the inventory, plus the Linux packages
+# when they ship together. Linux files attached later are covered by their own
+# signed SHA256SUMS-linux.
 echo "==> Writing $CHECKSUMS"
+CHECKSUMMED=("$(basename "$DMG")" "$(basename "$ZIP")")
+if [ "$LINUX_DEFERRED" = 0 ]; then
+    CHECKSUMMED+=("$(basename "$LINUX_APPIMAGE")" "$(basename "$LINUX_DEB")" "$(basename "$LINUX_MANIFEST")")
+fi
+CHECKSUMMED+=("$(basename "$FEED")" "$(basename "$INVENTORY")")
 (
     cd "$DIST"
-    shasum -a 256 \
-        "$(basename "$DMG")" \
-        "$(basename "$ZIP")" \
-        "$(basename "$LINUX_APPIMAGE")" \
-        "$(basename "$LINUX_DEB")" \
-        "$(basename "$LINUX_MANIFEST")" \
-        "$(basename "$FEED")" \
-        "$(basename "$INVENTORY")" > "$(basename "$CHECKSUMS")"
+    shasum -a 256 "${CHECKSUMMED[@]}" > "$(basename "$CHECKSUMS")"
     shasum -a 256 -c "$(basename "$CHECKSUMS")"
 )
 
@@ -463,7 +537,7 @@ echo "==> Publishing $TAG to $GH_REPO"
 GH_REPO="$GH_REPO" SOURCE_COMMIT="$SOURCE_COMMIT" \
     "$WORKSPACE/scripts/publish-github-release.sh" \
     "$VERSION" "$NOTES_FILE" "$DMG" "$ZIP" \
-    "$LINUX_APPIMAGE" "$LINUX_DEB" "$LINUX_MANIFEST" "${LINUX_SIGNATURES[@]}" \
+    ${LINUX_ASSETS[@]+"${LINUX_ASSETS[@]}"} \
     "$FEED" "$CHECKSUMS" "$INVENTORY"
 
 # ----------------------------------------------------------------------------
@@ -480,6 +554,21 @@ else
     GH_REPO="$GH_REPO" \
         "$WORKSPACE/scripts/publish-homebrew-cask.sh" \
         "$VERSION" "$DMG" "$TAP_DIR"
+fi
+
+echo "==> macOS release, feed and cask are live: https://github.com/$GH_REPO/releases/tag/$TAG"
+
+# ----------------------------------------------------------------------------
+# 7. Attach the Linux packages if they were still building
+# ----------------------------------------------------------------------------
+if [ "$LINUX_DEFERRED" = 1 ]; then
+    echo "==> Waiting for the Linux packages (Nightly run)"
+    join_background "$LINUX_PID" "Linux packages" "$LINUX_LOG"
+    stage_linux
+    echo "==> Attaching the Linux packages to $TAG"
+    PUBLISH_ATTACH=1 GH_REPO="$GH_REPO" \
+        "$WORKSPACE/scripts/publish-github-release.sh" \
+        "$VERSION" "$NOTES_FILE" "${LINUX_ASSETS[@]}"
 fi
 
 cat <<EOF

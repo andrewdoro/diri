@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+# PUBLISH_ATTACH=1 adds artifacts to an already-published release (the Linux
+# packages, which arrive after the macOS assets). It uploads only names the
+# release does not have yet and still refuses any whose published bytes differ;
+# it never replaces an asset.
 if [[ $# -lt 3 ]]; then
     echo "usage: $0 <version> <notes-file> <artifact> [artifact ...]" >&2
     exit 2
@@ -36,7 +40,7 @@ published_digest_for() {
     "${gh_bin}" release view "${tag}" \
         --repo "${gh_repo}" \
         --json assets \
-        --jq ".assets[] | select(.name == \"${asset_name}\") | .digest"
+        --jq ".assets[] | select(.name == \"${asset_name}\") | .digest" || true
 }
 
 verify_published_artifacts() {
@@ -60,7 +64,23 @@ EOF
     done
 }
 
-if "${gh_bin}" release view "${tag}" --repo "${gh_repo}" >/dev/null 2>&1; then
+if [[ "${PUBLISH_ATTACH:-0}" == "1" ]]; then
+    if ! "${gh_bin}" release view "${tag}" --repo "${gh_repo}" >/dev/null 2>&1; then
+        echo "error: cannot attach to ${tag}: the release does not exist" >&2
+        exit 1
+    fi
+    missing=()
+    for artifact in "${artifacts[@]}"; do
+        if [[ -z "$(published_digest_for "$(basename "${artifact}")")" ]]; then
+            missing+=("${artifact}")
+        fi
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        "${gh_bin}" release upload "${tag}" "${missing[@]}" --repo "${gh_repo}"
+    fi
+    verify_published_artifacts
+    echo "    ${#missing[@]} artifact(s) attached to ${tag} and verified"
+elif "${gh_bin}" release view "${tag}" --repo "${gh_repo}" >/dev/null 2>&1; then
     # A rerun is only a recovery path for a later failed step. It may reuse the
     # exact artifacts already online, but it must never mutate released bytes.
     verify_published_artifacts

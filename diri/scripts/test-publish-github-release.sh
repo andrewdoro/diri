@@ -52,14 +52,15 @@ printf '%s\n' \
     '            *appcast.json*) printf "sha256:%s\n" "${TEST_FEED_SHA:?}" ;;' \
     '            *SHA256SUMS*) printf "sha256:%s\n" "${TEST_CHECKSUMS_SHA:?}" ;;' \
     '            *THIRD-PARTY-LICENSES.json*) printf "sha256:%s\n" "${TEST_INVENTORY_SHA:?}" ;;' \
+    '            *diri_0.4.6_amd64.deb*) if [[ -f "${TEST_GH_STATE}/uploaded-deb" ]]; then printf "sha256:%s\n" "${TEST_DEB_SHA:?}"; fi ;;' \
     '            *) exit 1 ;;' \
     '        esac' \
     '    fi' \
     'elif [[ "$1 $2" == "release create" ]]; then' \
     '    touch "${TEST_GH_STATE}/exists"' \
     'elif [[ "$1 $2" == "release upload" ]]; then' \
-    '    echo "release upload must never be used" >&2' \
-    '    exit 99' \
+    '    if [[ -z "${TEST_ALLOW_UPLOAD:-}" ]]; then echo "release upload must never be used" >&2; exit 99; fi' \
+    '    if [[ " $* " == *"diri_0.4.6_amd64.deb"* ]]; then touch "${TEST_GH_STATE}/uploaded-deb"; fi' \
     'else' \
     '    exit 1' \
     'fi' > "${fake_gh}"
@@ -108,6 +109,46 @@ grep -q -- '--target 0123456789abcdef0123456789abcdef01234567' "${state_dir}/cal
     || fail "new release was not pinned to the reviewed source commit"
 if grep -q -- '--clobber' "${state_dir}/calls.log"; then
     fail "publisher exposed a clobber path"
+fi
+
+# Attach mode adds a missing asset (the Linux packages arrive after the macOS
+# release is public), leaves existing identical ones alone, and never clobbers.
+deb="${fixture_root}/diri_0.4.6_amd64.deb"
+printf 'deb bytes\n' > "${deb}"
+deb_sha="$(shasum -a 256 "${deb}" | awk '{print $1}')"
+rm -f "${state_dir}/calls.log"
+run_attach() {
+    PUBLISH_ATTACH=1 TEST_ALLOW_UPLOAD=1 \
+    TEST_GH_STATE="${state_dir}" \
+    TEST_DMG_SHA="${dmg_sha}" TEST_ZIP_SHA="${zip_sha}" TEST_FEED_SHA="${feed_sha}" \
+    TEST_CHECKSUMS_SHA="${checksums_sha}" TEST_INVENTORY_SHA="${inventory_sha}" \
+    TEST_DEB_SHA="${deb_sha}" \
+    GH_BIN="${fake_gh}" GH_REPO="example/diri" \
+        "${publisher}" 0.4.6 "${notes}" "${dmg}" "$@"
+}
+run_attach "${deb}"
+grep -q 'release upload v0.4.6 .*diri_0.4.6_amd64.deb' "${state_dir}/calls.log" \
+    || fail "attach did not upload the missing asset"
+if grep 'release upload' "${state_dir}/calls.log" | grep -q 'universal.dmg'; then
+    fail "attach re-uploaded an asset the release already has"
+fi
+if grep -q -- '--clobber' "${state_dir}/calls.log"; then
+    fail "attach exposed a clobber path"
+fi
+# Attach still refuses bytes that differ from what is published.
+printf 'other deb bytes\n' > "${deb}"
+if run_attach "${deb}" >"${fixture_root}/attach-immutable.log" 2>&1; then
+    fail "attach accepted different bytes for a published asset"
+fi
+grep -q "refusing to replace immutable release asset" "${fixture_root}/attach-immutable.log" \
+    || fail "attach did not refuse a changed asset"
+# Attaching to a release that does not exist fails rather than creating one.
+rm -f "${state_dir}/exists"
+if run_attach "${deb}" >/dev/null 2>&1; then
+    fail "attach created a release"
+fi
+if grep -q 'release create' "${state_dir}/calls.log"; then
+    fail "attach created a release"
 fi
 
 echo "publish-github-release regression test passed"

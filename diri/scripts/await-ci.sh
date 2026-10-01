@@ -4,18 +4,23 @@
 #
 # Usage:
 #   diri/scripts/await-ci.sh gates <sha>
-#       Succeeds once the CI workflow's push run on <sha> has passed. That run
-#       is the same clippy + workspace test pair release.sh used to repeat
-#       locally, on the exact commit being released.
+#       Succeeds once a CI run has passed on <sha>'s exact source tree: the
+#       push run on <sha>, or the pull-request run on the head of the PR that
+#       <sha> merged when that head has the same tree. A squash merge of an
+#       up-to-date bump PR is that case, so a release does not wait for main's
+#       macOS queue to re-test code CI already passed.
 #   diri/scripts/await-ci.sh linux <sha> <out-dir>
 #       Downloads the linux-packages-<sha> artifact from a Nightly run on <sha>,
 #       dispatching one against main if none exists. The Linux package jobs
-#       must have passed; unrelated Nightly jobs do not gate the download.
+#       must have passed; unrelated Nightly jobs do not gate the download. The
+#       artifact is fetched in parallel byte ranges, since GitHub's artifact
+#       store can throttle one connection to tens of KB/s.
 #
 # Env overrides:
 #   GH_REPO                  default cristicretu/diri
 #   DIRI_CI_POLL_SECONDS     default 20
 #   DIRI_CI_TIMEOUT_SECONDS  default 5400 (a fresh Nightly takes ~40 minutes)
+#   DIRI_DOWNLOAD_STREAMS    parallel ranges for artifact downloads (default 16)
 set -euo pipefail
 
 GH_REPO="${GH_REPO:-cristicretu/diri}"
@@ -49,37 +54,56 @@ newest_run() {
         --jq "[.[] | select($3)] | sort_by(.createdAt) | last | .databaseId // empty"
 }
 
+tree_of() {
+    gh api "repos/$GH_REPO/commits/$1" --jq .commit.tree.sha
+}
+
+# CI runs that tested <sha>'s tree: its push run, plus pull-request runs on the
+# head of any PR it merged whose tree is identical. Prints "<id> <event>" lines.
+gate_candidates() {
+    local sha="$1" tree="$2" head
+    gh run list -R "$GH_REPO" --workflow ci.yml --commit "$sha" -L 20 \
+        --json databaseId,event --jq '.[] | select(.event == "push") | "\(.databaseId) push"'
+    for head in $(gh api "repos/$GH_REPO/commits/$sha/pulls" --jq '.[].head.sha' 2>/dev/null); do
+        [ "$head" != "$sha" ] || continue
+        [ "$(tree_of "$head")" = "$tree" ] || continue
+        gh run list -R "$GH_REPO" --workflow ci.yml --commit "$head" -L 20 \
+            --json databaseId,event --jq '.[] | select(.event == "pull_request") | "\(.databaseId) pull_request"'
+    done
+}
+
 await_gates() {
-    local sha="$1" run="" status conclusion
-    while [ -z "$run" ]; do
-        run="$(newest_run ci.yml "$sha" '.event == "push"')"
-        [ -n "$run" ] || sleep_or_timeout "no CI push run for $sha yet"
-    done
-    log "CI run $run for $sha"
-    local reran=0
+    local sha="$1" tree reran="" id event status conclusion pending
+    tree="$(tree_of "$sha")"
+    log "Gate: a passing CI run on tree $tree (commit $sha)"
     while :; do
-        read -r status conclusion < <(gh run view "$run" -R "$GH_REPO" \
-            --json status,conclusion --jq '"\(.status) \(.conclusion)"')
-        # A run superseded by a later push never reached a verdict. Ask for
-        # one, once; a second cancellation is reported like any failure.
-        if [ "$status" = "completed" ] && [ "$conclusion" = "cancelled" ] && [ "$reran" = 0 ]; then
-            log "CI run $run was cancelled before finishing; re-running it"
-            gh run rerun "$run" -R "$GH_REPO"
-            reran=1
-            sleep_or_timeout "CI run $run re-run"
-            continue
+        pending=0
+        while read -r id event; do
+            [ -n "$id" ] || continue
+            read -r status conclusion < <(gh run view "$id" -R "$GH_REPO" \
+                --json status,conclusion --jq '"\(.status) \(.conclusion)"')
+            if [ "$status" = "completed" ] && [ "$conclusion" = "success" ]; then
+                log "CI passed: run $id ($event) tested the same tree"
+                return 0
+            fi
+            if [ "$status" != "completed" ]; then
+                pending=$((pending + 1))
+            elif [ "$conclusion" = "cancelled" ] && [ "$event" = "push" ] && [[ " $reran " != *" $id "* ]]; then
+                # A run superseded by a later push never reached a verdict.
+                # Ask for one, once; a second cancellation counts as a failure.
+                log "CI run $id was cancelled before finishing; re-running it"
+                gh run rerun "$id" -R "$GH_REPO"
+                reran="$reran $id"
+                pending=$((pending + 1))
+            fi
+        done < <(gate_candidates "$sha" "$tree")
+        if [ "$pending" -eq 0 ] && [ -n "$(gate_candidates "$sha" "$tree")" ]; then
+            echo "error: every CI run on tree $tree finished without passing" >&2
+            echo "  https://github.com/$GH_REPO/commit/$sha" >&2
+            exit 1
         fi
-        if [ "$status" = "completed" ]; then
-            break
-        fi
-        sleep_or_timeout "CI run $run is $status"
+        sleep_or_timeout "a CI verdict on $sha ($pending run(s) in progress)"
     done
-    if [ "$conclusion" != "success" ]; then
-        echo "error: CI run $run on $sha concluded '$conclusion'" >&2
-        echo "  https://github.com/$GH_REPO/actions/runs/$run" >&2
-        exit 1
-    fi
-    log "CI passed on $sha"
 }
 
 # Prints "<run status> <linux job count> <linux jobs not yet completed> <linux jobs failed>".
@@ -129,16 +153,55 @@ await_linux() {
         sleep_or_timeout "Linux package jobs in run $run ($pending of $count pending)"
     done
 
-    rm -rf "$out"
-    mkdir -p "$out"
-    # The artifact is downloadable as soon as its job uploads it, while the
-    # rest of the Nightly run is still going.
-    until gh run download "$run" -R "$GH_REPO" -n "linux-packages-$sha" -D "$out"; do
-        rm -rf "$out"
-        mkdir -p "$out"
+    until download_artifact "$run" "linux-packages-$sha" "$out"; do
         sleep_or_timeout "downloading linux-packages-$sha from run $run"
     done
     log "Linux packages for $sha in $out"
+}
+
+# Fetches a run's artifact into <out-dir> in parallel byte ranges. The artifact
+# is downloadable as soon as its job uploads it, while the rest of the run is
+# still going. GitHub's artifact store has served one connection at 40 KB/s
+# while sixteen ranges reached 1 MB/s.
+download_artifact() {
+    local run="$1" name="$2" out="$3" id size url parts streams chunk start end i
+    read -r id size < <(gh api "repos/$GH_REPO/actions/runs/$run/artifacts" \
+        --jq ".artifacts[] | select(.name == \"$name\" and (.expired | not)) | \"\(.id) \(.size_in_bytes)\"")
+    [ -n "${id:-}" ] || return 1
+    url="$(curl -fsS -o /dev/null -w '%{redirect_url}' \
+        -H "Authorization: Bearer $(gh auth token)" \
+        "https://api.github.com/repos/$GH_REPO/actions/artifacts/$id/zip")" || return 1
+    [ -n "$url" ] || return 1
+    parts="$(mktemp -d "${TMPDIR:-/tmp}/diri-artifact.XXXXXX")"
+    streams="${DIRI_DOWNLOAD_STREAMS:-16}"
+    chunk=$(( (size + streams - 1) / streams ))
+    local pids=()
+    for ((i = 0; i < streams; i++)); do
+        start=$((i * chunk))
+        [ "$start" -lt "$size" ] || break
+        end=$((start + chunk - 1))
+        [ "$end" -lt "$size" ] || end=$((size - 1))
+        curl -fsS --retry 5 --retry-all-errors -r "$start-$end" \
+            -o "$parts/$(printf %03d "$i")" "$url" &
+        pids+=("$!")
+    done
+    local failed=0 pid
+    for pid in "${pids[@]}"; do
+        wait "$pid" || failed=1
+    done
+    if [ "$failed" = 1 ]; then
+        rm -rf "$parts"
+        return 1
+    fi
+    cat "$parts"/[0-9][0-9][0-9] > "$parts/artifact.zip"
+    if [ "$(wc -c < "$parts/artifact.zip" | tr -d ' ')" != "$size" ]; then
+        rm -rf "$parts"
+        return 1
+    fi
+    rm -rf "$out"
+    mkdir -p "$out"
+    unzip -q "$parts/artifact.zip" -d "$out" || { rm -rf "$parts"; return 1; }
+    rm -rf "$parts"
 }
 
 case "${1:-}" in
