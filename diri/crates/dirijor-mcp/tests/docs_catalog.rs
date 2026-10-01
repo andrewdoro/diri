@@ -53,6 +53,26 @@ fn website_mcp_reference_matches_the_tool_catalog() {
         return;
     }
     let actual = std::fs::read_to_string(&reference).unwrap_or_default();
+    if let Some((line, (want, have))) = expected
+        .lines()
+        .zip(actual.lines())
+        .enumerate()
+        .find(|(_, (want, have))| want != have)
+    {
+        // Name the first difference: a bare "stale" left a Linux-only
+        // mismatch with nothing to go on.
+        eprintln!(
+            "first difference at line {}:\n  catalog: {want}\n  file:    {have}",
+            line + 1
+        );
+    } else if expected.lines().count() != actual.lines().count() {
+        eprintln!(
+            "line counts differ: catalog {} vs file {} ({} bytes read)",
+            expected.lines().count(),
+            actual.lines().count(),
+            actual.len()
+        );
+    }
     assert!(
         actual == expected,
         "website/docs-src/mcp-tools.json is stale. Run: DIRI_UPDATE_DOCS=1 cargo test -p dirijor-mcp --test docs_catalog"
