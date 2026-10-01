@@ -204,6 +204,7 @@
         <div class="app-window" id="demo-window" role="region" aria-label="Diri workspace preview">
           <aside class="app-sidebar" aria-label="Demo agents">
             <div class="sidebar-top"><span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span><button class="icon-button" data-open="command" aria-label="Open commands"><span class="icon" data-icon="settings"></span></button><button class="icon-button" data-open="command" aria-label="Search conversations"><span class="icon" data-icon="search"></span></button><button class="icon-button" id="toggle-sidebar" aria-label="Collapse sidebar"><span class="icon" data-icon="sidebar"></span></button></div>
+            <div class="sidebar-rows">
             <button class="new-chat" data-open="command"><span class="icon" data-icon="new-agent"></span>New Agent <span class="agent-logo new-chat-agent" data-agent="claude"></span></button>
             <div class="sidebar-group"><span class="group-chevron"><span class="icon" data-icon="chevron-down"></span></span>diri</div>
             <button class="chat-row selected" data-chat="release" aria-pressed="true"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Ship the 0.9 release</span><span class="agent-logo claude" data-agent="claude"></span></button>
@@ -217,9 +218,15 @@
             <button class="chat-row" data-chat="website" aria-pressed="false"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Build the Diri website</span><span class="agent-logo" data-agent="codex"></span></button>
             <button class="chat-row" data-chat="notes" aria-pressed="false"><span class="chat-state needs-input" aria-label="Needs input"><span class="icon" data-icon="warning"></span></span><span>Weekly plan</span><span class="agent-logo claude" data-agent="claude"></span></button>
             <button class="chat-row" data-chat="details" aria-pressed="false"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Keyboard navigation</span><span class="agent-logo" data-agent="cursor"></span></button>
+            <div class="sidebar-group second"><span class="group-chevron"><span class="icon" data-icon="chevron-down"></span></span>api</div>
+            <div class="chat-row static"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Rate limit the public API</span><span class="agent-logo claude" data-agent="claude"></span></div>
+            <div class="chat-row static"><span class="chat-state needs-input" aria-label="Needs input"><span class="icon" data-icon="warning"></span></span><span>Migrate auth to passkeys</span><span class="agent-logo" data-agent="codex"></span></div>
+            <div class="chat-row static"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Upgrade to Postgres 18</span><span class="agent-logo" data-agent="opencode"></span></div>
+            <div class="chat-row static"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Cut p95 latency on /search</span><span class="agent-logo" data-agent="cursor"></span></div>
             <div class="sidebar-group second"><span class="group-chevron"><span class="icon" data-icon="chevron-down"></span></span>Experiments</div>
             <div class="chat-row static"><span class="chat-state idle" aria-label="Hibernated"><span class="icon" data-icon="moon"></span></span><span>Benchmark the terminal parser</span><span class="agent-logo" data-agent="opencode"></span></div>
             <button class="chat-row" data-chat="weekend" aria-pressed="false"><span class="chat-state idle" aria-label="Hibernated"><span class="icon" data-icon="moon"></span></span><span>Travel map</span><span class="agent-logo gemini" data-agent="gemini"></span></button>
+            </div>
             <div class="sidebar-bottom">
               <div class="sidebar-filter"><span class="icon" data-icon="search"></span>Filter agents</div>
               <div class="account-summary"><span class="account-avatar" aria-hidden="true">G</span><span class="account-name">giga</span><span class="account-cost" title="Estimated usage cost today" aria-label="Estimated usage cost today: 19 dollars and 41 cents">$19.41</span><span class="icon" data-icon="chevron-up-down"></span></div>

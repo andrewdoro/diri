@@ -45,6 +45,7 @@ function selectChat(id) {
   const preview = agentPreviews[chat.view || chat.agent].render(chat, notesAnswer);
   $('.terminal-body').dataset.cli = chat.agent;
   $('#terminal-content').innerHTML = `<div class="terminal-scene">${preview.html}</div>`;
+  $('#terminal-content').classList.toggle('tail', Boolean(preview.tail));
   $('.terminal-composer').innerHTML = preview.composer;
   $('.terminal-footer').innerHTML = preview.footer;
   $('.changes-content').innerHTML = preview.changes;

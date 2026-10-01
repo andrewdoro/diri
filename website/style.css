@@ -959,3 +959,28 @@ html { overflow-x: clip; }
 .closing::before { content: ''; position: absolute; z-index: -1; left: 50%; bottom: 0; width: min(1100px, 100vw); height: 100%; translate: -50% 0; pointer-events: none;
   background: radial-gradient(50% 60% at 50% 100%, #f6cdb233, transparent 70%), radial-gradient(30% 45% at 28% 100%, #dc938726, transparent 70%), radial-gradient(30% 45% at 74% 100%, #a8c2e81f, transparent 70%); }
 @media (max-width: 600px) { .closing { padding: 56px 0 64px; } .closing .star-count { display: none; } }
+
+/* A long-running session: the swarm transcript is pinned to its end, earlier work scrolls off the top. */
+.terminal.tail { display: flex; flex-direction: column; justify-content: flex-end; }
+.terminal.tail .terminal-scene { flex: none; }
+.terminal.tail .claude-user { margin-block: 14px 10px; }
+.terminal.tail .claude-tool, .terminal.tail .claude-answer { margin-block: 8px; }
+.terminal.tail .claude-answer p { margin-bottom: 0; }
+.claude-worked { margin: 10px 0 4px; color: #a196b2; font-size: .92em; }
+.swarm-child small { margin-left: 4px; color: #a196b2; font-size: .9em; }
+.changes-summary { display: flex; align-items: center; gap: 10px; height: 34px; padding-inline: 12px; font: 11px Menlo, monospace; color: #cbc3dc; }
+.changes-summary span:first-child { margin-right: auto; }
+.added-text { color: #8fd3a3; }
+.removed-text { color: #e59ab0; }
+.diff-stat { margin-left: auto; color: #a196b2; font-size: .92em; }
+.diff-lines .removed { background: #eb6f9214; }
+.diff-lines .removed code { color: #e3a9bb; }
+/* The fuller sidebar runs under its footer; the footer keeps a solid base so rows never show through. */
+/* The window keeps its proportions; its one grid row must not grow with a long transcript or sidebar. */
+.app-window { grid-template-rows: minmax(0, 1fr); }
+.app-sidebar, .app-main, .changes-panel { min-height: 0; }
+.app-sidebar > * { flex-shrink: 0; }
+/* Rows get their own clipped area that fades out above the footer; the footer stays on the sidebar's glass. */
+.sidebar-rows { flex: 1 1 0; min-height: 0; overflow: hidden; -webkit-mask-image: linear-gradient(#000 calc(100% - 36px), transparent); mask-image: linear-gradient(#000 calc(100% - 36px), transparent); }
+.sidebar-rows > * { flex-shrink: 0; }
+.app-sidebar .sidebar-bottom { position: static; flex: none; background: none; }
