@@ -30,19 +30,19 @@ echo
 # The catalog once shrank from 20 Agents to 7. A missing manifest never errors; the
 # Agent silently degrades to a bare login shell.
 count="$(find "${manifests}" -name '*.json' -type f | wc -l | tr -d ' ')"
-if [[ "${count}" -ge 22 ]]; then
+if [[ "${count}" -ge 23 ]]; then
     pass "Agent catalog carries ${count} manifests"
 else
-    fail "Agent catalog carries only ${count} manifests (expected at least 22)"
+    fail "Agent catalog carries only ${count} manifests (expected at least 23)"
 fi
 
-# Eighteen launchable Agents declare returnToLoginShell. Dropping it means an Agent
+# Nineteen launchable Agents declare returnToLoginShell. Dropping it means an Agent
 # that exits or self-updates ends the session instead of landing at a prompt.
 login_shell="$(grep -l returnToLoginShell "${manifests}"/*.json | wc -l | tr -d ' ')"
-if [[ "${login_shell}" -eq 18 ]]; then
+if [[ "${login_shell}" -eq 19 ]]; then
     pass "returnToLoginShell declared on ${login_shell} Agents"
 else
-    fail "returnToLoginShell declared on ${login_shell} Agents (expected 18)"
+    fail "returnToLoginShell declared on ${login_shell} Agents (expected 19)"
 fi
 
 # Without a caller-minted conversation id, Gemini cannot resume at all.

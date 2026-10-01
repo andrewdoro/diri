@@ -360,6 +360,7 @@
               "opencode",
               "pi",
               "qoder",
+              "whipcode",
               "shell"
             ],
             "minLength": 1,
@@ -458,6 +459,7 @@
               "opencode",
               "pi",
               "qoder",
+              "whipcode",
               "shell"
             ],
             "minLength": 1,

@@ -1922,7 +1922,7 @@ Source: https://diri.sh/docs/agents/
 
 > Every coding agent diri ships a manifest for, what each supports for status, resume, fork and MCP, and how to add your own agent with a custom manifest.
 
-diri knows how to launch and read 20 terminal coding agents, plus a plain shell. Each one is described by a JSON manifest that says how to start it, how to resume it, and how to tell from its screen whether it is working, idle or waiting for you.
+diri knows how to launch and read 21 terminal coding agents, plus a plain shell. Each one is described by a JSON manifest that says how to start it, how to resume it, and how to tell from its screen whether it is working, idle or waiting for you.
 
 ## Agent catalog
 
@@ -1950,6 +1950,7 @@ Each agent also has its own page with setup steps and what diri adds: see [all a
 | OpenCode | `opencode` | Screen | Latest in folder | No | Yes | No | No |
 | Pi | `pi` | Screen | Per session | No | No | No | No |
 | Qoder CLI | `qodercli` | Screen | Latest in folder | No | No | No | No |
+| WhipCode | `whipcode` | Screen | No | No | Yes | No | No |
 | Shell | your login shell | Process only | No | No | No | No | No |
 
 What the columns mean:

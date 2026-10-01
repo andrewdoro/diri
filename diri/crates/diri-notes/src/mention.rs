@@ -78,6 +78,7 @@ pub fn agent_display_name(kind_id: &str) -> String {
         "cursor" => "Cursor".to_owned(),
         "gemini" => "Gemini".to_owned(),
         "opencode" => "OpenCode".to_owned(),
+        "whipcode" => "WhipCode".to_owned(),
         "shell" => "Terminal".to_owned(),
         other => {
             let mut chars = other.chars();

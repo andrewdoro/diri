@@ -2,7 +2,7 @@
 
 > Both run many terminal agents in parallel; Superset adds an in-app browser, a hosted MCP and paid remote access, while diri is native, Apache-2.0 and uses plain SSH.
 
-Superset is a desktop workspace for running many coding agents in parallel, each in its own git worktree, with a diff viewer, in-app browser, CLI, SDK, hosted MCP server and paid remote access and automations. diri covers much of the same ground as a native app: 20 terminal agents side by side with live status, optional worktrees, a Review panel, and a local MCP server that lets agents start and coordinate other agents. The biggest differences are license, how remote machines are reached, and how far each goes beyond the terminal.
+Superset is a desktop workspace for running many coding agents in parallel, each in its own git worktree, with a diff viewer, in-app browser, CLI, SDK, hosted MCP server and paid remote access and automations. diri covers much of the same ground as a native app: 21 terminal agents side by side with live status, optional worktrees, a Review panel, and a local MCP server that lets agents start and coordinate other agents. The biggest differences are license, how remote machines are reached, and how far each goes beyond the terminal.
 
 ## At a glance
 | | diri | Superset |
@@ -11,7 +11,7 @@ Superset is a desktop workspace for running many coding agents in parallel, each
 | Price | Free | Free tier; Pro $20/mo, or $15 per user per month billed yearly; Enterprise custom |
 | License | Apache-2.0, open source | Elastic License 2.0, source-available (not OSI-approved) |
 | App stack | Rust and GPUI | Electron and React |
-| Agents | 20 terminal agents plus custom JSON manifests | 21 listed agents; says any CLI agent works without configuration; built-in chat pane too |
+| Agents | 21 terminal agents plus custom JSON manifests | 21 listed agents; says any CLI agent works without configuration; built-in chat pane too |
 | Isolation | Optional git worktree per agent | A git worktree for every workspace |
 | Review | Review panel: diff, stage, discard, commit, PR checks and comments | Diff viewer to stage, commit, push and open PRs |
 | Remote hosts | Any SSH host; verified helper upload, no tmux, sudo or service install | Remote access through the Superset Relay on Pro; the host runs Superset and must stay awake |

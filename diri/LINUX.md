@@ -116,7 +116,7 @@ daemon, agent discovery, state file, and active socket without opening the UI.
 ## Optional integrations
 
 - Coding-agent executables must be installed separately and visible on the
-  login shell's `PATH`. Diri ships 22 agent definitions and shows the installed
+  login shell's `PATH`. Diri ships 23 agent definitions and shows the installed
   CLIs it detects. Claude Code and Codex have the deepest status and resume
   integration; every supported CLI still runs in a real terminal.
 - Status sounds use the first available command among `pw-play`, `paplay`, and

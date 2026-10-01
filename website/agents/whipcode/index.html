@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>WhipCode in parallel, with worktrees and live status · Diri</title>
+  <meta name="description" content="Run several WhipCode sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/agents/whipcode/">
+  <link rel="alternate" type="text/markdown" href="/agents/whipcode.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Run WhipCode in parallel">
+  <meta property="og:description" content="Run several WhipCode sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.">
+  <meta property="og:url" content="https://diri.sh/agents/whipcode/">
+  <meta property="og:image" content="https://diri.sh/og/agents-whipcode.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Run WhipCode in parallel">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <link rel="stylesheet" href="/docs.css">
+  <script src="/docs.js" defer></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Run WhipCode in parallel","description":"Run several WhipCode sessions side by side in diri, each in its own git worktree, with live status, alerts when it needs you, and review in one place.","url":"https://diri.sh/agents/whipcode/","inLanguage":"en","dateModified":"2026-10-01","publisher":{"@type":"Organization","name":"Diri","url":"https://diri.sh/"},"about":{"@type":"SoftwareApplication","name":"WhipCode"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page article-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/docs/">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <main id="main">
+      <header class="guide-heading"><span class="agent-tile lg letter" aria-hidden="true">W</span><a class="eyebrow" href="/agents/">Agents</a><h1>Run WhipCode in parallel</h1><p>Run as many WhipCode sessions as you like, each on its own branch, and step in only when one needs you.</p>
+        <div class="guide-meta"><span>Free and open source</span><span>Live status</span></div></header>
+      <div class="guide-layout"><nav class="guide-toc" aria-label="On this page"><span>On this page</span><a href="#what-diri-adds-for-whipcode">What diri adds for WhipCode</a><a href="#set-up">Set up</a><a href="#run-several-at-once">Run several at once</a><a href="#questions">Questions</a><a href="#other-agents">Other agents</a></nav>
+        <article class="docs-content article-content">
+<p>diri runs <code>whipcode</code> exactly as you would in a terminal, with your own install and sign-in. What it adds is everything one terminal window can't give you: several WhipCode sessions at once, each in its own git worktree, a sidebar that shows which ones are working and which need you, and one place to review what they changed.</p>
+<h2 id="what-diri-adds-for-whipcode"><a class="anchor" href="#what-diri-adds-for-whipcode" aria-hidden="true" tabindex="-1">#</a>What diri adds for WhipCode</h2>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td>Live status</td><td>Read from the screen with rules written for its interface.</td></tr><tr><td>Needs-you alerts</td><td>A notification and an amber mark when WhipCode asks a question or wants permission.</td></tr><tr><td>Own worktree</td><td>Optional per session, so parallel runs never edit the same checkout.</td></tr><tr><td>Review</td><td>Diffs, staging, commits and pull request checks beside the session.</td></tr><tr><td>Survives restarts</td><td>Yes. Each session is owned by its own process, so quitting diri never stops it.</td></tr><tr><td>Resume after exit</td><td>Not automatically.</td></tr><tr><td>Fork a conversation</td><td>Not supported.</td></tr><tr><td>Approve from a notification</td><td>Yes. Permission prompts get an Approve button on the notification.</td></tr><tr><td>Starts other agents</td><td>No built-in connection. Claude Code, Codex and Cursor can start WhipCode sessions for you.</td></tr></tbody></table></div>
+<h2 id="set-up"><a class="anchor" href="#set-up" aria-hidden="true" tabindex="-1">#</a>Set up</h2>
+<ol><li>Install WhipCode with its official installer (needs Python 3). diri can also run this for you: <strong>Settings → Agents → Install</strong> shows the command and runs it only after you confirm.</li></ol>
+<div class="code-block" data-lang="sh"><div class="code-head"><span>Terminal</span></div><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">curl</span> <span class="tk-flag">-fsSL</span> https://raw.githubusercontent.com/context-labs/whip/main/install.sh | sh</code></pre></div>
+<ol start="2"><li>Run whipcode and pick a provider, or run whipcode auth.</li><li>Install diri with <code>brew install --cask cristicretu/diri/diri</code>, or <a href="https://github.com/cristicretu/diri/releases/latest" rel="noopener">download it</a>.</li><li>Open <strong>New Agent</strong> in the sidebar and choose <strong>WhipCode</strong>. If you installed WhipCode while diri was open, click <strong>Refresh</strong> in <strong>Settings → Agents</strong> first.</li></ol>
+<p>The <a href="/docs/quickstart/">quickstart</a> covers the rest: picking a folder, giving a task and answering questions.</p>
+<h2 id="run-several-at-once"><a class="anchor" href="#run-several-at-once" aria-hidden="true" tabindex="-1">#</a>Run several at once</h2>
+<p>Start more sessions from <strong>New Agent</strong> with a fresh worktree each, or let an agent do it. Claude Code, Codex and Cursor get diri's <a href="/docs/mcp/">MCP server</a> automatically and can start WhipCode sessions (kind <code>whipcode</code>). Ask one of them:</p>
+<blockquote><p>Start two WhipCode agents in their own worktrees: one fixes the failing tests, the other updates the docs. Tell me when both are done.</p></blockquote>
+<p>Each session shows up in the sidebar under the agent that started it. <a href="/docs/worktrees/">Worktrees and review</a> explains how to bring the work back.</p>
+<h2 id="questions"><a class="anchor" href="#questions" aria-hidden="true" tabindex="-1">#</a>Questions</h2>
+<h3 id="does-diri-need-its-own-whipcode-account"><a class="anchor" href="#does-diri-need-its-own-whipcode-account" aria-hidden="true" tabindex="-1">#</a>Does diri need its own WhipCode account?</h3>
+<p>No. diri starts the <code>whipcode</code> you installed, which uses its own sign-in. diri has no account of its own and never sees your password.</p>
+<h3 id="can-i-pick-a-whipcode-session-up-again-later"><a class="anchor" href="#can-i-pick-a-whipcode-session-up-again-later" aria-hidden="true" tabindex="-1">#</a>Can I pick a WhipCode session up again later?</h3>
+<p>Not automatically. The terminal and its history survive restarts, but a session that exits starts a fresh conversation. Quitting diri never ends a session in the first place.</p>
+<h3 id="can-whipcode-run-on-a-server"><a class="anchor" href="#can-whipcode-run-on-a-server" aria-hidden="true" tabindex="-1">#</a>Can WhipCode run on a server?</h3>
+<p>Yes. Install and sign in to WhipCode on any machine you reach with <code>ssh</code>, then pick it as the machine in <strong>New Agent</strong>. diri needs no tmux, sudo or service there. See <a href="/docs/remote-hosts/">Remote hosts</a>.</p>
+<h3 id="what-does-diri-cost"><a class="anchor" href="#what-does-diri-cost" aria-hidden="true" tabindex="-1">#</a>What does diri cost?</h3>
+<p>Nothing. diri is free and open source under Apache 2.0. You pay for WhipCode as you do today.</p>
+<h2 id="other-agents"><a class="anchor" href="#other-agents" aria-hidden="true" tabindex="-1">#</a>Other agents</h2>
+<p><a href="/agents/claude-code/">Claude Code</a> · <a href="/agents/codex/">Codex</a> · <a href="/agents/antigravity/">Antigravity</a> · <a href="/agents/cursor/">Cursor</a> · <a href="/agents/gemini/">Gemini</a> · <a href="/agents/aider/">Aider</a> · <a href="/agents/amp/">Amp</a> · <a href="/agents/cline/">Cline CLI</a> · <a href="/agents/">All agents</a></p>
+        <aside class="install-box">
+          <div class="install-copy"><strong>Run WhipCode in diri</strong><span>Free and open source. macOS 15 or newer, Linux in beta. Bring the agent CLIs and accounts you already have.</span></div>
+          <div class="install-actions"><a class="button primary" href="https://github.com/cristicretu/diri/releases/latest"><span class="icon" data-icon="download" aria-hidden="true"></span>Download for macOS</a><div class="code-block install-brew" data-lang="sh"><button class="code-copy" type="button" aria-label="Copy code"><span class="icon" aria-hidden="true"></span></button><pre><code><span class="tk-cmd">brew</span> install <span class="tk-flag">--cask</span> cristicretu/diri/diri</code></pre></div></div>
+        </aside>
+        
+        </article>
+      </div>
+    </main>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a><a href="/agents/">Agents</a><a href="/compare/">Compare</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

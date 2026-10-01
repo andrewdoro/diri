@@ -363,7 +363,7 @@ mod tests {
 
         // The whole catalog, by name. A shrunken catalog does not error: a
         // missing agent just spawns as a bare login shell, which is how this
-        // shipped broken once already. Spelling out all twenty-two ids means a
+        // shipped broken once already. Spelling out all twenty-three ids means a
         // dropped manifest fails here instead of in someone's terminal.
         let mut ids = engine.ids();
         ids.sort_unstable();
@@ -392,6 +392,7 @@ mod tests {
                 "pi",
                 "qoder",
                 "shell",
+                "whipcode",
             ]
         );
 
@@ -403,7 +404,7 @@ mod tests {
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 119, "the shipped ruleset lost rules");
+        assert_eq!(rules, 126, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
             let expected_empty = matches!(id, "shell" | "generic");
@@ -419,7 +420,7 @@ mod tests {
     /// decodes it as `diri_proto::AgentDescriptor`. That type needs `id` and
     /// `displayName`, and a single manifest missing either fails the *whole*
     /// response — leaving the client with no catalog and every agent spawning
-    /// as a bare shell. Decode all twenty-two the way the client will.
+    /// as a bare shell. Decode all twenty-three the way the client will.
     #[test]
     fn every_shipped_descriptor_decodes_the_way_the_client_decodes_it() {
         let engine = engine();
@@ -930,6 +931,188 @@ mod tests {
             assert_eq!(
                 (observation.state, observation.matched_rule_id.as_str()),
                 (state, rule)
+            );
+        }
+    }
+
+    /// Captured from whipcode v1.0.0 at 120x36 against
+    /// `tests/fixtures/fake_openai_api.py` (see tests/whipcode_real.rs); the
+    /// left column is whipcode's own sidebar, the cwd footer is shortened.
+    #[test]
+    fn whipcode_rules_match_the_screens_whipcode_draws() {
+        let composer = |placeholder: &'static str, footer: &'static str| {
+            vec![
+                "    [2] Context                        0%",
+                "                                            ┃",
+                placeholder,
+                "                                            ┃",
+                "    [3] LSP                             0   ┃  Off · fake-model  fake",
+                "                                            ┃",
+                footer,
+            ]
+        };
+        let idle_footer = " ~/project                                                    ctrl+r repl  ctrl+p commands";
+        let busy_footer = " ⬝⬝⬝■■■⬝⬝ esc interrupt                                        ctrl+r repl  ctrl+p commands";
+        let idle_input = "                                            ┃  Ask whipcode anything… (/ commands, tab completes)";
+        let busy_input =
+            "                                            ┃  busy — enter steers the running turn";
+        let with = |head: &[&'static str], tail: Vec<&'static str>| {
+            head.iter().copied().chain(tail).collect::<Vec<_>>()
+        };
+        let permission = [
+            "    blocked root       In[1] print(shell…",
+            "                                            ⚒ rlm_exec {\"code\": \"print(shell.run(command=\\\"touch diri-e2e-file\\\"))\"}",
+            "                                            ⚠ Allow bash?",
+            "                                              touch diri-e2e-file",
+            "                                              always: bash touch",
+            "                                              agent src5sni7oyp4ak4vn3qa · permission 09791b3401fcf6355f4da264ba5faa1a",
+        ];
+        let cases = [
+            (
+                with(&["    idle root"], composer(idle_input, idle_footer)),
+                ManifestState::Idle,
+                "idle-footer",
+            ),
+            (
+                // Typed-but-unsent text hides the placeholder; the footer still reads idle.
+                with(
+                    &["    idle root"],
+                    composer(
+                        "                                            ┃  fix the build",
+                        idle_footer,
+                    ),
+                ),
+                ManifestState::Idle,
+                "idle-footer",
+            ),
+            (
+                with(
+                    &[
+                        "    running root",
+                        "                                            ● slow part 0 slow part 1",
+                    ],
+                    composer(busy_input, busy_footer),
+                ),
+                ManifestState::Working,
+                "footer-interrupt",
+            ),
+            (
+                with(
+                    &["    running root"],
+                    composer(
+                        busy_input,
+                        " ■■■⬝⬝⬝⬝⬝ esc again to interrupt                               ctrl+r repl  ctrl+p commands",
+                    ),
+                ),
+                ManifestState::Working,
+                "footer-interrupt",
+            ),
+            (
+                // The leader chord replaces the footer for two seconds.
+                with(
+                    &["    running root"],
+                    composer(
+                        busy_input,
+                        " ctrl+x r repl b sidebar 1·2·3 panels s stop t themes m model",
+                    ),
+                ),
+                ManifestState::Working,
+                "busy-placeholder",
+            ),
+            (
+                with(
+                    &permission,
+                    with(
+                        &[
+                            "                                              ❯ allow once (a)    allow always for this tree (t)    reject (r)",
+                        ],
+                        composer(busy_input, busy_footer),
+                    ),
+                ),
+                ManifestState::BlockedPermission,
+                "permission-dialog",
+            ),
+            (
+                // After 'r' the options give way to the reason field.
+                with(
+                    &permission,
+                    with(
+                        &[
+                            "                                              reject with message: █",
+                            "                                              enter sends · esc back",
+                        ],
+                        composer(busy_input, busy_footer),
+                    ),
+                ),
+                ManifestState::BlockedPermission,
+                "permission-dialog",
+            ),
+            (
+                with(
+                    &[
+                        "    running root       In[1] print(user.…",
+                        "                                                Question                                                        esc",
+                        "                                                Which database should I use?",
+                        "                                                1 Postgres                                               relational",
+                        "                                                2 SQLite                                                   embedded",
+                        "                                                ↑↓ select  enter answer  esc dismiss  1-2 jump",
+                    ],
+                    composer(busy_input, busy_footer),
+                ),
+                ManifestState::BlockedQuestion,
+                "question-dialog",
+            ),
+            (
+                with(
+                    &[
+                        "                                                     Connect a provider                                     esc",
+                        "                                                     Search",
+                        "                                                     Popular",
+                        "                                                     OpenRouter",
+                        "                                                     Custom endpoint",
+                        "                                                     enter select  ctrl+e manage",
+                    ],
+                    composer(
+                        "                                            ┃  Connect a provider to get started · /connect",
+                        " ~/project                                                     /connect providers  ctrl+p commands",
+                    ),
+                ),
+                ManifestState::BlockedQuestion,
+                "provider-picker",
+            ),
+            (
+                // The picker dismissed: its hint remains in the composer, which is ready.
+                composer(
+                    "                                            ┃  Connect a provider to get started · /connect",
+                    " ~/project                                                     /connect providers  ctrl+p commands",
+                ),
+                ManifestState::Idle,
+                "idle-footer",
+            ),
+            (
+                // An answered permission leaves only the tool row and its result.
+                with(
+                    &[
+                        "                                               ⚙ rlm_exec {\"code\": \"print(shell.run(command=\\\"touch diri-e2e-file\\\"))…",
+                        "                                               ↳ Error: Permission denied: the user rejected this action",
+                        "                                               The command ran. DONECMD",
+                    ],
+                    composer(idle_input, idle_footer),
+                ),
+                ManifestState::Idle,
+                "idle-footer",
+            ),
+        ];
+
+        let engine = engine();
+        for (lines, state, rule) in cases {
+            let observation = engine
+                .evaluate(&ScreenSnapshot::from_lines(lines.clone()), "whipcode")
+                .unwrap_or_else(|| panic!("WhipCode screen should match: {lines:#?}"));
+            assert_eq!(
+                (observation.state, observation.matched_rule_id.as_str()),
+                (state, rule),
+                "{lines:#?}"
             );
         }
     }
@@ -1650,6 +1833,11 @@ mod tests {
                 "opencode",
                 "curl -fsSL https://opencode.ai/install | bash",
                 None,
+            ),
+            (
+                "whipcode",
+                "curl -fsSL https://raw.githubusercontent.com/context-labs/whip/main/install.sh | sh",
+                Some("Python 3"),
             ),
         ]
         .map(|(id, command, requirement)| {

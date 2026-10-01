@@ -2,7 +2,7 @@
 
 > cmux is a free, scriptable Ghostty-based Mac terminal for agents; diri adds agent status, worktrees, review and agent-to-agent tasks, with sessions that outlive the app.
 
-cmux is a free, open-source macOS terminal built on libghostty, with vertical tabs, split panes, a scriptable browser, notification rings when an agent needs you, and a CLI and socket API for everything. diri is a free, open-source native app built specifically around coding agents: 20 agent CLIs with live status, optional git worktrees, a Review panel, notes, and an MCP server that lets agents start and coordinate other agents. Both are native Mac apps that run agents in real terminals; cmux is a general terminal first, diri is an agent manager first.
+cmux is a free, open-source macOS terminal built on libghostty, with vertical tabs, split panes, a scriptable browser, notification rings when an agent needs you, and a CLI and socket API for everything. diri is a free, open-source native app built specifically around coding agents: 21 agent CLIs with live status, optional git worktrees, a Review panel, notes, and an MCP server that lets agents start and coordinate other agents. Both are native Mac apps that run agents in real terminals; cmux is a general terminal first, diri is an agent manager first.
 
 ## At a glance
 | | diri | cmux |
@@ -11,7 +11,7 @@ cmux is a free, open-source macOS terminal built on libghostty, with vertical ta
 | Price | Free | Free; a Founder's Edition offers early access features |
 | License | Apache-2.0 | GPL-3.0-or-later for the client; server components under BSL 1.1 |
 | Built with | Rust and GPUI | Swift and AppKit on libghostty |
-| Agents | 20 agents with manifests for launch, resume and status, plus any shell | Any agent that runs in a terminal |
+| Agents | 21 agents with manifests for launch, resume and status, plus any shell | Any agent that runs in a terminal |
 | Status and attention | Working, needs you, done per session, from hooks or screen rules; notifications and an inbox | Notification rings and unread badges, triggered by OSC 9/99/777, the CLI or agent hooks |
 | Isolation | Optional git worktree per agent | Not documented |
 | Review | Review panel: diff, stage, discard, commit, PR checks and comments | Sidebar shows git branch and PR status; no diff panel documented |
@@ -26,7 +26,7 @@ cmux is a free, open-source macOS terminal built on libghostty, with vertical ta
 In diri each session lives in its own holder process, not in the window. Quit the app or update the Engine and every agent keeps working with its full screen. cmux restores your layout and scrollback on relaunch, and resumes supported agents from saved session ids, but says it does not checkpoint live processes. See [Sessions](/docs/sessions/#persistence).
 
 ### It knows what each agent is doing
-diri ships a manifest for each of 20 agents describing how to launch, resume and fork it and how to read its state. The sidebar shows working, needs you and done for every session, turns red on destructive-looking prompts, and ⇧⌘J jumps to the next one waiting. See [Supported agents](/docs/agents/).
+diri ships a manifest for each of 21 agents describing how to launch, resume and fork it and how to read its state. The sidebar shows working, needs you and done for every session, turns red on destructive-looking prompts, and ⇧⌘J jumps to the next one waiting. See [Supported agents](/docs/agents/).
 
 ### Work isolation and review built in
 Agents can each get a git worktree, and the Review panel shows what a session changed against the default branch or HEAD, with stage, discard, commit, and PR checks and comments. See [Worktrees and review](/docs/worktrees/).

@@ -272,11 +272,19 @@
     "hash": "004e2685456699c1"
   },
   {
+    "key": "agents-whipcode",
+    "url": "/agents/whipcode/",
+    "eyebrow": "Agents",
+    "title": "Run WhipCode in parallel",
+    "letter": "W",
+    "hash": "7bbc351ca6edce9b"
+  },
+  {
     "key": "agents",
     "url": "/agents/",
     "eyebrow": "Agents",
-    "title": "20 coding agents, side by side",
-    "hash": "2f2926dddfee8e1f"
+    "title": "21 coding agents, side by side",
+    "hash": "8888f8e348302aca"
   },
   {
     "key": "compare-cmux",

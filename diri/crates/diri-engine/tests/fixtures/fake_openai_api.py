@@ -3,13 +3,17 @@
 
   SLOW    -> streams a reply over ~5s (exercises the Working state)
   RUNCMD  -> asks to run a bash command (exercises the permission prompt)
+  ASKQ    -> asks the user a multiple-choice question (WhipCode only)
   other   -> replies with the first ALLCAPS word of the prompt, or OK
+WhipCode offers a single Starlark `rlm_exec` tool instead of `bash`; when
+that is the only tool, the same keywords are scripted as Starlark cells.
 A request without tools (title generation) gets a short title. Every reply
 waits ~1s first, like a real API. Requests are logged to argv[2].
 
 The server is also the client's HTTP(S) proxy: it logs and refuses every
 request for another host, so the test sees, and blocks, any network the CLI
-attempts beyond the model API. Used by tests/opencode_real.rs; binds
+attempts beyond the model API. Used by tests/opencode_real.rs and
+tests/whipcode_real.rs; binds
 127.0.0.1 only.
 """
 import json, re, sys, time
@@ -76,11 +80,26 @@ class Handler(BaseHTTPRequestHandler):
         text = last_turn(messages)
         tools = bool(body.get("tools"))
         LOG.write(f"POST {self.path} tools={tools} last_user={text[:80]!r}\n")
+        if text == "__TOOL_RESULT__":
+            result = next(m for m in reversed(messages) if m.get("role") == "tool")
+            LOG.write(f"TOOL_RESULT {text_of(result.get('content'))[:80]!r}\n")
 
+        starlark = tools and [t.get("function", {}).get("name") for t in body["tools"]] == ["rlm_exec"]
         if not tools:
             pieces = [{"content": "Fake title"}]
         elif text == "__TOOL_RESULT__":
             pieces = [{"content": "The command ran. DONECMD"}]
+        elif starlark and ("RUNCMD" in text or "ASKQ" in text):
+            code = (
+                'print(shell.run(command="touch diri-e2e-file"))' if "RUNCMD" in text else
+                'print(user.ask(question="Which database should I use?", options=['
+                '{"label": "Postgres", "description": "relational"}, '
+                '{"label": "SQLite", "description": "embedded"}]))'
+            )
+            pieces = [{"tool_calls": [{
+                "index": 0, "id": "call_diri_1", "type": "function",
+                "function": {"name": "rlm_exec", "arguments": json.dumps({"code": code})},
+            }]}]
         elif "RUNCMD" in text:
             pieces = [{"tool_calls": [{
                 "index": 0, "id": "call_diri_1", "type": "function",

@@ -1,10 +1,10 @@
 ---
 title: diri vs Conductor
-description: Conductor runs four agents behind a Mac chat interface with a PR flow and paid cloud workspaces; diri runs 20 agent CLIs as real terminals, free and open source.
+description: Conductor runs four agents behind a Mac chat interface with a PR flow and paid cloud workspaces; diri runs 21 agent CLIs as real terminals, free and open source.
 competitor: Conductor
 checked: 2026-10-01
 ---
-Conductor is a Mac app for running Claude Code, Codex, Cursor and OpenCode in parallel, each in its own workspace built on a git worktree, with a chat composer, diff viewer, pull request flow and optional cloud workspaces on paid plans. diri is a free, open-source native app that runs 20 terminal coding agents as real terminals side by side, tracks which ones need you, and lets agents start and coordinate other agents through a local MCP server.
+Conductor is a Mac app for running Claude Code, Codex, Cursor and OpenCode in parallel, each in its own workspace built on a git worktree, with a chat composer, diff viewer, pull request flow and optional cloud workspaces on paid plans. diri is a free, open-source native app that runs 21 terminal coding agents as real terminals side by side, tracks which ones need you, and lets agents start and coordinate other agents through a local MCP server.
 
 ## At a glance
 | | diri | Conductor |
@@ -12,7 +12,7 @@ Conductor is a Mac app for running Claude Code, Codex, Cursor and OpenCode in pa
 | Platforms | macOS 15 or newer (universal), Linux beta on x86_64 Ubuntu, iPhone companion beta | Mac; a mobile app is listed on the Pro plan |
 | Price | Free | Free plan; Pro $50/mo; Teams $60/mo per user (invite-only); Enterprise custom |
 | License | Apache-2.0, open source | Not documented on its site |
-| Agents | 20 terminal agents, including Claude Code, Codex, Cursor, Gemini, Copilot CLI, OpenCode, Amp and Aider, plus custom manifests | Claude Code, Codex, Cursor and OpenCode |
+| Agents | 21 terminal agents, including Claude Code, Codex, Cursor, Gemini, Copilot CLI, OpenCode, Amp and Aider, plus custom manifests | Claude Code, Codex, Cursor and OpenCode |
 | How agents appear | The agent's own terminal UI | A chat composer with model picker and modes, plus a terminal for ad hoc commands |
 | Isolation | Optional git worktree per agent (from an agent, a recipe or the CLI) | A git worktree and branch for every workspace, created by default |
 | Review | Review panel: diff against default branch or HEAD, stage, discard, commit, PR checks and comments | Diff viewer with comments, agent review, create PR, Checks tab for CI and review threads, merge |
@@ -26,7 +26,7 @@ Conductor is a Mac app for running Claude Code, Codex, Cursor and OpenCode in pa
 ## Where diri is different
 
 ### Real terminals, many agents
-diri does not put a chat layer between you and the agent. Each session is the agent CLI itself in a terminal, so every slash command, permission prompt and TUI feature works as the agent's authors intended. That is also why diri can support 20 agents, from Claude Code and Codex to Aider, Amp, Copilot CLI and Kiro, and why you can add one with a JSON manifest. See [Supported agents](/docs/agents/).
+diri does not put a chat layer between you and the agent. Each session is the agent CLI itself in a terminal, so every slash command, permission prompt and TUI feature works as the agent's authors intended. That is also why diri can support 21 agents, from Claude Code and Codex to Aider, Amp, Copilot CLI and Kiro, and why you can add one with a JSON manifest. See [Supported agents](/docs/agents/).
 
 ### Sessions outlive the window
 Each session is owned by its own holder process. Quit diri, or let it update its Engine, and agents keep working with their full screen history. Idle sessions can hibernate to save memory and wake where they were. See [Sessions](/docs/sessions/#persistence).
