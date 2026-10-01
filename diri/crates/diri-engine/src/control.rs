@@ -3187,6 +3187,21 @@ impl ControlServer {
             .record(&p.session_id.0)
             .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
         let exited = matches!(record.status, diri_proto::SessionStatus::Exited(_));
+        // The previous run's size is the pane's size: the App kept sizing that
+        // PTY. Waiting for the App to propose it again cost the whole launch
+        // fallback (an unchanged pane sends no resize) and started the agent
+        // at the 80x24 default, to be reflowed once the App caught up.
+        if let Some((cols, rows)) = registry
+            .get(&p.session_id.0)
+            .map(crate::session::Session::screen_size)
+            .or_else(|| previous_screen_size(&spec))
+            .and_then(|(cols, rows)| Some((u16::try_from(cols).ok()?, u16::try_from(rows).ok()?)))
+            .filter(|&(cols, rows)| cols >= 2 && rows >= 2)
+        {
+            spec.pty.cols = cols;
+            spec.pty.rows = rows;
+            spec.defer_launch = false;
+        }
         if registry.get(&p.session_id.0).is_some() {
             if !exited {
                 // Already live: resuming is a no-op, not an error.
@@ -4345,6 +4360,19 @@ impl Drop for ControlServer {
 /// `None` leaves the record's id untouched (not Claude, or nothing to check
 /// against), `Some(Some(id))` resumes a conversation whose transcript exists,
 /// and `Some(None)` means the tab's id was never written and must start fresh.
+/// The grid size of this session's last screen checkpoint: the size its
+/// previous run was using when the Engine last saved it.
+fn previous_screen_size(spec: &crate::session::SessionSpec) -> Option<(usize, usize)> {
+    let log = spec.logs_dir.join(format!("{}.bin", spec.id));
+    let checkpoint = crate::checkpoint::ScreenCheckpoint::load(
+        &crate::checkpoint::ScreenCheckpoint::path_for_log(&log),
+    )?;
+    Some((
+        usize::from(checkpoint.grid.cols),
+        usize::from(checkpoint.grid.rows),
+    ))
+}
+
 fn claude_resume_target(record: &diri_proto::SessionRecord) -> Option<Option<String>> {
     claude_resume_target_in(record, Path::new(&std::env::var_os("HOME")?))
 }
@@ -6939,6 +6967,57 @@ mod tests {
     #[test]
     fn revive_archived_session_clears_archive_durably() {
         check_resume_relaunches(true);
+    }
+
+    #[test]
+    fn resume_size_falls_back_to_the_last_screen_checkpoint() {
+        // After an Engine restart a dead session is no longer in the
+        // registry; its last checkpoint still records the size it ran at.
+        let temp = tempfile::tempdir().expect("temp");
+        let logs = temp.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs");
+        let spec = crate::session::SessionSpec {
+            id: "s_gone".into(),
+            pty: crate::pty::PtySpec::new(vec!["/bin/sh".into()], "/tmp"),
+            manifest_id: "shell".into(),
+            authority: crate::Authority::ProcessOnly,
+            logs_dir: logs.clone(),
+            holder: None,
+            remote: None,
+            defer_launch: true,
+        };
+        assert_eq!(previous_screen_size(&spec), None, "no checkpoint, no size");
+
+        let row = vec![diri_proto::grid::GridCell::BLANK; 3];
+        let checkpoint = crate::checkpoint::ScreenCheckpoint {
+            keyboard_snapshot: None,
+            keyboard: None,
+            log_offset: 0,
+            history_metadata: Vec::new(),
+            history: Vec::new(),
+            grid: diri_proto::grid::GridUpdate {
+                cols: 3,
+                rows: 2,
+                cursor_col: 0,
+                cursor_row: 0,
+                cursor_visible: true,
+                is_full_snapshot: true,
+                changed_rows: vec![
+                    diri_proto::grid::ChangedRow::new(0, row.clone()),
+                    diri_proto::grid::ChangedRow::new(1, row),
+                ],
+            },
+            marker_buffer: Vec::new(),
+            alt_screen: false,
+            bracketed_paste: false,
+            mouse: diri_proto::terminal::MouseModes::default(),
+        };
+        checkpoint
+            .write_atomically(&crate::checkpoint::ScreenCheckpoint::path_for_log(
+                &logs.join("s_gone.bin"),
+            ))
+            .expect("write checkpoint");
+        assert_eq!(previous_screen_size(&spec), Some((3, 2)));
     }
 
     #[test]
