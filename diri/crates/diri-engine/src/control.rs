@@ -1518,6 +1518,7 @@ impl ControlServer {
     /// and stays removed. Runs once per Engine start, oldest note first.
     pub fn adopt_orphan_notes(&self) -> Result<usize, ControlError> {
         let store = self.note_store()?;
+        self.relink_notes(&store)?;
         let mut notes = store.list().map_err(io_control_error)?;
         notes.sort_by(|a, b| a.created.cmp(&b.created).then(a.id.cmp(&b.id)));
         let known: std::collections::HashSet<String> = self
@@ -1547,6 +1548,41 @@ impl ControlServer {
             }
         }
         Ok(adopted)
+    }
+
+    /// Gives back a note Session's file link when its record lost it. An
+    /// Engine that predates notes rewrites state.json without `noteId` (it
+    /// does not know the field) and reaps the record as exited; the note then
+    /// opens as "file is gone" although its file is intact. The file names
+    /// its Session in front matter, so the link is recovered from there.
+    /// Returns how many records were repaired.
+    fn relink_notes(&self, store: &diri_notes::store::NoteStore) -> Result<usize, ControlError> {
+        let notes = store.list().map_err(io_control_error)?;
+        let mut repaired = 0;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        for note in notes {
+            let Some(session) = note.session.as_deref() else {
+                continue;
+            };
+            let Some(mut record) = registry.record(session) else {
+                continue;
+            };
+            if !record.is_note() || record.note_id.is_some() {
+                continue;
+            }
+            record.note_id = Some(note.id.clone());
+            if matches!(record.status, diri_proto::SessionStatus::Exited(_)) {
+                record.status = diri_proto::SessionStatus::Idle;
+            }
+            registry.insert_record(record);
+            self.publish_updated(&registry, session);
+            repaired += 1;
+        }
+        if repaired > 0 {
+            registry.persist_for_shutdown().map_err(io_control_error)?;
+            diri_telemetry::event!("notes.relinked", count = repaired);
+        }
+        Ok(repaired)
     }
 
     /// Adopts orphan notes on a one-shot thread, off the accept path.
@@ -6101,6 +6137,32 @@ mod tests {
         let reopened = ok_of(call(&server, "session.reopen_last", None));
         assert_eq!(reopened["id"], record.id.0.as_str());
         assert_eq!(store.load(&note_id).unwrap().doc.title, "Launch plan");
+
+        // An Engine that predates notes drops `noteId` from the record and
+        // reaps it; the next notes-aware start links it back from the file.
+        {
+            let mut registry = registry.lock().expect("registry");
+            let mut broken = registry.record(&record.id.0).expect("listed");
+            broken.note_id = None;
+            broken.status = diri_proto::SessionStatus::Exited(diri_proto::ExitInfo {
+                reason: diri_proto::ExitReason::DaemonRestart,
+                code: None,
+                signal: None,
+            });
+            registry.insert_record(broken);
+        }
+        server.adopt_orphan_notes().expect("relink");
+        let healed = registry
+            .lock()
+            .expect("registry")
+            .record(&record.id.0)
+            .expect("listed");
+        assert_eq!(
+            healed.note_id.as_deref(),
+            Some(note_id.as_str()),
+            "link restored"
+        );
+        assert!(matches!(healed.status, diri_proto::SessionStatus::Idle));
 
         // A daemon restart finds no holder for the note and must not call it lost.
         registry.lock().expect("registry").reap_orphans_for_test();
