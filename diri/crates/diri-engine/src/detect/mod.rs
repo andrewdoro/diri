@@ -403,7 +403,7 @@ mod tests {
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 112, "the shipped ruleset lost rules");
+        assert_eq!(rules, 113, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
             let expected_empty = matches!(id, "shell" | "generic");
@@ -870,6 +870,75 @@ mod tests {
                 (state, rule)
             );
         }
+    }
+
+    /// Captured from official Grok Build 1.0.46 via tests/grok_real.rs.
+    /// The first-run login screen emits idle OSC metadata despite requiring login.
+    #[test]
+    fn grok_rules_match_the_screens_grok_draws() {
+        let engine = engine();
+        let login = [
+            "         error sending request for url (https://auth.x.ai/.well-known/openid-configuration)",
+            "                                   Login with Grok              l",
+            "                                   Quit                         q",
+            "  ╭──────────────────────────────────────────────────────────────────────────────────────────────╮",
+            "  │ ❯ Type a message...                                                                          │",
+            "  ╰──────────────────────────────────────────────────────────────────────────── Grok 4.6 (high) ─╯",
+            "                                                                                Grok Build  1.0.46",
+        ];
+        let mut snapshot = ScreenSnapshot::from_lines(login);
+        // Login must outrank both ways Grok can advertise idle.
+        snapshot.osc_title = Some("grok".into());
+        snapshot.osc_progress_state = Some(0);
+        let observation = engine.evaluate(&snapshot, "grok").unwrap();
+        assert_eq!(observation.state, ManifestState::BlockedQuestion);
+        assert_eq!(observation.matched_rule_id, "blocked-login");
+
+        // A quoted login instruction in conversation is not the active menu.
+        let mut stale = login.to_vec();
+        stale.extend(["later conversation output"; 9]);
+        snapshot.lines = stale.into_iter().map(str::to_owned).collect();
+        assert_eq!(
+            engine.evaluate(&snapshot, "grok").unwrap().state,
+            ManifestState::Idle
+        );
+        let working = ScreenSnapshot::from_lines([
+            "     ⠸ Waiting for response… 0.0s                                                   0.0s ⇣15 [stop]",
+            "  ╭──────────────────────────────────────────────────────────────────────────────────────────────╮",
+            "  │ ❯                                                                                            │",
+            "  ╰───────────────────────────────────────────────────────────────────────────────── fake-model ─╯",
+            "  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts",
+        ]);
+        assert_eq!(
+            engine.evaluate(&working, "grok").unwrap().state,
+            ManifestState::Working
+        );
+        let question = ScreenSnapshot::from_lines([
+            "  ┃  Pick a test color",
+            "  ┃  1 (○) Blue   Use blue                                                   █",
+            "  ┃  2 (○) Green  Use green                                                  █",
+            "  ┃  z (○) Type your answer here",
+            "  ┃  ↑/↓ navigate · y copy                                    Enter:submit",
+            "  Tab:next answer  │  Esc:scrollback  │  Shift+x:dismiss",
+        ]);
+        assert_eq!(
+            engine.evaluate(&question, "grok").unwrap().state,
+            ManifestState::BlockedQuestion
+        );
+        let permission = ScreenSnapshot::from_lines([
+            "  ┃  Create the e2e marker file",
+            "  ┃  touch diri-e2e-file",
+            "  ┃  1 (○) Yes, and don't ask again for anything (always-approve mode)",
+            "  ┃  2 (○) Always allow: touch diri-e2e-file",
+            "  ┃  3 (●) Yes, proceed",
+            "  ┃  4 (○) No, reject (type to add feedback)",
+            "  ┃  5 (○) Never allow: touch diri-e2e-file",
+            "  1/5:select  │  Tab:next option  │  ←/→:scope  │  e:edit pattern  │  Ctrl+o:always-approve  │",
+        ]);
+        assert_eq!(
+            engine.evaluate(&permission, "grok").unwrap().state,
+            ManifestState::BlockedPermission
+        );
     }
 
     #[test]

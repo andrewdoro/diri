@@ -4866,9 +4866,60 @@ fn prepare_agent_input(
         if pi {
             accept_pi_project_trust(registry, session_id);
         }
+        let grok = with_session(registry, session_id, |session| {
+            session.manifest_id() == "grok"
+        })
+        .unwrap_or(false);
+        if grok {
+            wait_for_grok_composer(registry, session_id)?;
+        }
         inject_initial_prompt(registry, session_id, prompt)?;
     }
     Ok(())
+}
+
+/// Grok paints a composer-shaped placeholder on its unauthenticated welcome
+/// screen. Pasting there drops the prompt; Enter starts login, and the fresh
+/// NeedsInput evidence can falsely confirm delivery. Only its interactive
+/// footer or authenticated home menu proves readiness. Never answer login for a user.
+fn wait_for_grok_composer(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+) -> Result<(), InitialPromptFailure> {
+    for _ in 0..200 {
+        let text = screen_text(registry, session_id).ok_or(InitialPromptFailure::SessionEnded)?;
+        let bottom = text
+            .lines()
+            .rev()
+            .filter(|line| !line.trim().is_empty())
+            .take(8)
+            .collect::<Vec<_>>();
+        if bottom
+            .iter()
+            .any(|line| line.split_whitespace().eq(["Login", "with", "Grok", "l"]))
+            && bottom
+                .iter()
+                .any(|line| line.split_whitespace().eq(["Quit", "q"]))
+        {
+            return Err(InitialPromptFailure::SubmissionUnconfirmed);
+        }
+        let authenticated_home = text
+            .lines()
+            .any(|line| line.contains("New worktree") && line.contains("ctrl+w"))
+            && text
+                .lines()
+                .any(|line| line.contains("Resume session") && line.contains("ctrl+r"));
+        if authenticated_home
+            || bottom.iter().any(|line| {
+                let line = line.to_ascii_lowercase();
+                line.contains("ctrl+x:shortcuts") || line.contains("ctrl+.:shortcuts")
+            })
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(InitialPromptFailure::SubmissionUnconfirmed)
 }
 
 #[derive(Clone, Copy, Debug)]
