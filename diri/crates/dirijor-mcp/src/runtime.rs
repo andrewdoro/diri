@@ -128,6 +128,7 @@ fn read_only(message: &Value) -> bool {
                     | "list_worktrees"
                     | "list_tasks"
                     | "list_schedules"
+                    | "get_skill"
                     | "wait_any"
                     | "get_diff"
                     | "whoami"

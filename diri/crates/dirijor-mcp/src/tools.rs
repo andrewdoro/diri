@@ -27,20 +27,14 @@ impl ToolDefinition {
     }
 }
 
-/// How agents keep a Diri note current. It is part of the MCP server's
-/// instructions and the note tools point at it, so every agent learns the
-/// same short contract. People who are not developers read these notes.
-pub const NOTES_CONTRACT: &str = "Diri Notes are the person's plans, briefs, and to-do lists. People who are not developers read them, so write plainly.\n\
-- If whoami shows origin_note, you were started from a note: read it first with read_note {\"note\":\"origin\"}. It is your brief.\n\
-- As you find important things (a decision, a finding, a blocker, a result, a link), add one short entry with write_note {\"note\":\"origin\",\"entry\":\"...\"}: one or two plain sentences, no progress chatter, no logs or code dumps. It is filed under your to-do, or in the note's Updates.\n\
-- Prefer adding. Change or remove existing text only when the person asks for it, or to keep your own entries current (tick a row, change \"Fix\" to \"Done\"): use edit_note, which works like editing a file (exact old text, new text), or replace_section for everything under a heading. Never silently delete the person's writing; every version is kept and the person can restore one.\n\
-- Tick your own sub-tasks as you finish them (write_note with todo and checked:true). Leave the to-do you were started from unticked: the person reviews your work and ticks it.\n\
-- Finish with a one-paragraph result: report_to_parent {\"status\":\"done\",\"summary\":\"...\"} is added to the note.\n\
-- To explain something or hand over a longer write-up, use create_note: it makes a new note under you in the sidebar, and open:true shows it to the person.";
-
 pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
     let kind_enum: Vec<Value> = kinds.iter().map(|kind| json!(kind)).collect();
     let mut tools = vec![
+        ToolDefinition::new(
+            "get_skill",
+            "Read one of Diri's skills: the detailed rules for a Diri capability, as Markdown. Read the matching skill before acting: scheduling (run anything later, at a time, or repeatedly; waking the Mac), notes (work started from or written to a Diri note), orchestration (parallel agents, tasks, waiting, retries). Claude Code sessions also have them as skills named diri:<name>.",
+            json!({"type":"object","properties":{"name":{"type":"string","enum":["scheduling","notes","orchestration"]}},"required":["name"]}),
+        ),
         ToolDefinition::new(
             "submit_task",
             "Assign a tracked task to an authorized Agent. Returns a durable task_id and delivery receipt, and tells the Agent to acknowledge and report that exact task. Reuse request_id on retries. Identical target/text defaults to one task; use a new request_id only for intentional additional work. Unknown delivery never permits a fresh copy. Pass result_schema to require a JSON result of that shape. Await it with wait_any (several tasks) or wait_for_task.",

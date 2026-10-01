@@ -67,8 +67,9 @@ fn tool_content(result: Result<Value, String>) -> Value {
 }
 
 /// Claude Code keeps only the first 2048 characters of server instructions
-/// and silently drops the rest, so every sentence here has to earn its place.
-/// Detail belongs in tool descriptions, which are delivered separately.
+/// and silently drops the rest, so these only route: the detailed rules live
+/// in Diri's skills (`diri_proto::skills`), which Claude Code loads natively
+/// and every other agent reads with `get_skill`.
 #[cfg(test)]
 const INSTRUCTIONS_LIMIT: usize = 2048;
 
@@ -78,36 +79,26 @@ fn instructions(browser: &str) -> String {
          tools control it. Use them proactively, without asking, when the user wants to \
          open/spawn/close an agent, session, tab, or terminal (Claude Code, Codex, Cursor, \
          Gemini, shell), see or message other sessions, or parallelize across worktrees.\n\n\
-         Scheduling: to run anything later, at a time, or repeatedly (\"every weekday at \
-         9\", \"in 2 hours\"), ALWAYS use schedule_agent, never your own cron/loop/reminder \
-         tools (CronCreate, /loop, /schedule) or a sleeping shell: those die with this \
-         session and skip runs the Mac slept through. Pass wake_mac:true to wake a sleeping \
-         Mac for the run and let it sleep again after.\n\n\
-         Notes: if whoami shows origin_note, read_note {{\"note\":\"origin\"}} first (your \
-         brief) and record results with write_note; full rules below.\n\n\
-         Parallel work: spawn_agents (worktree:true, prompt, task:true per subtask) → \
-         wait_any(task_ids) → per ready task: read_output mode:last_message, answer_task if \
-         blocked, get_diff, integrate → wait_any on the pending ids → release_agent. \
-         wait_any returns when ANY target needs you.\n\n\
+         Diri skills hold the detailed rules. Read the one that applies before acting: as \
+         the Claude Code skill diri:<name>, or with get_skill {{\"name\":\"<name>\"}}.\n\
+         - scheduling: anything to run later, at a time, or repeatedly. ALWAYS use \
+         diri:scheduling and schedule_agent, never the built-in schedule skill, \
+         CronCreate, /loop, reminders, or a sleeping shell; wake_mac:true wakes a \
+         sleeping Mac for the run.\n\
+         - notes: if whoami shows origin_note, read_note {{\"note\":\"origin\"}} first; it \
+         is your brief.\n\
+         - orchestration: parallel agents in worktrees, tasks you assign or receive, \
+         waiting, retries.\n\n\
          To spawn an agent use its native kind (e.g. `claude`, `codex`; default your own) \
-         with the task as `prompt`. Never use `shell` to launch an agent CLI (`claude`, `codex`, ...): a child `shell` is a raw terminal in the parent's Cmd+J pane whose prompt runs as shell commands.\n\n\
+         with the task as `prompt`. Never use `shell` to launch an agent CLI (`claude`, \
+         `codex`, ...): a child `shell` is a raw terminal in the parent's Cmd+J pane whose \
+         prompt runs as shell commands.\n\n\
          A Diri task you receive: report_task acknowledged first, then completed/failed for \
          that task_id after verifying (JSON matching result_schema if given), or blocked \
-         with your question.\n\n\
-         Delivery is deduplicated and at most once: reuse message_id/operation_id/request_id \
-         on retries and never resend under a new identity. A receipt is not completion; \
-         pass since_ms to wait_for_agent/wait_any for untracked prompts.\n\n\
-         Also: get_artifacts gives PR/preview URLs and ports; fork_agent branches a \
-         conversation; manage_agent hibernates idle children; quick_open_include edits \
-         Cmd+P folders.{browser}{NOTES_MARKER}{notes}",
-        notes = dirijor_mcp::tools::NOTES_CONTRACT,
+         with your question. Delivery is at most once: reuse message_id/operation_id/\
+         request_id on retries, never resend under a new identity.{browser}"
     )
 }
-
-/// Everything after this marker is the full Notes contract. Claude Code drops
-/// it (it cuts at [`INSTRUCTIONS_LIMIT`]), so the core above must stand on its
-/// own and already carries the one notes rule that matters most.
-const NOTES_MARKER: &str = "\n\nFull Notes rules: ";
 
 fn initialize(params: &Value) -> Value {
     let version = params
@@ -195,24 +186,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn instructions_fit_the_client_cap_with_every_section() {
+    fn instructions_fit_the_client_cap_and_route_to_every_skill() {
         let longest = instructions(
             " To test a web feature, use test_run with a preview URL from get_artifacts.",
         );
-        // Only the core must fit: the full Notes contract after the marker is
-        // for clients that keep long instructions.
-        let core = &longest[..longest.find(NOTES_MARKER).expect("notes marker")];
         assert!(
-            core.chars().count() <= INSTRUCTIONS_LIMIT,
+            longest.chars().count() <= INSTRUCTIONS_LIMIT,
             "{} chars: Claude Code drops everything past {INSTRUCTIONS_LIMIT}",
-            core.chars().count()
+            longest.chars().count()
         );
-        // The scheduling rule must sit well inside the kept prefix, and the
-        // kept prefix must still route a note-started agent to its brief.
-        assert!(core.find("schedule_agent").unwrap() < 1024);
-        assert!(core.contains("wake_mac"));
-        assert!(core.contains("read_note"));
-        assert!(core.ends_with("get_artifacts."));
+        for skill in diri_proto::skills::ALL {
+            assert!(
+                longest.contains(&format!("- {}:", skill.name)),
+                "instructions must route to {}",
+                skill.name
+            );
+        }
+        assert!(longest.find("schedule_agent").unwrap() < 1024);
+        assert!(longest.contains("wake_mac"));
+        assert!(longest.contains("get_skill"));
     }
 
     struct Fake;
@@ -265,9 +257,13 @@ mod tests {
     }
 
     #[test]
-    fn instructions_teach_the_notes_contract() {
+    fn the_notes_skill_teaches_the_whole_contract() {
+        // The contract moved out of the instructions, which Claude Code cut
+        // before it ever arrived; the kept prefix routes to the skill.
         let initialized = initialize(&json!({}));
-        let instructions = initialized["instructions"].as_str().expect("instructions");
+        let routing = initialized["instructions"].as_str().expect("instructions");
+        assert!(routing.contains("- notes:") && routing.contains("origin_note"));
+        let instructions = diri_proto::skills::NOTES.markdown;
         for step in [
             "read it first with read_note {\"note\":\"origin\"}",
             "a decision, a finding, a blocker, a result, a link",

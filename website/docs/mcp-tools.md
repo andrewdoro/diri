@@ -457,6 +457,14 @@ Earlier versions of a Diri note: when, by whom, and what changed, newest first. 
 
 ## Other
 
+### `get_skill`
+
+Read one of Diri's skills: the detailed rules for a Diri capability, as Markdown. Read the matching skill before acting: scheduling (run anything later, at a time, or repeatedly; waking the Mac), notes (work started from or written to a Diri note), orchestration (parallel agents, tasks, waiting, retries). Claude Code sessions also have them as skills named diri:<name>.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `name` | `scheduling`, `notes`, `orchestration` | **Required.** |
+
 ### `schedule_agent`
 
 Schedule an agent run owned by Diri, not by this session: it survives this session closing and Diri restarting. Use it whenever the user wants something done later, at a time, or repeatedly, instead of your own cron/loop tools. How runs work: at each due time Diri opens a NEW top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation, so write a self-contained prompt: the goal, the repo and relevant context, what to produce, and where the result goes (open a PR, write a file, post a summary). For code changes pass worktree:true and base "origin/main" so each run starts clean. Give a short `name`. When: exactly one of cron (five fields, the Mac's local time, e.g. "0 9 * * 1-5" weekdays 09:00), in_minutes (relative one-off), or at_ms (epoch ms). Missed runs: if the Mac was asleep or Diri was closed, the newest missed run fires once when it is back, within catch_up_hours (default 12); older ones are recorded as missed. wake_mac:true (use when the user wants it to run even if the Mac is asleep): Diri wakes the Mac 2 minutes early (lid must be open), keeps it awake while the agent works, then puts it back to sleep if nobody used it. It needs the one-time "Allow diri to wake the Mac" approval in Settings > Schedules; if list_schedules reports wakeHelperError, tell the user to turn it on. After creating, confirm in words from the returned nextDue, e.g. "weekdays at 09:00, next run Monday; it will wake the Mac".

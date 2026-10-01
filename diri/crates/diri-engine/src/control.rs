@@ -256,6 +256,7 @@ impl ControlServer {
     pub fn with_injection(mut self, config: InjectionConfig) -> Self {
         let _ = crate::inject::write_claude_hooks_file(&config.inject_dir);
         let _ = crate::inject::write_claude_mcp_file(&config.inject_dir, &config.cli_path);
+        let _ = crate::inject::write_claude_skills_plugin(&config.inject_dir);
         self.injection = Some(config);
         self
     }

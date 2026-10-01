@@ -19,6 +19,7 @@ pub mod recovery;
 pub mod remote_connection;
 pub mod remote_pty;
 pub mod schedules;
+pub mod skills;
 pub use remote_connection::{RemoteConnection, RemoteConnectionState};
 pub mod process;
 pub mod process_facts;
