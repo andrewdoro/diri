@@ -303,7 +303,7 @@ impl SessionSurfaces {
         let width = f32::from(window.viewport_size().width);
         let layout = Layout::for_variant(OverviewVariant::Windows, width);
         let card_width = layout.card_width(width);
-        let font = crate::fonts::terminal_font();
+        let font = self.terminal_font();
         let pane = CellMetrics::measure(window.text_system(), &font, px(PANE_FONT));
         let (cols, rows) = self.fleet_grid();
         let (size, _) = miniature_geometry(window, &font, pane, card_width, cols, rows);
@@ -324,7 +324,7 @@ impl SessionSurfaces {
         let width = f32::from(window.viewport_size().width);
         let layout = Layout::for_variant(OverviewVariant::Windows, width);
         let card_width = layout.card_width(width);
-        let font = crate::fonts::terminal_font();
+        let font = self.terminal_font();
         let pane = CellMetrics::measure(window.text_system(), &font, px(PANE_FONT));
         let (cols, rows) = self.fleet_grid();
         let (_, mini_height) = miniature_geometry(window, &font, pane, card_width, cols, rows);
@@ -457,7 +457,7 @@ impl SessionSurfaces {
         // Cards re-measure themselves as they paint below.
         self.zoom.forget_cards();
 
-        let font = crate::fonts::terminal_font();
+        let font = self.terminal_font();
         let pane = CellMetrics::measure(window.text_system(), &font, px(PANE_FONT));
 
         let visible = state.visible_sessions(&sessions).cloned();
@@ -972,7 +972,7 @@ impl SessionSurfaces {
         window: &Window,
     ) -> AnyElement {
         let (cols, rows) = self.fleet_grid();
-        let font = crate::fonts::terminal_font();
+        let font = self.terminal_font();
         let (_, mini_height) = miniature_geometry(window, &font, pane, card_width, cols, rows);
         let height = mini_height
             + if variant == OverviewVariant::Gallery {

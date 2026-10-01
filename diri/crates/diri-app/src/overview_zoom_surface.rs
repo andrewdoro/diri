@@ -121,6 +121,18 @@ impl ZoomPresentation {
 }
 
 impl SessionSurfaces {
+    /// The user's terminal font, as the panes paint it.
+    pub(super) fn terminal_font(&self) -> gpui::Font {
+        crate::fonts::terminal_font(
+            &self
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .preferences()
+                .terminal_font_family,
+        )
+    }
+
     pub(crate) fn set_page_region(&mut self, viewport: TerminalViewport, header: f32) {
         self.zoom.page = ZoomRect {
             x: viewport.x,
@@ -512,11 +524,7 @@ impl SessionSurfaces {
             .expect("session store lock poisoned")
             .preferences()
             .terminal_font_size;
-        let metrics = CellMetrics::measure(
-            window.text_system(),
-            &crate::fonts::terminal_font(),
-            px(size),
-        );
+        let metrics = CellMetrics::measure(window.text_system(), &self.terminal_font(), px(size));
         GridAnchor {
             x: PAGE_GRID_LEFT,
             y: self.zoom.page_header + PAGE_GRID_TOP,
@@ -593,12 +601,7 @@ impl SessionSurfaces {
             .preferences()
             .terminal_font_size;
         let line = f32::from(
-            CellMetrics::measure(
-                window.text_system(),
-                &crate::fonts::terminal_font(),
-                px(size),
-            )
-            .line_height,
+            CellMetrics::measure(window.text_system(), &self.terminal_font(), px(size)).line_height,
         );
         let content = anchor.y + line * f32::from(rows) + PAGE_GRID_BOTTOM;
         let region = ZoomRect {
