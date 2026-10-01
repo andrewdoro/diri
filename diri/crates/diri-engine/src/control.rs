@@ -4497,6 +4497,13 @@ fn prepare_agent_input(
         if gemini {
             accept_gemini_folder_trust(registry, session_id);
         }
+        let pi = with_session(registry, session_id, |session| {
+            session.manifest_id() == "pi"
+        })
+        .unwrap_or(false);
+        if pi {
+            accept_pi_project_trust(registry, session_id);
+        }
         inject_initial_prompt(registry, session_id, prompt)?;
     }
     Ok(())
@@ -4692,6 +4699,76 @@ fn is_gemini_composer_screen(lines: &[String]) -> bool {
         .join("\n")
         .to_lowercase()
         .contains("type your message or @path/to/file")
+}
+
+/// Answers Pi's startup "Trust project folder?" selector when a spawn carries
+/// an initial prompt, then waits for the composer Pi draws once startup goes
+/// on.
+///
+/// Pi asks before its interactive UI exists, whenever the folder holds
+/// project resources (`.pi/settings.json`, `.pi/extensions`, ...). The
+/// injector's paste went into the selector, which drops it, and its blind
+/// Enter picked the preselected "Trust" and saved it: the folder ended up
+/// trusted anyway and the prompt was gone. The trade is the one
+/// [`accept_claude_workspace_trust`] documents, and it is no wider than the
+/// accidental Enter was. Without a prompt the selector is left to the user,
+/// where the manifest reports it as a question.
+///
+/// The composer only ever follows the selector, so it ends the wait as soon
+/// as it shows. Capped at 20s.
+fn accept_pi_project_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted = false;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_pi_project_trust_screen(&screen) {
+            if !accepted {
+                diri_telemetry::event!(
+                    "prompt.workspace_trust_accepted",
+                    session = diri_telemetry::id(session_id),
+                );
+                // Enter on the preselected "→ Trust".
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted = true;
+            }
+        } else if is_pi_composer_screen(&screen) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Pi's trust selector, anchored to its key hint at the bottom of the screen.
+fn is_pi_project_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 16);
+    let hint = bottom
+        .iter()
+        .rev()
+        .take(3)
+        .any(|line| line.contains("↑↓ navigate"));
+    hint && bottom
+        .iter()
+        .any(|line| line.to_lowercase().contains("trust project folder?"))
+}
+
+/// Pi's composer: two bare full-width rules (above and below the input)
+/// directly over its two-line footer.
+fn is_pi_composer_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 6);
+    let rules = bottom
+        .iter()
+        .filter(|line| {
+            let line = line.trim();
+            line.chars().count() >= 10 && line.chars().all(|c| c == '─')
+        })
+        .count();
+    rules >= 2 && !bottom.iter().any(|line| line.contains("↑↓ navigate"))
 }
 
 /// Types and submits an initial prompt at most once. Screen observations can
@@ -7500,6 +7577,29 @@ mod tests {
             &path,
         );
         let _listener = server.bind().expect("a stale socket should be replaced");
+    }
+
+    #[test]
+    fn pi_trust_and_composer_screens_are_told_apart() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let rule = "─".repeat(60);
+        // Captured from Pi 0.99.2 in a folder holding `.pi/settings.json`.
+        let dialog = format!(
+            "{rule}\n Trust project folder?\n /tmp/project\n\n\
+             This allows pi to load .pi settings and resources, install missing project packages, and execute\n\
+             project extensions.\n\n → Trust\n   Trust parent folder (/tmp)\n   Trust (this session only)\n\
+             \x20  Do not trust\n   Do not trust (this session only)\n\n\
+             \x20↑↓ navigate  enter select  escape/ctrl+c cancel\n\n{rule}"
+        );
+        assert!(is_pi_project_trust_screen(&lines(&dialog)));
+        assert!(!is_pi_composer_screen(&lines(&dialog)));
+
+        let composer = format!(
+            " ▀▀█  v0.99.2\n Warning: fd not found. Offline mode enabled, skipping download.\n\
+             {rule}\n\n{rule}\n/tmp/project\n0.0%/128k (auto)                fake-model"
+        );
+        assert!(!is_pi_project_trust_screen(&lines(&composer)));
+        assert!(is_pi_composer_screen(&lines(&composer)));
     }
 
     #[test]
