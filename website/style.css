@@ -1157,3 +1157,16 @@ html { overflow-x: clip; }
   .intro-heading > p { font-size: 16px !important; }
   .intro-heading .inline-agent .agent-logo { display: inline-block; }
 }
+/* How the hero sits: a calmer headline, the subtitle broken after the agent list, less air above, the window closer. */
+.intro { padding-top: 64px !important; padding-bottom: 56px !important; }
+.release-pill { margin-bottom: 26px; }
+.intro-heading h1 { font-size: 42px !important; font-weight: 520 !important; letter-spacing: -.022em !important; line-height: 1.12 !important; }
+.intro-heading > p { max-width: none !important; margin-top: 14px !important; font-size: 18px !important; line-height: 1.55 !important; }
+.sub-line { display: block; }
+.intro-actions { margin-top: 30px !important; }
+@media (max-width: 600px) {
+  .intro { padding-top: 40px !important; padding-bottom: 36px !important; }
+  .intro-heading h1 { font-size: 30px !important; }
+  .intro-heading > p { font-size: 16px !important; }
+  .sub-line { display: inline; }
+}
