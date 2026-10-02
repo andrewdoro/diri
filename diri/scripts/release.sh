@@ -172,8 +172,11 @@ SOURCE_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 export DIRI_REMOTE_BUILD_ID="$SOURCE_TREE"
 find_source_commit() {
     git -C "$ROOT" fetch --quiet origin main --tags
+    # awk reads to the end rather than exiting at the match: an early exit
+    # sends git log SIGPIPE, which pipefail turns into a failed lookup, so a
+    # found merge looked missing and --wait-for-merge polled forever.
     git -C "$ROOT" log --first-parent -50 --format='%H %T' origin/main \
-        | awk -v tree="$SOURCE_TREE" '$2 == tree { print $1; exit }'
+        | awk -v tree="$SOURCE_TREE" '$2 == tree && !found { print $1; found = 1 }'
 }
 SOURCE_COMMIT="$(find_source_commit)"
 if [ -z "$SOURCE_COMMIT" ] && [ "$WAIT_FOR_MERGE" != 1 ]; then
