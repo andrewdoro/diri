@@ -1625,7 +1625,7 @@ impl Render for SchedulesPage {
                 div()
                     .text_size(px(13.0))
                     .text_color(colors.secondary)
-                    .child("Start an agent at a set time. Each run opens in a new tab. You can also ask any agent in diri, for example “every weekday at 9, triage new issues”."),
+                    .child("Start an agent at a set time. Later runs continue in the same tab until you close it. You can also ask any agent in diri, for example “every weekday at 9, triage new issues”."),
             );
         if self.draft.is_some() {
             page = page.child(self.draft_form(cx));

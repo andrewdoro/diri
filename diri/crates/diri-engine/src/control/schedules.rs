@@ -910,52 +910,31 @@ impl super::ControlServer {
                     wake_mac: record.spec.wake_mac,
                     woke_mac,
                 };
-                // Preserve the same account and lifecycle guards as dispatch.
-                // The reserved identity survives an uncertain prompt delivery;
-                // the stamp is part of the very first persisted/published record.
-                let attempt = || {
-                    let _account = server.account_operations.try_read().map_err(|_| {
-                        ControlError::new(
-                            "busy",
-                            "An account switch is in progress. Retry when it finishes.",
-                        )
-                    })?;
-                    let _operation = super::account_handoff::SessionOperation::for_session(
-                        &server,
-                        &reserved_id,
-                    )?;
-                    server.session_spawn_identified(
-                        Some(params.clone()),
-                        Some(reserved_id.clone()),
-                        Some(info.clone()),
-                    )
-                };
-                let mut result = attempt();
-                for _ in 1..SPAWN_ATTEMPTS {
-                    // Never repeat effects after a session has been created.
-                    if server
-                        .registry
-                        .lock()
-                        .unwrap()
-                        .record(&reserved_id)
-                        .is_some()
-                    {
-                        break;
-                    }
-                    match &result {
-                        Err(error) if error.message.contains("Retry") || error.code == "busy" => {
-                            std::thread::sleep(SPAWN_RETRY_DELAY);
-                            result = attempt();
+                // A repeating schedule keeps talking to the session its last
+                // run opened; only a closed (or unrevivable) one gets a new tab.
+                let prompt = spawn.initial_prompt.clone().unwrap_or_default();
+                let continued = server.previous_run_session(&record).and_then(|previous| {
+                    let attempt =
+                        || server.continue_scheduled_session(&previous, &prompt, info.clone());
+                    let mut outcome = attempt();
+                    for _ in 1..SPAWN_ATTEMPTS {
+                        match &outcome {
+                            Err(error) if error.code == "busy" => {
+                                std::thread::sleep(SPAWN_RETRY_DELAY);
+                                outcome = attempt();
+                            }
+                            _ => break,
                         }
-                        _ => break,
                     }
-                }
-                let session_id = server
-                    .registry
-                    .lock()
-                    .unwrap()
-                    .record(&reserved_id)
-                    .map(|record| record.id.0);
+                    match outcome {
+                        Ok(false) => None,
+                        outcome => Some((previous, outcome.map(|_| ()))),
+                    }
+                });
+                let (session_id, result) = match continued {
+                    Some((previous, result)) => (Some(previous), result),
+                    None => server.spawn_scheduled_session(&params, &reserved_id, &info),
+                };
                 if let Some(session_id) = &session_id
                     && (record.spec.keep_awake || record.spec.wake_mac)
                     && let Ok(mut active) = server.scheduler.active.lock()
@@ -991,6 +970,77 @@ impl super::ControlServer {
             }
             self.scheduler.spawning.fetch_sub(1, Ordering::AcqRel);
         }
+    }
+
+    /// The session the schedule's newest earlier run opened, while it still
+    /// exists and still matches what the schedule launches. Editing the
+    /// schedule's Agent, host, or directory starts a new conversation, and a
+    /// worktree schedule promises every run a clean checkout, so it never
+    /// continues one.
+    fn previous_run_session(&self, record: &ScheduleRecord) -> Option<String> {
+        let spawn = &record.spec.spawn;
+        if spawn.new_worktree.unwrap_or(false) {
+            return None;
+        }
+        let previous = record
+            .runs
+            .iter()
+            .rev()
+            .find_map(|run| run.session_id.as_ref())?;
+        let session = self.registry.lock().ok()?.record(&previous.0)?;
+        (!session.is_note()
+            && session.kind == spawn.kind
+            && session.host == spawn.host
+            && (session.cwd == spawn.cwd || spawn.host.is_some()))
+        .then(|| previous.0.clone())
+    }
+
+    /// Opens a new session for a run. Preserves the same account and
+    /// lifecycle guards as dispatch. The reserved identity survives an
+    /// uncertain prompt delivery; the stamp is part of the very first
+    /// persisted/published record.
+    fn spawn_scheduled_session(
+        &self,
+        params: &Value,
+        reserved_id: &str,
+        info: &diri_proto::schedules::ScheduledRunInfo,
+    ) -> (Option<String>, Result<(), ControlError>) {
+        let attempt = || {
+            let _account = self.account_operations.try_read().map_err(|_| {
+                ControlError::new(
+                    "busy",
+                    "An account switch is in progress. Retry when it finishes.",
+                )
+            })?;
+            let _operation =
+                super::account_handoff::SessionOperation::for_session(self, reserved_id)?;
+            self.session_spawn_identified(
+                Some(params.clone()),
+                Some(reserved_id.to_owned()),
+                Some(info.clone()),
+            )
+        };
+        let mut result = attempt();
+        for _ in 1..SPAWN_ATTEMPTS {
+            // Never repeat effects after a session has been created.
+            if self.registry.lock().unwrap().record(reserved_id).is_some() {
+                break;
+            }
+            match &result {
+                Err(error) if error.message.contains("Retry") || error.code == "busy" => {
+                    std::thread::sleep(SPAWN_RETRY_DELAY);
+                    result = attempt();
+                }
+                _ => break,
+            }
+        }
+        let session_id = self
+            .registry
+            .lock()
+            .unwrap()
+            .record(reserved_id)
+            .map(|record| record.id.0);
+        (session_id, result.map(|_| ()))
     }
 
     fn record_run_result(

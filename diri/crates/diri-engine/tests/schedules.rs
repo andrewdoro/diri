@@ -332,6 +332,82 @@ fn run_now_starts_a_run_and_keeps_the_next_due_time() {
     );
 }
 
+/// Each run's session id, oldest first, once every run has recorded one.
+fn run_sessions(control: &mut Control, id: &str, runs: usize) -> Vec<String> {
+    let mut sessions = Vec::new();
+    wait_until(
+        "every run recorded its session",
+        Duration::from_secs(30),
+        || {
+            let record = control.schedule(id);
+            sessions = record["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|run| run["sessionId"].as_str().map(str::to_owned))
+                .collect();
+            sessions.len() == runs
+        },
+    );
+    sessions
+}
+
+#[test]
+fn a_repeating_schedule_keeps_one_session_until_it_is_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = start_server(temp.path());
+    server.spawn_scheduler();
+    let mut control = Control::connect(&server);
+    let marker = temp.path().join("run");
+    // The prompt touches a marker named by a counter the shell keeps, so
+    // the second run is visible only if it reached the first run's shell.
+    let mut schedule = spec(
+        &marker,
+        json!({ "kind": "cron", "expr": "0 9 * * *" }),
+        60_000,
+    );
+    schedule["spawn"]["initialPrompt"] =
+        json!(format!("n=$((n+1)); touch '{}'-$n", marker.display()));
+    let id = control.request("schedule.create", schedule)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fired = |n: u32| temp.path().join(format!("run-{n}"));
+
+    control.request("schedule.run_now", json!({ "id": id }));
+    wait_until("the first run ran", Duration::from_secs(30), || {
+        fired(1).exists()
+    });
+    let first = run_sessions(&mut control, &id, 1);
+
+    control.request("schedule.run_now", json!({ "id": id }));
+    wait_until(
+        "the second run reached the same shell",
+        Duration::from_secs(30),
+        || fired(2).exists(),
+    );
+    let sessions = run_sessions(&mut control, &id, 2);
+    assert_eq!(sessions[1], first[0], "the second run reuses the session");
+    let list = control.request("session.list", json!({}));
+    assert_eq!(
+        list["sessions"].as_array().unwrap().len(),
+        1,
+        "no second tab"
+    );
+
+    // Closing the tab ends the conversation: the next run opens a new one.
+    control.request("session.remove", json!({ "sessionID": first[0] }));
+    control.request("schedule.run_now", json!({ "id": id }));
+    let sessions = run_sessions(&mut control, &id, 3);
+    assert_ne!(sessions[2], first[0]);
+    wait_until(
+        "the fresh shell ran its prompt",
+        Duration::from_secs(30),
+        || fired(1).exists(),
+    );
+    control.request("session.kill", json!({ "sessionID": sessions[2] }));
+}
+
 #[test]
 fn invalid_schedules_are_rejected_before_storage() {
     let temp = tempfile::tempdir().unwrap();

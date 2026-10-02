@@ -3583,6 +3583,78 @@ impl ControlServer {
         })
     }
 
+    /// Hands a scheduled run's prompt to the session an earlier run of the
+    /// same schedule opened, so a repeating schedule keeps one conversation
+    /// instead of opening a tab per run. An exited agent is resumed first; a
+    /// working one is given time to finish its turn. `Ok(false)` means the
+    /// session is gone or could not be revived and nothing was typed, so the
+    /// caller may start a fresh one. Once typing begins, a failure is final:
+    /// a prompt of unknown fate is never sent twice.
+    fn continue_scheduled_session(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        info: diri_proto::schedules::ScheduledRunInfo,
+    ) -> Result<bool, ControlError> {
+        // Queueing a prompt behind a running turn would race its repaints,
+        // so wait the turn out before reserving the session.
+        let deadline = Instant::now() + SCHEDULED_TURN_WAIT;
+        loop {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            let Some(record) = registry.record(session_id) else {
+                return Ok(false);
+            };
+            if record.status != diri_proto::SessionStatus::Working || Instant::now() >= deadline {
+                break;
+            }
+            drop(registry);
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        let _account = self.account_operations.try_read().map_err(|_| {
+            ControlError::new(
+                "busy",
+                "An account switch is in progress. Retry when it finishes.",
+            )
+        })?;
+        let _operation = account_handoff::SessionOperation::for_session(self, session_id)?;
+        let (kind, needs_resume) = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            let Some(record) = registry.record(session_id) else {
+                return Ok(false);
+            };
+            let exited = matches!(record.status, diri_proto::SessionStatus::Exited(_));
+            (record.kind, exited || registry.get(session_id).is_none())
+        };
+        if needs_resume
+            && let Err(error) = self.session_resume(Some(json!({ "sessionID": session_id })))
+        {
+            eprintln!(
+                "diri-scheduler: could not resume {session_id}, starting a new session: {}",
+                error.message
+            );
+            return Ok(false);
+        }
+        {
+            let mut registry = self.registry.lock().map_err(poisoned)?;
+            registry
+                .wake_session(session_id)
+                .map_err(io_control_error)?;
+            registry.update_record(session_id, |record| record.scheduled_run = Some(info));
+            let _ = registry.persist();
+            self.publish_updated(&registry, session_id);
+        }
+        // A freshly resumed Claude may ask about workspace trust again.
+        prepare_agent_input(
+            &self.registry,
+            session_id,
+            needs_resume && kind == diri_proto::AgentKind::CLAUDE_CODE,
+            None,
+            Some(prompt),
+        )
+        .map_err(|error| initial_prompt_control_error(session_id, error))?;
+        Ok(true)
+    }
+
     /// Revives a conversation found in an agent's own history: a NEW record
     /// whose agent-side id is the transcript's.
     fn session_resume_from_history(
@@ -5792,6 +5864,9 @@ enum EchoOutcome {
 /// of its MCP servers have started. Both end early on confirmation, so the
 /// long window only delays reporting an outcome that stays unknown.
 const ECHO_WINDOW: Duration = Duration::from_millis(1500);
+/// Longest a scheduled run waits for the turn already running in its reused
+/// session to finish before typing its prompt anyway.
+const SCHEDULED_TURN_WAIT: Duration = Duration::from_secs(30 * 60);
 const LANDED_WINDOW: Duration = Duration::from_secs(10);
 
 /// Polls for the typed prompt to appear on screen. With no usable probe —

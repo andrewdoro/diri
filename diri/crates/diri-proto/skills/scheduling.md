@@ -4,10 +4,11 @@ When the person wants something run later, at a set time, or repeatedly ("every 
 
 ## How a run works
 
-- At each due time Diri opens a **new** top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation.
+- The first run opens a **new** top-level session of `kind` in `cwd` and sends `prompt`. That session cannot see this conversation.
+- Later runs send `prompt` again into that same session (resuming it if the agent exited), so a repeating schedule is one ongoing conversation. If the person closed the tab, the next run opens a new one. With `worktree: true` every run opens its own session instead.
 - Write the prompt so it stands on its own: the goal, the repository and any context it needs, what to produce, and where the result goes (open a PR, write a file, add to a note).
 - For code changes pass `worktree: true` and `base: "origin/main"` so every run starts from a clean checkout.
-- Give a short `name`; it titles the schedule and the tab each run opens.
+- Give a short `name`; it titles the schedule and the tab its runs use.
 
 ## When it runs
 
