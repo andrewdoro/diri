@@ -429,6 +429,43 @@ fn failed_holder_stop_keeps_the_live_session_tracked_until_retry() {
 }
 
 #[test]
+fn a_markerless_holder_death_can_still_be_closed() {
+    let root = holders_dir("markerless");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let mut registry = Registry::new(engine(), root.join("state.json"));
+    registry
+        .spawn(
+            shell_spec("s_markerless", "cat", &logs, Some(holder.clone())),
+            record("s_markerless"),
+        )
+        .unwrap();
+    let child = registry.get("s_markerless").unwrap().child_pid();
+    let paths = HolderPaths::new(&holder.holders_dir, "s_markerless");
+    let holder_pid: i32 = std::fs::read_to_string(paths.pid_file())
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    // The Holder dies before it can write an exit marker; its group guard
+    // takes the child with it. The follower can only call it markerless.
+    assert_eq!(unsafe { libc::kill(holder_pid, libc::SIGKILL) }, 0);
+    wait_until("child gone", Duration::from_secs(5), || unsafe {
+        libc::kill(child, 0) != 0
+    });
+    wait_until("markerless exit observed", Duration::from_secs(10), || {
+        registry.get("s_markerless").unwrap().view().exited
+    });
+
+    registry
+        .terminate("s_markerless", Duration::from_millis(100))
+        .expect("a dead, markerless session must still close");
+    assert!(registry.get("s_markerless").is_none());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn a_held_shell_is_working_while_a_foreground_job_runs() {
     let root = holders_dir("fgwork");
     let logs = root.join("logs");

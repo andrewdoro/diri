@@ -1336,6 +1336,32 @@ impl RemoteStop {
     }
 }
 
+/// The exit of a held child whose Holder went away without an exit marker.
+///
+/// The follower records such a "markerless death" as `exited` with no
+/// [`Exit`]: a kill-tree that takes the Holder session down can beat its own
+/// marker to the log. No retry can ever produce that marker, so requiring one
+/// would leave the session impossible to close. It is accepted as the kill
+/// this termination asked for only when the Holder no longer answers and the
+/// Agent's pid is gone too; an unreachable Holder over a live child still
+/// fails closed.
+fn accept_markerless_exit(shared: &Shared, client: &HolderClient) -> Option<Exit> {
+    if !shared.exited.load(Ordering::SeqCst) || client.is_alive() {
+        return None;
+    }
+    let pid = shared.child_pid.load(Ordering::SeqCst);
+    // SAFETY: signal 0 only probes; EPERM still means the pid exists.
+    let gone = pid <= 0
+        || (unsafe { libc::kill(pid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH));
+    if !gone {
+        return None;
+    }
+    let exit = Exit::Signal(libc::SIGKILL);
+    *shared.exit.lock().expect("exit") = Some(exit);
+    Some(exit)
+}
+
 /// The destructive stop channel revokes the prior controller. Its observed
 /// exit must reach the projection even when that controller never saw ProcessExit.
 fn accept_remote_stop_result(
@@ -3191,12 +3217,15 @@ impl Session {
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                self.shared.exit.lock().expect("exit").ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "Holder did not confirm Agent exit; the session remains tracked",
-                    )
-                })?
+                let confirmed = *self.shared.exit.lock().expect("exit");
+                confirmed
+                    .or_else(|| accept_markerless_exit(&self.shared, client))
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Holder did not confirm Agent exit; the session remains tracked",
+                        )
+                    })?
             }
             Transport::Remote(client) => {
                 if !self.shared.exited.load(Ordering::SeqCst) {
