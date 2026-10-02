@@ -240,7 +240,7 @@ impl ToastSlot {
     }
 }
 
-/// Visual direction. `Capsule` ships; `Card` and `Ink` are the rendered
+/// Visual direction. `Card` ships (the owner's pick); `Capsule` and `Ink` are the rendered
 /// alternatives from the redesign (docs/screenshots/toast-redesign), swapped
 /// in by changing [`ToastStyle::SHIPPED`] or launching with
 /// `DIRI_TOAST_STYLE`.
@@ -255,7 +255,7 @@ pub enum ToastStyle {
 }
 
 impl ToastStyle {
-    pub const SHIPPED: Self = Self::Capsule;
+    pub const SHIPPED: Self = Self::Card;
 
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim() {
@@ -266,7 +266,7 @@ impl ToastStyle {
         }
     }
 
-    /// `DIRI_TOAST_STYLE=card|ink` at launch tries an alternative direction
+    /// `DIRI_TOAST_STYLE=capsule|ink` at launch tries an alternative direction
     /// in the real app without a rebuild.
     pub fn from_env() -> Self {
         std::env::var("DIRI_TOAST_STYLE")
