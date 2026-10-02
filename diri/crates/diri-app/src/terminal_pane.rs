@@ -2896,8 +2896,9 @@ impl TerminalPane {
         self.pending_note_block = Some((Some(note_id), block));
     }
 
-    /// Only the macOS window screenshots host a fixture note pane.
-    #[cfg(all(test, target_os = "macos"))]
+    /// Hosts a fixture note pane: the macOS window screenshots, and the
+    /// cross-platform note-selection tests.
+    #[cfg(test)]
     pub(crate) fn set_note_pane_for_test(&mut self, pane: Entity<crate::notes::NotePane>) {
         self.note = Some(pane);
     }
