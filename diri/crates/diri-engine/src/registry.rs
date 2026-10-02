@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use diri_proto::{
-    AgentKind, DateMillis, ExitInfo, ExitReason, Resumability, SessionRecord, SessionStatus,
-    TitleSource,
+    AgentKind, DateMillis, ExitInfo, Resumability, SessionRecord, SessionStatus, TitleSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -755,6 +754,7 @@ impl Registry {
                     crate::pty::Exit::Signal(signal) => Some(signal),
                     _ => None,
                 },
+                system_restart: false,
             });
         }
     }
@@ -803,7 +803,7 @@ impl Registry {
     pub fn restore(&mut self, holder: &HolderConfig, logs_dir: &Path) -> Vec<String> {
         let records_before = self.records.len();
         let (adopted, stale) = self.adopt_live_holders(holder, logs_dir);
-        self.reap_orphans(stale);
+        self.reap_orphans(stale, crate::boot::boot_time());
         if self.records.len() > records_before {
             let _ = self.persist_now();
         }
@@ -825,12 +825,18 @@ impl Registry {
     /// daemon and this Mac, so their records stay untouched.
     #[cfg(test)]
     pub(crate) fn reap_orphans_for_test(&mut self) {
-        self.reap_orphans(0);
+        self.reap_orphans(0, None);
     }
 
     /// `stale` counts holder sockets that were still on disk but refused:
     /// holders that were killed, as opposed to a reboot, which clears them.
-    fn reap_orphans(&mut self, stale: usize) {
+    ///
+    /// `boot` is when this machine booted. A record nothing has touched since
+    /// then describes a process from an earlier boot: the computer
+    /// restarting ended it, not Diri, and the exit says so. Every run this
+    /// boot stamps its record (spawn, resume, status), so a lost session
+    /// that did live this boot was ended by a Diri restart.
+    fn reap_orphans(&mut self, stale: usize, boot: Option<DateMillis>) {
         let orphaned: Vec<String> = self
             .records
             .values()
@@ -844,9 +850,11 @@ impl Registry {
         if orphaned.is_empty() {
             return;
         }
-        diri_telemetry::warn_event!("engine.holders_lost", count = orphaned.len(), stale = stale);
+        let mut rebooted = 0_usize;
         for id in &orphaned {
             if let Some(record) = self.records.get_mut(id) {
+                let system_restart = boot.is_some_and(|boot| predates_boot(record, boot));
+                rebooted += usize::from(system_restart);
                 diri_telemetry::event!(
                     "session.lost",
                     session = diri_telemetry::id(id),
@@ -854,14 +862,16 @@ impl Registry {
                     conv = record.agent_session_id.as_deref().map(diri_telemetry::id),
                     status = crate::telemetry::status_name(&record.status),
                 );
-                record.status = SessionStatus::Exited(ExitInfo {
-                    reason: ExitReason::DaemonRestart,
-                    code: None,
-                    signal: None,
-                });
+                record.status = SessionStatus::Exited(ExitInfo::restart(system_restart));
                 record.needs_input = None;
             }
         }
+        diri_telemetry::warn_event!(
+            "engine.holders_lost",
+            count = orphaned.len(),
+            stale = stale,
+            rebooted = rebooted,
+        );
         let _ = self.persist();
     }
 
@@ -1483,6 +1493,7 @@ impl Registry {
                     reason: diri_proto::ExitReason::Exited,
                     code: None,
                     signal: None,
+                    system_restart: false,
                 });
                 record.needs_input = None;
             }
@@ -2195,6 +2206,21 @@ pub struct TelemetryCounts {
     pub hibernated: usize,
     pub working: usize,
     pub needs_input: usize,
+}
+
+/// Whether nothing has touched `record` since `boot`: every run stamps its
+/// record, so an untouched one belonged to a process from an earlier boot.
+fn predates_boot(record: &SessionRecord, boot: DateMillis) -> bool {
+    let last_touched = [
+        Some(record.created_at),
+        Some(record.updated_at),
+        record.last_turn_completed_at,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|at| at.0)
+    .fold(f64::NEG_INFINITY, f64::max);
+    last_touched < boot.0
 }
 
 fn user_home() -> Option<PathBuf> {
@@ -2989,7 +3015,9 @@ pub(crate) fn session_project_id(root: &str, host: Option<&str>) -> diri_proto::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diri_proto::{AgentKind, DateMillis, ProjectId, Resumability, SessionId, TitleSource};
+    use diri_proto::{
+        AgentKind, DateMillis, ExitReason, ProjectId, Resumability, SessionId, TitleSource,
+    };
 
     #[test]
     fn title_refresh_batch_keeps_profiles_with_the_same_thread_id_separate() {
@@ -3514,6 +3542,7 @@ mod tests {
             reason: diri_proto::ExitReason::Exited,
             code: Some(255),
             signal: None,
+            system_restart: false,
         });
         registry.records.insert("s_dead".into(), dead);
 
@@ -3598,6 +3627,7 @@ mod tests {
             reason: diri_proto::ExitReason::Exited,
             code: Some(0),
             signal: None,
+            system_restart: false,
         });
         registry.records.insert("s_dead".into(), dead);
 
@@ -5264,6 +5294,57 @@ mod tests {
         assert_eq!(session.attention(), diri_proto::AttentionLevel::DoneUnseen);
     }
 
+    /// A holder lost across a reboot was ended by the computer, not by
+    /// Diri: every session nothing has touched since boot says so, while
+    /// one that ran this boot (resumed, still reporting) was ended by Diri
+    /// restarting. Without a boot time nothing is blamed on the computer.
+    #[test]
+    fn a_lost_session_from_an_earlier_boot_ended_with_the_computer() {
+        let temp = tempfile::tempdir().expect("temp");
+        let mut registry = Registry::new(engine(), temp.path().join("state.json"));
+        let boot = DateMillis(10_000.0);
+        let mut before = record("before");
+        before.created_at = DateMillis(1_000.0);
+        before.updated_at = DateMillis(9_000.0);
+        let mut resumed = record("resumed");
+        resumed.created_at = DateMillis(1_000.0);
+        resumed.updated_at = DateMillis(11_000.0);
+        let mut turned = record("turned");
+        turned.updated_at = DateMillis(2_000.0);
+        turned.last_turn_completed_at = Some(DateMillis(12_000.0));
+        let mut done = record("done");
+        done.status = SessionStatus::Exited(ExitInfo {
+            reason: ExitReason::Exited,
+            code: Some(0),
+            signal: None,
+            system_restart: false,
+        });
+        for record in [before, resumed, turned, done] {
+            registry.records.insert(record.id.0.clone(), record);
+        }
+
+        registry.reap_orphans(0, Some(boot));
+
+        let exit = |id: &str| match registry.record(id).expect("record").status {
+            SessionStatus::Exited(info) => info,
+            other => panic!("{id}: {other:?}"),
+        };
+        assert_eq!(exit("before"), ExitInfo::restart(true));
+        assert_eq!(exit("resumed"), ExitInfo::restart(false));
+        assert_eq!(exit("turned"), ExitInfo::restart(false));
+        assert_eq!(exit("done").reason, ExitReason::Exited, "already ended");
+
+        let mut unknown_boot = Registry::new(engine(), temp.path().join("other.json"));
+        let mut old = record("old");
+        old.updated_at = DateMillis(1.0);
+        unknown_boot.records.insert(old.id.0.clone(), old);
+        unknown_boot.reap_orphans(0, None);
+        assert_eq!(
+            unknown_boot.record("old").expect("record").status,
+            SessionStatus::Exited(ExitInfo::restart(false))
+        );
+    }
+
     /// A reboot takes every Holder with it. The directory a terminal had
     /// `cd`'d to must outlive that: through the state file, through a first
     /// live view that has not sampled a directory yet (an adopted Holder),
@@ -5304,7 +5385,7 @@ mod tests {
         fold_session_view(&mut adopted, &unsampled);
         assert_eq!(adopted.terminal_cwd.as_deref(), Some("/work/diri/crates"));
 
-        after.reap_orphans(0);
+        after.reap_orphans(0, None);
         let lost = after.record("shell").expect("record");
         assert!(matches!(
             lost.status,
@@ -5330,6 +5411,7 @@ mod tests {
                 reason,
                 code,
                 signal: None,
+                system_restart: false,
             });
             shell
         };

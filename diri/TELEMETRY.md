@@ -128,7 +128,7 @@ recorded by the Engine, not the Holder.
 | `engine.state_quarantined` | incident | `io` | a corrupt state file (records moved aside) |
 | `engine.state_unreadable` | incident | `io` | the Engine refusing to start over unreadable state |
 | `engine.restore` | info | `adopted, records, live, ms` | sessions not coming back after an Engine restart |
-| `engine.holders_lost` | warn | `count, stale` | holders that died with the Engine or the machine; `stale` counts sockets left on disk that refused, i.e. killed holders (a reboot clears the usual `/tmp` holder directory) |
+| `engine.holders_lost` | warn | `count, stale, rebooted` | holders that died with the Engine or the machine; `stale` counts sockets left on disk that refused, i.e. killed holders (a reboot clears the usual `/tmp` holder directory); `rebooted` counts sessions untouched since the machine booted, which the computer restarting ended (their exit carries `systemRestart`) |
 | `engine.remote_restore` | info | `adopted, ms` | remote sessions not re-adopted after restart |
 | `engine.bind_failed` | incident | `io` | the control socket could not be bound |
 | `engine.accept_failed` | incident (EMFILE/ENFILE), error | `io` | descriptor exhaustion: blank terminals until resize (at most one a minute) |
@@ -151,7 +151,7 @@ recorded by the Engine, not the Holder.
 | kind | sev | fields | catches |
 |---|---|---|---|
 | `session.spawn` | info | `session, agent, mode: fresh\|history, conv, host, project, worktree, parent, account, prompt, ms` | what was launched, where (`project` is a `path_hash`), with which conversation |
-| `session.resume` | info | `session, agent, decision, conv, recorded_conv, transcript, host, status, exit_reason, archived` | resume decisions: `resume_verified` (transcript found), `resume` (id not verified), `fresh_unwritten` (Claude never wrote it; started fresh), `no_conversation`, `remote`, `already_live` |
+| `session.resume` | info | `session, agent, decision, conv, recorded_conv, transcript, host, status, exit_reason, archived` | resume decisions: `resume_verified` (transcript found), `resume` (id not verified), `fresh_unwritten` (Claude never wrote it; started fresh), `no_conversation`, `remote`, `already_live`; `exit_reason` is `system_restart` for a session a reboot ended |
 | `session.launch` | info | `session, agent, transport: held_deferred\|held\|direct\|remote, ms` | every Session start, including resume, fork and account relaunches |
 | `session.launch_failed` | incident | `session, agent, transport, stage: spawn\|holder_launch\|holder_wait, io\|kind, ms` | spawns that never produced a child (holder missing, manager down, exec errno) |
 | `session.exec` | debug | `session, defer_ms, ms, cols, rows` | a deferred launch waiting on the first client size |

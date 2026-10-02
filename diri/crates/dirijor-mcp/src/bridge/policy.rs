@@ -437,6 +437,7 @@ mod tests {
             reason: ExitReason::Exited,
             code: Some(0),
             signal: None,
+            system_restart: false,
         });
         let records = vec![record("root", "p", None), exited];
         let projects = vec![project("p")];

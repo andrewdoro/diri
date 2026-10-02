@@ -145,6 +145,26 @@ pub fn herdr_import_transition(
     foreground_banner(title, body)
 }
 
+/// The one summary a "Resume all" batch posts: how many sessions came back,
+/// and the first reason any did not.
+pub fn resume_all_transition(
+    resumed: usize,
+    total: usize,
+    first_failure: Option<&str>,
+) -> StatusTransition {
+    let sessions = |count: usize| if count == 1 { "session" } else { "sessions" };
+    let title = if resumed == total {
+        format!("Resumed {resumed} {}", sessions(resumed))
+    } else {
+        format!("Resumed {resumed} of {total} {}", sessions(total))
+    };
+    let body = match first_failure {
+        Some(reason) => format!("Some did not resume: {reason}"),
+        None => "They pick up where they left off.".to_owned(),
+    };
+    foreground_banner(title, body)
+}
+
 fn foreground_banner(title: String, body: String) -> StatusTransition {
     StatusTransition {
         dismiss: Vec::new(),

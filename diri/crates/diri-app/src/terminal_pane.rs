@@ -4864,6 +4864,20 @@ impl TerminalPane {
                         cx.notify();
                     })),
             );
+            if let Some(count) = self.resume_all_offer(session) {
+                pill = pill.child(
+                    div()
+                        .id("exit-pill-resume-all")
+                        .rounded(px(999.0))
+                        .px(px(9.0))
+                        .py(px(3.0))
+                        .hover(move |style| style.bg(colors.primary.alpha(0.08)))
+                        .cursor_pointer()
+                        .text_color(colors.primary)
+                        .child(resume_all_label(count))
+                        .on_click(cx.listener(|this, _, _, cx| this.resume_all(cx))),
+                );
+            }
         } else if session.resumability == Resumability::TranscriptMissing {
             pill = pill.child(div().text_color(colors.tertiary).child("· transcript gone"));
         }
@@ -5030,6 +5044,31 @@ impl TerminalPane {
         ))
     }
 
+    /// How many sessions "Resume all" would bring back, offered only over a
+    /// session a restart ended, alongside its own Resume.
+    fn resume_all_offer(&self, session: &SessionRecord) -> Option<usize> {
+        let SessionStatus::Exited(info) = &session.status else {
+            return None;
+        };
+        if !info.ended_by_restart() || !session.can_resume() {
+            return None;
+        }
+        self.runtime
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .resume_all_offer()
+    }
+
+    fn resume_all(&mut self, cx: &mut Context<Self>) {
+        self.runtime
+            .store
+            .write()
+            .expect("session store lock poisoned")
+            .resume_all();
+        cx.notify();
+    }
+
     /// The pane-filling card for an exited session, or `None` when the terminal
     /// itself should stay on screen (with [`Self::render_exit_pill`] over it).
     fn render_exited_takeover(
@@ -5038,7 +5077,7 @@ impl TerminalPane {
         colors: SemanticColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (auto_resuming, migrating) = {
+        let (auto_resuming, migrating, batch) = {
             let store = self
                 .runtime
                 .store
@@ -5047,6 +5086,7 @@ impl TerminalPane {
             (
                 store.auto_resuming().contains(&session.id),
                 store.migrating().contains(&session.id),
+                store.resume_all_progress(),
             )
         };
         // Mid-migration the source agent is briefly down; show the busy state
@@ -5055,12 +5095,14 @@ impl TerminalPane {
             return Some(centered_message("◌", "Moving session…", colors).into_any_element());
         }
         if auto_resuming {
-            let message = if is_local_shell(session) {
-                "Restarting terminal…"
+            let message = if let Some(batch) = batch {
+                format!("Resuming all — {} of {} back", batch.finished, batch.total)
+            } else if is_local_shell(session) {
+                "Restarting terminal…".to_owned()
             } else {
-                "Resuming conversation…"
+                "Resuming conversation…".to_owned()
             };
-            return Some(centered_message("◌", message, colors).into_any_element());
+            return Some(centered_message("◌", &message, colors).into_any_element());
         }
         if self
             .residents
@@ -5081,25 +5123,42 @@ impl TerminalPane {
         let id = session.id.clone();
         let content = centered_message("", &exit_description(session), colors);
         if session.can_resume() {
+            let resume = primary_button(
+                "resume-conversation",
+                if is_local_shell(session) {
+                    "Restart Terminal"
+                } else {
+                    "Resume Conversation"
+                },
+                colors,
+                cx,
+                move |this, cx| {
+                    this.runtime
+                        .store
+                        .read()
+                        .expect("session store lock poisoned")
+                        .resume(id.clone());
+                    cx.notify();
+                },
+            );
+            let Some(count) = self.resume_all_offer(session) else {
+                return content.child(resume).into_any_element();
+            };
             content
-                .child(primary_button(
-                    "resume-conversation",
-                    if is_local_shell(session) {
-                        "Restart Terminal"
-                    } else {
-                        "Resume Conversation"
-                    },
-                    colors,
-                    cx,
-                    move |this, cx| {
-                        this.runtime
-                            .store
-                            .read()
-                            .expect("session store lock poisoned")
-                            .resume(id.clone());
-                        cx.notify();
-                    },
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(resume)
+                        .child(secondary_button(
+                            "resume-all",
+                            resume_all_label(count),
+                            colors,
+                            cx,
+                            |this, cx| this.resume_all(cx),
+                        )),
+                )
                 .into_any_element()
         } else if session.resumability == Resumability::TranscriptMissing {
             content
@@ -5566,6 +5625,36 @@ fn primary_button(
         .into_any_element()
 }
 
+/// The quieter companion to [`primary_button`], for a second choice beside it.
+fn secondary_button(
+    id: &'static str,
+    label: String,
+    colors: SemanticColors,
+    cx: &mut Context<TerminalPane>,
+    handler: impl Fn(&mut TerminalPane, &mut Context<TerminalPane>) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .mt(px(2.0))
+        .rounded(px(7.0))
+        .px(px(14.0))
+        .py(px(7.0))
+        .bg(colors.primary.alpha(0.08))
+        .text_size(px(13.0))
+        .font_weight(Typo::ROW_EMPHASIZED.weight)
+        .text_color(colors.primary)
+        .hover(move |style| style.bg(colors.primary.alpha(0.14)))
+        .active(move |style| style.bg(colors.primary.alpha(0.2)))
+        .cursor_pointer()
+        .child(label)
+        .on_click(cx.listener(move |this, _, _, cx| handler(this, cx)))
+        .into_any_element()
+}
+
+pub(crate) fn resume_all_label(count: usize) -> String {
+    format!("Resume All ({count})")
+}
+
 fn centered_message(icon: &str, message: &str, colors: SemanticColors) -> gpui::Div {
     div()
         .flex_1()
@@ -5823,6 +5912,9 @@ fn exit_description(session: &SessionRecord) -> String {
         return "Session ended".to_owned();
     };
     match info.reason {
+        ExitReason::DaemonRestart if info.system_restart => {
+            format!("Ended when {} restarted", crate::platform::your_machine())
+        }
         ExitReason::DaemonRestart => "Session ended when the daemon restarted".to_owned(),
         ExitReason::Signaled => "Agent was stopped".to_owned(),
         ExitReason::Exited if info.code == Some(0) => "Agent exited".to_owned(),
@@ -8868,6 +8960,7 @@ mod tests {
             reason: ExitReason::Exited,
             code: Some(0),
             signal: None,
+            system_restart: false,
         });
         store_runtime.store.write().unwrap().upsert_session(exited);
         shown.lock().unwrap().clear();
@@ -10364,11 +10457,25 @@ mod tests {
             reason: ExitReason::DaemonRestart,
             code: None,
             signal: None,
+            system_restart: false,
         });
         assert_eq!(
             exit_description(&session),
             "Session ended when the daemon restarted"
         );
+    }
+
+    /// A reboot is the computer's doing, not Diri's: the copy says so.
+    #[test]
+    fn system_restart_exit_blames_the_computer() {
+        let mut session = fixture_session();
+        session.status = SessionStatus::Exited(ExitInfo::restart(true));
+        let expected = if cfg!(target_os = "macos") {
+            "Ended when your Mac restarted"
+        } else {
+            "Ended when your computer restarted"
+        };
+        assert_eq!(exit_description(&session), expected);
     }
 
     #[test]

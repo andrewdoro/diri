@@ -422,6 +422,36 @@ pub struct ExitInfo {
     pub code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<i32>,
+    /// With [`ExitReason::DaemonRestart`]: the session's process belonged to
+    /// an earlier boot, so the computer restarting ended it, not Diri. A
+    /// field rather than a reason so older peers, which decode an unknown
+    /// reason as `Unknown`, still treat the session as restart-ended and
+    /// offer to resume it.
+    #[serde(
+        rename = "systemRestart",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub system_restart: bool,
+}
+
+impl ExitInfo {
+    /// A session whose holder an Engine restart found gone: `system_restart`
+    /// when the machine rebooted under it.
+    pub fn restart(system_restart: bool) -> Self {
+        Self {
+            reason: ExitReason::DaemonRestart,
+            code: None,
+            signal: None,
+            system_restart,
+        }
+    }
+
+    /// Ended by a Diri or computer restart, so resuming it continues the
+    /// work rather than repeating a choice the user made.
+    pub fn ended_by_restart(&self) -> bool {
+        self.reason == ExitReason::DaemonRestart
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

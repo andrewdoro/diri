@@ -761,6 +761,7 @@ mod tests {
             reason: ExitReason::Exited,
             code: Some(0),
             signal: None,
+            system_restart: false,
         });
         assert_eq!(
             preview_caption(&session, Some(PreviewState::Disconnected)),

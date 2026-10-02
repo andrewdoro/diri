@@ -33,6 +33,7 @@ pub mod agent_catalog;
 pub mod artifacts;
 pub mod attach;
 pub mod attention;
+pub mod boot;
 pub mod browser;
 pub mod checkpoint;
 #[cfg(unix)]

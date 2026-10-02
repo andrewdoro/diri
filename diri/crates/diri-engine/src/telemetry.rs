@@ -369,6 +369,7 @@ pub fn record_resume(
         host = record.host.as_deref().map(diri_telemetry::id),
         status = status_name(&record.status),
         exit_reason = match &record.status {
+            SessionStatus::Exited(info) if info.system_restart => Some("system_restart"),
             SessionStatus::Exited(info) => Some(exit_reason_name(info.reason)),
             _ => None,
         },

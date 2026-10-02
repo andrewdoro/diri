@@ -1,7 +1,7 @@
 use diri_proto::{
     AgentDescriptor, AgentKind, AgentReadinessResult, AttachRequest, ClientRole, ControlMessage,
-    DateMillis, EventName, EventsSubscribeParams, ExitReason, HostInitializeParams, Method,
-    ReadScrollbackCellsResult, SessionDiffBase, SessionId, SessionListResult,
+    DateMillis, EventName, EventsSubscribeParams, ExitInfo, ExitReason, HostInitializeParams,
+    Method, ReadScrollbackCellsResult, SessionDiffBase, SessionId, SessionListResult,
     SessionReadDiffParams, SessionReadDiffResult, SessionStatus, StateSnapshotResult,
     WorktreeListResult,
 };
@@ -106,6 +106,25 @@ fn swift_associated_value_shapes_match_real_data() {
         serde_json::to_value(exited).unwrap(),
         json!({"exited": {"_0": {"reason": "daemonRestart"}}})
     );
+
+    // A reboot rides on the restart reason as an additive flag: an older peer
+    // ignores the field and still reads a restart-ended, resumable session.
+    let rebooted = SessionStatus::Exited(ExitInfo::restart(true));
+    let wire = serde_json::to_value(&rebooted).unwrap();
+    assert_eq!(
+        wire,
+        json!({"exited": {"_0": {"reason": "daemonRestart", "systemRestart": true}}})
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionStatus>(wire.clone()).unwrap(),
+        rebooted
+    );
+    #[derive(serde::Deserialize)]
+    struct OlderExitInfo {
+        reason: ExitReason,
+    }
+    let older: OlderExitInfo = serde_json::from_value(wire["exited"]["_0"].clone()).unwrap();
+    assert_eq!(older.reason, ExitReason::DaemonRestart);
 }
 
 #[test]

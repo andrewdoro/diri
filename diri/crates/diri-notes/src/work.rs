@@ -843,6 +843,7 @@ mod tests {
             reason: diri_proto::ExitReason::Signaled,
             code: None,
             signal: Some(9),
+            system_restart: false,
         });
         assert_eq!(
             SessionFacts::from_record(&record).activity,

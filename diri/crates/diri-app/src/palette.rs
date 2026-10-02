@@ -38,6 +38,8 @@ pub enum PaletteCommand {
     SyncPrefs {
         host: String,
     },
+    /// Resume every session a restart ended (see `store::resume_all`).
+    ResumeAll,
     /// Show a note (from the notes ⌘K finds while typing), with the caret
     /// on the block that matched.
     OpenNote {
@@ -343,6 +345,22 @@ pub fn actions(
     selected: Option<&SessionRecord>,
 ) -> Vec<PaletteAction> {
     actions_for_default_host(default_agent, catalog, projects, hosts, selected, None)
+}
+
+/// "Resume All (N)", offered while more than one session a restart ended
+/// can be brought back.
+pub fn resume_all_action(count: usize) -> PaletteAction {
+    PaletteAction {
+        id: "resume-all".into(),
+        title: crate::terminal_pane::resume_all_label(count),
+        system_image: "arrow.clockwise",
+        shortcut: None,
+        detail: None,
+        enabled: true,
+        is_default: false,
+        command: PaletteCommand::ResumeAll,
+        keywords: "resume restart restore reboot sessions all agents".into(),
+    }
 }
 
 pub fn actions_for_default_host(

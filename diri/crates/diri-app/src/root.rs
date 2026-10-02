@@ -9724,6 +9724,86 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// The card over a session a reboot ended: it blames the computer, not
+    /// Diri, and offers to bring back every such session at once.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes restart-ended card screenshots to DIRI_RESTART_SCREENSHOTS"]
+    fn render_restart_ended_screenshots() {
+        use gpui::{AppContext as _, HeadlessAppContext};
+        let output = std::env::var("DIRI_RESTART_SCREENSHOTS").expect("DIRI_RESTART_SCREENSHOTS");
+        std::fs::create_dir_all(&output).unwrap();
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| {
+            crate::fonts::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        for (name, light) in [("restart-ended-dark", false), ("restart-ended-light", true)] {
+            let services = test_services();
+            let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+            let selected = fixture.selected_session_id.clone().unwrap();
+            {
+                let mut store = services.store.store.write().unwrap();
+                let mut list = fixture.list;
+                for session in list.sessions.iter_mut().filter(|session| {
+                    !session.is_archived() && session.kind != diri_proto::AgentKind::SHELL
+                }) {
+                    session.status =
+                        diri_proto::SessionStatus::Exited(diri_proto::ExitInfo::restart(true));
+                    session.resumability = diri_proto::Resumability::Resumable;
+                    session.capabilities = None;
+                    session.needs_input = None;
+                }
+                store.hydrate(list);
+                store.mark_connected_for_test();
+                store.select(selected.clone());
+                store
+                    .update_preferences(|prefs| {
+                        prefs.sidebar_visible = true;
+                        prefs.terminal_theme = if light {
+                            "dirijor-light"
+                        } else {
+                            "dirijor-dark"
+                        }
+                        .into();
+                    })
+                    .unwrap();
+            }
+            let window = cx
+                .open_window(size(px(1000.0), px(700.0)), |window, cx| {
+                    cx.new(|cx| {
+                        RootView::new(services.clone(), false, PreviewScenario::Empty, window, cx)
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            // Selecting it auto-resumed it once; with no Engine behind this
+            // store that never lands, so settle it back to the card.
+            services
+                .store
+                .store
+                .write()
+                .unwrap()
+                .finish_auto_resume(&selected);
+            services.store.publish_local_change();
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+            cx.capture_screenshot(window.into())
+                .unwrap()
+                .save(std::path::Path::new(&output).join(format!("{name}.png")))
+                .unwrap();
+            cx.update_window(window.into(), |_, window, _| window.remove_window())
+                .unwrap();
+            cx.run_until_parked();
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "writes deterministic tab orientation screenshots to DIRI_TABS_SCREENSHOTS"]
@@ -11353,6 +11433,7 @@ mod tests {
             reason: diri_proto::ExitReason::Exited,
             code: Some(0),
             signal: None,
+            system_restart: false,
         });
         assert!(!is_quote_target(&exited));
     }

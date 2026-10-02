@@ -1006,6 +1006,13 @@ impl NavigationOverlay {
                     .sync_prefs(host);
                 self.close_overlay(window, cx);
             }
+            PaletteCommand::ResumeAll => {
+                self.store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .resume_all();
+                self.close_overlay(window, cx);
+            }
         }
     }
 
@@ -1042,6 +1049,9 @@ impl NavigationOverlay {
                 store.sessions(),
                 store.workspace_catalog().can_edit(),
             ));
+            if let Some(count) = store.resume_all_offer() {
+                actions.push(palette::resume_all_action(count));
+            }
             let orientation = store.preferences().tab_orientation;
             for action in &mut actions {
                 if let PaletteCommand::Action(command) = action.command {

@@ -478,6 +478,7 @@ impl StatusReducer {
                     reason,
                     code: *code,
                     signal: *signal,
+                    system_restart: false,
                 }),
                 &mut outcome,
             );

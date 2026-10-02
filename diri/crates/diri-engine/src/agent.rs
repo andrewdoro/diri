@@ -1399,6 +1399,7 @@ mod tests {
             reason: diri_proto::ExitReason::Exited,
             code: Some(0),
             signal: None,
+            system_restart: false,
         });
         let capabilities = codex.session_capabilities(
             diri_proto::Resumability::Resumable,

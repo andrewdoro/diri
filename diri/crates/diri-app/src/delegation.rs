@@ -496,6 +496,7 @@ mod tests {
             reason: ExitReason::Exited,
             code: Some(0),
             signal: None,
+            system_restart: false,
         });
         source.resumability = Resumability::Resumable;
         let project = Project {

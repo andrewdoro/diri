@@ -4,6 +4,7 @@ mod herdr;
 mod prefs;
 mod projection;
 mod residency;
+mod resume_all;
 mod window_navigation;
 mod work_items;
 mod workspace_spawn;
@@ -42,6 +43,7 @@ pub use prefs::{
 };
 pub use projection::{SidebarProject, SidebarProjection, SidebarRow};
 pub use residency::{ResidencyUpdate, TerminalResidency};
+pub use resume_all::ResumeAllProgress;
 pub(crate) use window_navigation::{WindowAction, WindowStore, WindowWrite};
 pub use work_items::WorkLink;
 pub use workspace_spawn::{
@@ -188,6 +190,8 @@ pub enum StoreEffect {
     },
     /// Open every planned herdr pane as a Diri session, in herdr's order.
     ImportHerdr(Vec<herdr::ImportStep>),
+    /// Resume every session a restart ended, a few at a time.
+    ResumeAll(Vec<SessionId>),
     /// Rescan this Mac until the Agent the user is installing appears.
     WatchAgentInstall {
         kind: AgentKind,
@@ -440,6 +444,8 @@ pub struct SessionStore {
     switcher: SessionSwitcherState,
     overview: SessionOverviewState,
     auto_resume_attempted: HashSet<SessionId>,
+    /// A running "Resume all" batch; see `resume_all`.
+    resume_all: Option<resume_all::ResumeAllProgress>,
     revision: u64,
     cached_projection: Option<(u64, Arc<SidebarProjection>)>,
     /// The same tree with sidebar folds blanked; see [`SessionStore::menu_bar_projection`].
@@ -553,6 +559,7 @@ impl SessionStore {
                 switcher: SessionSwitcherState::default(),
                 overview: SessionOverviewState::default(),
                 auto_resume_attempted: HashSet::new(),
+                resume_all: None,
                 revision: 0,
                 cached_projection: None,
                 cached_menu_projection: None,
@@ -3960,6 +3967,16 @@ async fn run_effects(
                 ));
                 Ok(())
             }
+            StoreEffect::ResumeAll(ids) => {
+                tokio::spawn(resume_all::run(
+                    ids,
+                    Arc::clone(&client),
+                    Arc::clone(&store),
+                    change_tx.clone(),
+                    status_tx.clone(),
+                ));
+                Ok(())
+            }
             StoreEffect::ImportHerdr(steps) => {
                 tokio::spawn(herdr::import(
                     steps,
@@ -4147,6 +4164,8 @@ fn action_context(effect: &StoreEffect) -> Option<ActionContext> {
         | StoreEffect::WatchAgentInstall { .. } => return None,
         // Import outcomes, failures included, arrive as one summary banner.
         StoreEffect::ScanHerdr { .. } | StoreEffect::ImportHerdr(_) => return None,
+        // So does a "Resume all" batch.
+        StoreEffect::ResumeAll(_) => return None,
     };
     Some(ActionContext { title, retry })
 }

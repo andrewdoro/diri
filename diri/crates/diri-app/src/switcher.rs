@@ -737,6 +737,7 @@ mod tests {
                 reason: ExitReason::Exited,
                 code: Some(0),
                 signal: None,
+                system_restart: false,
             }),
         );
         let mut asleep = session("asleep", SessionStatus::Working);
@@ -819,6 +820,7 @@ mod tests {
                     reason: ExitReason::Exited,
                     code: Some(0),
                     signal: None,
+                    system_restart: false,
                 }),
             ),
         ];

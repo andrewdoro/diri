@@ -5662,11 +5662,13 @@ fn pump_held(
                 reason: diri_proto::ExitReason::Exited,
                 code: Some(code),
                 signal: None,
+                system_restart: false,
             },
             Exit::Signal(signal) => diri_proto::ExitInfo {
                 reason: diri_proto::ExitReason::Signaled,
                 code: None,
                 signal: Some(signal),
+                system_restart: false,
             },
         };
         *shared.completed.lock().expect("completed capture") =

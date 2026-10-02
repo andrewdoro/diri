@@ -6333,7 +6333,7 @@ impl Sidebar {
         colors: SemanticColors,
         cx: &mut Context<Self>,
     ) -> PopoverSpec {
-        let (session, pinned, unread, bulk, hosts, migrating) = {
+        let (session, pinned, unread, bulk, hosts, migrating, resume_all) = {
             let mut store = self.store.write().expect("session store lock poisoned");
             let Some(session) = store.sessions().get(&id).cloned() else {
                 return PopoverSpec::empty();
@@ -6350,7 +6350,16 @@ impl Sidebar {
                 };
             let hosts = store.hosts().to_vec();
             let migrating = store.migrating().contains(&id);
-            (session, pinned, unread, bulk, hosts, migrating)
+            // Beside a restart-ended session's own Resume: the rest of them.
+            let resume_all = match &session.status {
+                diri_proto::SessionStatus::Exited(info)
+                    if info.ended_by_restart() && session.can_resume() =>
+                {
+                    store.resume_all_offer()
+                }
+                _ => None,
+            };
+            (session, pinned, unread, bulk, hosts, migrating, resume_all)
         };
         let mut content = div().p(px(4.0)).flex().flex_col();
         if bulk.len() > 1 {
@@ -6488,6 +6497,20 @@ impl Sidebar {
                         }
                     }),
                 ));
+                if let Some(count) = resume_all {
+                    content = content.child(menu_row(
+                        crate::terminal_pane::resume_all_label(count),
+                        colors,
+                        cx.listener(move |this, _, _, cx| {
+                            this.store
+                                .write()
+                                .expect("session store lock poisoned")
+                                .resume_all();
+                            this.ui.popover = None;
+                            cx.notify();
+                        }),
+                    ));
+                }
             }
             // Session handoff (Claude only): local sessions offer "Move to
             // <host>", remote ones "Move to Local". Hidden while a move is
@@ -9844,6 +9867,7 @@ mod tests {
             reason: diri_proto::ExitReason::Exited,
             code: Some(0),
             signal: None,
+            system_restart: false,
         });
         assert_eq!(display_title(&session), "Ended");
     }

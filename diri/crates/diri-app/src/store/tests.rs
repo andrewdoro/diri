@@ -14,9 +14,10 @@ use tokio::sync::mpsc;
 use crate::notifications::NotificationSound;
 
 use super::{
-    ClickModifiers, ClientStartup, EventEnvelope, InspectorTab, Prefs, SavedWindow, SessionStore,
-    SidebarOrdering, SidebarProjection, StoreEffect, StoreEventChange, StoreRuntime,
-    TerminalResidency, WindowMode, WindowPlacement, event_publication_policy, now_millis,
+    ClickModifiers, ClientStartup, EventEnvelope, InspectorTab, Prefs, ResumeAllProgress,
+    SavedWindow, SessionStore, SidebarOrdering, SidebarProjection, StoreEffect, StoreEventChange,
+    StoreRuntime, TerminalResidency, WindowMode, WindowPlacement, event_publication_policy,
+    now_millis,
 };
 use crate::switcher::{OverviewFilter, OverviewLane, SwitcherKey};
 
@@ -253,6 +254,7 @@ fn overview_store_integration_filters_selects_and_bulk_closes() {
         reason: ExitReason::Exited,
         code: Some(0),
         signal: None,
+        system_restart: false,
     });
     let (mut store, mut effects) =
         hydrated(vec![live, ended], vec![project("a", "A")], Prefs::default());
@@ -1044,6 +1046,7 @@ fn auto_resume_is_attempted_once_per_run() {
         reason: ExitReason::DaemonRestart,
         code: None,
         signal: None,
+        system_restart: false,
     });
     record.resumability = Resumability::Resumable;
     let (mut store, mut effects) = hydrated(
@@ -1078,6 +1081,7 @@ fn cold_boot_only_auto_resumes_the_selected_session() {
             reason: ExitReason::DaemonRestart,
             code: None,
             signal: None,
+            system_restart: false,
         });
         record.resumability = Resumability::Resumable;
         record
@@ -1137,6 +1141,7 @@ fn close_confirmation_only_gates_running_sessions() {
         reason: ExitReason::Exited,
         code: Some(0),
         signal: None,
+        system_restart: false,
     });
     let (mut store, mut effects) = hydrated(
         vec![running, exited],
@@ -1164,6 +1169,7 @@ fn exited_parent_with_terminal(terminal_running: bool) -> Vec<SessionRecord> {
         reason: ExitReason::Exited,
         code: Some(1),
         signal: None,
+        system_restart: false,
     });
     let mut parent = session("parent", "p", 2.0);
     parent.status = exit.clone();
@@ -1279,6 +1285,7 @@ fn a_real_process_exit_immediately_detaches_and_removes_the_agent() {
         reason: ExitReason::Exited,
         code: Some(0),
         signal: None,
+        system_restart: false,
     });
     store.upsert_session(exited);
 
@@ -1305,6 +1312,7 @@ fn a_clean_exit_with_a_conversation_keeps_its_row() {
         reason: ExitReason::Exited,
         code: Some(0),
         signal: None,
+        system_restart: false,
     });
     exited.agent_session_id = Some("conversation".into());
     exited.resumability = Resumability::NotResumable;
@@ -1332,6 +1340,7 @@ fn a_signalled_agent_keeps_its_row_and_its_scrollback() {
         reason: ExitReason::Signaled,
         code: None,
         signal: Some(15),
+        system_restart: false,
     });
     store.upsert_session(killed);
 
@@ -1360,6 +1369,7 @@ fn an_exited_but_resumable_agent_stays_listed_for_resume() {
         reason: ExitReason::Exited,
         code: Some(0),
         signal: None,
+        system_restart: false,
     });
     exited.resumability = Resumability::Resumable;
     store.upsert_session(exited);
@@ -1388,6 +1398,7 @@ fn a_nonzero_exit_keeps_its_row() {
         reason: ExitReason::Exited,
         code: Some(1),
         signal: None,
+        system_restart: false,
     });
     store.upsert_session(crashed);
 
@@ -1413,6 +1424,7 @@ fn daemon_restart_exit_remains_available_for_automatic_resume() {
         reason: ExitReason::DaemonRestart,
         code: None,
         signal: None,
+        system_restart: false,
     });
     restart.resumability = Resumability::Resumable;
     store.upsert_session(restart);
@@ -3707,6 +3719,7 @@ fn a_note_outlives_the_agent_that_wrote_it() {
         reason: ExitReason::Signaled,
         code: None,
         signal: Some(9),
+        system_restart: false,
     });
     let (mut store, _) = hydrated(
         vec![exited, note],
@@ -3714,4 +3727,118 @@ fn a_note_outlives_the_agent_that_wrote_it() {
         Prefs::default(),
     );
     assert!(visible(&mut store).contains(&(id("note"), 1)));
+}
+
+fn restart_ended(value: &str, created: f64, system_restart: bool) -> SessionRecord {
+    let mut record = session(value, "p", created);
+    record.status = SessionStatus::Exited(ExitInfo::restart(system_restart));
+    record.resumability = Resumability::Resumable;
+    record
+}
+
+/// "Resume all" brings back exactly the sessions a restart ended that can
+/// resume, newest first, in one batch effect; a second request while it runs,
+/// or selecting a queued tab, resumes nothing twice.
+#[test]
+fn resume_all_batches_every_restart_ended_session_once() {
+    let mut selected = session("selected", "p", 0.5);
+    selected.status = SessionStatus::Idle;
+    let mut archived = restart_ended("archived", 2.0, true);
+    archived.archived_at = Some(DateMillis(9.0));
+    let mut crashed = restart_ended("crashed", 3.0, false);
+    crashed.status = SessionStatus::Exited(ExitInfo {
+        reason: ExitReason::Exited,
+        code: Some(1),
+        signal: None,
+        system_restart: false,
+    });
+    let mut no_conversation = restart_ended("no-conversation", 4.0, true);
+    no_conversation.resumability = Resumability::NotResumable;
+    let (mut store, mut effects) = hydrated(
+        vec![
+            selected,
+            restart_ended("rebooted", 5.0, true),
+            restart_ended("daemon", 6.0, false),
+            archived,
+            crashed,
+            no_conversation,
+        ],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    assert_eq!(store.selected_session_id(), Some(&id("selected")));
+    drain(&mut effects);
+
+    assert_eq!(store.resume_all_offer(), Some(2));
+    assert_eq!(store.resume_all(), 2);
+    let batches: Vec<_> = drain(&mut effects)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            StoreEffect::ResumeAll(ids) => Some(ids),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(batches, vec![vec![id("daemon"), id("rebooted")]]);
+    assert!(store.auto_resuming().contains(&id("rebooted")));
+    assert_eq!(
+        store.resume_all_progress(),
+        Some(ResumeAllProgress {
+            total: 2,
+            finished: 0
+        })
+    );
+
+    assert_eq!(store.resume_all_offer(), None, "one batch at a time");
+    assert_eq!(store.resume_all(), 0);
+    store.select(id("rebooted"));
+    assert!(!store.auto_resume_if_needed(&id("rebooted")));
+    assert!(
+        drain(&mut effects)
+            .iter()
+            .all(|effect| !matches!(effect, StoreEffect::Resume { .. })),
+        "a queued tab is not resumed a second time"
+    );
+
+    store.finish_resume_all_one(&id("daemon"));
+    assert!(!store.auto_resuming().contains(&id("daemon")));
+    assert_eq!(store.resume_all_progress().map(|p| p.finished), Some(1));
+}
+
+/// One restart-ended session already has its own Resume; "all" is offered
+/// only when there is more than one, and never for one being auto-resumed.
+#[test]
+fn resume_all_is_offered_only_for_several_sessions() {
+    let (store, mut effects) = hydrated(
+        vec![
+            restart_ended("first", 1.0, true),
+            restart_ended("second", 2.0, true),
+        ],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    // Selecting `first` auto-resumed it, which leaves one for the batch.
+    assert!(store.auto_resuming().contains(&id("first")));
+    drain(&mut effects);
+    assert_eq!(store.restart_ended_resumable(), vec![id("second")]);
+    assert_eq!(store.resume_all_offer(), None);
+}
+
+/// A session counts as back once it has left both `Starting` and the exit it
+/// was resumed from; a fresh exit of its own also frees the batch.
+#[test]
+fn a_resumed_session_settles_once_it_reports_a_new_state() {
+    let (mut store, _effects) = hydrated(
+        vec![restart_ended("rebooted", 1.0, true)],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    assert!(!store.resume_settled(&id("rebooted")));
+    let mut record = (**store.sessions().get(&id("rebooted")).unwrap()).clone();
+    record.status = SessionStatus::Starting;
+    store.upsert_session(record.clone());
+    assert!(!store.resume_settled(&id("rebooted")));
+    record.status = SessionStatus::Idle;
+    store.upsert_session(record);
+    assert!(store.resume_settled(&id("rebooted")));
+    assert!(store.resume_settled(&id("gone")));
 }

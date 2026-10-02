@@ -850,6 +850,7 @@ mod tests {
             reason: ExitReason::Exited,
             code: Some(code),
             signal: None,
+            system_restart: false,
         }
     }
 
@@ -1158,6 +1159,7 @@ mod tests {
             reason: ExitReason::DaemonRestart,
             code: None,
             signal: None,
+            system_restart: false,
         };
         assert!(
             matches!(
@@ -1175,6 +1177,7 @@ mod tests {
             reason: ExitReason::Exited,
             code: Some(0),
             signal: Some(9),
+            system_restart: false,
         };
         assert!(matches!(
             store.publish(
@@ -1209,6 +1212,7 @@ mod tests {
             reason: ExitReason::Signaled,
             code: None,
             signal: Some(15),
+            system_restart: false,
         };
         store
             .publish(

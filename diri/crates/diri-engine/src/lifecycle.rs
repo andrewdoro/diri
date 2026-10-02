@@ -40,6 +40,7 @@ impl LifecyclePlan {
                         reason: ExitReason::Archived,
                         code: None,
                         signal: None,
+                        system_restart: false,
                     });
                 }
                 replacement.needs_input = None;
@@ -160,6 +161,7 @@ mod tests {
             reason: ExitReason::Signaled,
             code: None,
             signal: Some(9),
+            system_restart: false,
         });
 
         let archived =

@@ -1298,6 +1298,7 @@ mod tests {
             reason: diri_proto::ExitReason::Exited,
             code: Some(0),
             signal: None,
+            system_restart: false,
         };
         let record = diri_proto::SessionRecord {
             attention_state: None,
