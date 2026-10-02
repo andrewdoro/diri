@@ -93,7 +93,7 @@ nothing. Holders record facts as they happen and run no sampler or timer.
 held, remote, hibernated, working, needs_input`), `clients` (open control
 and data connections) and `attached` (terminal attachments, previews
 excluded). `metrics` carries counters `rpc.calls, rpc.errors,
-engine.connections, engine.accept_errors, attach.reseeds, remote.delta_gaps,
+engine.connections, engine.accept_errors, attach.reseeds, attach.lag_reseeds, remote.delta_gaps,
 ssh.commands, ssh.channels, hook.queued` (hook reports answered before a busy
 Registry was free, applied in order by the hook applier) and timings `rpc,
 rpc.hook_report` (the `hook.report` reply an Agent's synchronous hook waits
@@ -190,7 +190,8 @@ recorded by the Engine, not the Holder.
 | `attach.open` | debug | `session, preview, seed_bytes, ms` | slow seeds (blank pane on tab switch) |
 | `attach.close` | debug | `session, preview, attached_s` | attachments ending |
 | `attach.rejected` | info (≤ 1/min per session) | `session, reason` (`not_terminal`\|`session_not_found`\|`keyboard_unsupported`), `suppressed` (refusals since the last event) | an attach the Engine refused for good; it answers with an `AttachRejected` frame before closing. Replaces `attach.note_rejected` (before 2026-10-01: one per attempt, tens of thousands from one pane retrying a note every 500 ms) |
-| `attach.sink_dropped` | warn | `session, reason: backlog\|stalled, preview, attached_s` | a client that fell behind; it reattaches and is reseeded with a full grid |
+| `attach.sink_reseeded` | debug | `session, reason: backlog\|stalled, preview, lagged_ms` | a client that fell behind (descheduled by App Nap or memory pressure): its stale diffs were dropped and, once its socket had room, it got a Full Snapshot on the same connection (counter `attach.lag_reseeds`). Since 2026-10-02 |
+| `attach.sink_dropped` | warn | `session, reason: backlog\|stalled, preview, attached_s` | a client that stayed behind for 30 s (before 2026-10-02: 2 s, or one backlog overflow), or a connection no pump serves; it reattaches and is reseeded with a full grid |
 
 ### Remote
 
@@ -253,7 +254,7 @@ of a main window), `term.paint` (one terminal element's prepaint + paint),
 `pane.attach`, `pane.first_grid`, `pane.first_paint`, `client.connect`,
 `rpc.<method>` per control method; counters `rpc.calls`, `rpc.errors`,
 `rpc.disconnected`, `pane.reseed`, `pane.attach_retries`,
-`pane.input_rejected`.
+`pane.input_rejected`, `pane.reconnect_silent` (detaches with no typing at risk, which raise no notice).
 
 Frame breakdown, one set per `ui.frame` sample: timings `ui.frame.cpu` (the
 main thread's CPU time over the same span; far below `ui.frame` means the
@@ -315,7 +316,7 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `pane.first_grid` | debug; warn if not a snapshot | `session, ms, snapshot` | first frame missing or a diff before a seed |
 | `pane.first_paint` | debug | `session, ms, grid_ms, shown_ms, parked` | mount (or, for a pane nobody drew at mount, the first frame that showed it: `shown_ms` after mount) → the first frame that drew content, taken inside the terminal element's paint; `grid_ms` stays relative to mount. Once per mount of a resident per view. A pane that is never drawn (the selection pane under a workspace workbench, a warm pane of another tab, a window the system stopped drawing) records none; before 2026-09-30 the blank watchdog recorded those as a ~10 s "first paint" |
 | `pane.blank` | incident; warn if live with a blank grid | `session, agent, state, got_grid, content, frames, ms` | "session doesn't render": drawn at least once since mount, running, and no content painted 10 s after mount. `content=true` means the grid holds content that was never painted (a missed repaint: always an incident). A pane never drawn since mount is not reported |
-| `pane.detached` | warn | `session, live_ms, grids, reseeds` | "Terminal connection interrupted" toast |
+| `pane.detached` | warn | `session, live_ms, grids, reseeds, input_at_risk` | a live attachment ended. `input_at_risk=true` (typed input with no frame since, or within 2 s of the close) is followed by the `ui.toast` "Terminal" notice "Reconnected. Your last keystrokes may not have arrived."; otherwise the pane reconnects silently. Before 2026-10-02 every detach raised "Terminal connection interrupted…" |
 | `pane.drain_interrupted` | warn | `session` | input possibly lost on detach |
 | `pane.input_rejected` | warn (≤ 1 per 5 s per session) | `session, input` (`input`\|`mouse`\|`mouse_motion`\|`scroll`), `reason` (`passive_view`\|`disconnected`\|`overloaded`) | typing that goes nowhere; lost lease |
 | `pane.resize_storm` | warn (≤ 1/min) | `session, flips, cols, rows` | layouts fighting over the PTY size |

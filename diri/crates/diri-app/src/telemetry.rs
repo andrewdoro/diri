@@ -1062,15 +1062,21 @@ impl TransportTrace {
         }
     }
 
-    pub(crate) fn detached(&mut self) {
+    /// `input_at_risk`: typed input may have been lost, so the pane says so;
+    /// otherwise the reconnect is silent and only counted.
+    pub(crate) fn detached(&mut self, input_at_risk: bool) {
         let live_ms = self.live_at.take().map(|at| at.elapsed());
+        if !input_at_risk {
+            diri_telemetry::count("pane.reconnect_silent", 1);
+        }
         if !self.flapping() {
             diri_telemetry::warn_event!(
                 "pane.detached",
                 session = self.session.clone(),
                 live_ms = live_ms,
                 grids = self.grids,
-                reseeds = self.snapshots.saturating_sub(1)
+                reseeds = self.snapshots.saturating_sub(1),
+                input_at_risk = input_at_risk
             );
         }
         if self.grids == 0 {
