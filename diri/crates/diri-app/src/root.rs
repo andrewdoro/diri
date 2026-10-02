@@ -30,7 +30,6 @@ mod gesture_acceptance_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod gesture_schedule_profile;
 
-use crate::tooltip_warmth::WarmTooltip;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,15 +63,15 @@ use crate::launcher::{LauncherEvent, LauncherOverlay};
 #[cfg(target_os = "macos")]
 use crate::macos::browser::NativeBrowser;
 use crate::navigation::NavigationOverlay;
-use crate::notifications::InAppBanner;
 use crate::quote::Quote;
-use crate::recovery::{RecoveryAction, RecoveryKind, RecoveryNotice};
+use crate::recovery::RecoveryNotice;
 use crate::seam::{SeamSlide, toggle_has_settled};
 use crate::session_surfaces::SessionSurfaces;
 use crate::sidebar::{PreviewScenario, Sidebar, SidebarEvent};
 use crate::store::{SpawnOptions, WindowMaterial};
 use crate::surface_shell::UtilitySurfaces;
 use crate::terminal_pane::{TerminalPane, TerminalPaneEvent, TerminalViewport};
+use crate::toast::{Toast, ToastCommand, ToastHandlers, ToastSlot, ToastStyle};
 use crate::updates::UpdatePhase;
 use crate::workbench::WorkbenchLayout;
 
@@ -316,8 +315,9 @@ pub struct RootView {
     /// Debounces move/resize persistence while retaining the newest placement
     /// in memory immediately (the quit hook flushes that value synchronously).
     window_bounds_save: Option<Task<()>>,
-    status_banner: Option<InAppBanner>,
-    status_banner_generation: u64,
+    /// The one transient toast; connection recovery renders beside it.
+    toast: ToastSlot,
+    toast_style: ToastStyle,
     /// Records this window's open and close for the flight recorder.
     _telemetry_window: crate::telemetry::WindowGuard,
     quote_target_picker: Option<QuoteTargetPicker>,
@@ -593,10 +593,10 @@ impl RootView {
                     }
                 }
                 TerminalPaneEvent::Feedback { message } => {
-                    this.show_quote_feedback("Terminal", message.clone(), cx);
+                    this.show_feedback("terminal", Toast::info(message.clone()), cx);
                 }
                 TerminalPaneEvent::ExternalDropFeedback { message } => {
-                    this.show_quote_feedback("Dropped files", message.clone(), cx);
+                    this.show_feedback("dropped_files", Toast::warning(message.clone()), cx);
                 }
                 TerminalPaneEvent::RevealSession(id) => {
                     this.open_workspace_launch_session(id.clone(), window, cx);
@@ -613,14 +613,15 @@ impl RootView {
                         sidebar.run_workspace_palette(command.clone(), window, cx)
                     });
                     if !handled {
-                        this.show_quote_feedback(
-                            "Workspace changed",
-                            "The selected target is no longer available. Open the command palette to choose again.",
+                        this.show_feedback(
+                            "workspace",
+                            Toast::info("That target is gone. Open the palette to pick again."),
                             cx,
                         );
                     }
                 },
-            ).detach();
+            )
+            .detach();
             cx.subscribe_in(
                 navigation,
                 window,
@@ -1024,10 +1025,11 @@ impl RootView {
         if !preview && crate::telemetry::take_first_run_notice() {
             cx.spawn(async move |this, cx| {
                 let _ = this.update(cx, |this, cx| {
-                    this.show_banner(
-                        "diri shares diagnostics",
-                        "Crashes, hangs and errors help fix bugs; terminal contents never leave your Mac. Turn it off in Settings › General › Privacy.",
-                        Duration::from_secs(20),
+                    this.show_toast(
+                        Toast::info("diri sends crash and error reports")
+                            .detail("Terminal contents never leave your Mac.")
+                            .action("Settings", ToastCommand::OpenPrivacySettings)
+                            .hold(Duration::from_secs(20)),
                         cx,
                     );
                 });
@@ -1089,24 +1091,8 @@ impl RootView {
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         };
                         let _ = this.update(cx, |this, cx| {
-                            if let Some(banner) = status.in_app_banner {
-                                this.status_banner_generation =
-                                    this.status_banner_generation.wrapping_add(1);
-                                let generation = this.status_banner_generation;
-                                this.status_banner = Some(banner);
-                                cx.notify();
-                                cx.spawn(async move |this, cx| {
-                                    cx.background_executor()
-                                        .timer(Duration::from_secs(7))
-                                        .await;
-                                    let _ = this.update(cx, |this, cx| {
-                                        if this.status_banner_generation == generation {
-                                            this.status_banner = None;
-                                            cx.notify();
-                                        }
-                                    });
-                                })
-                                .detach();
+                            if let Some(toast) = status.in_app_banner {
+                                this.show_toast(toast, cx);
                             }
                         });
                     }
@@ -1283,9 +1269,9 @@ impl RootView {
                                 && this.workspace_error.as_ref() != Some(&error)
                             {
                                 this.workspace_error = Some(error.clone());
-                                this.show_quote_feedback(
-                                    "Workspace change was not saved",
-                                    error.1,
+                                this.show_feedback(
+                                    "workspace_rejected",
+                                    Toast::error("Workspace change wasn’t saved").detail(error.1),
                                     cx,
                                 );
                             }
@@ -1458,8 +1444,8 @@ impl RootView {
             inspector_resize_origin: None,
             seam_limit: haptics::Crossing::default(),
             window_bounds_save: None,
-            status_banner: None,
-            status_banner_generation: 0,
+            toast: ToastSlot::default(),
+            toast_style: ToastStyle::from_env(),
             _telemetry_window: crate::telemetry::WindowGuard::new("main", window),
             quote_target_picker: None,
             notification_panel_open: false,
@@ -1596,7 +1582,7 @@ impl RootView {
                     window,
                     |this, _, event, window, cx| match event {
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Notice(message) => {
-                            this.show_quote_feedback("Workspace", message.clone(), cx)
+                            this.show_feedback("workspace", Toast::info(message.clone()), cx)
                         }
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::RequestSplit {
                             tab,
@@ -1616,10 +1602,12 @@ impl RootView {
                         ) => this.open_workspace_launch_session(id.clone(), window, cx),
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
                             TerminalPaneEvent::Feedback { message },
-                        ) => this.show_quote_feedback("Terminal", message.clone(), cx),
+                        ) => this.show_feedback("terminal", Toast::info(message.clone()), cx),
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
                             TerminalPaneEvent::ExternalDropFeedback { message },
-                        ) => this.show_quote_feedback("Dropped files", message.clone(), cx),
+                        ) => {
+                            this.show_feedback("dropped_files", Toast::warning(message.clone()), cx)
+                        }
                         crate::workspace_workbench::WorkspaceWorkbenchEvent::Terminal(
                             TerminalPaneEvent::ContinueAccount(id),
                         ) => {
@@ -1700,43 +1688,69 @@ impl RootView {
         self.applied_material = Some(material);
     }
 
-    /// The window's standard toast. `title` is always authored in code, so it
-    /// is what the flight recorder keeps; the body may carry runtime detail
-    /// and is never recorded.
-    fn show_quote_feedback(
-        &mut self,
-        title: &'static str,
-        body: impl Into<String>,
-        cx: &mut Context<Self>,
-    ) {
-        diri_telemetry::event!("ui.toast", title = title);
-        self.show_banner(title, body, Duration::from_secs(4), cx);
+    /// The window's standard toast. `kind` is a fixed label for the flight
+    /// recorder; the toast's copy may carry runtime detail and is never
+    /// recorded.
+    fn show_feedback(&mut self, kind: &'static str, toast: Toast, cx: &mut Context<Self>) {
+        diri_telemetry::event!("ui.toast", kind = kind);
+        self.show_toast(toast, cx);
     }
 
-    fn show_banner(
-        &mut self,
-        title: impl Into<String>,
-        body: impl Into<String>,
-        visible_for: Duration,
-        cx: &mut Context<Self>,
-    ) {
-        self.status_banner_generation = self.status_banner_generation.wrapping_add(1);
-        let generation = self.status_banner_generation;
-        self.status_banner = Some(InAppBanner {
-            title: title.into(),
-            body: body.into(),
-        });
+    fn show_toast(&mut self, toast: Toast, cx: &mut Context<Self>) {
+        let timer = self.toast.show(toast);
+        self.arm_toast_timer(timer, cx);
         cx.notify();
+    }
+
+    fn arm_toast_timer(&mut self, timer: Option<crate::toast::ToastTimer>, cx: &mut Context<Self>) {
+        let Some(timer) = timer else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(visible_for).await;
+            cx.background_executor().timer(timer.after).await;
             let _ = this.update(cx, |this, cx| {
-                if this.status_banner_generation == generation {
-                    this.status_banner = None;
+                if this.toast.expire(timer.token) {
                     cx.notify();
                 }
             });
         })
         .detach();
+    }
+
+    fn run_toast_command(
+        &mut self,
+        command: ToastCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            ToastCommand::OpenPrivacySettings => {
+                self.toast.dismiss();
+                if let Some(surfaces) = &self.utility_surfaces {
+                    surfaces.update(cx, |surfaces, cx| {
+                        surfaces.open_settings(cx);
+                        surfaces.open_settings_tab(crate::settings::SettingsTab::General, cx);
+                        surfaces.focus_handle(cx).focus(window, cx);
+                    });
+                }
+            }
+            ToastCommand::RetryConnection => {
+                self.window_store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .retry_connection();
+            }
+            ToastCommand::RetryAction => {
+                self.window_store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .retry_last_action();
+            }
+            ToastCommand::CopyDetails(detail) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(detail));
+            }
+        }
+        cx.notify();
     }
 
     fn frame_context(&self, cx: &App) -> crate::telemetry::FrameContext {
@@ -1920,9 +1934,9 @@ impl RootView {
 
     fn quote_selection(&mut self, pick_target: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(quote) = self.selected_quote(window, cx) else {
-            self.show_quote_feedback(
-                "Nothing selected",
-                "Select terminal text, a diff hunk or line range, or a Markdown turn first.",
+            self.show_feedback(
+                "quote",
+                Toast::info("Select text, a diff hunk or a Markdown turn to quote"),
                 cx,
             );
             return;
@@ -1933,11 +1947,7 @@ impl RootView {
                 .unwrap_or(self.last_quote_surface);
             let targets = self.quote_targets();
             if targets.is_empty() {
-                self.show_quote_feedback(
-                    "No target session",
-                    "Start an agent to stage this quote.",
-                    cx,
-                );
+                self.show_feedback("quote", Toast::info("Start an agent to quote into"), cx);
                 return;
             }
             let active = self.active_session_id(cx);
@@ -1958,11 +1968,7 @@ impl RootView {
         }
         let target = self.active_session_id(cx);
         let Some(target) = target else {
-            self.show_quote_feedback(
-                "No active session",
-                "Select an agent to receive the quote.",
-                cx,
-            );
+            self.show_feedback("quote", Toast::info("Select an agent to quote into"), cx);
             return;
         };
         if !self
@@ -1970,9 +1976,9 @@ impl RootView {
             .iter()
             .any(|session| session.id == target)
         {
-            self.show_quote_feedback(
-                "Active session unavailable",
-                "Choose a running or sleeping agent—not a shell—as the quote target.",
+            self.show_feedback(
+                "quote",
+                Toast::info("Quotes go to an agent, not a shell"),
                 cx,
             );
             return;
@@ -1995,13 +2001,13 @@ impl RootView {
             .get(&target)
             .cloned();
         let Some(target_record) = target_record else {
-            self.show_quote_feedback("Target unavailable", "That session no longer exists.", cx);
+            self.show_feedback("quote", Toast::info("That session no longer exists"), cx);
             return;
         };
         if !is_quote_target(&target_record) {
-            self.show_quote_feedback(
-                "Target unavailable",
-                "Quotes can be staged only in an agent draft, not a shell.",
+            self.show_feedback(
+                "quote",
+                Toast::info("Quotes go to an agent, not a shell"),
                 cx,
             );
             return;
@@ -2025,7 +2031,11 @@ impl RootView {
         // Resolve against the snapshot shown to the user. A concurrent store
         // reorder must never redirect a click to a different session.
         let Some(target) = quote_target_id(&picker.targets, index) else {
-            self.show_quote_feedback("Target unavailable", "Choose another session.", cx);
+            self.show_feedback(
+                "quote",
+                Toast::info("That session is gone. Pick another."),
+                cx,
+            );
             return;
         };
         self.open_quote_draft(target, picker.quote, window, cx);
@@ -2237,9 +2247,9 @@ impl RootView {
                     workbench.execute_command(command, window, cx)
                 });
             } else {
-                self.show_quote_feedback(
-                    "Workspace panes",
-                    "Choose a workspace to arrange its panes.",
+                self.show_feedback(
+                    "workspace",
+                    Toast::info("Open a workspace to arrange its panes"),
                     cx,
                 );
             }
@@ -2371,9 +2381,9 @@ impl RootView {
                 if let Err(error) = self.sidebar.update(cx, |sidebar, cx| {
                     sidebar.set_tab_orientation(orientation, cx)
                 }) {
-                    self.show_quote_feedback(
-                        "Tab orientation",
-                        format!("Could not save tab orientation: {error}"),
+                    self.show_feedback(
+                        "prefs",
+                        Toast::error("Couldn’t save the tab layout").detail(error.to_string()),
                         cx,
                     );
                     return;
@@ -2395,9 +2405,10 @@ impl RootView {
                         .sidebar
                         .update(cx, |sidebar, cx| sidebar.toggle_horizontal_tabs(window, cx))
                     {
-                        self.show_quote_feedback(
-                            "Tab bar",
-                            format!("Could not save tab bar visibility: {error}"),
+                        self.show_feedback(
+                            "prefs",
+                            Toast::error("Couldn’t save the tab bar setting")
+                                .detail(error.to_string()),
                             cx,
                         );
                     }
@@ -4514,229 +4525,104 @@ impl RootView {
         )
     }
 
-    fn status_banner(&self, colors: SemanticColors, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let banner = self.status_banner.as_ref()?;
-        Some(
-            deferred(
-                div()
-                    .absolute()
-                    .right(px(16.0))
-                    .bottom(px(16.0))
-                    .w(px(360.0))
-                    .p(px(13.0))
-                    .flex()
-                    .items_start()
-                    .gap(px(10.0))
-                    .rounded(px(Radius::PANEL))
-                    .bg(colors.background)
-                    .border_1()
-                    .border_color(colors.floating_stroke())
-                    .shadow_lg()
-                    .occlude()
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.0))
-                            .child(
-                                div()
-                                    .text_size(px(Typo::ROW_EMPHASIZED.size))
-                                    .font_weight(Typo::ROW_EMPHASIZED.weight)
-                                    .text_color(colors.primary)
-                                    .child(banner.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(Typo::META.size))
-                                    .text_color(colors.secondary)
-                                    .child(banner.body.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("dismiss-status-banner")
-                            .size(px(22.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(Radius::CHIP))
-                            .cursor_pointer()
-                            .text_color(colors.tertiary)
-                            .hover(move |button| button.bg(colors.primary.alpha(0.06)))
-                            .child(sf_symbol_weighted(
-                                "xmark",
-                                8.5,
-                                SymbolWeight::Bold,
-                                colors.tertiary,
-                            ))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.status_banner_generation =
-                                    this.status_banner_generation.wrapping_add(1);
-                                this.status_banner = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .into_any_element(),
-        )
-    }
-
-    fn recovery_notice(&self, notice: RecoveryNotice, colors: SemanticColors) -> AnyElement {
-        let accent = match notice.kind {
-            RecoveryKind::Connecting
-            | RecoveryKind::Reconnecting
-            | RecoveryKind::RetryingAction => colors.secondary,
-            RecoveryKind::ManualAttention | RecoveryKind::ActionFailed => Ink::ATTENTION,
+    /// The toast stack: connection recovery (persistent) nearest the edge,
+    /// the transient toast beside it. Both are the same primitive.
+    fn toast_stack(
+        &self,
+        recovery: Option<RecoveryNotice>,
+        colors: SemanticColors,
+        insets: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let transient = self.toast.current();
+        if recovery.is_none() && transient.is_none() {
+            return None;
+        }
+        let style = self.toast_style;
+        let reduce_motion = cx.reduce_motion();
+        let hover = |cx: &mut Context<Self>| {
+            let view = cx.entity().downgrade();
+            Box::new(move |hovered: bool, _: &mut Window, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    let timer = this.toast.set_hovered(hovered);
+                    this.arm_toast_timer(timer, cx);
+                });
+            }) as crate::toast::HoverHandler
         };
-        let mut bar = div()
-            .id("recovery-notice")
-            .debug_selector(|| "RECOVERY_NOTICE".to_owned())
-            .absolute()
-            .bottom(px(16.0))
-            .right(px(16.0))
-            .w(px(380.0))
-            .max_w(gpui::relative(0.9))
-            .p(px(14.0))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .rounded(px(Radius::PANEL))
-            .bg(colors.floating_surface())
-            .border_1()
-            .border_color(colors.floating_stroke())
-            .shadow_lg()
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .text_color(colors.primary)
-            .child(
-                div()
-                    .pr(px(24.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(sf_symbol(
-                        if matches!(
-                            notice.kind,
-                            RecoveryKind::ActionFailed | RecoveryKind::ManualAttention
-                        ) {
-                            "exclamationmark.triangle"
-                        } else {
-                            "arrow.triangle.2.circlepath"
-                        },
-                        13.0,
-                        accent,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(Typo::ROW_EMPHASIZED.size))
-                            .font_weight(Typo::ROW_EMPHASIZED.weight)
-                            .child(notice.title),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(Typo::META.size))
-                    .line_height(px(18.0))
-                    .text_color(colors.secondary)
-                    .child(bounded_notice_body(&notice.body)),
-            );
-        let mut actions = div().flex().items_center().gap(px(8.0));
-        if let Some((action, label)) = notice.primary_action {
-            let store = self.window_store.clone();
-            actions = actions.child(
-                div()
-                    .id("recovery-primary-action")
-                    .self_start()
-                    .h(px(27.0))
-                    .px(px(9.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .rounded(px(Radius::ROW))
-                    .cursor_pointer()
-                    .bg(colors.primary.alpha(0.075))
-                    .hover(move |button| button.bg(colors.primary.alpha(0.12)))
-                    .text_size(px(Typo::META.size))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(label)
-                    .on_click(move |_, _, cx| {
-                        let mut store = store.write().expect("session store lock poisoned");
-                        match action {
-                            RecoveryAction::RetryConnection => store.retry_connection(),
-                            RecoveryAction::RetryAction => store.retry_last_action(),
-                        }
-                        cx.stop_propagation();
+        let action = |cx: &mut Context<Self>| {
+            let view = cx.entity().downgrade();
+            Box::new(
+                move |command: ToastCommand, window: &mut Window, cx: &mut App| {
+                    let _ = view.update(cx, |this, cx| this.run_toast_command(command, window, cx));
+                },
+            ) as crate::toast::ActionHandler
+        };
+        let mut items: Vec<AnyElement> = Vec::with_capacity(2);
+        if let Some(toast) = transient {
+            let view = cx.entity().downgrade();
+            items.push(crate::toast::toast_element(
+                toast,
+                style,
+                colors,
+                "toast",
+                self.toast.generation(),
+                reduce_motion,
+                ToastHandlers {
+                    on_action: action(cx),
+                    on_dismiss: Box::new(move |_, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.toast.dismiss();
+                            cx.notify();
+                        });
                     }),
-            );
+                    on_hover: hover(cx),
+                },
+            ));
         }
-        let detail = notice.detail;
-        let has_actions = notice.primary_action.is_some() || detail.is_some();
-        if let Some(detail) = detail {
-            actions = actions.child(
-                div()
-                    .id("copy-recovery-details")
-                    .debug_selector(|| "copy-recovery-details".into())
-                    .h(px(28.0))
-                    .px(px(7.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(Radius::ROW))
-                    .cursor_pointer()
-                    .text_size(px(Typo::META.size))
-                    .text_color(colors.secondary)
-                    .hover(move |button| button.bg(colors.primary.alpha(0.06)))
-                    .child("Copy details")
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(detail.clone()));
-                        cx.stop_propagation();
-                    }),
-            );
-        }
-        if has_actions {
-            bar = bar.child(actions);
-        }
-        if notice.dismissible {
+        if let Some(notice) = recovery {
             let store = self.window_store.clone();
-            bar = bar.child(
-                div()
-                    .id("dismiss-recovery-notice")
-                    .debug_selector(|| "dismiss-recovery-notice".into())
-                    .absolute()
-                    .top(px(9.0))
-                    .right(px(9.0))
-                    .size(px(28.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(Radius::CHIP))
-                    .cursor_pointer()
-                    .warm_tooltip(move |_, cx| {
-                        cx.new(|_| crate::palette_chrome::PaletteTooltip("Dismiss".into(), colors))
-                            .into()
-                    })
-                    .hover(move |button| button.bg(colors.primary.alpha(0.06)))
-                    .child(sf_symbol_weighted(
-                        "xmark",
-                        8.5,
-                        SymbolWeight::Bold,
-                        colors.tertiary,
-                    ))
-                    .on_click(move |_, _, cx| {
+            items.push(crate::toast::toast_element(
+                &notice.toast(),
+                style,
+                colors,
+                "recovery",
+                0,
+                reduce_motion,
+                ToastHandlers {
+                    on_action: action(cx),
+                    on_dismiss: Box::new(move |_, _| {
                         store
                             .write()
                             .expect("session store lock poisoned")
                             .dismiss_action_failure();
-                        cx.stop_propagation();
                     }),
-            );
+                    on_hover: Box::new(|_, _, _| {}),
+                },
+            ));
         }
-        bar.into_any_element()
+        let (left, right) = insets;
+        let mut stack = div()
+            .absolute()
+            .left(px(left + 16.0))
+            .right(px(right + 16.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0));
+        stack = match style.anchor() {
+            // The persistent notice sits nearest the edge; a transient toast
+            // stacks beyond it and leaves without moving it.
+            crate::toast::ToastAnchor::BottomCenter => stack.bottom(px(18.0)).items_center(),
+            crate::toast::ToastAnchor::BottomLeft => stack.bottom(px(16.0)).items_start(),
+            crate::toast::ToastAnchor::TopRight => {
+                items.reverse();
+                stack.top(px(Metrics::TITLE_BAR + 8.0)).items_end()
+            }
+        };
+        Some(
+            deferred(stack.children(items))
+                .with_priority(1)
+                .into_any_element(),
+        )
     }
 }
 
@@ -5498,11 +5384,8 @@ impl Render for RootView {
         if let Some(panel) = self.notification_panel(window, cx) {
             root = root.child(deferred(panel));
         }
-        if let Some(status) = self.status_banner(colors, cx) {
-            root = root.child(status);
-        }
-        if let Some(notice) = recovery_notice {
-            root = root.child(self.recovery_notice(notice, colors));
+        if let Some(stack) = self.toast_stack(recovery_notice, colors, (seam, inspector_seam), cx) {
+            root = root.child(stack);
         }
         if let Some(build) = &self.services.dev_build {
             root = root.child(dev_build_marker(build.marker_label(), colors, 10.0));
@@ -7170,20 +7053,17 @@ mod tests {
             });
             cx.run_until_parked();
             root.read_with(cx, |root, _| {
-                let banner = root
-                    .status_banner
-                    .as_ref()
-                    .expect("standard right-side toast");
-                assert_eq!(banner.title, "Terminal");
+                let toast = root.toast.current().expect("standard toast");
                 assert_eq!(
-                    banner.body,
+                    toast.message,
                     format!("Input rejected in workspace={workspace}")
                 );
+                assert_eq!(toast.detail, None, "no category title like “Terminal”");
             });
         }
         cx.executor().advance_clock(Duration::from_secs(4));
         cx.run_until_parked();
-        root.read_with(cx, |root, _| assert!(root.status_banner.is_none()));
+        root.read_with(cx, |root, _| assert!(root.toast.current().is_none()));
     }
 
     #[gpui::test]
@@ -8288,14 +8168,16 @@ mod tests {
                 .report_prompt_delivery_failure("diagnostic detail".into());
             root
         });
+        // Measure the resting position, not the entrance rise.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         for width in [640.0, 1000.0] {
             cx.simulate_resize(size(px(width), px(700.0)));
             cx.run_until_parked();
-            let card = cx.debug_bounds("RECOVERY_NOTICE").unwrap();
+            let card = cx.debug_bounds("recovery").unwrap();
             assert!(card.top() > px(Metrics::TITLE_BAR));
             assert!(card.right() <= px(width - 16.0));
             assert!(card.bottom() <= px(684.0));
-            let button = cx.debug_bounds("copy-recovery-details").unwrap();
+            let button = cx.debug_bounds("recovery-action-0").unwrap();
             assert!(card.contains(&button.center()));
             cx.simulate_click(button.center(), Modifiers::default());
             assert_eq!(
@@ -8303,12 +8185,12 @@ mod tests {
                 Some("diagnostic detail")
             );
         }
-        let dismiss = cx.debug_bounds("dismiss-recovery-notice").unwrap().center();
+        let dismiss = cx.debug_bounds("recovery-dismiss").unwrap().center();
         cx.simulate_click(dismiss, Modifiers::default());
         assert!(store.store.read().unwrap().action_failure().is_none());
         root.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
-        assert!(cx.debug_bounds("copy-recovery-details").is_none());
+        assert!(cx.debug_bounds("recovery-action-0").is_none());
     }
 
     #[gpui::test]
@@ -9672,6 +9554,128 @@ mod tests {
         cx.update_window(window.into(), |_, window, _| window.remove_window())
             .unwrap();
         cx.run_until_parked();
+    }
+
+    /// Every toast direction × theme × state, in the real window, for the
+    /// redesign comparison sheets (docs/screenshots/toast-redesign).
+    /// `DIRI_TOAST_STYLES=capsule,card,ink` narrows the set.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes toast previews to DIRI_TOAST_SCREENSHOTS"]
+    fn render_toast_redesign_screenshots() {
+        use gpui::HeadlessAppContext;
+        let dir =
+            std::path::PathBuf::from(std::env::var("DIRI_TOAST_SCREENSHOTS").expect("output dir"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let styles =
+            std::env::var("DIRI_TOAST_STYLES").unwrap_or_else(|_| "capsule,card,ink".into());
+        type State = (&'static str, fn() -> Toast);
+        let states: [State; 3] = [
+            ("privacy", || {
+                Toast::info("diri sends crash and error reports")
+                    .detail("Terminal contents never leave your Mac.")
+                    .action("Settings", ToastCommand::OpenPrivacySettings)
+            }),
+            ("error", || Toast::error("Workspace change wasn’t saved")),
+            ("reconnect", || {
+                Toast::warning("Reconnected. Your last keystrokes may not have arrived.")
+            }),
+        ];
+        for style_name in styles.split(',') {
+            let style = ToastStyle::parse(style_name).expect("style");
+            for theme in ["dark", "light"] {
+                for (state, make) in states.iter().map(|(n, f)| (*n, *f)).chain([
+                    ("stack", (|| Toast::success("Copied")) as fn() -> Toast),
+                    ("hover", states[0].1),
+                ]) {
+                    let platform = gpui_platform::current_platform(true);
+                    let mut cx = HeadlessAppContext::with_platform(
+                        platform.text_system(),
+                        Arc::new(diri_ui::IconAssets),
+                        gpui_platform::current_headless_renderer,
+                    );
+                    cx.update(|cx| {
+                        crate::fonts::init(cx);
+                        cx.set_reduce_motion(true);
+                    });
+                    let services = test_services();
+                    let mut fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+                    let selected = fixture.selected_session_id.clone().unwrap();
+                    let session = fixture
+                        .list
+                        .sessions
+                        .iter_mut()
+                        .find(|s| s.id == selected)
+                        .unwrap();
+                    session.kind = diri_proto::AgentKind::CODEX;
+                    session.host = None;
+                    session.title = "Image drop regression".into();
+                    {
+                        let mut store = services.store.store.write().unwrap();
+                        store.hydrate(fixture.list);
+                        store.select(selected);
+                        store
+                            .update_preferences(|p| {
+                                p.terminal_theme = format!("dirijor-{theme}");
+                                p.sidebar_visible = true;
+                            })
+                            .unwrap();
+                        if state == "stack" {
+                            store.report_prompt_delivery_failure("diagnostic detail".into());
+                        }
+                    }
+                    let window = cx
+                        .open_window(size(px(1000.0), px(650.0)), |window, cx| {
+                            cx.new(|cx| {
+                                let mut root = RootView::new(
+                                    services.clone(),
+                                    false,
+                                    PreviewScenario::Empty,
+                                    window,
+                                    cx,
+                                );
+                                root.preview = state != "stack";
+                                root.toast_style = style;
+                                let mut grid = diri_term::buffer::GridBuffer::new(100, 36);
+                                let sample = "  OpenAI Codex\n\n  /Users/you/work/diri\n\n  Ready to work on your project.\n\n› Ask Codex to do anything";
+                                for (y, line) in sample.lines().enumerate() {
+                                    for (x, ch) in line.chars().enumerate() {
+                                        grid.cells[y * 100 + x].scalar = ch as u32;
+                                    }
+                                }
+                                root.terminal.as_ref().unwrap().update(cx, |terminal, cx| {
+                                    terminal.seed_preview_grid_for_test(grid, cx);
+                                });
+                                root.show_toast(make(), cx);
+                                root
+                            })
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+                    if state == "hover" {
+                        // A point inside the toast for each anchor, so the
+                        // corner ✕ and action hover show.
+                        let at = match style.anchor() {
+                            crate::toast::ToastAnchor::BottomCenter => point(px(560.0), px(612.0)),
+                            crate::toast::ToastAnchor::TopRight => point(px(840.0), px(66.0)),
+                            crate::toast::ToastAnchor::BottomLeft => point(px(300.0), px(612.0)),
+                        };
+                        cx.update_window(window.into(), |_, window, cx| {
+                            window.simulate_mouse_move(at, cx);
+                        })
+                        .unwrap();
+                        cx.run_until_parked();
+                    }
+                    cx.capture_screenshot(window.into())
+                        .unwrap()
+                        .save(dir.join(format!("{style_name}-{theme}-{state}.png")))
+                        .unwrap();
+                    cx.update_window(window.into(), |_, window, _| window.remove_window())
+                        .unwrap();
+                    cx.run_until_parked();
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]

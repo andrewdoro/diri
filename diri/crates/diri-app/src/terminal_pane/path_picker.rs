@@ -51,11 +51,7 @@ impl TerminalPane {
             return;
         };
         if session.host.is_some() {
-            self.show_terminal_feedback(
-                "Insert Path browses this Mac, so it's unavailable in remote sessions",
-                window,
-                cx,
-            );
+            self.show_terminal_feedback("Insert Path works in local sessions only", window, cx);
             cx.stop_propagation();
             return;
         }

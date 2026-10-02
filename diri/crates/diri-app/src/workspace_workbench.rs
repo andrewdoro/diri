@@ -579,7 +579,7 @@ impl WorkspaceWorkbench {
             || !store.edit_workspace(mutation)
         {
             cx.emit(WorkspaceWorkbenchEvent::Notice(
-                "The layout changed while moving. Try the move again.".into(),
+                "The layout changed mid-move. Try again.".into(),
             ));
         }
         cx.notify();
@@ -673,7 +673,7 @@ impl WorkspaceWorkbench {
         } else {
             tab.layout = resize.original;
             cx.emit(WorkspaceWorkbenchEvent::Notice(
-                "The layout changed while resizing. Try the resize again.".into(),
+                "The layout changed mid-resize. Try again.".into(),
             ));
         }
         cx.notify();

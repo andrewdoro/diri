@@ -3527,11 +3527,11 @@ async fn herdr_import_runner_remembers_only_what_opened_and_reports_failures() {
         .expect("summary banner")
         .in_app_banner
         .expect("in-app banner");
-    assert_eq!(banner.title, "Moved 5 of 6 sessions from herdr");
+    assert_eq!(banner.message, "Moved 5 of 6 sessions from herdr");
+    let detail = banner.detail.expect("first failure");
     assert!(
-        banner.body.contains("no manifest for agent opencode"),
-        "{}",
-        banner.body
+        detail.contains("no manifest for agent opencode"),
+        "{detail}"
     );
 }
 

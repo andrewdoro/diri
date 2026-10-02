@@ -609,11 +609,7 @@ impl TerminalPane {
             selecting: false,
         });
         window.focus(&self.focus, cx);
-        self.show_terminal_feedback(
-            "Copy mode · arrows or h j k l · v select · y copy · Esc exit",
-            window,
-            cx,
-        );
+        self.show_terminal_feedback("Copy mode on. Esc to exit.", window, cx);
     }
 
     pub(super) fn handle_qol_key(
@@ -806,7 +802,7 @@ impl TerminalPane {
                 let response = client
                     .read_scrollback_cells(&request_id, first, 128)
                     .await
-                    .map_err(|_| "Could not read terminal history")?;
+                    .map_err(|_| "Couldn’t read the terminal history")?;
                 if sequence.is_some_and(|seq| seq != response.content_seq) {
                     return Err("Output changed during the read. Try again when it settles.");
                 }
@@ -849,13 +845,19 @@ impl TerminalPane {
             ))
         });
         self.qol.busy = true;
-        self.show_terminal_feedback("Reading retained terminal output…", window, cx);
+        self.show_terminal_feedback("Reading terminal output…", window, cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = crate::floating::update_in_owner(&this, cx, |this, window, cx| {
-                if this.selected_id().as_ref() != Some(&id) { return; }
+                if this.selected_id().as_ref() != Some(&id) {
+                    return;
+                }
                 this.qol.busy = false;
-                if this.residents.get(&id).is_none_or(|resident| resident.attachment_generation != generation) {
+                if this
+                    .residents
+                    .get(&id)
+                    .is_none_or(|resident| resident.attachment_generation != generation)
+                {
                     this.show_terminal_feedback("Terminal changed. Try again.", window, cx);
                     return;
                 }
@@ -863,37 +865,69 @@ impl TerminalPane {
                     Ok(Ok((text, prompts, live_start, total, sequence))) => {
                         if let Some(next) = direction {
                             let top = live_start - top_offset;
-                            let target = if next { prompts.into_iter().find(|row| *row > top) } else { prompts.into_iter().rev().find(|row| *row < top) };
+                            let target = if next {
+                                prompts.into_iter().find(|row| *row > top)
+                            } else {
+                                prompts.into_iter().rev().find(|row| *row < top)
+                            };
                             if let Some(target) = target {
                                 if let Some(resident) = this.residents.get(&id) {
                                     let rows = usize::from(resident.element.grid_rows());
-                                    resident.element.adopt_history_geometry(live_start, total, sequence, rows);
+                                    resident
+                                        .element
+                                        .adopt_history_geometry(live_start, total, sequence, rows);
                                     resident.element.scroll_to_absolute(target, 0.0, rows);
                                     this.pump_scrollback_fetch(&id, rows);
                                 }
                                 this.qol.feedback = None;
-                            } else { this.show_terminal_feedback("No shell prompt in that direction · requires OSC 133 prompt marks", window, cx); }
+                            } else {
+                                this.show_terminal_feedback(
+                                    "No shell prompt that way (needs OSC 133 marks)",
+                                    window,
+                                    cx,
+                                );
+                            }
                         } else {
                             let saved = (|| -> std::io::Result<tempfile::NamedTempFile> {
-                                let mut file = tempfile::Builder::new().prefix("diri-scrollback-").suffix(".txt").tempfile()?;
-                                file.write_all(text.as_bytes())?; file.flush()?; Ok(file)
+                                let mut file = tempfile::Builder::new()
+                                    .prefix("diri-scrollback-")
+                                    .suffix(".txt")
+                                    .tempfile()?;
+                                file.write_all(text.as_bytes())?;
+                                file.flush()?;
+                                Ok(file)
                             })();
                             match saved {
                                 Ok(file) => {
-                                    if let Ok(url) = url::Url::from_file_path(file.path()) { cx.open_url(url.as_str()); }
+                                    if let Ok(url) = url::Url::from_file_path(file.path()) {
+                                        cx.open_url(url.as_str());
+                                    }
                                     this.qol.export_files.push(file);
-                                    this.show_terminal_feedback("Opened retained output in your editor", window, cx);
+                                    this.show_terminal_feedback(
+                                        "Opened the output in your editor",
+                                        window,
+                                        cx,
+                                    );
                                 }
-                                Err(_) => this.show_terminal_feedback("Could not save terminal output", window, cx),
+                                Err(_) => this.show_terminal_feedback(
+                                    "Couldn’t save the terminal output",
+                                    window,
+                                    cx,
+                                ),
                             }
                         }
                     }
                     Ok(Err(message)) => this.show_terminal_feedback(message, window, cx),
-                    Err(_) => this.show_terminal_feedback("Could not read terminal history", window, cx),
+                    Err(_) => this.show_terminal_feedback(
+                        "Couldn’t read the terminal history",
+                        window,
+                        cx,
+                    ),
                 }
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 
     pub(super) fn render_qol(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {

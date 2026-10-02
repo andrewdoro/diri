@@ -3,6 +3,7 @@
 //! priority, and safe-action policy as a pure decision.
 
 use crate::store::{ActionFailure, DaemonState};
+use crate::toast::{Toast, ToastCommand, ToastTone};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveryKind {
@@ -48,10 +49,9 @@ impl RecoveryNotice {
                     failure.title.clone()
                 },
                 body: if failure.retrying {
-                    "Waiting for the daemon to confirm the operation.".to_owned()
+                    "Waiting for confirmation.".to_owned()
                 } else if failure.title == crate::store::PROMPT_DELIVERY_FAILURE_TITLE {
-                    "Check the session before sending again. Your draft is saved in the composer."
-                        .to_owned()
+                    "Check the session before sending again. Your draft is saved.".to_owned()
                 } else {
                     failure.detail.clone()
                 },
@@ -66,28 +66,59 @@ impl RecoveryNotice {
             DaemonState::Connecting => Some(Self {
                 kind: RecoveryKind::Connecting,
                 title: "Connecting…".to_owned(),
-                body: "Diri is starting its engine. Sessions stay visible meanwhile.".to_owned(),
+                body: "Sessions stay visible meanwhile.".to_owned(),
                 detail: None,
                 primary_action: None,
                 dismissible: false,
             }),
             DaemonState::Unreachable(error) if needs_manual_attention(error) => Some(Self {
                 kind: RecoveryKind::ManualAttention,
-                title: "The daemon needs attention".to_owned(),
-                body: "Retry the connection. If it still fails, relaunch Diri to replace the bundled daemon.".to_owned(),
+                title: "diri can’t reach its engine".to_owned(),
+                body: "Retry, or relaunch diri if it keeps failing.".to_owned(),
                 detail: None,
                 primary_action: Some((RecoveryAction::RetryConnection, "Retry now")),
                 dismissible: false,
             }),
             DaemonState::Unreachable(_) => Some(Self {
                 kind: RecoveryKind::Reconnecting,
-                title: "Daemon unavailable".to_owned(),
-                body: "Reconnecting automatically; existing sessions remain readable.".to_owned(),
+                title: "Reconnecting…".to_owned(),
+                body: "Retrying automatically. Sessions stay readable.".to_owned(),
                 detail: None,
                 primary_action: Some((RecoveryAction::RetryConnection, "Retry now")),
                 dismissible: false,
             }),
         }
+    }
+}
+
+impl RecoveryNotice {
+    /// The notice as the window's standard toast: persistent while its state
+    /// lasts, with Retry and Copy details as inline text actions.
+    #[must_use]
+    pub fn toast(&self) -> Toast {
+        let tone = match self.kind {
+            RecoveryKind::Connecting
+            | RecoveryKind::Reconnecting
+            | RecoveryKind::RetryingAction => ToastTone::Progress,
+            RecoveryKind::ManualAttention => ToastTone::Warning,
+            RecoveryKind::ActionFailed => ToastTone::Error,
+        };
+        let mut toast = Toast::new(tone, self.title.clone())
+            .detail(self.body.clone())
+            .persistent(self.dismissible);
+        if let Some((action, label)) = self.primary_action {
+            toast = toast.action(
+                label,
+                match action {
+                    RecoveryAction::RetryConnection => ToastCommand::RetryConnection,
+                    RecoveryAction::RetryAction => ToastCommand::RetryAction,
+                },
+            );
+        }
+        if let Some(detail) = &self.detail {
+            toast = toast.action("Copy details", ToastCommand::CopyDetails(detail.clone()));
+        }
+        toast
     }
 }
 
@@ -167,6 +198,11 @@ mod tests {
         );
         let notice = RecoveryNotice::resolve(&DaemonState::Connected, Some(&failure)).unwrap();
         assert_eq!(notice.title, "Check prompt delivery");
+        let toast = notice.toast();
+        assert_eq!(toast.tone, ToastTone::Error);
+        assert!(toast.dismissible);
+        assert_eq!(toast.visible_for(), None, "stays until dismissed");
+        assert_eq!(toast.actions.len(), 1, "Copy details only");
         assert!(notice.body.contains("Your draft is saved"));
         assert!(!notice.body.contains("initial_prompt_delivery_failed"));
         assert!(!notice.body.contains("s_123"));

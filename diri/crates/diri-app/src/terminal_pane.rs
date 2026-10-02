@@ -2050,7 +2050,7 @@ impl TerminalPane {
                         session = diri_telemetry::id(&target.id.0)
                     );
                     self.show_terminal_feedback(
-                        "Couldn't copy the clipboard image to the session's host",
+                        "Couldn’t copy the image to the remote host",
                         window,
                         cx,
                     );
@@ -2068,9 +2068,7 @@ impl TerminalPane {
                         session = diri_telemetry::id(&target.id.0)
                     );
                     cx.emit(TerminalPaneEvent::ExternalDropFeedback {
-                        message: format!(
-                            "Couldn't copy the dropped files to the session's host: {error}"
-                        ),
+                        message: format!("Couldn’t copy the files to the remote host: {error}"),
                     });
                 }
             },
@@ -7501,7 +7499,7 @@ mod tests {
                             );
                         }
                         "controller-feedback" => pane.handle_pane_event(
-                            PaneEvent::InputFeedback(id.clone(), "Terminal input queue is full. The latest input was not accepted.".into()), window, cx),
+                            PaneEvent::InputFeedback(id.clone(), "Input queue full; that keystroke was dropped".into()), window, cx),
                         "copy" => pane.enter_copy_mode(window, cx),
                         scene if scene.starts_with("insert-path") => {
                             pane.open_path_picker(&crate::commands::InsertPath, window, cx);
@@ -8737,7 +8735,7 @@ mod tests {
             &*shown.lock().unwrap(),
             &[
                 "Couldn't paste the clipboard image: permission denied",
-                "Couldn't copy the clipboard image to the session's host",
+                "Couldn’t copy the image to the remote host",
             ],
             "each failure is shown once, without paths, hosts or subprocess output"
         );

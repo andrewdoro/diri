@@ -117,9 +117,9 @@ impl RootView {
             available
         };
         if !available {
-            self.show_quote_feedback(
-                "Session unavailable",
-                "This session was closed or archived. Its notification remains in your history.",
+            self.show_feedback(
+                "notification",
+                crate::toast::Toast::info("That session was closed or archived"),
                 cx,
             );
             return;

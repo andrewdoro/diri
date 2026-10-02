@@ -85,7 +85,7 @@ impl TerminalPane {
                 if this.reconnect.finish(&id, request, error) {
                     if result.is_ok_and(|result| result.uncertain_input_discarded) {
                         this.show_terminal_feedback(
-                            "Previous queued input was discarded; delivery was not confirmed.",
+                            "Queued input was dropped; it may not have arrived",
                             window,
                             cx,
                         );

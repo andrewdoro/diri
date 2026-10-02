@@ -115,7 +115,12 @@ fn describe_rejections(partial: bool, rejected: &[RejectedExternalPath]) -> Opti
         .map(|rejection| {
             format!(
                 "“{}” {}",
-                rejection.path.to_string_lossy(),
+                // The name is enough to recognise it; a full path is a
+                // second line of noise in a one-line toast.
+                rejection.path.file_name().map_or_else(
+                    || rejection.path.to_string_lossy(),
+                    |name| name.to_string_lossy()
+                ),
                 rejection.reason.explanation()
             )
         })
