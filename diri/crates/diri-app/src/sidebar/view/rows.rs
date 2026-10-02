@@ -2,7 +2,9 @@
 //!
 //! The sidebar re-renders whenever any of its rows or chrome changes. Before
 //! this, it rebuilt, laid out and painted every row each time, and a working
-//! row's 8 Hz activity mark alone did that constantly. Each row is now a cached
+//! row's 8 Hz activity mark alone did that constantly. (Working marks no
+//! longer notify at all: the window swaps their pre-rasterized frames in the
+//! drawn scene, see `diri_ui::FrameLoop`.) Each row is now a cached
 //! view (`SessionRowView`) that renders from a [`SessionRowProps`] snapshot
 //! the sidebar computes while it renders. A row re-renders only when:
 //!
@@ -41,8 +43,6 @@ pub(in crate::sidebar) struct SessionRowProps {
     pub(super) drag_selection: Option<Vec<SessionId>>,
     pub(super) migrating: bool,
     pub(super) activity_state: StatusState,
-    /// The activity mark's frame, or zero for a mark that does not animate.
-    pub(super) activity_frame: usize,
     /// Terminal progress, when the session reports any.
     pub(super) progress: Option<crate::progress_mark::ProgressFace>,
     pub(super) marked: bool,
@@ -127,11 +127,6 @@ impl Sidebar {
             drag_selection,
             migrating,
             activity_state,
-            activity_frame: if activity_state == StatusState::Working {
-                self.activity_frame
-            } else {
-                0
-            },
             progress: crate::progress_mark::face(session, self.activity_frame, reduce_motion),
             marked: self.ui.delegation_mark.as_ref() == Some(id),
             hovered: self.ui.hovered_session.as_ref() == Some(id),
@@ -175,9 +170,9 @@ impl Sidebar {
             cx.reduce_motion(),
             window,
         );
-        // An indeterminate progress sweep rides the working marks' tick.
-        let working = props.activity_state == StatusState::Working
-            || props.progress.is_some_and(|face| face.animates());
+        // An indeterminate progress sweep rides the sidebar's tick. A working
+        // mark needs no tick: the window advances its frames by itself.
+        let working = props.progress.is_some_and(|face| face.animates());
         self.working_row_rendered |= working;
         // A row growing in or collapsing out renders every frame of its
         // motion, like a settling title.
@@ -220,9 +215,10 @@ impl Sidebar {
         .into_any_element()
     }
 
-    /// Advances working marks. While session rows are on screen, only the
-    /// working rows are notified: the sidebar re-renders as their ancestor,
-    /// hands them their next frame, and reuses every other row. The
+    /// Advances indeterminate progress sweeps. While session rows are on
+    /// screen, only the sweeping rows are notified: the sidebar re-renders as
+    /// their ancestor, hands them their next frame, and reuses every other
+    /// row. The
     /// horizontal strip, painted by `RootView`, still needs the sidebar
     /// notified; its tabs take the new frame through their props, so the
     /// notify does not stale them.

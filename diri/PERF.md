@@ -2822,3 +2822,36 @@ cargo test -p diri-engine --features latency-trace --test keystroke_latency \
 `attach::a_held_session_publishes_an_echo_without_waiting_out_the_batch`
 guards the regression (median 9.3 ms before, sub-millisecond after, asserts
 ≤ 5 ms).
+
+## Working marks without rendering — 2026-10-02
+
+The installed 0.9.1 app sat at 15–23% CPU with two agents working and nothing
+else moving. An Instruments trace showed about 23 frames a second at about
+5 ms each, and the sidebar re-rendering in about 14 of them: every 125 ms
+working-mark step notified the working rows, a notify marks every ancestor
+dirty, and the sidebar re-ran taffy layout over its whole tree to swap one
+14px sprite.
+
+The eight working frames are now rasterized once and swapped inside the
+already-drawn scene (`Window::paint_animated_svg` in the vendored GPUI, see
+`vendor/gpui/DIRI_PATCHES.md`). On an idle display refresh the window only
+checks the clock; on a step boundary it rewrites the marks' tiles and
+presents the same scene again. Nothing renders, lays out or paints, and the
+sidebar's 8 Hz tick now runs only for indeterminate progress sweeps.
+
+| per working-mark step, 51 sessions / 4 working, release | main thread |
+| --- | ---: |
+| before: sidebar render (cached rows reused) | 1.10 ms |
+| after: tile swap in the drawn scene | 0.0001 ms |
+
+Presenting the frame (GPU encode) is the same in both. Reproduce from `diri/`:
+
+```sh
+cargo test --release -p diri-app --bin diri -- --ignored --nocapture \
+    --test-threads=1 working_mark_step_cost
+```
+
+`swapped_working_mark_frames_paint_like_a_full_render` checks the swapped
+frames pixel for pixel against full renders under headless Metal, and
+`working_marks_advance_without_rendering_anything` asserts that a step
+renders no view.

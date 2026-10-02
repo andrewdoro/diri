@@ -1,13 +1,15 @@
-//! Callers supply a shared animation frame and own its repaint cadence.
-//! No task, clock, entity invalidation, or frame request belongs to this mark.
+//! The working mark loops through pre-rasterized frames that the window
+//! advances on its own (`diri_ui::FrameLoop`). No task, entity invalidation,
+//! or frame request belongs to this mark, and no caller re-renders for it.
 
 use diri_proto::{
     AgentKind as ProtoAgentKind, AttentionLevel as ProtoAttentionLevel, SessionRecord,
 };
-use diri_ui::{AgentKind, Icon, IconName, Ink, SemanticColors, StatusState};
-use gpui::{AnyElement, IntoElement, Role, div, prelude::*, px, svg};
+use diri_ui::{AgentKind, FrameLoop, Icon, IconName, Ink, SemanticColors, StatusState};
+use gpui::{AnyElement, IntoElement, Role, div, prelude::*, px};
+use std::time::Duration;
 
-const FRAMES: [&str; 8] = [
+static FRAMES: [&str; 8] = [
     "icons/working-0.svg",
     "icons/working-1.svg",
     "icons/working-2.svg",
@@ -18,19 +20,10 @@ const FRAMES: [&str; 8] = [
     "icons/working-7.svg",
 ];
 
-pub(crate) fn frame_at(millis: f64, reduce_motion: bool) -> usize {
-    if reduce_motion {
-        0
-    } else {
-        (millis.max(0.0) / 125.0) as usize % FRAMES.len()
-    }
-}
+/// One working-mark frame lasts this long: eight frames, one lap a second.
+const FRAME_INTERVAL: Duration = Duration::from_millis(125);
 
-pub(crate) fn activity_mark(
-    state: StatusState,
-    frame: usize,
-    colors: SemanticColors,
-) -> AnyElement {
+pub(crate) fn activity_mark(state: StatusState, colors: SemanticColors) -> AnyElement {
     // Match the project badge column; the mark itself stays optically smaller.
     let slot = div()
         .size(px(18.0))
@@ -40,12 +33,12 @@ pub(crate) fn activity_mark(
         .justify_center();
     match state {
         StatusState::Working => slot
-            .child(
-                svg()
-                    .path(FRAMES[frame % FRAMES.len()])
-                    .size(px(14.0))
-                    .text_color(colors.primary),
-            )
+            .child(FrameLoop::new(
+                &FRAMES,
+                FRAME_INTERVAL,
+                14.0,
+                colors.primary,
+            ))
             .into_any_element(),
         StatusState::NeedsInput { destructive } => slot
             .child(Icon::new(
@@ -167,17 +160,5 @@ mod tests {
                 "{path} must follow the theme color"
             );
         }
-    }
-
-    #[test]
-    fn fleet_shares_eight_bounded_frames_and_reduce_motion_is_static() {
-        for millis in [0.0, 124.0, 125.0, 999.0, 1000.0, 1750000000000.0] {
-            let frames = [frame_at(millis, false); 30];
-            assert!(frames.iter().all(|frame| *frame == frames[0] && *frame < 8));
-            assert_eq!(frame_at(millis, true), 0);
-        }
-        assert_eq!(frame_at(124.0, false), 0);
-        assert_eq!(frame_at(125.0, false), 1);
-        assert_eq!(frame_at(1000.0, false), 0);
     }
 }

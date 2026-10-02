@@ -25,7 +25,7 @@ use crate::quick_open::{
     self, DirectoryIndex, QuickOpenItem, QuickOpenSnapshot, RANK_DEBOUNCE, RESULT_LIMIT,
     RankedFolder,
 };
-use crate::session_presentation::{activity_mark, frame_at, status_state, ui_agent_kind};
+use crate::session_presentation::{activity_mark, status_state, ui_agent_kind};
 use crate::store::{SessionStore, SpawnOptions, StoreRuntime};
 #[cfg(test)]
 use diri_proto::AgentKind;
@@ -160,7 +160,6 @@ pub struct NavigationOverlay {
     last_theme_id: String,
     theme_matches: Vec<TermTheme>,
     page_error: Option<String>,
-    activity_frame: usize,
     /// Separate slots: the disk-cache load and the filesystem scan both start
     /// at launch, and neither may cancel the other by sharing a `Task` slot.
     cache_task: Option<Task<()>>,
@@ -292,7 +291,6 @@ impl NavigationOverlay {
             last_theme_id: String::new(),
             theme_matches: Vec::new(),
             page_error: None,
-            activity_frame: 0,
             cache_task: None,
             scan_task: None,
             rank_task: None,
@@ -352,7 +350,6 @@ impl NavigationOverlay {
             last_theme_id: String::new(),
             theme_matches: Vec::new(),
             page_error: None,
-            activity_frame: 0,
             cache_task: None,
             scan_task: None,
             rank_task: None,
@@ -1941,14 +1938,13 @@ impl NavigationOverlay {
         let identity =
             StatusGlyph::new(ui_agent_kind(session.effective_kind()), state, 16.0, colors)
                 .rendered_mark();
-        let frame = self.activity_frame;
         let trailing = session_shortcut(index)
             .map(SharedString::from)
             .into_iter()
             .collect();
         palette_row(
             highlighted_label(session.title, &ranked.title_matches),
-            activity_mark(state, frame, colors),
+            activity_mark(state, colors),
             trailing,
             index == self.highlight,
             index,
@@ -2114,7 +2110,6 @@ impl Focusable for NavigationOverlay {
 
 impl Render for NavigationOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.activity_frame = frame_at(diri_ui::wall_clock_seconds() * 1000.0, cx.reduce_motion());
         let layout = OverlayLayout::command_palette(window.viewport_size());
         self.main_window = Some(window.window_handle());
         self.main_viewport = window.viewport_size();

@@ -120,7 +120,6 @@ pub(crate) fn progress_mark(
 /// and sleep, still win: they are what the user has to act on.
 pub(crate) fn leading_mark(
     state: StatusState,
-    frame: usize,
     progress: Option<ProgressFace>,
     colors: SemanticColors,
 ) -> AnyElement {
@@ -131,7 +130,7 @@ pub(crate) fn leading_mark(
     {
         return progress_mark(face, colors, None);
     }
-    crate::session_presentation::activity_mark(state, frame, colors)
+    crate::session_presentation::activity_mark(state, colors)
 }
 
 /// A point `turn` of the way clockwise around a circle from 12 o'clock.

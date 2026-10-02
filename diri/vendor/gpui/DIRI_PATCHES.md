@@ -239,3 +239,40 @@ Draw order, and therefore pixels, are unchanged. Test:
 `the_sprite_sort_matches_a_stable_sort_by_key` in
 `crates/diri-app/src/gpui_view_cache_tests.rs`. Re-apply on a GPUI bump by
 replacing the three sprite `sort_by_key` calls in `Scene::finish`.
+
+## Frame-swapped sprite animation (`Window::paint_animated_svg`)
+
+A looping mark (the sidebar's working spinner: eight SVG frames, one per
+125 ms) needed a notify per frame, and a notify marks every ancestor view
+dirty. Even with cached rows, each step re-rendered the sidebar and re-ran
+taffy layout over its whole tree: about 14 sidebar renders a second and
+15-20% of a core in the installed app with two agents working.
+
+`Window::paint_animated_svg(bounds, frames, interval, color, cx)` rasterizes
+every frame once, under its own atlas key (`<path>#diri-animated`, so a
+static use of the same SVG never animates), and paints the current one. The
+window keeps a registry from each frame's tile to its animation
+(`src/window/sprite_animation.rs`). After every draw it records which
+monochrome sprites in the finished scene carry an animated tile and brings
+them to the current step. Cached views replay whatever frame they last
+painted; the registry recognizes any frame's tile, so replayed marks keep
+animating. When nothing is dirty, the request-frame callback calls
+`Window::advance_sprite_animations`: on a step boundary it rewrites those
+sprites' tiles in the rendered scene and presents it again, with no render,
+layout, prepaint or paint. Frames may land in different atlas textures; the
+scene groups sprites into per-texture batches only when it is presented.
+The clock is the executor's (`now()`), so tests drive it with
+`advance_clock`. On GPU device recovery (`force_render`) the registry is
+cleared with the atlas and refilled by the redraw.
+
+Test support: `Window::animated_sprite_tiles`,
+`Window::refresh_sprite_animations_for_test` and
+`App::set_asset_source_for_test` (a test app starts with no assets, so no SVG
+reaches the scene). Tests: `working_marks_advance_without_rendering_anything`
+in `crates/diri-app/src/sidebar/view.rs`;
+`swapped_working_mark_frames_paint_like_a_full_render` (headless Metal pixels)
+and `working_mark_step_cost` in `crates/diri-app/src/root.rs`. Files:
+`src/window.rs` (DIRI PATCH (sprite animation)), `src/window/sprite_animation.rs`,
+`src/svg_renderer.rs` (`load_asset`), `src/app.rs`. Re-apply on a GPUI bump by
+re-adding the window field, the post-swap `collect` in `Window::draw`, the
+idle branch of the request-frame callback, and `paint_animated_svg`.

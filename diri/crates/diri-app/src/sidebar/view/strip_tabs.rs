@@ -39,8 +39,6 @@ pub(in crate::sidebar) struct StripTabProps {
     /// ⌘1–⌘8, then ⌘9 for the last tab.
     pub(super) rank: Option<usize>,
     pub(super) state: StatusState,
-    /// The activity mark's frame, or zero for a mark that does not animate.
-    pub(super) activity_frame: usize,
     /// Terminal progress, when the session reports any.
     pub(super) progress: Option<crate::progress_mark::ProgressFace>,
     pub(super) colors: SemanticColors,
@@ -136,11 +134,6 @@ impl Sidebar {
             active,
             rank,
             state,
-            activity_frame: if state == StatusState::Working {
-                self.activity_frame
-            } else {
-                0
-            },
             progress: crate::progress_mark::face(session, self.activity_frame, reduce_motion),
             colors,
             custom_ordering,
@@ -170,9 +163,9 @@ impl Sidebar {
         props: StripTabProps,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // An indeterminate progress sweep rides the working marks' tick.
-        self.working_row_rendered |= props.state == StatusState::Working
-            || props.progress.is_some_and(|face| face.animates());
+        // An indeterminate progress sweep rides the sidebar's tick. A working
+        // mark needs no tick: the window advances its frames by itself.
+        self.working_row_rendered |= props.progress.is_some_and(|face| face.animates());
         if props.shift.is_none() {
             self.tab_shift.applied.borrow_mut().remove(&props.id);
         }

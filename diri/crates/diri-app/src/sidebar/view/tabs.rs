@@ -570,7 +570,7 @@ impl Sidebar {
                 })
                 .role(Role::Image)
                 .aria_label(state.label())
-                .child(activity_mark(state, props.activity_frame, colors))
+                .child(activity_mark(state, colors))
                 .into_any_element(),
         };
         let mark = crate::held_hints::in_leading_slot(
@@ -888,7 +888,7 @@ impl Sidebar {
         // only painted surface, so the per-frame work `Sidebar::render`
         // does has to happen here: settle workspace navigation (a pending
         // project-agent open, a created or removed workspace) and keep the
-        // working marks' 8 Hz tick alive only while one is on screen.
+        // progress sweeps' 8 Hz tick alive only while one is on screen.
         self.reconcile_workspace_navigation(cx);
         self.working_row_rendered = false;
         // The strip stands in for the panel; its marks advance through a
@@ -1084,7 +1084,11 @@ mod tests {
         cx: &mut TestAppContext,
         reduce_motion: bool,
     ) -> (Entity<Sidebar>, &mut VisualTestContext) {
-        cx.update(|cx| cx.set_reduce_motion(reduce_motion));
+        cx.update(|cx| {
+            cx.set_reduce_motion(reduce_motion);
+            // Real icons, so working marks reach the scene as sprites.
+            cx.set_asset_source_for_test(diri_ui::IconAssets);
+        });
         let (view, cx) = cx.add_window_view(move |_, cx| {
             let sidebar = cx.new(|cx| {
                 let mut sidebar = Sidebar::new(None, true, PreviewScenario::Typical, cx);
@@ -1216,11 +1220,12 @@ mod tests {
         assert!(!working.is_empty(), "the preview strip has a working tab");
         assert_eq!(tab_renders(&sidebar, cx).len(), order.len());
 
-        // A working mark's tick re-renders the working tabs alone.
+        // A working mark's frame step re-renders no tab.
         let before = tab_renders(&sidebar, cx);
         cx.executor().advance_clock(Duration::from_millis(125));
         cx.run_until_parked();
-        assert_eq!(rerendered(&before, &tab_renders(&sidebar, cx)), working);
+        assert!(cx.update(|window, cx| window.advance_sprite_animations(cx)));
+        assert_eq!(rerendered(&before, &tab_renders(&sidebar, cx)), []);
 
         // A store publication that changes nothing re-renders no tab.
         let before = tab_renders(&sidebar, cx);
@@ -1479,6 +1484,13 @@ mod tests {
         );
     }
 
+    /// Advances the window's animated sprites one 125 ms step.
+    fn step_marks(cx: &mut VisualTestContext) -> bool {
+        cx.executor().advance_clock(Duration::from_millis(125));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.advance_sprite_animations(cx))
+    }
+
     #[gpui::test]
     fn horizontal_strip_keeps_the_working_mark_ticking_while_the_panel_is_hidden(
         cx: &mut TestAppContext,
@@ -1488,19 +1500,16 @@ mod tests {
         cx.run_until_parked();
         sidebar.read_with(cx, |sidebar, _| {
             assert!(!sidebar.is_visible(), "the panel is hidden");
-            assert!(sidebar.working_row_rendered);
-            assert!(sidebar.activity_tick.is_some());
+            assert!(sidebar.activity_tick.is_none(), "marks need no tick");
         });
+        assert!(
+            !cx.update(|window, _| window.animated_sprite_tiles())
+                .is_empty()
+        );
         for _ in 0..3 {
-            let frame = sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame);
-            cx.executor().advance_clock(Duration::from_millis(125));
-            cx.run_until_parked();
-            assert_eq!(
-                sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame),
-                (frame + 1) % 8,
-            );
+            assert!(step_marks(cx));
         }
-        // Once nothing works, the strip lets the wake lapse.
+        // Once nothing works, nothing is left to advance.
         sidebar.update(cx, |sidebar, cx| {
             let mut store = sidebar.store.write().unwrap();
             let sessions: Vec<_> = store.sessions().values().cloned().collect();
@@ -1513,8 +1522,11 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_millis(125));
-        cx.run_until_parked();
+        assert!(
+            cx.update(|window, _| window.animated_sprite_tiles())
+                .is_empty()
+        );
+        assert!(!step_marks(cx));
         sidebar.read_with(cx, |sidebar, _| {
             assert!(!sidebar.working_row_rendered);
             assert!(sidebar.activity_tick.is_none());
@@ -1523,8 +1535,7 @@ mod tests {
 
     /// A floating menu is its own window and reads the sidebar while it
     /// draws, so GPUI comes to regard that window as the sidebar's. Closing
-    /// it leaves the sidebar with no window until the main one draws again,
-    /// and a tick landing in that gap must not strand the working marks.
+    /// it must not strand the working marks in the main window.
     #[gpui::test]
     fn working_mark_keeps_ticking_after_a_floating_window_closes(cx: &mut TestAppContext) {
         struct Panel {
@@ -1550,13 +1561,7 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         for _ in 0..3 {
-            let frame = sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame);
-            cx.executor().advance_clock(Duration::from_millis(125));
-            cx.run_until_parked();
-            assert_eq!(
-                sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame),
-                (frame + 1) % 8,
-            );
+            assert!(step_marks(cx));
         }
     }
 

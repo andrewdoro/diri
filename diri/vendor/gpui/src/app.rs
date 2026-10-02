@@ -1897,6 +1897,15 @@ impl App {
         &self.asset_source
     }
 
+    /// DIRI PATCH (sprite animation): swaps the asset source of a test app,
+    /// which starts with none, so SVGs rasterize and reach the scene.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_asset_source_for_test(&mut self, asset_source: impl AssetSource) {
+        let asset_source: Arc<dyn AssetSource> = Arc::new(asset_source);
+        self.svg_renderer = SvgRenderer::new(asset_source.clone());
+        self.asset_source = asset_source;
+    }
+
     /// Accessor for the text system.
     pub fn text_system(&self) -> &Arc<TextSystem> {
         &self.text_system

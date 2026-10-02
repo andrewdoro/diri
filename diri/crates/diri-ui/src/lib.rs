@@ -8,6 +8,7 @@
 
 mod brand;
 mod components;
+mod frame_loop;
 pub mod hover_trail;
 mod icon;
 pub mod motion;
@@ -25,6 +26,7 @@ pub use components::{
     AlertChip, FloatingSurface, GlassMenuRow, GlassPill, HairlineDivider, HoverMarquee,
     LoadingIndicator, RowFill, StateChip,
 };
+pub use frame_loop::FrameLoop;
 pub use hover_trail::HoverTrail;
 pub use icon::{Icon, IconAssets, IconName, IconSize, icon_from_system_name};
 pub use scroller::{

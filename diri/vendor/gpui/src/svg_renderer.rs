@@ -194,6 +194,11 @@ impl SvgRenderer {
         })
     }
 
+    /// DIRI PATCH (sprite animation): an SVG's bytes from the asset source.
+    pub(crate) fn load_asset(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        self.asset_source.load(path)
+    }
+
     pub(crate) fn render_alpha_mask(
         &self,
         params: &RenderSvgParams,

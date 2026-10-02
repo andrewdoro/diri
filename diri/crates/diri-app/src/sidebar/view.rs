@@ -3619,7 +3619,6 @@ impl Sidebar {
             ref drag_selection,
             migrating,
             activity_state,
-            activity_frame,
             progress,
             marked,
             hovered,
@@ -3736,7 +3735,6 @@ impl Sidebar {
                 .children(indent_rails(row, colors))
                 .child(crate::progress_mark::leading_mark(
                     activity_state,
-                    activity_frame,
                     progress,
                     colors,
                 ))
@@ -3942,7 +3940,6 @@ impl Sidebar {
             // Hover keeps activity visible and swaps identity for the close action.
             .child(crate::progress_mark::leading_mark(
                 activity_state,
-                activity_frame,
                 progress,
                 colors,
             ))
@@ -6848,8 +6845,9 @@ impl Sidebar {
         )
     }
 
-    /// One bounded 8 Hz wake for the whole sidebar, only while working marks
-    /// are shown. A one-shot is rearmed by painting, so an unmounted sidebar
+    /// One bounded 8 Hz wake for the whole sidebar, only while an
+    /// indeterminate progress sweep is shown. Working marks need none: the
+    /// window advances their frames without rendering (`diri_ui::FrameLoop`). A one-shot is rearmed by painting, so an unmounted sidebar
     /// cannot keep a background loop alive.
     ///
     /// Visibility/occlusion is GPUI's job (display-link stops when the
@@ -10061,31 +10059,52 @@ mod tests {
         assert_eq!(status_state(session, true), StatusState::Working);
     }
 
+    /// Advances the window's animated sprites one 125 ms step and returns
+    /// the tiles they now show.
+    fn step_working_marks(cx: &mut VisualTestContext) -> (bool, Vec<gpui::AtlasTile>) {
+        cx.executor().advance_clock(Duration::from_millis(125));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            (
+                window.advance_sprite_animations(cx),
+                window.animated_sprite_tiles(),
+            )
+        })
+    }
+
     #[gpui::test]
-    fn working_sidebar_repaints_without_pointer_input(cx: &mut TestAppContext) {
+    fn working_marks_advance_without_rendering_anything(cx: &mut TestAppContext) {
         let (sidebar, _, cx) = drag_harness(cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        let (working, listed) = sidebar.read_with(cx, |sidebar, _| {
-            (sidebar.animated_rows.len(), sidebar.session_row_views.len())
-        });
-        assert!(working > 0, "the fixture must show a working row");
-        assert!(working < listed, "the fixture must show an idle row");
+        assert!(
+            sidebar.read_with(cx, |sidebar, _| sidebar.activity_tick.is_none()),
+            "working marks need no sidebar tick"
+        );
+        let mut tiles = cx.update(|window, _| window.animated_sprite_tiles());
+        assert!(!tiles.is_empty(), "the fixture must show a working row");
         render_probe::take();
-        // No mouse movement or store events: the working mark must advance
-        // itself, re-rendering the working rows and reusing every other row.
+        // No mouse movement or store events: the window swaps the marks'
+        // frames in the drawn scene, and no view renders for it.
         for _ in 0..3 {
-            let frame = sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame);
-            cx.executor().advance_clock(Duration::from_millis(125));
-            cx.run_until_parked();
-            assert_eq!(
-                sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame),
-                (frame + 1) % 8,
-            );
+            let (advanced, next) = step_working_marks(cx);
+            assert!(advanced, "working animation froze without pointer input");
+            assert_eq!(next.len(), tiles.len());
+            assert_ne!(next, tiles, "every working mark shows its next frame");
+            tiles = next;
             let (rows, renders, _) = render_probe::take();
-            assert_eq!(renders, 1, "working animation froze without pointer input");
-            assert_eq!(rows, working, "a tick re-renders exactly the working rows");
+            assert_eq!((rows, renders), (0, 0), "a frame step renders nothing");
         }
+        // Within a step there is nothing new to present.
+        assert!(!cx.update(|window, cx| window.advance_sprite_animations(cx)));
+        // A redraw that reuses the cached rows keeps their marks animating.
+        sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx));
+        cx.run_until_parked();
+        assert_eq!(render_probe::take().0, 0, "the redraw reuses every row");
+        assert_eq!(cx.update(|window, _| window.animated_sprite_tiles()), tiles);
+        let (advanced, next) = step_working_marks(cx);
+        assert!(advanced);
+        assert_ne!(next, tiles);
     }
 
     /// Held-⌘ hints fade in and out on cached session rows: the fade reaches
@@ -10194,19 +10213,15 @@ mod tests {
 
     #[gpui::test]
     fn working_sidebar_keeps_animating_when_the_window_is_unfocused(cx: &mut TestAppContext) {
-        let (sidebar, _, cx) = drag_harness(cx);
+        let (_sidebar, _, cx) = drag_harness(cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         cx.deactivate_window();
         cx.run_until_parked();
         for _ in 0..3 {
-            let frame = sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame);
-            cx.executor().advance_clock(Duration::from_millis(125));
-            cx.run_until_parked();
-            assert_eq!(
-                sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame),
-                (frame + 1) % 8,
-            );
+            let (advanced, tiles) = step_working_marks(cx);
+            assert!(advanced);
+            assert!(!tiles.is_empty());
         }
     }
 
@@ -10231,29 +10246,20 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sidebar_activity_stops_when_hidden_or_motion_is_reduced(cx: &mut TestAppContext) {
+    fn reduced_motion_paints_still_working_marks(cx: &mut TestAppContext) {
         let (sidebar, _, cx) = drag_harness(cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.activity_tick.is_some()));
-        sidebar.update(cx, |sidebar, cx| sidebar.conceal(cx));
-        cx.run_until_parked();
-        let frame = sidebar.read_with(cx, |sidebar, _| sidebar.activity_frame);
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-        sidebar.read_with(cx, |sidebar, _| {
-            assert!(sidebar.activity_tick.is_none());
-            assert_eq!(sidebar.activity_frame, frame);
-        });
-        sidebar.update(cx, |sidebar, cx| sidebar.reveal(cx));
-        cx.run_until_parked();
-        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.activity_tick.is_some()));
+        let live = |cx: &mut VisualTestContext| {
+            !cx.update(|window, _| window.animated_sprite_tiles())
+                .is_empty()
+        };
+        assert!(live(cx));
         cx.update(|_, cx| cx.set_reduce_motion(true));
         cx.run_until_parked();
-        sidebar.read_with(cx, |sidebar, _| {
-            assert!(sidebar.activity_tick.is_none());
-            assert_eq!(sidebar.activity_frame, 0);
-        });
+        assert!(!live(cx), "reduced motion paints a still mark");
+        assert!(!step_working_marks(cx).0);
+        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.activity_tick.is_none()));
     }
 
     #[gpui::test]
@@ -10702,6 +10708,8 @@ mod tests {
         &mut VisualTestContext,
     ) {
         let handoffs: Rc<RefCell<Vec<HandoffProposal>>> = Rc::default();
+        // Real icons, so working marks reach the scene as sprites.
+        cx.update(|cx| cx.set_asset_source_for_test(diri_ui::IconAssets));
         let (view, cx) = cx.add_window_view({
             let handoffs = Rc::clone(&handoffs);
             move |_, cx| {

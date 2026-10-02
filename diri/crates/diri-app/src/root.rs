@@ -6241,6 +6241,145 @@ mod tests {
     /// ticks, a `window.refresh()` that rebuilds everything at the same mark
     /// frame must match pixel for pixel. Eleven ticks leave the marks mid-cycle,
     /// so a mark that failed to advance would differ too.
+    /// A 51-session sidebar with four working rows, drawn by headless Metal.
+    #[cfg(target_os = "macos")]
+    fn working_fleet_window() -> (
+        gpui::HeadlessAppContext,
+        gpui::AnyWindowHandle,
+        Entity<crate::sidebar::Sidebar>,
+    ) {
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        let services = test_services();
+        services
+            .store
+            .store
+            .write()
+            .unwrap()
+            .hydrate(SidebarPreviewFixture::bench_fleet(51, 4).list);
+        services
+            .store
+            .store
+            .write()
+            .unwrap()
+            .update_preferences(|prefs| prefs.sidebar_visible = true)
+            .unwrap();
+        let window = cx
+            .open_window(size(px(1600.0), px(1000.0)), |window, cx| {
+                cx.new(|cx| RootView::new(services, false, PreviewScenario::Empty, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let window: gpui::AnyWindowHandle = window.into();
+        let sidebar = cx
+            .update_window(window, |root, _, cx| {
+                root.downcast::<RootView>()
+                    .unwrap()
+                    .read(cx)
+                    .sidebar
+                    .clone()
+            })
+            .unwrap();
+        (cx, window, sidebar)
+    }
+
+    /// A working mark advanced by swapping its sprite's tile in the drawn
+    /// scene paints exactly what a full render at the same frame paints.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal pixel comparison; run explicitly on macOS"]
+    fn swapped_working_mark_frames_paint_like_a_full_render() {
+        let (mut cx, window, sidebar) = working_fleet_window();
+        let tiles = |cx: &mut gpui::HeadlessAppContext| {
+            cx.update_window(window, |_, window, _| window.animated_sprite_tiles())
+                .unwrap()
+        };
+        assert!(!tiles(&mut cx).is_empty(), "the fleet shows working marks");
+        for step in 0..3 {
+            cx.advance_clock(Duration::from_millis(125));
+            let advanced = cx
+                .update_window(window, |_, window, cx| window.advance_sprite_animations(cx))
+                .unwrap();
+            assert!(advanced, "every 125 ms brings a new frame");
+            let shown = tiles(&mut cx);
+            let swapped = cx.capture_screenshot(window).unwrap();
+            cx.update_window(window, |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+            assert_eq!(tiles(&mut cx), shown, "a full render shows the same frame");
+            let fresh = cx.capture_screenshot(window).unwrap();
+            if let Ok(dir) = std::env::var("DIRI_VISUAL_OUTPUT_DIR") {
+                let dir = std::path::PathBuf::from(dir);
+                swapped
+                    .save(dir.join(format!("mark-swapped-{step}.png")))
+                    .unwrap();
+                fresh
+                    .save(dir.join(format!("mark-fresh-{step}.png")))
+                    .unwrap();
+            }
+            // The sidebar column only: with no daemon behind the test
+            // services, a full render can also bring in the "Connecting"
+            // toast once its wall-clock grace has passed.
+            let sidebar_column = swapped.width() * 15 / 100;
+            let differing = swapped
+                .enumerate_pixels()
+                .filter(|(x, y, pixel)| *x < sidebar_column && fresh.get_pixel(*x, *y) != *pixel)
+                .count();
+            assert_eq!(differing, 0, "a swapped frame painted differently");
+        }
+        drop(sidebar);
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// What one working-mark step costs the main thread: a sidebar render
+    /// (what every step did before) against a tile swap in the drawn scene.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "benchmark; run explicitly on macOS with --nocapture"]
+    fn working_mark_step_cost() {
+        let (mut cx, window, sidebar) = working_fleet_window();
+        let mut render = Vec::new();
+        for _ in 0..200 {
+            let started = Instant::now();
+            cx.update(|cx| sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx)));
+            cx.update_window(window, |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            render.push(started.elapsed());
+        }
+        let mut swap = Vec::new();
+        for _ in 0..200 {
+            let started = Instant::now();
+            cx.update_window(window, |_, window, cx| {
+                // Forget the shown step, so each pass rewrites every mark.
+                window.refresh_sprite_animations_for_test();
+                window.advance_sprite_animations(cx)
+            })
+            .unwrap();
+            swap.push(started.elapsed());
+        }
+        let median = |samples: &mut Vec<Duration>| {
+            samples.sort();
+            samples[samples.len() / 2].as_secs_f64() * 1e6
+        };
+        eprintln!(
+            "working mark step: sidebar render {:.0} us, sprite swap {:.1} us",
+            median(&mut render),
+            median(&mut swap),
+        );
+        drop(sidebar);
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "headless Metal pixel comparison; run explicitly on macOS"]
