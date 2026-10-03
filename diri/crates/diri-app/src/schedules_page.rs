@@ -134,7 +134,12 @@ impl SchedulesPage {
         runtime: Arc<Runtime>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut events = store_runtime.client().events();
+        // `events()` spawns its subscription onto Tokio when the client is
+        // already connected, which an Engine that is up before the window is.
+        let mut events = {
+            let _runtime = runtime.enter();
+            store_runtime.client().events()
+        };
         let events_task = cx.spawn(async move |this, cx| {
             loop {
                 match events.recv().await {
