@@ -3891,15 +3891,10 @@ impl TerminalPane {
             cx.propagate();
             return;
         }
-        let Some(term_event) = terminal_key_event(event) else {
+        let option = OptionKey::for_layout(cx.keyboard_layout().id());
+        let Some((term_event, modifiers)) = terminal_key_event(event, option) else {
             cx.propagate();
             return;
-        };
-        let modifiers = TermModifiers {
-            shift: event.keystroke.modifiers.shift,
-            ctrl: event.keystroke.modifiers.control,
-            alt: event.keystroke.modifiers.alt,
-            cmd: event.keystroke.modifiers.platform,
         };
         let bytes = match diri_term::keys::encode_interactive_action(
             &term_event,
@@ -5725,10 +5720,70 @@ fn terminal_command_navigation(key: &gpui::Keystroke) -> Option<&'static [u8]> {
     }
 }
 
-fn terminal_key_event(event: &KeyDownEvent) -> Option<TermKeyEvent> {
+/// What a held Option key means for a character key.
+///
+/// macOS has no Alt key: Option is how many layouts type ordinary ASCII
+/// (German ⌥7 = `|`, ⌥L = `@`, ⌥5 = `[`; French, Swiss, Nordic and Polish
+/// likewise), while US users expect it to be Meta (⌥B = `ESC b`). This follows
+/// Ghostty's unset `macos-option-as-alt`: Meta on US layouts, composed text on
+/// every other layout. Named keys (arrows, Backspace, Enter) are Meta either
+/// way, and an Option chord that composes nothing new is Meta either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OptionKey {
+    /// `ESC` + the key's unmodified character, as readline's `M-b`.
+    Meta,
+    /// The character the layout composes, as typed, with no `ESC`.
+    Compose,
+}
+
+impl OptionKey {
+    fn for_layout(layout_id: &str) -> Self {
+        // Off macOS, Alt is a real Alt key; AltGr composition arrives without
+        // the alt modifier.
+        if !cfg!(target_os = "macos") {
+            return Self::Meta;
+        }
+        // Layouts whose Option characters are a novelty (∫, ƒ, ∂) rather than
+        // how ASCII is typed. ABC is the US layout under its newer name.
+        match layout_id {
+            "com.apple.keylayout.US"
+            | "com.apple.keylayout.ABC"
+            | "com.apple.keylayout.USInternational"
+            | "com.apple.keylayout.USInternational-PC" => Self::Meta,
+            _ => Self::Compose,
+        }
+    }
+}
+
+/// The text a Meta chord prefixes with `ESC`: the key itself, not the
+/// character Option would have composed (`ESC b`, never `ESC ∫`).
+fn option_meta_text(keystroke: &gpui::Keystroke) -> String {
+    let key = keystroke.key.as_str();
+    if key == "space" {
+        return " ".to_owned();
+    }
+    // GPUI keeps Shift only for letters (`shift-b`); other shifted keys arrive
+    // already resolved (`&`) with Shift cleared.
+    if keystroke.modifiers.shift && key.len() == 1 && key.chars().all(|c| c.is_ascii_lowercase()) {
+        return key.to_ascii_uppercase();
+    }
+    key.to_owned()
+}
+
+fn terminal_key_event(
+    event: &KeyDownEvent,
+    option: OptionKey,
+) -> Option<(TermKeyEvent, TermModifiers)> {
+    let keystroke = &event.keystroke;
+    let mut modifiers = TermModifiers {
+        shift: keystroke.modifiers.shift,
+        ctrl: keystroke.modifiers.control,
+        alt: keystroke.modifiers.alt,
+        cmd: keystroke.modifiers.platform,
+    };
     #[cfg(target_os = "macos")]
     if let Some(keypad) = crate::macos::terminal_keys::keypad_event(event) {
-        return Some(keypad);
+        return Some((keypad, modifiers));
     }
     let named = match event.keystroke.key.as_str() {
         "up" => Some(NamedKey::ArrowUp),
@@ -5760,18 +5815,42 @@ fn terminal_key_event(event: &KeyDownEvent) -> Option<TermKeyEvent> {
         _ => None,
     };
     if let Some(named) = named {
-        return Some(TermKeyEvent::named(named));
+        return Some((TermKeyEvent::named(named), modifiers));
     }
-    let logical = event.keystroke.key.clone();
-    let text = event
-        .keystroke
+    let logical = keystroke.key.clone();
+    if logical.is_empty() {
+        return None;
+    }
+    let mut text = keystroke
         .key_char
         .clone()
         .unwrap_or_else(|| logical.clone());
-    (!logical.is_empty()).then_some(TermKeyEvent {
-        key: TermKey::Character(logical),
-        text: Some(text),
-    })
+    // GPUI only fills `key_char` for Option chords without Control/Command, so
+    // this is exactly "Option produced a character".
+    if modifiers.alt
+        && !modifiers.ctrl
+        && !modifiers.cmd
+        && let Some(composed) = keystroke.key_char.as_ref()
+    {
+        let meta = option_meta_text(keystroke);
+        let composes =
+            !composed.is_empty() && *composed != meta && composed.chars().all(|c| !c.is_control());
+        if option == OptionKey::Compose && composes {
+            // Option was consumed by the layout: the composed character is
+            // the input, exactly as a text field would insert it.
+            text = composed.clone();
+            modifiers.alt = false;
+        } else {
+            text = meta;
+        }
+    }
+    Some((
+        TermKeyEvent {
+            key: TermKey::Character(logical),
+            text: Some(text),
+        },
+        modifiers,
+    ))
 }
 
 fn ui_agent_kind(kind: &ProtoAgentKind) -> UiAgentKind {
@@ -8421,6 +8500,25 @@ mod tests {
                     "compatibility must not invent observed state"
                 );
             }
+            // #670: the pane consults the active layout. The test platform's
+            // layout is not a US one, so Option composes as on German.
+            let mut keystroke = Keystroke::parse("alt-7").unwrap();
+            keystroke.key_char = Some("|".into());
+            pane.handle_key_down(
+                &KeyDownEvent {
+                    keystroke,
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                window,
+                cx,
+            );
+            let expected: &[u8] = if cfg!(target_os = "macos") {
+                b"|"
+            } else {
+                b"\x1b7"
+            };
+            assert_eq!(input.try_recv().unwrap(), (id.clone(), expected.to_vec()));
         });
     }
 
@@ -10504,7 +10602,7 @@ mod tests {
             is_held: false,
             prefer_character_input: false,
         };
-        let mapped = terminal_key_event(&event).unwrap();
+        let (mapped, _) = terminal_key_event(&event, OptionKey::Meta).unwrap();
         assert_eq!(
             encode_key(&mapped, TermModifiers::default(), TermInputModes::default()),
             b"\x1b[A"
@@ -10522,18 +10620,166 @@ mod tests {
             is_held: false,
             prefer_character_input: false,
         };
-        let mapped = terminal_key_event(&command_backspace).unwrap();
+        let (mapped, modifiers) = terminal_key_event(&command_backspace, OptionKey::Meta).unwrap();
         assert_eq!(
-            encode_key(
-                &mapped,
-                TermModifiers {
-                    cmd: true,
-                    ..TermModifiers::default()
-                },
-                TermInputModes::default()
-            ),
+            modifiers,
+            TermModifiers {
+                cmd: true,
+                ..TermModifiers::default()
+            }
+        );
+        assert_eq!(
+            encode_key(&mapped, modifiers, TermInputModes::default()),
             [0x15]
         );
+    }
+
+    /// A macOS key-down as GPUI delivers it: `key` is the unmodified key
+    /// (Shift already resolved for non-letters), `key_char` what the layout
+    /// typed with Option held.
+    fn option_key(chord: &str, key_char: Option<&str>) -> KeyDownEvent {
+        let mut keystroke = Keystroke::parse(chord).unwrap();
+        keystroke.key_char = key_char.map(str::to_owned);
+        KeyDownEvent {
+            keystroke,
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    fn option_bytes(event: &KeyDownEvent, option: OptionKey) -> Vec<u8> {
+        let (mapped, modifiers) = terminal_key_event(event, option).unwrap();
+        diri_term::keys::encode_interactive_action(
+            &mapped,
+            modifiers,
+            Some(diri_term::keys::KeyboardState::default()),
+            diri_term::keys::KeyAction::Press,
+        )
+        .unwrap()
+    }
+
+    /// #670: German, French, Swiss, Nordic and Polish users type ASCII with
+    /// Option. The composed character must reach the PTY as typed, not as an
+    /// `ESC`-prefixed Meta chord the shell or agent silently drops.
+    #[test]
+    fn option_composed_characters_type_on_non_us_layouts() {
+        let german = OptionKey::Compose;
+        #[cfg(target_os = "macos")]
+        assert_eq!(OptionKey::for_layout("com.apple.keylayout.German"), german);
+        for (chord, composed, expected) in [
+            ("alt-7", "|", b"|".as_slice()),
+            ("alt-l", "@", b"@"),
+            ("alt-5", "[", b"["),
+            ("alt-6", "]", b"]"),
+            ("alt-8", "{", b"{"),
+            ("alt-9", "}", b"}"),
+            // ⌥⇧7: GPUI resolves Shift into the key (`/`) and clears it.
+            ("alt-/", "\\", b"\\"),
+            ("alt-n", "~", b"~"),
+            ("alt-e", "€", "€".as_bytes()),
+        ] {
+            assert_eq!(
+                option_bytes(&option_key(chord, Some(composed)), german),
+                expected,
+                "{chord} -> {composed}"
+            );
+        }
+        // Other non-US layouts, including ones macOS names per variant.
+        #[cfg(target_os = "macos")]
+        for layout in [
+            "com.apple.keylayout.French",
+            "com.apple.keylayout.SwissFrench",
+            "com.apple.keylayout.Norwegian",
+            "com.apple.keylayout.PolishPro",
+            "com.apple.keylayout.ABC-QWERTZ",
+            "com.apple.keylayout.ABC-Extended",
+        ] {
+            assert_eq!(
+                OptionKey::for_layout(layout),
+                OptionKey::Compose,
+                "{layout}"
+            );
+        }
+        // Held keys repeat the composed character, not a Meta chord.
+        let mut held = option_key("alt-7", Some("|"));
+        held.is_held = true;
+        let (mapped, modifiers) = terminal_key_event(&held, german).unwrap();
+        assert_eq!(
+            diri_term::keys::encode_interactive_action(
+                &mapped,
+                modifiers,
+                Some(diri_term::keys::KeyboardState::default()),
+                diri_term::keys::KeyAction::Repeat,
+            )
+            .unwrap(),
+            b"|"
+        );
+    }
+
+    /// An Option chord that composes nothing new, or that is a named key,
+    /// stays Meta on every layout: word motion keeps working in shells.
+    #[test]
+    fn option_stays_meta_where_nothing_is_composed() {
+        for option in [OptionKey::Meta, OptionKey::Compose] {
+            for (chord, key_char, expected) in [
+                ("alt-left", None, b"\x1b[1;3D".as_slice()),
+                ("alt-right", None, b"\x1b[1;3C"),
+                ("alt-backspace", None, b"\x1b\x7f"),
+                ("alt-enter", Some("\n"), b"\x1b\r"),
+                ("alt-escape", None, b"\x1b\x1b"),
+                ("alt-space", Some(" "), b"\x1b "),
+                // A layout whose Option leaves the key unchanged.
+                ("alt-b", Some("b"), b"\x1bb"),
+                // Control claims the chord before Option can compose.
+                ("ctrl-alt-a", None, b"\x01"),
+            ] {
+                assert_eq!(
+                    option_bytes(&option_key(chord, key_char), option),
+                    expected,
+                    "{chord} under {option:?}"
+                );
+            }
+        }
+    }
+
+    /// US layouts keep Option as Meta, and Meta now means the key itself:
+    /// ⌥B is `ESC b` (readline backward-word), never `ESC ∫`.
+    #[test]
+    fn option_is_meta_on_us_layouts() {
+        for layout in [
+            "com.apple.keylayout.US",
+            "com.apple.keylayout.ABC",
+            "com.apple.keylayout.USInternational-PC",
+        ] {
+            let option = OptionKey::for_layout(layout);
+            assert_eq!(option, OptionKey::Meta, "{layout}");
+            for (chord, key_char, expected) in [
+                ("alt-b", "∫", b"\x1bb".as_slice()),
+                ("alt-f", "ƒ", b"\x1bf"),
+                ("alt-d", "∂", b"\x1bd"),
+                ("alt-.", "≥", b"\x1b."),
+                ("alt-shift-b", "ı", b"\x1bB"),
+                // ⌥⇧7 on US: GPUI reports `&` with Shift cleared.
+                ("alt-&", "‡", b"\x1b&"),
+                // Dead keys report their no-dead-key character.
+                ("alt-e", "´", b"\x1be"),
+            ] {
+                assert_eq!(
+                    option_bytes(&option_key(chord, Some(key_char)), option),
+                    expected,
+                    "{layout} {chord}"
+                );
+            }
+        }
+        // Without Option nothing about plain typing changes.
+        for option in [OptionKey::Meta, OptionKey::Compose] {
+            assert_eq!(option_bytes(&option_key("a", Some("a")), option), b"a");
+            assert_eq!(
+                option_bytes(&option_key("shift-a", Some("A")), option),
+                b"A"
+            );
+            assert_eq!(option_bytes(&option_key("ctrl-c", None), option), b"\x03");
+        }
     }
 
     #[test]

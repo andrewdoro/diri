@@ -479,6 +479,22 @@ mod tests {
         assert_eq!(editor.text(), "fun/");
     }
 
+    /// #670: launcher, palette and Find fields insert what Option composed on
+    /// the active layout (German ⌥7 = `|`), as a native text field does.
+    #[test]
+    fn option_composed_characters_insert_as_text() {
+        let mut editor = seeded("ls ");
+        for (chord, composed) in [("alt-7", "|"), ("alt-l", "@"), ("alt-/", "\\")] {
+            let mut keystroke = gpui::Keystroke::parse(chord).unwrap();
+            keystroke.key_char = Some(composed.into());
+            let Some(Edit::Local(edit)) = edit_for(&keystroke) else {
+                panic!("{chord} is text");
+            };
+            assert!(editor.apply(edit));
+        }
+        assert_eq!(editor.text(), "ls |@\\");
+    }
+
     #[test]
     fn arrows_move_the_caret_and_shift_extends_the_selection() {
         let mut editor = seeded("abc");
