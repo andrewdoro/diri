@@ -381,6 +381,10 @@ impl ClientCore {
 pub struct DaemonClient {
     core: Arc<ClientCore>,
     lifecycle: StdMutex<Option<JoinHandle<()>>>,
+    /// The runtime `connect` ran on. Synchronous callers such as GPUI views
+    /// built from a Dock reopen have no current runtime, and a bare
+    /// `tokio::spawn` there panics inside an Objective-C callback, which aborts.
+    runtime: StdMutex<Option<tokio::runtime::Handle>>,
 }
 
 impl Default for DaemonClient {
@@ -433,6 +437,7 @@ impl DaemonClient {
                 retry_tx,
             }),
             lifecycle: StdMutex::new(None),
+            runtime: StdMutex::new(None),
         }
     }
 
@@ -447,7 +452,9 @@ impl DaemonClient {
             return;
         }
         let core = Arc::clone(&self.core);
-        *lifecycle = Some(tokio::spawn(async move { run_lifecycle(core).await }));
+        let runtime = tokio::runtime::Handle::current();
+        *lifecycle = Some(runtime.spawn(async move { run_lifecycle(core).await }));
+        *self.runtime.lock().expect("runtime mutex poisoned") = Some(runtime);
     }
 
     /// Synchronously asks the connect/reconnect loop to close its control
@@ -493,10 +500,18 @@ impl DaemonClient {
         self.core.want_events.store(true, Ordering::Release);
         let receiver = self.core.event_tx.subscribe();
         if self.core.state_tx.borrow().is_connected() {
-            let core = Arc::clone(&self.core);
-            tokio::spawn(async move {
-                let _ = core.subscribe_to_events().await;
-            });
+            // Connected implies `connect` stored its runtime. Without one, the
+            // lifecycle subscribes on its next connection because
+            // `want_events` is set.
+            let runtime = tokio::runtime::Handle::try_current()
+                .ok()
+                .or_else(|| self.runtime.lock().expect("runtime mutex poisoned").clone());
+            if let Some(runtime) = runtime {
+                let core = Arc::clone(&self.core);
+                runtime.spawn(async move {
+                    let _ = core.subscribe_to_events().await;
+                });
+            }
         }
         receiver
     }
@@ -1610,6 +1625,27 @@ mod tests {
             .wait_until_connected(Duration::from_secs(5))
             .await
             .expect("reconnected");
+    }
+
+    /// A Dock reopen builds views on the main thread, outside any runtime.
+    /// `events()` there used to `tokio::spawn` and abort the app (0.9.1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn events_from_a_thread_without_a_runtime_subscribes_on_the_connect_runtime() {
+        let engine = FakeEngine::start(Some("engine-a"), 2);
+        let client = Arc::new(DaemonClient::with_socket_path(&engine.socket));
+        client.connect();
+        client
+            .wait_until_connected(Duration::from_secs(5))
+            .await
+            .expect("connected");
+
+        let off_runtime = Arc::clone(&client);
+        let mut events = std::thread::spawn(move || off_runtime.events())
+            .join()
+            .expect("events() must not panic off the runtime");
+
+        assert_eq!(engine.next_subscription().await.since_seq, None);
+        drain_events(&mut events, 2).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
