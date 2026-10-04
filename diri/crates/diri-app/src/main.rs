@@ -1,9 +1,11 @@
 mod agent_catalog;
 mod agent_setup;
 mod alerts;
+mod api_client;
 mod app_theme;
 mod application_notifications;
 mod clipboard_transfer;
+mod code_editor;
 mod code_intelligence;
 mod code_viewer;
 mod commands;
@@ -18,12 +20,14 @@ pub mod diff;
 mod empty_workbench;
 mod external_drop;
 mod file_links;
+mod file_tree;
 mod floating;
 pub mod fonts;
 pub mod fuzzy;
 #[cfg(test)]
 mod gesture_delivery;
 mod git_review;
+mod git_ui;
 #[cfg(test)]
 mod gpui_view_cache_tests;
 mod haptics;

@@ -54,10 +54,31 @@ pub struct DiffRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffFile {
     pub path: PathBuf,
+    /// What the change did to the file, read from the patch's file header.
+    pub status: DiffFileStatus,
+    /// The source of a rename or copy.
+    pub old_path: Option<PathBuf>,
     pub row_range: Range<usize>,
     pub additions: usize,
     pub deletions: usize,
     pub hunks: Vec<DiffHunk>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffFileStatus {
+    #[default]
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+}
+
+/// The changed words of one row: byte ranges into [`DiffRow::text`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowWords {
+    pub row: usize,
+    pub ranges: Vec<Range<usize>>,
 }
 
 /// A whole, independently applicable unified-diff hunk.
@@ -96,9 +117,22 @@ pub struct DiffSnapshot {
     /// the names are kept: their contents are never read, so the preview stays
     /// bounded while the review can still say which files it left out.
     pub omitted_untracked_paths: Vec<PathBuf>,
+    /// Word-level emphasis for replaced lines, sorted by row. Computed once
+    /// when the patch is parsed, on the loader's thread.
+    pub word_ranges: Vec<RowWords>,
 }
 
 impl DiffSnapshot {
+    /// The changed words of `row`, if it is a replaced line.
+    #[must_use]
+    pub fn words_for(&self, row: usize) -> &[Range<usize>] {
+        let at = self.word_ranges.partition_point(|words| words.row < row);
+        match self.word_ranges.get(at) {
+            Some(words) if words.row == row => &words.ranges,
+            _ => &[],
+        }
+    }
+
     /// The row of the "not shown" notice, which the review expands into the
     /// omitted names. The loader always pushes that notice last.
     #[must_use]
@@ -125,6 +159,13 @@ impl DiffSelection {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.anchor.is_none()
+    }
+
+    /// The row the selection last moved to, which keyboard navigation keeps
+    /// in view.
+    #[must_use]
+    pub fn head(&self) -> Option<usize> {
+        self.head
     }
 
     /// Selects the natural unit at `row`. File/meta rows are not quotable.
@@ -552,6 +593,8 @@ fn parse_unified_diff_bytes(patch: &[u8]) -> DiffSnapshot {
             snapshot.files += 1;
             snapshot.file_diffs.push(DiffFile {
                 path: path.clone(),
+                status: DiffFileStatus::Modified,
+                old_path: None,
                 row_range: row_start..row_start,
                 additions: 0,
                 deletions: 0,
@@ -614,10 +657,11 @@ fn parse_unified_diff_bytes(patch: &[u8]) -> DiffSnapshot {
             snapshot.file_diffs[file_index].hunks[hunk_index]
                 .patch
                 .extend_from_slice(raw_line);
-        } else if current_file.is_some() {
+        } else if let Some(file_index) = current_file {
             // Everything before the first hunk is part of the complete file
             // preamble repeated by every independently applicable hunk.
             file_preamble.extend_from_slice(raw_line);
+            read_file_header(&mut snapshot.file_diffs[file_index], line_bytes);
         }
 
         let row = if line.starts_with("--- ") || line.starts_with("+++ ") {
@@ -678,7 +722,55 @@ fn parse_unified_diff_bytes(patch: &[u8]) -> DiffSnapshot {
 
     finish_hunk(&mut snapshot, &mut current_hunk);
     finish_file(&mut snapshot, &mut current_file);
+    snapshot.word_ranges = crate::git_ui::words::snapshot_words(&snapshot.rows);
     snapshot
+}
+
+/// Reads the extended header lines Git writes between `diff --git` and the
+/// first hunk.
+fn read_file_header(file: &mut DiffFile, line: &[u8]) {
+    if line.starts_with(b"new file mode ") {
+        file.status = DiffFileStatus::Added;
+    } else if line.starts_with(b"deleted file mode ") {
+        file.status = DiffFileStatus::Deleted;
+    } else if let Some(source) = line.strip_prefix(b"rename from ") {
+        file.status = DiffFileStatus::Renamed;
+        file.old_path = Some(header_path(source));
+    } else if let Some(source) = line.strip_prefix(b"copy from ") {
+        file.status = DiffFileStatus::Copied;
+        file.old_path = Some(header_path(source));
+    }
+}
+
+fn header_path(bytes: &[u8]) -> PathBuf {
+    match bytes
+        .strip_prefix(b"\"")
+        .and_then(|rest| rest.strip_suffix(b"\""))
+    {
+        Some(quoted) => path_from_bytes(&unquote_c_style(quoted)),
+        None => path_from_bytes(bytes),
+    }
+}
+
+/// Whether a meta row only repeats Git's file header (`index …`, modes,
+/// similarity). The review shows those facts as the file's status instead.
+#[must_use]
+pub fn is_file_header_meta(text: &str) -> bool {
+    [
+        "index ",
+        "new file mode ",
+        "deleted file mode ",
+        "old mode ",
+        "new mode ",
+        "similarity index ",
+        "dissimilarity index ",
+        "rename from ",
+        "rename to ",
+        "copy from ",
+        "copy to ",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
 }
 
 fn trim_patch_line(mut line: &[u8]) -> &[u8] {
@@ -737,6 +829,72 @@ pub fn snapshot_from_read_diff(result: SessionReadDiffResult) -> DiffSnapshot {
         });
     }
     snapshot
+}
+
+/// Loads what one commit changed, against its first parent (or, for a root
+/// commit, against the empty tree). The snapshot is a read-only Branch-lane
+/// view: commits are history, so nothing in it can be staged or discarded.
+pub fn load_commit_diff(
+    cwd: &Path,
+    oid: &str,
+    first_parent: Option<&str>,
+) -> Result<DiffSnapshot, DiffError> {
+    if !is_object_id(oid) || first_parent.is_some_and(|parent| !is_object_id(parent)) {
+        return Err(DiffError::Git("not a commit id".to_owned()));
+    }
+    let repo_root = discover_repository(cwd)?;
+    let mut patch = Vec::new();
+    let output = match first_parent {
+        Some(parent) => git(
+            &repo_root,
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "--unified=3",
+                "-M",
+                parent,
+                oid,
+                "--",
+            ],
+        )?,
+        None => git(
+            &repo_root,
+            [
+                "diff-tree",
+                "-p",
+                "--root",
+                "--no-commit-id",
+                "--no-ext-diff",
+                "--no-color",
+                "--unified=3",
+                "-M",
+                oid,
+                "--",
+            ],
+        )?,
+    };
+    append_output(&mut patch, output)?;
+    let truncated = patch.len() > MAX_DIFF_BYTES;
+    patch.truncate(MAX_DIFF_BYTES);
+    let mut snapshot = parse_unified_diff_bytes(&patch);
+    snapshot.repo_root = repo_root;
+    snapshot.base_ref = Some(oid.chars().take(7).collect());
+    snapshot.layer = DiffLayer::Branch;
+    snapshot.truncated = truncated;
+    if truncated {
+        snapshot.rows.push(DiffRow {
+            kind: DiffRowKind::Meta,
+            old_line: None,
+            new_line: None,
+            text: "Diff truncated at 16 MB".to_owned(),
+        });
+    }
+    Ok(snapshot)
+}
+
+fn is_object_id(value: &str) -> bool {
+    (4..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1438,6 +1596,87 @@ mod tests {
                     .all(|row| row.text != "Diff truncated at 16 MB")
             );
         }
+    }
+
+    #[test]
+    fn file_headers_become_statuses_and_words_are_marked() {
+        let patch = "diff --git a/new.rs b/new.rs\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1 @@\n+fresh\ndiff --git a/old.rs b/renamed.rs\nsimilarity index 90%\nrename from old.rs\nrename to renamed.rs\n--- a/old.rs\n+++ b/renamed.rs\n@@ -1 +1 @@\n-let x = 1;\n+let x = 2;\ndiff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n";
+        let snapshot = parse_unified_diff(patch);
+        let statuses: Vec<DiffFileStatus> =
+            snapshot.file_diffs.iter().map(|file| file.status).collect();
+        assert_eq!(
+            statuses,
+            [
+                DiffFileStatus::Added,
+                DiffFileStatus::Renamed,
+                DiffFileStatus::Deleted
+            ]
+        );
+        assert_eq!(
+            snapshot.file_diffs[1].old_path.as_deref(),
+            Some(Path::new("old.rs"))
+        );
+        let removed = snapshot
+            .rows
+            .iter()
+            .position(|row| row.text == "let x = 1;")
+            .expect("removed line");
+        let added = removed + 1;
+        assert_eq!(
+            &snapshot.rows[removed].text[snapshot.words_for(removed)[0].clone()],
+            "1"
+        );
+        assert_eq!(
+            &snapshot.rows[added].text[snapshot.words_for(added)[0].clone()],
+            "2"
+        );
+        assert!(snapshot.words_for(0).is_empty());
+        assert!(is_file_header_meta("index 0000000..1111111"));
+        assert!(!is_file_header_meta("\\ No newline at end of file"));
+    }
+
+    #[test]
+    fn loads_a_commit_diff_against_its_first_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        init_with_baseline(root);
+        fs::write(root.join("base.txt"), "base\nchanged\n").unwrap();
+        run(
+            root,
+            &[
+                "-c",
+                "user.name=diri tests",
+                "-c",
+                "user.email=diri@example.invalid",
+                "commit",
+                "--quiet",
+                "-am",
+                "Change",
+            ],
+        );
+        let output = |args: &[&str]| {
+            let output = git_command(root).args(args).output().unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let head = output(&["rev-parse", "HEAD"]);
+        let parent = output(&["rev-parse", "HEAD^"]);
+
+        let snapshot = load_commit_diff(root, &head, Some(&parent)).unwrap();
+        assert_eq!(snapshot.files, 1);
+        assert_eq!((snapshot.additions, snapshot.deletions), (1, 0));
+        assert_eq!(snapshot.base_ref.as_deref(), Some(&head[..7]));
+        assert_eq!(snapshot.layer, DiffLayer::Branch);
+
+        let root_commit = load_commit_diff(root, &parent, None).unwrap();
+        assert!(
+            root_commit
+                .file_diffs
+                .iter()
+                .all(|file| file.status == DiffFileStatus::Added)
+        );
+        assert!(root_commit.additions >= 1);
+
+        assert!(load_commit_diff(root, "HEAD; rm -rf /", None).is_err());
     }
 
     fn init_with_baseline(root: &Path) {

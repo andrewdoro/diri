@@ -78,7 +78,7 @@ impl Peer {
         }
     }
 
-    fn bridge(&self) -> Bridge {
+    pub(super) fn bridge(&self) -> Bridge {
         Bridge::new(self.path.clone(), Some("parent".into()))
     }
 }

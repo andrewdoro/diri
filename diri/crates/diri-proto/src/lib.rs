@@ -1,8 +1,13 @@
 //! Wire types and codecs for control messages, binary frames, grid updates, and daemon paths.
 
 pub mod accounts;
+pub mod api_request;
 pub mod attention;
 pub use accounts::*;
+pub use api_request::{
+    ApiEnvironmentDraft, ApiHeaderDraft, ApiRequestDraft, ApiVariableDraft,
+    SessionOpenApiRequestParams,
+};
 pub mod control;
 pub mod frames;
 pub mod grid;

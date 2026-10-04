@@ -99,6 +99,64 @@ pub struct CommitResult {
     pub summary: String,
 }
 
+/// How many commits the review's history lists for one branch.
+pub const COMMIT_HISTORY_LIMIT: usize = 200;
+/// Commits of the base branch shown under a feature branch's own commits, so
+/// the graph shows where the branch left its base.
+const BASE_CONTEXT_COMMITS: usize = 12;
+/// Unpushed commits looked up at most; past it the oldest read as pushed.
+const UNPUSHED_LOOKUP_LIMIT: usize = 2_000;
+
+/// One commit as the review's history lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitSummary {
+    pub oid: String,
+    /// Parent object ids, first parent first. Empty for a root commit.
+    pub parents: Vec<String>,
+    pub author: String,
+    /// Author time, in seconds since the Unix epoch.
+    pub timestamp: i64,
+    pub subject: String,
+    pub refs: Vec<CommitRef>,
+    /// Whether the commit is on the branch but not on its base.
+    pub on_branch: bool,
+    /// Whether any remote-tracking ref already contains the commit.
+    pub pushed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitRefKind {
+    /// The checked-out branch (`HEAD -> name`), or a detached `HEAD`.
+    Head,
+    Branch,
+    Remote,
+    Tag,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitRef {
+    pub name: String,
+    pub kind: CommitRefKind,
+}
+
+/// The branch's commits, newest first, followed by a few commits of its base.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommitHistory {
+    /// The HEAD commit the history was read at; `None` for an unborn branch.
+    pub head: Option<String>,
+    /// The default branch the feature branch is measured against.
+    pub base: Option<String>,
+    pub commits: Vec<CommitSummary>,
+    /// Commits on the branch and not on its base (all listed, unless
+    /// `truncated`).
+    pub ahead: usize,
+    /// More branch commits exist than [`COMMIT_HISTORY_LIMIT`].
+    pub truncated: bool,
+    /// Whether the repository has any remote at all; without one nothing can
+    /// be pushed and the history does not mark commits as unpushed.
+    pub has_remote: bool,
+}
+
 #[derive(Debug)]
 pub enum GitReviewError {
     NotRepository(PathBuf),
@@ -488,6 +546,179 @@ impl GitRepository {
         })
     }
 
+    /// Reads the branch's history for the review: commits on HEAD that its
+    /// default branch does not have, then a few base commits for context. On
+    /// the default branch itself (or with no base) it lists recent history.
+    pub fn commit_history(&self, limit: usize) -> Result<CommitHistory, GitReviewError> {
+        let Some(head) = self.resolve_commit("HEAD")? else {
+            return Ok(CommitHistory::default());
+        };
+        let remotes = self.remotes()?;
+        let base = self.default_branch_ref(&remotes)?;
+        let merge_base = match &base {
+            Some(base) => {
+                let output = run_git(
+                    &self.root,
+                    ["merge-base", base.as_str(), "HEAD"],
+                    None,
+                    "finding merge base",
+                )?;
+                output
+                    .status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                    .filter(|commit| !commit.is_empty())
+            }
+            None => None,
+        };
+
+        let mut history = CommitHistory {
+            head: Some(head.clone()),
+            base: base.clone(),
+            has_remote: !remotes.is_empty(),
+            ..CommitHistory::default()
+        };
+        match merge_base.filter(|merge_base| *merge_base != head) {
+            Some(merge_base) => {
+                let range = format!("{merge_base}..HEAD");
+                let mut branch = self.log(&range, limit + 1, &remotes)?;
+                history.truncated = branch.len() > limit;
+                branch.truncate(limit);
+                for commit in &mut branch {
+                    commit.on_branch = true;
+                }
+                history.ahead = branch.len();
+                history.commits = branch;
+                let context = self.log(&merge_base, BASE_CONTEXT_COMMITS, &remotes)?;
+                history.commits.extend(context);
+            }
+            None => {
+                let mut commits = self.log("HEAD", limit + 1, &remotes)?;
+                history.truncated = commits.len() > limit;
+                commits.truncate(limit);
+                history.commits = commits;
+            }
+        }
+
+        if history.has_remote {
+            let unpushed = run_git(
+                &self.root,
+                [
+                    "rev-list".to_owned(),
+                    format!("--max-count={UNPUSHED_LOOKUP_LIMIT}"),
+                    "HEAD".to_owned(),
+                    "--not".to_owned(),
+                    "--remotes".to_owned(),
+                ],
+                None,
+                "finding unpushed commits",
+            )?;
+            let unpushed = ensure_success(unpushed, "finding unpushed commits")?;
+            let unpushed: std::collections::HashSet<&[u8]> = unpushed
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .collect();
+            for commit in &mut history.commits {
+                commit.pushed = !unpushed.contains(commit.oid.as_bytes());
+            }
+        }
+        Ok(history)
+    }
+
+    /// The full object id of `revision` as a commit, or `None` if it does not
+    /// name one (an unborn HEAD, a missing branch).
+    fn resolve_commit(&self, revision: &str) -> Result<Option<String>, GitReviewError> {
+        let peeled = format!("{revision}^{{commit}}");
+        let output = run_git(
+            &self.root,
+            ["rev-parse", "--verify", "--quiet", peeled.as_str()],
+            None,
+            "resolving commit",
+        )?;
+        Ok(output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .filter(|oid| !oid.is_empty()))
+    }
+
+    fn remotes(&self) -> Result<Vec<String>, GitReviewError> {
+        let output = run_git(&self.root, ["remote"], None, "listing remotes")?;
+        let output = ensure_success(output, "listing remotes")?;
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// The default branch a feature branch is reviewed against: the remote's
+    /// HEAD when it is known, otherwise the first of `main`/`master` that
+    /// exists remotely or locally.
+    fn default_branch_ref(&self, remotes: &[String]) -> Result<Option<String>, GitReviewError> {
+        let origin_head = run_git(
+            &self.root,
+            [
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ],
+            None,
+            "reading remote HEAD",
+        )?;
+        let origin_head = origin_head
+            .status
+            .success()
+            .then(|| {
+                String::from_utf8_lossy(&origin_head.stdout)
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|name| !name.is_empty());
+        let has_origin = remotes.iter().any(|remote| remote == "origin");
+        let candidates = origin_head.into_iter().chain(
+            ["origin/main", "main", "origin/master", "master"]
+                .into_iter()
+                .filter(|name| has_origin || !name.starts_with("origin/"))
+                .map(str::to_owned),
+        );
+        for candidate in candidates {
+            if self.resolve_commit(&candidate)?.is_some() {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
+
+    fn log(
+        &self,
+        revision: &str,
+        limit: usize,
+        remotes: &[String],
+    ) -> Result<Vec<CommitSummary>, GitReviewError> {
+        let output = run_git(
+            &self.root,
+            [
+                "-c".to_owned(),
+                "log.showSignature=false".to_owned(),
+                "log".to_owned(),
+                "--topo-order".to_owned(),
+                "--no-color".to_owned(),
+                format!("--max-count={limit}"),
+                format!("--format={LOG_FORMAT}"),
+                revision.to_owned(),
+                "--".to_owned(),
+            ],
+            None,
+            "reading history",
+        )?;
+        let output = ensure_success(output, "reading history")?;
+        Ok(parse_log(&output.stdout, remotes))
+    }
+
     fn run_mutation(
         &self,
         args: Vec<OsString>,
@@ -593,6 +824,88 @@ fn os_str_contains_nul(value: &OsStr) -> bool {
 #[cfg(not(unix))]
 fn os_str_contains_nul(value: &OsStr) -> bool {
     value.to_string_lossy().contains('\0')
+}
+
+/// One record per commit, fields split by unit separators: id, parents,
+/// author, author time, decorations, subject.
+const LOG_FORMAT: &str = "%H%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s%x1e";
+
+fn parse_log(bytes: &[u8], remotes: &[String]) -> Vec<CommitSummary> {
+    bytes
+        .split(|byte| *byte == 0x1e)
+        .filter_map(|record| {
+            let record = record.strip_prefix(b"\n").unwrap_or(record);
+            let fields: Vec<&[u8]> = record.splitn(6, |byte| *byte == 0x1f).collect();
+            let [oid, parents, author, timestamp, refs, subject] = fields.as_slice() else {
+                return None;
+            };
+            let oid = String::from_utf8_lossy(oid).trim().to_owned();
+            if oid.is_empty() {
+                return None;
+            }
+            Some(CommitSummary {
+                oid,
+                parents: String::from_utf8_lossy(parents)
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect(),
+                author: String::from_utf8_lossy(author).into_owned(),
+                timestamp: String::from_utf8_lossy(timestamp)
+                    .trim()
+                    .parse()
+                    .unwrap_or(0),
+                subject: String::from_utf8_lossy(subject).trim_end().to_owned(),
+                refs: parse_decorations(&String::from_utf8_lossy(refs), remotes),
+                on_branch: false,
+                pushed: false,
+            })
+        })
+        .collect()
+}
+
+/// Reads `%D` decorations (`HEAD -> main, origin/main, tag: v1`). A remote's
+/// symbolic `HEAD` is left out: it repeats the branch it points at.
+fn parse_decorations(decorations: &str, remotes: &[String]) -> Vec<CommitRef> {
+    decorations
+        .split(", ")
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| {
+            if let Some(branch) = name.strip_prefix("HEAD -> ") {
+                return Some(CommitRef {
+                    name: branch.to_owned(),
+                    kind: CommitRefKind::Head,
+                });
+            }
+            if name == "HEAD" {
+                return Some(CommitRef {
+                    name: name.to_owned(),
+                    kind: CommitRefKind::Head,
+                });
+            }
+            if let Some(tag) = name.strip_prefix("tag: ") {
+                return Some(CommitRef {
+                    name: tag.to_owned(),
+                    kind: CommitRefKind::Tag,
+                });
+            }
+            let remote = remotes.iter().find(|remote| {
+                name.strip_prefix(remote.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+            });
+            match remote {
+                Some(_) if name.ends_with("/HEAD") => None,
+                Some(_) => Some(CommitRef {
+                    name: name.to_owned(),
+                    kind: CommitRefKind::Remote,
+                }),
+                None => Some(CommitRef {
+                    name: name.to_owned(),
+                    kind: CommitRefKind::Branch,
+                }),
+            }
+        })
+        .collect()
 }
 
 fn parse_status(root: &Path, bytes: &[u8]) -> Result<ReviewStatus, GitReviewError> {
@@ -1408,6 +1721,125 @@ mod tests {
             status.staged[0].original_path.as_deref(),
             Some(Path::new("old name.txt"))
         );
+    }
+
+    #[test]
+    fn parses_log_records_with_parents_refs_and_subjects() {
+        let bytes = b"aaa\x1fbbb ccc\x1fAda Lovelace\x1f1700000000\x1fHEAD -> feature, origin/feature, tag: v1, origin/HEAD\x1fMerge: keep, the commas\x1e\nbbb\x1f\x1fGrace\x1f1600000000\x1f\x1fRoot\x1e\n";
+        let commits = parse_log(bytes, &["origin".to_owned()]);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].oid, "aaa");
+        assert_eq!(commits[0].parents, ["bbb", "ccc"]);
+        assert_eq!(commits[0].author, "Ada Lovelace");
+        assert_eq!(commits[0].timestamp, 1_700_000_000);
+        assert_eq!(commits[0].subject, "Merge: keep, the commas");
+        assert_eq!(
+            commits[0].refs,
+            [
+                CommitRef {
+                    name: "feature".to_owned(),
+                    kind: CommitRefKind::Head
+                },
+                CommitRef {
+                    name: "origin/feature".to_owned(),
+                    kind: CommitRefKind::Remote
+                },
+                CommitRef {
+                    name: "v1".to_owned(),
+                    kind: CommitRefKind::Tag
+                },
+            ]
+        );
+        assert!(commits[1].parents.is_empty());
+        assert!(commits[1].refs.is_empty());
+    }
+
+    #[test]
+    fn commit_history_lists_branch_commits_over_base_context() {
+        let Some(repo) = TestRepo::new() else {
+            return;
+        };
+        repo.write("base.txt", "one\n");
+        repo.commit_all("Base one");
+        repo.write("base.txt", "two\n");
+        repo.commit_all("Base two");
+        repo.git(["checkout", "--quiet", "-b", "feature"]);
+        repo.write("feature.txt", "a\n");
+        repo.commit_all("Feature first");
+        repo.write("feature.txt", "b\n");
+        repo.commit_all("Feature second");
+
+        let history = repo.review().commit_history(COMMIT_HISTORY_LIMIT).unwrap();
+        assert_eq!(history.base.as_deref(), Some("main"));
+        assert_eq!(history.ahead, 2);
+        assert!(!history.truncated);
+        assert!(!history.has_remote);
+        let subjects: Vec<&str> = history.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(
+            subjects,
+            ["Feature second", "Feature first", "Base two", "Base one"]
+        );
+        let on_branch: Vec<bool> = history.commits.iter().map(|c| c.on_branch).collect();
+        assert_eq!(on_branch, [true, true, false, false]);
+        assert_eq!(history.commits[0].parents, [history.commits[1].oid.clone()]);
+        assert!(history.commits.iter().all(|commit| !commit.pushed));
+        assert!(
+            history.commits[0]
+                .refs
+                .iter()
+                .any(|r| r.kind == CommitRefKind::Head && r.name == "feature")
+        );
+        assert_eq!(
+            history.head.as_deref(),
+            Some(history.commits[0].oid.as_str())
+        );
+
+        // On the default branch itself the history is just recent commits.
+        repo.git(["checkout", "--quiet", "main"]);
+        let history = repo.review().commit_history(1).unwrap();
+        assert_eq!(history.ahead, 0);
+        assert!(history.truncated);
+        assert_eq!(history.commits.len(), 1);
+        assert_eq!(history.commits[0].subject, "Base two");
+    }
+
+    #[test]
+    fn commit_history_of_an_unborn_branch_is_empty() {
+        let Some(repo) = TestRepo::new() else {
+            return;
+        };
+        let history = repo.review().commit_history(COMMIT_HISTORY_LIMIT).unwrap();
+        assert_eq!(history, CommitHistory::default());
+    }
+
+    #[test]
+    fn commits_on_a_remote_read_as_pushed() {
+        let Some(repo) = TestRepo::new() else {
+            return;
+        };
+        repo.write("a.txt", "a\n");
+        repo.commit_all("Pushed");
+        let pushed = String::from_utf8(repo.git(["rev-parse", "HEAD"])).unwrap();
+        repo.git(["update-ref", "refs/remotes/origin/main", pushed.trim()]);
+        repo.git([
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ]);
+        repo.git(["checkout", "--quiet", "-b", "feature"]);
+        repo.write("a.txt", "b\n");
+        repo.commit_all("Local only");
+
+        let history = repo.review().commit_history(COMMIT_HISTORY_LIMIT).unwrap();
+        assert_eq!(history.base.as_deref(), Some("origin/main"));
+        assert!(history.has_remote);
+        let pushed: Vec<(&str, bool)> = history
+            .commits
+            .iter()
+            .map(|commit| (commit.subject.as_str(), commit.pushed))
+            .collect();
+        assert_eq!(pushed, [("Local only", false), ("Pushed", true)]);
     }
 
     fn numbered_lines(count: usize) -> String {

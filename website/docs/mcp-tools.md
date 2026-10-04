@@ -497,11 +497,28 @@ Earlier versions of a Diri note: when, by whom, and what changed, newest first. 
 
 ### `get_skill`
 
-Read one of Diri's skills: the detailed rules for a Diri capability, as Markdown. Read the matching skill before acting: scheduling (run anything later, at a time, or repeatedly; waking the Mac), notes (work started from or written to a Diri note), orchestration (parallel agents, tasks, waiting, retries). Claude Code sessions also have them as skills named diri:<name>.
+Read one of Diri's skills: the detailed rules for a Diri capability, as Markdown. Read the matching skill before acting: scheduling (run anything later, at a time, or repeatedly; waking the Mac), notes (work started from or written to a Diri note), orchestration (parallel agents, tasks, waiting, retries), api (HTTP APIs and dev servers: show endpoints in the API tab). Claude Code sessions also have them as skills named diri:<name>.
 
 | Argument | Type | Notes |
 | --- | --- | --- |
-| `name` | `scheduling`, `notes`, `orchestration` | **Required.** |
+| `name` | `scheduling`, `notes`, `orchestration`, `api` | **Required.** |
+
+### `open_api_request`
+
+Open an HTTP request in the API tab of YOUR session's right panel in Diri, prefilled, so the person can inspect, edit and send it. Use it whenever you build, run or debug an HTTP API: after starting a dev server, open the endpoint you just added or changed (e.g. GET http://localhost:3000/api/health) instead of only pasting a curl command. Put {{name}} placeholders in url/headers/body and pass their values in variables (marking tokens in secrets so they are masked); they land in the project's environment (environment names it, default the active one or "Local"). json sets a JSON body and its Content-Type; body sends text as written. auto_send:true sends a GET immediately and shows the response; any other method is never sent until the person presses Send. The call returns once the tab is open, without the response.
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `url` | string | **Required.** http(s) URL; may use {{variables}}. No scheme means http:// for localhost. |
+| `auto_send` | boolean | Send right away. Honoured for GET only. Default `false`. |
+| `body` | string | Raw body text. |
+| `environment` | string | Environment the variables go into (created if missing). |
+| `headers` | object | Header name to value, e.g. {"Authorization": "Bearer {{token}}"}. |
+| `json` | any | A JSON value sent as the body, indented, with Content-Type: application/json. |
+| `method` | `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS` | Default `"GET"`. |
+| `name` | string | Tab and saved-request title. |
+| `secrets` | string array | Names in variables to mask as secrets. |
+| `variables` | object | Variable name to value for {{name}} placeholders. |
 
 ### `note_links`
 

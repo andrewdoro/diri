@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::control::{ControlClient, ControlFailure, default_socket_path};
 use crate::tools::{ToolDefinition, tool_definitions_for};
 
+mod api;
 #[cfg(test)]
 mod audit_tests;
 mod notes;
@@ -140,6 +141,7 @@ impl Bridge {
             "release_agent" => self.release_agent(arguments),
             "test_run" => self.test_run(arguments),
             "browser" => self.browser(arguments),
+            "open_api_request" => self.open_api_request(arguments),
             "quick_open_include" => self.quick_open_include(arguments),
             "whoami" => self.whoami(),
             "list_children" => self.list_children(arguments),

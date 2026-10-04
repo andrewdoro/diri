@@ -15,6 +15,7 @@ use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use std::time::SystemTime;
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
@@ -318,69 +319,186 @@ impl CodeIntelligence {
         Ok(result)
     }
 
-    /// Literal, smart-case workspace text search. Uses the ignore-aware file
-    /// index and bounded reads; callers can cancel obsolete queries between files.
-    pub fn search_content(
+    /// Every indexed file, workspace-relative, sorted. Builds the index on
+    /// first use, so call it from a worker.
+    pub fn indexed_files(&self) -> Vec<PathBuf> {
+        self.index()
+            .files
+            .iter()
+            .map(|file| file.relative_path.clone())
+            .collect()
+    }
+
+    /// A workspace file's text within the viewer's bounds (size, binary,
+    /// UTF-8, containment).
+    pub fn read_text(&self, relative: &Path) -> Result<String, CodeIntelligenceError> {
+        Ok(self.open_file(relative, None)?.text)
+    }
+
+    /// Opens a workspace file directly by its relative path.
+    pub fn open_file(
         &self,
-        query: &str,
-        limit: usize,
-        cancelled: impl Fn() -> bool,
-    ) -> Vec<SearchHit> {
-        if query.is_empty() || limit == 0 {
+        relative: &Path,
+        target: Option<SourceTarget>,
+    ) -> Result<SourceSnapshot, CodeIntelligenceError> {
+        let (absolute_path, relative_path) =
+            self.resolve_workspace_file(&self.workspace_root.join(relative))?;
+        self.load_resolved(ResolvedReference {
+            absolute_path,
+            relative_path,
+            target,
+        })
+    }
+
+    /// Fuzzy-ranked file paths only, best first.
+    pub fn search_files(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        let query = query.trim();
+        let mut results: Vec<SearchHit> = self
+            .index()
+            .files
+            .iter()
+            .filter_map(|file| {
+                let score = if query.is_empty() {
+                    0
+                } else {
+                    path_score(query, &file.display_path)?
+                };
+                Some(SearchHit {
+                    relative_path: file.relative_path.clone(),
+                    kind: SearchHitKind::File,
+                    line: None,
+                    preview: file.display_path.clone(),
+                    score,
+                })
+            })
+            .collect();
+        results.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.relative_path.cmp(&right.relative_path))
+        });
+        results.truncate(limit);
+        results
+    }
+
+    /// Declarations named exactly `name`, from the symbol index: the data
+    /// behind hover cards and go-to-definition.
+    pub fn definitions(&self, name: &str, limit: usize) -> Vec<SearchHit> {
+        if name.is_empty() {
             return Vec::new();
         }
-        let case_sensitive = query.chars().any(char::is_uppercase);
-        let needle = if case_sensitive {
-            query.to_owned()
-        } else {
-            query.to_lowercase()
-        };
-        let mut results = Vec::new();
-        let mut remaining = MAX_SYMBOL_INDEX_BYTES;
-        for file in &self.index().files {
-            if cancelled() || remaining == 0 {
-                break;
-            }
-            let Ok((absolute_path, _)) =
-                self.resolve_workspace_file(&self.workspace_root.join(&file.relative_path))
-            else {
-                continue;
-            };
-            let Ok(metadata) = fs::metadata(&absolute_path) else {
-                continue;
-            };
-            if metadata.len() > MAX_SOURCE_BYTES || metadata.len() > remaining {
-                continue;
-            }
-            remaining = remaining.saturating_sub(metadata.len());
-            let Ok(source) = self.load_resolved(ResolvedReference {
-                absolute_path,
-                relative_path: file.relative_path.clone(),
-                target: None,
-            }) else {
-                continue;
-            };
-            for (index, line) in source.text.lines().enumerate() {
-                let matches = if case_sensitive {
-                    line.contains(&needle)
-                } else {
-                    line.to_lowercase().contains(&needle)
-                };
-                if matches {
-                    results.push(SearchHit {
-                        relative_path: file.relative_path.clone(),
-                        kind: SearchHitKind::Content,
-                        line: Some(index + 1),
-                        preview: excerpt(line.trim(), 180),
-                        score: 0,
-                    });
-                    if results.len() >= limit {
-                        return results;
-                    }
-                }
-            }
+        let index = self.index();
+        index
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.name == name)
+            .take(limit)
+            .map(|symbol| SearchHit {
+                relative_path: symbol.relative_path.clone(),
+                kind: SearchHitKind::Symbol,
+                line: Some(symbol.line),
+                preview: symbol.preview.clone(),
+                score: 0,
+            })
+            .collect()
+    }
+
+    /// Indexed symbol names starting with `prefix` (case-insensitively),
+    /// each once, shortest first: completion candidates beyond the buffer.
+    pub fn symbol_names(&self, prefix: &str, limit: usize) -> Vec<(String, String)> {
+        if prefix.is_empty() {
+            return Vec::new();
         }
-        results
+        let lower = prefix.to_lowercase();
+        let mut seen = HashSet::new();
+        let mut names: Vec<(String, String)> = self
+            .index()
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.name.to_lowercase().starts_with(&lower) && symbol.name != prefix
+            })
+            .filter(|symbol| seen.insert(symbol.name.clone()))
+            .map(|symbol| (symbol.name.clone(), symbol.preview.clone()))
+            .collect();
+        names.sort_by(|left, right| {
+            left.0
+                .len()
+                .cmp(&right.0.len())
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        names.truncate(limit);
+        names
+    }
+
+    /// Writes a workspace file atomically: a sibling temporary file, then a
+    /// rename over the original, keeping its permissions. Refuses when the
+    /// file changed on disk since `expected` (what the editor loaded).
+    pub fn save_file(
+        &self,
+        relative: &Path,
+        text: &str,
+        expected: Option<SystemTime>,
+        force: bool,
+    ) -> Result<Option<SystemTime>, CodeIntelligenceError> {
+        let (absolute_path, _) =
+            self.resolve_workspace_file(&self.workspace_root.join(relative))?;
+        let metadata = fs::metadata(&absolute_path).map_err(|error| CodeIntelligenceError::Io {
+            path: absolute_path.clone(),
+            operation: "inspect",
+            message: error.to_string(),
+        })?;
+        if !force && expected.is_some() && metadata.modified().ok() != expected {
+            return Err(CodeIntelligenceError::ChangedOnDisk {
+                path: absolute_path,
+            });
+        }
+        let parent = absolute_path
+            .parent()
+            .expect("a workspace file has a parent directory");
+        let io = |operation: &'static str| {
+            let path = absolute_path.clone();
+            move |error: io::Error| CodeIntelligenceError::Io {
+                path,
+                operation,
+                message: error.to_string(),
+            }
+        };
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".diri-save-")
+            .tempfile_in(parent)
+            .map_err(io("save"))?;
+        io::Write::write_all(&mut temporary, text.as_bytes()).map_err(io("save"))?;
+        temporary.as_file().sync_all().map_err(io("save"))?;
+        fs::set_permissions(temporary.path(), metadata.permissions()).map_err(io("save"))?;
+        temporary
+            .persist(&absolute_path)
+            .map_err(|error| io("save")(error.error))?;
+        Ok(fs::metadata(&absolute_path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok()))
+    }
+
+    /// The workspace's Git state for the file tree: per-path status and the
+    /// ignored paths, from one `git status`. `None` outside a repository.
+    pub fn git_snapshot(&self) -> Option<crate::file_tree::GitSnapshot> {
+        let output = Command::new("git")
+            .current_dir(&self.workspace_root)
+            .args([
+                "-c",
+                "core.quotepath=off",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--ignored",
+            ])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(crate::file_tree::GitSnapshot::parse(&output.stdout))
     }
 
     fn resolve_workspace_file(
@@ -476,6 +594,8 @@ impl CodeIntelligence {
             text,
             lines,
             target,
+            modified: metadata.modified().ok(),
+            read_only: metadata.permissions().readonly(),
         })
     }
 }
@@ -525,6 +645,10 @@ pub struct SourceSnapshot {
     /// file ends in a newline. Ranges exclude line terminators.
     pub lines: Vec<SourceLine>,
     pub target: Option<SourceTarget>,
+    /// When the file was last written, as read; a save checks it still holds.
+    pub modified: Option<SystemTime>,
+    /// The file's permissions forbid writing it.
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -548,7 +672,6 @@ pub struct SearchHit {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SearchHitKind {
-    Content,
     Symbol,
     File,
 }
@@ -657,6 +780,9 @@ pub enum CodeIntelligenceError {
     NotUtf8 {
         path: PathBuf,
     },
+    ChangedOnDisk {
+        path: PathBuf,
+    },
     Io {
         path: PathBuf,
         operation: &'static str,
@@ -697,6 +823,11 @@ impl fmt::Display for CodeIntelligenceError {
             Self::NotUtf8 { path } => {
                 write!(formatter, "{} is not valid UTF-8 text", path.display())
             }
+            Self::ChangedOnDisk { path } => write!(
+                formatter,
+                "{} changed on disk since it was opened",
+                path.display()
+            ),
             Self::Io {
                 path,
                 operation,
@@ -917,7 +1048,7 @@ fn index_symbols(
         .collect()
 }
 
-fn symbol_name(line: &str, language: SourceLanguage) -> Option<String> {
+pub(crate) fn symbol_name(line: &str, language: SourceLanguage) -> Option<String> {
     let mut line = line.trim_start();
     if line.is_empty()
         || line
@@ -1475,34 +1606,122 @@ mod tests {
     }
 
     #[test]
-    fn text_search_is_literal_smart_case_bounded_and_cancellable() {
+    fn saves_atomically_keeping_permissions_and_refusing_outside_changes() {
+        let workspace = workspace();
+        let path = workspace.path().join("src/lib.rs");
+        write(&path, "old\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let intelligence = CodeIntelligence::for_session(workspace.path()).unwrap();
+        let snapshot = intelligence
+            .open_file(Path::new("src/lib.rs"), None)
+            .unwrap();
+        assert!(snapshot.modified.is_some());
+        let saved = intelligence
+            .save_file(Path::new("src/lib.rs"), "new\n", snapshot.modified, false)
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+        // Another writer moves the file on; the stale save is refused.
+        let file = File::options().write(true).open(&path).unwrap();
+        file.set_modified(SystemTime::now() + std::time::Duration::from_secs(9))
+            .unwrap();
+        drop(file);
+        assert!(matches!(
+            intelligence.save_file(Path::new("src/lib.rs"), "mine\n", saved, false),
+            Err(CodeIntelligenceError::ChangedOnDisk { .. })
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+        intelligence
+            .save_file(Path::new("src/lib.rs"), "mine\n", saved, true)
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "mine\n");
+        assert!(matches!(
+            intelligence.save_file(Path::new("../outside.rs"), "x", None, true),
+            Err(CodeIntelligenceError::OutsideWorkspace { .. }
+                | CodeIntelligenceError::NotFound { .. })
+        ));
+        let leftovers: Vec<_> = fs::read_dir(workspace.path().join("src"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".diri-save-")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "no temporary file is left behind");
+    }
+
+    #[test]
+    fn git_snapshot_reports_untracked_and_ignored_paths() {
+        let workspace = tempfile::tempdir().unwrap();
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(workspace.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        write(&workspace.path().join(".gitignore"), "target/\n*.log\n");
+        write(&workspace.path().join("src/main.rs"), "fn main() {}\n");
+        write(&workspace.path().join("target/debug/app"), "binary\n");
+        write(&workspace.path().join("run.log"), "log\n");
+        let intelligence = CodeIntelligence::for_session(workspace.path()).unwrap();
+        let git = intelligence.git_snapshot().expect("a repository");
+        use crate::file_tree::GitStatus;
+        assert_eq!(
+            git.status(Path::new("src/main.rs"), false),
+            Some(GitStatus::Untracked)
+        );
+        assert_eq!(
+            git.status(Path::new("src"), true),
+            Some(GitStatus::Untracked)
+        );
+        assert!(git.is_ignored(Path::new("target/debug/app")));
+        assert!(git.is_ignored(Path::new("run.log")));
+        assert!(!git.is_ignored(Path::new("src/main.rs")));
+
+        let plain = tempfile::tempdir().unwrap();
+        let outside = CodeIntelligence::for_session(plain.path()).unwrap();
+        assert!(
+            outside.git_snapshot().is_none(),
+            "no repository, no snapshot"
+        );
+    }
+
+    #[test]
+    fn definitions_and_symbol_names_come_from_the_index() {
         let workspace = workspace();
         write(
-            &workspace.path().join("src/file.rs"),
-            "// café Result<T>\n// CAFÉ result<t>\nlet value = 3;\n",
+            &workspace.path().join("src/view.rs"),
+            "pub fn render_row(ix: usize) -> Row {}\nstruct Row;\nfn render_rows() {}\n",
         );
-        write(
-            &workspace.path().join("node_modules/ignored.js"),
-            "Result<T>",
-        );
-        write(&workspace.path().join("binary.dat"), b"Result<T>\0");
         let intelligence = CodeIntelligence::for_session(workspace.path()).unwrap();
-        let matches = intelligence.search_content("result<t>", 20, || false);
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].line, Some(1));
-        assert_eq!(matches[1].line, Some(2));
-        assert_eq!(
-            intelligence.search_content("Result<T>", 20, || false).len(),
-            1
-        );
-        assert_eq!(intelligence.search_content("café", 20, || false).len(), 2);
-        assert_eq!(intelligence.search_content("result", 1, || false).len(), 1);
-        assert!(
-            intelligence
-                .search_content("result", 20, || true)
-                .is_empty()
-        );
-        assert!(intelligence.search_content("", 20, || false).is_empty());
+        let found = intelligence.definitions("render_row", 5);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].line, Some(1));
+        assert!(found[0].preview.contains("(ix: usize)"));
+        let names: Vec<_> = intelligence
+            .symbol_names("rend", 5)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, ["render_row", "render_rows"]);
+        assert!(intelligence.definitions("", 5).is_empty());
+        let files = intelligence.search_files("view", 5);
+        assert_eq!(files[0].relative_path, Path::new("src/view.rs"));
+        assert!(files.iter().all(|hit| hit.kind == SearchHitKind::File));
     }
 
     #[test]

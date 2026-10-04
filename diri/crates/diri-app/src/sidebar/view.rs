@@ -10,6 +10,7 @@ mod rows;
 mod strip_tabs;
 mod tabs;
 mod titles;
+mod windowing;
 mod workspaces;
 
 #[cfg(all(test, target_os = "macos"))]
@@ -63,6 +64,7 @@ use crate::usage::{UsageFormat, UsageSnapshot};
 use crate::session_presentation::{activity_mark, is_loading, status_state, ui_agent_kind};
 
 use super::disclosure::{Disclosure, Frame as DisclosureFrame};
+use super::row_window::{self, RowWindow, Slot, merge_skipped};
 use super::title_settle::{SettlingLabel, TitleSettles};
 
 use super::{
@@ -90,6 +92,10 @@ const SECTION_SHIFT_TIME: Duration = Duration::from_millis(220);
 /// Vertical gap between project sections in the list, mirrored here because
 /// the slide animation reconstructs slot positions from section heights.
 const SECTION_GAP: f32 = 8.0;
+/// The session list's top padding, where its content-space cursor starts.
+const LIST_TOP_PADDING: f32 = 8.0;
+/// A recency bucket's label row ("Today", "Yesterday", ...).
+const RECENCY_HEADER_HEIGHT: f32 = 24.0;
 /// Backstop for a motion whose display-link frames stop arriving (a covered
 /// window, or a floating panel that closed while it painted the sidebar): two
 /// 60 Hz frames, so the motion never stalls for longer than a hitch.
@@ -723,6 +729,24 @@ pub struct Sidebar {
     /// out of it, sampled on the title clock.
     row_motion: super::row_motion::RowMotion<SessionId, crate::store::SidebarRow>,
     hover_trails: hover_linger::HoverTrails,
+    /// This render's walk down the session list, which builds only the rows
+    /// near the viewport (see `row_window.rs`).
+    row_window: RowWindow,
+    /// Content-space slot of every row the latest render walked, built or
+    /// not, so the keyboard can reveal a row that has never been painted.
+    row_slots: Rc<RefCell<HashMap<SessionId, row_window::Span>>>,
+    /// The list's content height from the latest render's walk.
+    list_content_height: f32,
+    /// The band the latest render built rows for, checked against the scroll
+    /// the list actually painted at.
+    built_band: Rc<Cell<Option<row_window::Span>>>,
+    /// Rows outside the viewport are skipped; off only for tests that need
+    /// every row's bounds.
+    windowing: bool,
+    /// Rows built this render wherever they are (see `held_rows`).
+    held_rows: HashSet<SessionId>,
+    /// The latest render built every row because rows were in motion.
+    rows_built_for_motion: bool,
 }
 
 /// The sidebar state that asked for a native folder pick, captured when the
@@ -889,6 +913,13 @@ impl Sidebar {
             title_tick: false,
             row_motion: Default::default(),
             hover_trails: hover_linger::HoverTrails::default(),
+            row_window: RowWindow::default(),
+            row_slots: Rc::new(RefCell::new(HashMap::new())),
+            list_content_height: 0.0,
+            built_band: Rc::new(Cell::new(None)),
+            windowing: true,
+            held_rows: HashSet::new(),
+            rows_built_for_motion: false,
         };
         sidebar.ui.preview_account = preview;
         sidebar._self_observer = Some(cx.observe_self(|sidebar, _| sidebar.note_self_notified()));
@@ -1574,13 +1605,14 @@ impl Sidebar {
         };
         let scroll = self.list_scroll.clone();
         let row_bounds = Rc::clone(&self.row_bounds);
+        let row_slots = Rc::clone(&self.row_slots);
         // Keyboard movement changes the focused styling in the upcoming
         // frame. A row newly exposed by Right may not have bounds until that
         // frame has painted, so retry once on the following frame.
         window.on_next_frame(move |window, _cx| {
-            if !reveal_tracked_row(&scroll, &row_bounds, &id, window) {
+            if !reveal_tracked_row(&scroll, &row_bounds, &row_slots, &id, window) {
                 window.on_next_frame(move |window, _cx| {
-                    reveal_tracked_row(&scroll, &row_bounds, &id, window);
+                    reveal_tracked_row(&scroll, &row_bounds, &row_slots, &id, window);
                 });
             }
         });
@@ -2985,6 +3017,7 @@ impl Sidebar {
                 )
             });
         section = section.child(header);
+        self.row_window.advance(SIDEBAR_NAV_ROW_HEIGHT);
 
         // Keep the last visible rows only for the close animation. The Store
         // remains authoritative for keyboard navigation and selection.
@@ -3031,9 +3064,25 @@ impl Sidebar {
         if collapsed && !frame.animating {
             retained.clear();
         }
+        let body_top = self.row_window.cursor();
+        // A body mid-disclosure clips and slides its rows, so they leave the
+        // walk's slots: build them all until it settles.
+        let settled = !frame.animating && frame.reveal >= 1.0;
         if frame.reveal > 0.0 {
             let mut children = Vec::new();
             for (row, presence, ghost) in super::row_motion::paint_order(&rows, &slots) {
+                let height = SIDEBAR_NAV_ROW_HEIGHT * presence.height;
+                let margin = 2.0 * presence.height;
+                let moving = presence != super::row_motion::Presence::FULL || ghost;
+                if !self.place_row(
+                    (!ghost).then(|| row.id()),
+                    margin,
+                    height,
+                    moving || !settled,
+                ) {
+                    children.push(Slot::Skipped { height, margin });
+                    continue;
+                }
                 let shortcut = (!ghost).then(|| self.shortcut_for(row.id())).flatten();
                 let id = row.id().clone();
                 let drop = if collapsed || ghost {
@@ -3064,16 +3113,28 @@ impl Sidebar {
                 } else {
                     self.track_row_bounds(id, rendered, marker)
                 };
-                children.push((
-                    rendered,
-                    SIDEBAR_NAV_ROW_HEIGHT * presence.height,
-                    presence.height,
-                ));
+                children.push(Slot::Built {
+                    row: rendered,
+                    height,
+                    margin,
+                });
             }
             if !group.archived.is_empty() {
+                self.row_window.advance(2.0);
                 let (bucket, height) = self.archived_bucket(group, !collapsed, colors, window, cx);
-                children.push((bucket, height, 1.0));
+                children.push(Slot::Built {
+                    row: bucket,
+                    height,
+                    margin: 2.0,
+                });
             }
+            let children = windowing::body_rows(children);
+            let natural: f32 = children
+                .iter()
+                .map(|(_, height, gap)| height + 2.0 * gap)
+                .sum();
+            self.row_window
+                .set_cursor(body_top + natural * frame.reveal);
             section = section.child(disclosure_body(children, &frame, !collapsed));
         }
         // The whole section rides with the pointer, sessions included,
@@ -3221,10 +3282,14 @@ impl Sidebar {
             if bucket_rows.is_empty() {
                 continue;
             }
+            if !sections.is_empty() {
+                self.row_window.advance(SECTION_GAP);
+            }
+            self.row_window.advance(RECENCY_HEADER_HEIGHT);
             let mut section = div().flex().flex_col().child(
                 div()
                     .px(px(Space::ROW_H))
-                    .h(px(24.0))
+                    .h(px(RECENCY_HEADER_HEIGHT))
                     .flex()
                     .items_center()
                     .text_size(px(Typo::SECTION_HEADER.size))
@@ -3234,14 +3299,21 @@ impl Sidebar {
             );
             let bucket_rows: Vec<_> = bucket_rows.into_iter().cloned().collect();
             let slots = self.arrange_rows(bucket.label(), &bucket_rows);
+            let mut children = Vec::new();
             for (row, presence, ghost) in super::row_motion::paint_order(&bucket_rows, &slots) {
+                let height = SIDEBAR_NAV_ROW_HEIGHT * presence.height;
+                let margin = 2.0 * presence.height;
+                let moving = presence != super::row_motion::Presence::FULL || ghost;
+                if !self.place_row((!ghost).then(|| row.id()), margin, height, moving) {
+                    children.push(Slot::Skipped { height, margin });
+                    continue;
+                }
                 let shortcut = (!ghost).then(|| self.shortcut_for(row.id())).flatten();
                 let id = row.id().clone();
                 let drop = (!ghost)
                     .then(|| self.row_drop_feedback(row, window, cx))
                     .flatten();
                 let working = self.working_row_rendered;
-                let moving = presence != super::row_motion::Presence::FULL || ghost;
                 let rendered =
                     self.mount_session_row(row, shortcut, drop, false, colors, moving, window, cx);
                 self.working_row_rendered &= !ghost || working;
@@ -3267,18 +3339,26 @@ impl Sidebar {
                 } else {
                     self.track_row_bounds(id, rendered, None)
                 };
-                // The 2 px above each row closes with its slot.
-                section = section.child(
-                    div()
-                        .flex_none()
-                        .mt(px(2.0 * presence.height))
-                        .child(rendered),
-                );
+                children.push(Slot::Built {
+                    row: rendered,
+                    height,
+                    margin,
+                });
+            }
+            // The 2 px above each row closes with its slot.
+            for (rendered, _, margin) in merge_skipped(children, windowing::skipped_spacer) {
+                section = section.child(div().flex_none().mt(px(margin)).child(rendered));
             }
             sections.push(section.into_any_element());
         }
-        if let Some(archives) = self.recency_archive_section(projection, colors, window, cx) {
-            sections.push(archives);
+        if !sections.is_empty() {
+            self.row_window.advance(SECTION_GAP);
+        }
+        match self.recency_archive_section(projection, colors, window, cx) {
+            Some(archives) => sections.push(archives),
+            // Nothing follows the last bucket after all.
+            None if !sections.is_empty() => self.row_window.advance(-SECTION_GAP),
+            None => {}
         }
         sections
     }
@@ -3357,20 +3437,40 @@ impl Sidebar {
             .get_or_insert_with(|| Disclosure::new(expanded, count, now));
         let frame = motion.update(expanded, count, now, cx.reduce_motion());
         self.disclosure_animating |= frame.animating;
+        self.row_window.advance(4.0 + SIDEBAR_NAV_ROW_HEIGHT);
+        let body_top = self.row_window.cursor();
         if frame.reveal > 0.0 {
+            let settled = !frame.animating && frame.reveal >= 1.0 && expanded;
             let mut children = Vec::new();
             for session in archived {
                 let id = session.id.clone();
+                if !self.place_row(Some(&id), 2.0, SIDEBAR_NAV_ROW_HEIGHT, !settled) {
+                    children.push(Slot::Skipped {
+                        height: SIDEBAR_NAV_ROW_HEIGHT,
+                        margin: 2.0,
+                    });
+                    continue;
+                }
                 let rendered = self.archived_row(&session, colors, window, cx);
                 let rendered = if expanded {
                     self.track_row_bounds(id, rendered, None)
                 } else {
                     rendered
                 };
-                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT, 1.0));
+                children.push(Slot::Built {
+                    row: rendered,
+                    height: SIDEBAR_NAV_ROW_HEIGHT,
+                    margin: 2.0,
+                });
             }
-            section = section.child(disclosure_body(children, &frame, expanded));
+            section = section.child(disclosure_body(
+                windowing::body_rows(children),
+                &frame,
+                expanded,
+            ));
         }
+        self.row_window
+            .set_cursor(body_top + (SIDEBAR_NAV_ROW_HEIGHT + 2.0) * count as f32 * frame.reveal);
         Some(section.into_any_element())
     }
 
@@ -4272,20 +4372,39 @@ impl Sidebar {
         self.disclosure_animating |= frame.animating;
         let body_height =
             (SIDEBAR_NAV_ROW_HEIGHT + 2.0) * group.archived.len() as f32 * frame.reveal;
+        self.row_window.advance(4.0 + SIDEBAR_NAV_ROW_HEIGHT);
+        let body_top = self.row_window.cursor();
         if frame.reveal > 0.0 {
+            let settled = !frame.animating && frame.reveal >= 1.0 && interactive;
             let mut children = Vec::new();
             for session in &group.archived {
                 let id = session.id.clone();
+                if !self.place_row(Some(&id), 2.0, SIDEBAR_NAV_ROW_HEIGHT, !settled) {
+                    children.push(Slot::Skipped {
+                        height: SIDEBAR_NAV_ROW_HEIGHT,
+                        margin: 2.0,
+                    });
+                    continue;
+                }
                 let rendered = self.archived_row(session, colors, window, cx);
                 let rendered = if expanded && interactive {
                     self.track_row_bounds(id, rendered, None)
                 } else {
                     rendered
                 };
-                children.push((rendered, SIDEBAR_NAV_ROW_HEIGHT, 1.0));
+                children.push(Slot::Built {
+                    row: rendered,
+                    height: SIDEBAR_NAV_ROW_HEIGHT,
+                    margin: 2.0,
+                });
             }
-            bucket = bucket.child(disclosure_body(children, &frame, expanded && interactive));
+            bucket = bucket.child(disclosure_body(
+                windowing::body_rows(children),
+                &frame,
+                expanded && interactive,
+            ));
         }
+        self.row_window.set_cursor(body_top + body_height);
         (
             bucket.into_any_element(),
             SIDEBAR_NAV_ROW_HEIGHT + 4.0 + body_height,
@@ -6921,6 +7040,22 @@ impl Sidebar {
         self.notify_activity_frame(cx);
     }
 
+    /// What one scroll-wheel step over the list does: GPUI moves the offset
+    /// and notifies the view that owns the scroll container.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn scroll_list_for_test(&mut self, y: f32, cx: &mut Context<Self>) {
+        self.list_scroll.set_offset(point(px(0.0), px(-y)));
+        cx.notify();
+    }
+
+    /// Builds every row (`false`) or only the rows near the viewport, for
+    /// tests that compare the two.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn set_row_windowing_for_test(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.windowing = on;
+        cx.notify();
+    }
+
     /// One publication from the shared store.
     pub(crate) fn store_changed(&mut self, cx: &mut Context<Self>) {
         self.store.write().expect("store").reconcile();
@@ -8124,17 +8259,36 @@ fn offset_to_reveal(
     }
 }
 
+/// Scrolls the list so the row `id` is fully visible. A row that painted
+/// last frame reveals from its bounds; one the list only walked past (built
+/// rows are only those near the viewport) reveals from its walked slot.
 fn reveal_tracked_row(
     scroll: &ScrollHandle,
     row_bounds: &RefCell<HashMap<SessionId, Bounds<Pixels>>>,
+    row_slots: &RefCell<HashMap<SessionId, row_window::Span>>,
     id: &SessionId,
     window: &mut Window,
 ) -> bool {
-    let Some(row) = row_bounds.borrow().get(id).copied() else {
-        return false;
-    };
     let viewport = scroll.bounds();
     let offset = scroll.offset();
+    let Some(row) = row_bounds.borrow().get(id).copied() else {
+        let Some(slot) = row_slots.borrow().get(id).copied() else {
+            return false;
+        };
+        if viewport.size.height <= px(0.0) {
+            return false;
+        }
+        let next_y = row_window::offset_revealing(
+            f32::from(offset.y),
+            f32::from(viewport.size.height),
+            slot,
+        );
+        if (next_y - f32::from(offset.y)).abs() > f32::EPSILON {
+            scroll.set_offset(point(offset.x, px(next_y)));
+            window.refresh();
+        }
+        return true;
+    };
     let next_y = offset_to_reveal(
         f32::from(offset.y),
         f32::from(viewport.top()),
@@ -8424,14 +8578,18 @@ impl Sidebar {
                 .min_h(px(0.0))
                 .overflow_y_scroll()
                 .px(px(Space::INSET))
-                .pt(px(8.0))
-                .pb(px(SIDEBAR_NAV_ROW_HEIGHT + 17.0))
+                .pt(px(LIST_TOP_PADDING))
+                .pb(px(windowing::LIST_BOTTOM_PADDING))
                 .flex()
                 .flex_col()
-                .gap(px(8.0));
+                .gap(px(SECTION_GAP));
+            self.begin_row_window();
             match grouping {
                 SidebarGrouping::Project => {
-                    for group in &projection.projects {
+                    for (index, group) in projection.projects.iter().enumerate() {
+                        if index > 0 {
+                            self.row_window.advance(SECTION_GAP);
+                        }
                         list = list.child(self.project_section(group, colors, window, cx));
                     }
                 }
@@ -8446,6 +8604,7 @@ impl Sidebar {
                     ));
                 }
             }
+            self.finish_row_window();
             list = list.child(self.empty_space_drop_target(colors, cx));
             list
         });
@@ -8454,12 +8613,19 @@ impl Sidebar {
         self.rows_mounted = list.is_some();
         self.rows_stale = false;
         self.notify_keeps_rows = false;
-        // Rows mounted this pass (leaving ghosts included) keep their views.
+        // Rows mounted this pass (leaving ghosts included) keep their views,
+        // and so do rows the list walked past without building, so scrolling
+        // back to them does not create them again.
         let mounted = std::mem::take(&mut self.mounted_row_ids);
-        self.session_row_views.retain(|id, _| mounted.contains(id));
+        let walked = self.rows_mounted.then(|| self.row_slots.borrow());
+        self.session_row_views.retain(|id, _| {
+            mounted.contains(id) || walked.as_ref().is_some_and(|slots| slots.contains_key(id))
+        });
+        drop(walked);
 
         // Row, disclosure and title motion ask the display link for frames.
         self.disclosure_tick = self.disclosure_animating;
+        self.settle_row_window(window);
         self.schedule_activity_tick(cx);
         self.schedule_title_tick();
         if self.disclosure_tick || self.title_tick || self.hover_trails.is_fading() {
@@ -8545,6 +8711,8 @@ impl Sidebar {
                 // instead of being sliced off by the container edge.
                 let viewport = Rc::clone(&self.fade_viewport);
                 let weak = self.weak_self.clone();
+                let built_band = Rc::clone(&self.built_band);
+                let scroll = self.list_scroll.clone();
                 body = body.child(
                     div()
                         .relative()
@@ -8557,6 +8725,8 @@ impl Sidebar {
                                 && viewport.get() != Some(list)
                             {
                                 viewport.set(Some(list));
+                                Self::refresh_on_next_frame(&weak, window);
+                            } else if !windowing::band_covers_scroll(built_band.get(), &scroll) {
                                 Self::refresh_on_next_frame(&weak, window);
                             }
                         })

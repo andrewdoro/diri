@@ -25,6 +25,10 @@
 //! Every other row is reused by the vendored GPUI's nested view cache (see
 //! `vendor/gpui/DIRI_PATCHES.md`), including the opacity the list wraps
 //! around it.
+//!
+//! Rows far from the viewport are not mounted at all: the list walks them
+//! and lays out a spacer in their place (`row_window.rs`). Their views are
+//! kept while they stay in the list, so scrolling back reuses them.
 
 use super::*;
 

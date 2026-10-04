@@ -67,6 +67,10 @@ impl Method {
     /// Asks the app to select and show a Session (`SessionIdParams`); the
     /// Engine re-publishes it as the `session.reveal` event.
     pub const SESSION_REVEAL: &'static str = "session.reveal";
+    /// Asks the app to open an HTTP request in a Session's API tab
+    /// (`SessionOpenApiRequestParams`); the Engine re-publishes it as the
+    /// `session.api_request` event. Nothing is sent by the Engine.
+    pub const SESSION_OPEN_API_REQUEST: &'static str = "session.open_api_request";
     pub const SESSION_MIGRATE: &'static str = "session.migrate";
     pub const SESSION_REPARENT_WORKTREE: &'static str = "session.reparent_worktree";
     pub const HOST_SYNC_PREFS: &'static str = "host.sync_prefs";
@@ -131,6 +135,10 @@ impl EventName {
     /// an agent that just wrote a note. The app selects it without taking
     /// focus from another app.
     pub const SESSION_REVEAL: &'static str = "session.reveal";
+    /// An agent asked for a request to be opened in its Session's API tab
+    /// (`SessionOpenApiRequestParams`). The app prefills the tab; it sends
+    /// only a `GET` marked `autoSend`, anything else waits for Send.
+    pub const SESSION_API_REQUEST: &'static str = "session.api_request";
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
