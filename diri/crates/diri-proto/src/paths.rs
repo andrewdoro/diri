@@ -26,6 +26,12 @@ pub const USAGE_CACHE_FILE_NAME: &str = "usage-cache.json";
 pub const ACTIVITY_LOG_FILE_NAME: &str = "activity-log.jsonl";
 pub const SESSION_RECOVERY_DIR_NAME: &str = "sessions";
 
+/// The argument that runs diri.app's main executable as a session Holder's
+/// launchd trampoline (macOS): `<diri> --holder-trampoline <holder> <args…>`
+/// spawns the Holder, waits for it and exits 0. The Engine starts it; the app
+/// must recognise it before doing anything else.
+pub const HOLDER_TRAMPOLINE_FLAG: &str = "--holder-trampoline";
+
 pub const ENV_SESSION_ID: &str = "DIRIJOR_SESSION_ID";
 pub const ENV_SOCKET: &str = "DIRIJOR_SOCKET";
 pub const ENV_CLI: &str = "DIRIJOR_CLI";

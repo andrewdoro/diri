@@ -136,6 +136,8 @@ recorded by the Engine, not the Holder.
 | `engine.exit` | info | `reason: shutdown\|idle` | deliberate Engine exits (vs. crashes: no `engine.exit` before the next `process.start`) |
 | `crash.report` | incident | `process, app_version, incident_id, crashed_at, timestamp, exception, signal, subtype, termination, namespace, code, thread, thread_name, signature, frames[]` | native crashes (SIGSEGV/abort in GPUI/objc) of `diri`, `dirijord-rs`, `diri-holder`, `dirijor`, `dirijor-mcp`, `diri-ssh-askpass` from `~/Library/Logs/DiagnosticReports/*.ips`, scanned at start and every 10 min past a watermark in `telemetry/crash_watermark.json` (first scan looks back 7 days). Frames are `image!symbol+offset`; no paths, registers or application-specific messages |
 | `holder.manager_died` | incident | `pid, code, signal` | the Holder manager exiting abnormally (every local session with it) |
+| `holder.launchd_launch` | info | `session, ms` | macOS: a session Holder started as a launchd job of its own (its own process coalition) |
+| `holder.launchd_fallback` | incident | `session, kind` | macOS: the launchd job provably never started, so the session went to the shared manager (and shares its coalition) |
 
 ### Control RPC and clients
 

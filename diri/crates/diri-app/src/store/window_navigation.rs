@@ -1405,6 +1405,7 @@ mod tests {
                 code: Some(1),
                 signal: None,
                 system_restart: false,
+                interrupted: false,
             });
         };
         let terminal_id = SessionId::new("auxiliary-terminal");

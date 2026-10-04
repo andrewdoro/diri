@@ -44,7 +44,7 @@ impl SessionStore {
                 !self.auto_resuming.contains(&session.id)
                     && !session.is_archived()
                     && session.can_resume()
-                    && matches!(&session.status, SessionStatus::Exited(info) if info.ended_by_restart())
+                    && matches!(&session.status, SessionStatus::Exited(info) if info.ended_by_interruption())
             })
             .map(|session| {
                 let selected = self.selected_session_id.as_ref() == Some(&session.id);
@@ -113,7 +113,7 @@ impl SessionStore {
             .get(id)
             .is_none_or(|session| match &session.status {
                 SessionStatus::Starting => false,
-                SessionStatus::Exited(info) => !info.ended_by_restart(),
+                SessionStatus::Exited(info) => !info.ended_by_interruption(),
                 _ => true,
             })
     }

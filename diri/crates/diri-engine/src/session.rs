@@ -2327,6 +2327,7 @@ impl Session {
             StatusSignal::ProcessExit {
                 code: Some(0),
                 signal: None,
+                interrupted: false,
             },
             SystemTime::now(),
         );
@@ -4576,6 +4577,7 @@ fn record_remote_exit(shared: &Shared, exit: ProcessExit) {
         StatusSignal::ProcessExit {
             code: exit.code,
             signal: exit.signal,
+            interrupted: false,
         },
         SystemTime::now(),
     );
@@ -4766,8 +4768,13 @@ fn pump(
             Some(Exit::Signal(signal)) => (None, Some(signal)),
             None => (None, None),
         };
+        let interrupted = interrupted_exit(&shared, exit);
         let outcome = shared.reducer.lock().expect("reducer").reduce(
-            StatusSignal::ProcessExit { code, signal },
+            StatusSignal::ProcessExit {
+                code,
+                signal,
+                interrupted,
+            },
             SystemTime::now(),
         );
         apply(&shared, &outcome);
@@ -5689,6 +5696,7 @@ fn pump_held(
         (code, None) => Exit::Code(code.unwrap_or(-1)),
     });
     *shared.exit.lock().expect("exit") = exit;
+    let interrupted = interrupted_exit(&shared, exit);
     // The marker is the last thing the Holder writes after draining the PTY,
     // so reaching it with nothing buffered means the retained screen is the
     // whole run. A partial marker means the drain is not proven; retain
@@ -5703,12 +5711,14 @@ fn pump_held(
                 code: Some(code),
                 signal: None,
                 system_restart: false,
+                interrupted,
             },
             Exit::Signal(signal) => diri_proto::ExitInfo {
                 reason: diri_proto::ExitReason::Signaled,
                 code: None,
                 signal: Some(signal),
                 system_restart: false,
+                interrupted,
             },
         };
         *shared.completed.lock().expect("completed capture") =
@@ -5721,13 +5731,59 @@ fn pump_held(
             None => (None, None),
         };
         let outcome = shared.reducer.lock().expect("reducer").reduce(
-            StatusSignal::ProcessExit { code, signal },
+            StatusSignal::ProcessExit {
+                code,
+                signal,
+                interrupted,
+            },
             SystemTime::now(),
         );
         apply(&shared, &outcome);
     }
     shared.exited.store(true, Ordering::SeqCst);
     record_exit_telemetry(&shared);
+}
+
+/// Whether an exit Diri did not ask for came from outside the Agent: its
+/// Holder vanished without reporting one, or a termination signal killed it
+/// (directly, or caught and turned into the shell's `128 + signal` code).
+/// macOS ends a whole process coalition this way when an app an Agent
+/// launched is force-quit, and under memory pressure; neither is the Agent
+/// finishing, so the session is offered back like a restart-ended one.
+fn interrupted_exit(shared: &Shared, exit: Option<Exit>) -> bool {
+    !shared.terminate_requested.load(Ordering::SeqCst) && is_outside_kill(exit)
+}
+
+fn is_outside_kill(exit: Option<Exit>) -> bool {
+    const KILLS: [i32; 3] = [libc::SIGHUP, libc::SIGKILL, libc::SIGTERM];
+    match exit {
+        None => true,
+        Some(Exit::Signal(signal)) => KILLS.contains(&signal),
+        Some(Exit::Code(code)) => KILLS.iter().any(|signal| code == 128 + signal),
+    }
+}
+
+#[cfg(test)]
+mod outside_kill_tests {
+    use super::{Exit, is_outside_kill};
+
+    #[test]
+    fn only_a_vanished_holder_or_a_termination_kill_counts() {
+        // The 2026-10-04 force-quit: Holders gone without a marker, and Agents
+        // SIGTERMed by macOS (some caught it and exited 143).
+        assert!(is_outside_kill(None));
+        assert!(is_outside_kill(Some(Exit::Signal(libc::SIGTERM))));
+        assert!(is_outside_kill(Some(Exit::Signal(libc::SIGKILL))));
+        assert!(is_outside_kill(Some(Exit::Signal(libc::SIGHUP))));
+        assert!(is_outside_kill(Some(Exit::Code(143))));
+        assert!(is_outside_kill(Some(Exit::Code(137))));
+        // The Agent's own ending, or the person's Ctrl-C, stays a plain exit.
+        assert!(!is_outside_kill(Some(Exit::Code(0))));
+        assert!(!is_outside_kill(Some(Exit::Code(1))));
+        assert!(!is_outside_kill(Some(Exit::Code(130))));
+        assert!(!is_outside_kill(Some(Exit::Signal(libc::SIGINT))));
+        assert!(!is_outside_kill(Some(Exit::Signal(libc::SIGSEGV))));
+    }
 }
 
 /// The held-output follower is on the input-to-pixel path while a terminal is
@@ -5875,6 +5931,7 @@ fn mark_launch_failed(shared: &Shared, stage: &'static str, error: &crate::holde
         StatusSignal::ProcessExit {
             code: Some(127),
             signal: None,
+            interrupted: false,
         },
         SystemTime::now(),
     );

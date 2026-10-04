@@ -1466,6 +1466,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         };
         let record = diri_proto::SessionRecord {
             attention_state: None,

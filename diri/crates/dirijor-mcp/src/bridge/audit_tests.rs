@@ -191,6 +191,7 @@ fn exited_agent_does_not_wait_forever_for_idle() {
                 code: Some(1),
                 signal: None,
                 system_restart: false,
+                interrupted: false,
             }),
         )])
     });

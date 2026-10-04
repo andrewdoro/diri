@@ -868,6 +868,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         assert!(satisfies_wait_target(&exited, "exited"));
         assert!(satisfies_wait_target(&exited, "dead"));

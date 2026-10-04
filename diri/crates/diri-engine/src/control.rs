@@ -2163,6 +2163,7 @@ impl ControlServer {
                     code: Some(0),
                     signal: None,
                     system_restart: false,
+                    interrupted: false,
                 });
                 record.needs_input = None;
                 record.hibernation = None;
@@ -6595,6 +6596,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         record.resumability = diri_proto::Resumability::Resumable;
         record
@@ -6691,6 +6693,7 @@ mod tests {
                 code: None,
                 signal: None,
                 system_restart: false,
+                interrupted: false,
             });
             registry.insert_record(broken);
         }
@@ -7068,6 +7071,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         };
         record.status = diri_proto::SessionStatus::Exited(exit.clone());
         let child = ProcessIdentity::new(
@@ -7191,6 +7195,7 @@ mod tests {
                 code: None,
                 signal: None,
                 system_restart: false,
+                interrupted: false,
             });
             registry.insert_record(other);
         }

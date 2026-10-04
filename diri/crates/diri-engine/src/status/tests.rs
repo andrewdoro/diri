@@ -591,6 +591,7 @@ fn a_process_only_agent_goes_working_on_first_output_then_exits() {
         StatusSignal::ProcessExit {
             code: Some(0),
             signal: None,
+            interrupted: false,
         },
         now + Duration::from_secs(2),
     );
@@ -873,6 +874,7 @@ fn a_signalled_exit_is_reported_as_signalled() {
         StatusSignal::ProcessExit {
             code: None,
             signal: Some(9),
+            interrupted: false,
         },
         t0(),
     );
@@ -886,12 +888,33 @@ fn a_signalled_exit_is_reported_as_signalled() {
 }
 
 #[test]
+fn an_interrupted_exit_carries_the_flag_to_the_status() {
+    let mut reducer = StatusReducer::new(Authority::HooksPrimary, t0());
+    let outcome = reducer.reduce(
+        StatusSignal::ProcessExit {
+            code: None,
+            signal: None,
+            interrupted: true,
+        },
+        t0(),
+    );
+    match outcome.status_change {
+        Some(SessionStatus::Exited(info)) => {
+            assert!(info.interrupted);
+            assert!(info.ended_by_interruption());
+        }
+        other => panic!("expected an interrupted exit, got {other:?}"),
+    }
+}
+
+#[test]
 fn exited_is_absorbing() {
     let mut reducer = StatusReducer::new(Authority::HooksPrimary, t0());
     reducer.reduce(
         StatusSignal::ProcessExit {
             code: Some(0),
             signal: None,
+            interrupted: false,
         },
         t0(),
     );
@@ -1230,6 +1253,7 @@ fn unavailable_transport_is_not_a_process_exit_and_cannot_complete_a_turn() {
         StatusSignal::ProcessExit {
             code: Some(126),
             signal: None,
+            interrupted: false,
         },
         t0(),
     );

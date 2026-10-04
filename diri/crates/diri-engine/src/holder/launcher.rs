@@ -20,8 +20,9 @@ const READINESS_ATTEMPTS: u32 = 250;
 pub struct HolderLauncher;
 
 impl HolderLauncher {
-    /// Ensures a live holder serves `spec`, launching the shared manager if
-    /// needed. Returns the pid serving the session (the manager's, or a
+    /// Ensures a live holder serves `spec`: on macOS in a launchd job of its
+    /// own when the Engine runs from an app bundle, otherwise in the shared
+    /// manager, launched if needed. Returns the pid serving the session (the manager's, or a
     /// pre-manager holder's when one is adopted).
     pub fn launch(
         executable_path: &Path,
@@ -37,6 +38,27 @@ impl HolderLauncher {
             && let Some(serving_pid) = read_pid_file(&paths.pid_file())
         {
             return Ok(serving_pid);
+        }
+
+        // macOS: a launchd job per session, so no other session (nor the app)
+        // shares its process coalition. Falls back to the manager only when
+        // the job provably never started.
+        #[cfg(target_os = "macos")]
+        if let Some(trampoline) = super::launchd::trampoline_executable() {
+            match super::launchd::launch(&trampoline, executable_path, paths, spec) {
+                Ok(pid) => return Ok(pid),
+                Err(super::launchd::LaunchdFailure::Uncertain(error)) => return Err(error),
+                Err(super::launchd::LaunchdFailure::NotStarted(error)) => {
+                    eprintln!(
+                        "diri-engine: launchd holder launch failed, using the manager: {error}"
+                    );
+                    diri_telemetry::incident!(
+                        "holder.launchd_fallback",
+                        session = diri_telemetry::id(&spec.session_id),
+                        kind = crate::telemetry::holder_error_kind(&error),
+                    );
+                }
+            }
         }
 
         let manager_paths = HolderManagerPaths::new(&paths.directory);

@@ -433,6 +433,13 @@ pub struct ExitInfo {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub system_restart: bool,
+    /// Something outside the Agent and the person ended it, and Diri did not
+    /// ask: its Holder vanished without reporting an exit, or the Agent was
+    /// killed by a termination signal (macOS force-quitting an app the Agent
+    /// launched takes its whole process coalition down this way). A field so
+    /// older peers keep reading the plain exit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 impl ExitInfo {
@@ -444,6 +451,7 @@ impl ExitInfo {
             code: None,
             signal: None,
             system_restart,
+            interrupted: false,
         }
     }
 
@@ -451,6 +459,12 @@ impl ExitInfo {
     /// work rather than repeating a choice the user made.
     pub fn ended_by_restart(&self) -> bool {
         self.reason == ExitReason::DaemonRestart
+    }
+
+    /// Ended by a restart or an outside kill rather than by the Agent or the
+    /// person, so Diri brings it back the way it does after a restart.
+    pub fn ended_by_interruption(&self) -> bool {
+        self.ended_by_restart() || self.interrupted
     }
 }
 

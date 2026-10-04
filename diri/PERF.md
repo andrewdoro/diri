@@ -2914,3 +2914,37 @@ DIRI_BENCH_SESSIONS=1000 DIRI_BENCH_PROJECTS=20 DIRI_BENCH_ITERATIONS=150 \
 cargo test --release -p diri-app --bin diri -- --ignored --exact \
   root::tests::windowed_sidebar_rows_paint_like_every_row_built
 ```
+
+## One coalition per local session (2026-10-04)
+
+Force-quitting a Chrome that an Agent's browser MCP server had launched
+killed every local session: LaunchServices force-quits the whole process
+coalition of the app, and the Engine, the shared Holder manager, every Agent
+and that Chrome all shared diri's. On macOS a bundled Engine now starts each
+session's Holder as a transient launchd job (a fresh coalition) whose program
+is diri.app's main executable acting as a trampoline, so TCC still credits
+Agents to `com.dirijor.diri`. A force-quit now ends at most the one session
+whose Agent launched the app, and that session is marked `interrupted` and
+resumes on its own.
+
+Footprint (`footprint`, release build, idle `sleep` Agent):
+
+| Process | Per session |
+| --- | ---: |
+| trampoline (`diri --holder-trampoline`) | 3.3 MB |
+| `diri-holder --spec` | 1.6 MB |
+| its group guard | 1.3 MB |
+| **total** | **6.2 MB** |
+
+The shared manager it replaces measured 4.2 MB for a whole fleet, so 40
+sessions cost about 250 MB more. That is the price of isolation: a launchd
+job is the only way out of a coalition without private entitlements, and the
+trampoline must outlive the Holder or TCC credits the Agents to
+`diri-holder`. Folding the guard into the trampoline would save 1.3 MB a
+session.
+
+```sh
+cargo build -p diri-app --bin diri
+DIRI_LAUNCHD_TRAMPOLINE=$PWD/target/debug/diri \
+  cargo test -p diri-engine --test launchd_holder -- --ignored
+```

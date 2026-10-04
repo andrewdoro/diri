@@ -6499,7 +6499,7 @@ impl Sidebar {
             // Beside a restart-ended session's own Resume: the rest of them.
             let resume_all = match &session.status {
                 diri_proto::SessionStatus::Exited(info)
-                    if info.ended_by_restart() && session.can_resume() =>
+                    if info.ended_by_interruption() && session.can_resume() =>
                 {
                     store.resume_all_offer()
                 }
@@ -10080,6 +10080,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         assert_eq!(display_title(&session), "Ended");
     }

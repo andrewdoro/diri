@@ -34,6 +34,8 @@ mod haptics;
 mod held_hints;
 mod herdr_import;
 pub mod history;
+#[cfg(target_os = "macos")]
+mod holder_trampoline;
 mod icons;
 mod inspector;
 mod launch_recipe;
@@ -241,6 +243,10 @@ pub(crate) struct AppServices {
 }
 
 fn main() {
+    // A session Holder's launchd trampoline: before anything else, so it
+    // never touches the window server or telemetry.
+    #[cfg(target_os = "macos")]
+    holder_trampoline::run_if_requested();
     if cfg!(test) {
         #[cfg(all(test, target_os = "macos"))]
         if std::env::var_os("DIRI_TEST_NATIVE_FIND").is_some() {

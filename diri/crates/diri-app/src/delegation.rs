@@ -498,6 +498,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         source.resumability = Resumability::Resumable;
         let project = Project {

@@ -17,6 +17,11 @@
 //! shared because a local manager hosts many sessions and each guard process
 //! costs about 1.3 MB.
 //!
+//! On macOS a bundled Engine launches each session's holder as a launchd job
+//! of its own instead (see [`launchd`]), so no session shares a process
+//! coalition with the app or with another session; the shared manager is the
+//! fallback, and the only path elsewhere.
+//!
 //! All holder processes and protocols in the active architecture are
 //! Rust-owned. The socket paths, NDJSON request/response shapes, pid-file
 //! contents and in-band OSC 777 exit marker are versioned internal contracts.
@@ -29,6 +34,8 @@
 pub mod client;
 #[cfg(unix)]
 pub mod guard;
+#[cfg(target_os = "macos")]
+pub mod launchd;
 pub mod launcher;
 pub mod manager;
 pub mod paths;
