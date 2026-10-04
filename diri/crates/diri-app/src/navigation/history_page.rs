@@ -121,7 +121,7 @@ impl NavigationOverlay {
             return;
         }
         if !entry.cwd_exists || !Path::new(&entry.cwd).is_dir() {
-            self.history_error = Some("The conversation folder is no longer available".to_owned());
+            self.history_error = Some(crate::i18n::t("nav.history.folder_gone").to_owned());
             cx.notify();
             return;
         }
@@ -188,17 +188,12 @@ impl NavigationOverlay {
         let title = entry
             .title
             .clone()
-            .unwrap_or_else(|| "Untitled conversation".to_owned());
-        let detail = format!(
-            "{title}\n{} · {}{}",
-            entry.kind.id(),
-            entry.cwd,
-            if resumable {
-                ""
-            } else {
-                "\nFolder unavailable"
-            }
-        );
+            .unwrap_or_else(|| crate::i18n::t("nav.history.untitled").to_owned());
+        let mut detail = format!("{title}\n{} · {}", entry.kind.id(), entry.cwd);
+        if !resumable {
+            detail.push('\n');
+            detail.push_str(crate::i18n::t("nav.history.folder_unavailable"));
+        }
         let age = relative_time(entry.last_active_at.0);
         let agent = crate::surface_shell::ui_agent(&entry.kind);
         div()
@@ -302,9 +297,9 @@ pub(super) fn relative_time(milliseconds: f64) -> String {
         .map_or(0.0, |duration| duration.as_secs_f64() * 1000.0);
     let seconds = ((now - milliseconds).max(0.0) / 1000.0) as u64;
     match seconds {
-        0..=59 => "now".to_owned(),
-        60..=3_599 => format!("{}m", seconds / 60),
-        3_600..=86_399 => format!("{}h", seconds / 3_600),
-        _ => format!("{}d", seconds / 86_400),
+        0..=59 => crate::i18n::t("nav.age.now").to_owned(),
+        60..=3_599 => crate::i18n::tf("nav.age.minutes", &[("count", &(seconds / 60))]),
+        3_600..=86_399 => crate::i18n::tf("nav.age.hours", &[("count", &(seconds / 3_600))]),
+        _ => crate::i18n::tf("nav.age.days", &[("count", &(seconds / 86_400))]),
     }
 }

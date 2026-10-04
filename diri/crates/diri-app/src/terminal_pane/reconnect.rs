@@ -85,7 +85,7 @@ impl TerminalPane {
                 if this.reconnect.finish(&id, request, error) {
                     if result.is_ok_and(|result| result.uncertain_input_discarded) {
                         this.show_terminal_feedback(
-                            "Queued input was dropped; it may not have arrived",
+                            t("terminal.reconnect.input_dropped"),
                             window,
                             cx,
                         );
@@ -123,11 +123,11 @@ impl TerminalPane {
         let state = remote_state(session)?;
         let failed = state == RemoteConnectionState::Failed;
         let message = if self.reconnect.pending || state == RemoteConnectionState::Reconnecting {
-            "Reconnecting… Last received screen"
+            t("terminal.reconnect.reconnecting_last")
         } else if state == RemoteConnectionState::Connecting {
-            "Connecting…"
+            t("terminal.reconnect.connecting")
         } else if failed {
-            "Connection lost · Last received screen"
+            t("terminal.reconnect.lost_last")
         } else {
             return None;
         };
@@ -141,11 +141,11 @@ impl TerminalPane {
             .as_ref()
             .map_or_else(|| message.to_owned(), |error| format!("{message}\n{error}"));
         let label = if short && failed && !self.reconnect.pending {
-            "Offline"
+            t("terminal.reconnect.offline")
         } else if short && state == RemoteConnectionState::Connecting {
-            "Connecting…"
+            t("terminal.reconnect.connecting")
         } else if short {
-            "Reconnecting…"
+            t("terminal.reconnect.reconnecting")
         } else {
             message
         };
@@ -194,9 +194,9 @@ impl TerminalPane {
                             .debug_selector(|| "reconnect-remote-session".into())
                             .role(Role::Button)
                             .aria_label(if pending {
-                                "Reconnecting remote session"
+                                t("terminal.reconnect.reconnecting_remote")
                             } else {
-                                "Reconnect remote session"
+                                t("terminal.reconnect.reconnect_remote")
                             })
                             .flex_none()
                             .rounded(px(5.0))
@@ -212,11 +212,11 @@ impl TerminalPane {
                                     .hover(move |button| button.bg(colors.primary.alpha(0.14)))
                             })
                             .child(if pending && short {
-                                "Wait"
+                                t("terminal.reconnect.wait")
                             } else if pending {
-                                "Reconnecting…"
+                                t("terminal.reconnect.reconnecting")
                             } else {
-                                "Reconnect"
+                                t("terminal.reconnect.reconnect")
                             })
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
