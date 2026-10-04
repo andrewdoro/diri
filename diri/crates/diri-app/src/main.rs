@@ -1,9 +1,11 @@
 mod agent_catalog;
 mod agent_setup;
 mod alerts;
+mod api_client;
 mod app_theme;
 mod application_notifications;
 mod clipboard_transfer;
+mod code_editor;
 mod code_intelligence;
 mod code_viewer;
 mod commands;
@@ -11,18 +13,21 @@ mod composer;
 #[cfg(unix)]
 mod daemon_launch;
 mod delegation;
+mod details_ui;
 mod dev_build;
 mod diagnostics;
 pub mod diff;
 mod empty_workbench;
 mod external_drop;
 mod file_links;
+mod file_tree;
 mod floating;
 pub mod fonts;
 pub mod fuzzy;
 #[cfg(test)]
 mod gesture_delivery;
 mod git_review;
+mod git_ui;
 #[cfg(test)]
 mod gpui_view_cache_tests;
 mod haptics;
@@ -53,6 +58,7 @@ mod path_picker;
 mod peek_settle;
 mod phone_access;
 mod platform;
+mod pr_card;
 mod progress_mark;
 mod project_hue;
 pub mod query_editor;
@@ -90,6 +96,7 @@ mod window_restore;
 mod workbench;
 #[cfg(all(test, target_os = "macos"))]
 mod workspace_fixture;
+mod workspace_follow;
 #[cfg_attr(not(test), allow(dead_code))]
 mod workspace_geometry;
 #[cfg_attr(not(test), allow(dead_code))]

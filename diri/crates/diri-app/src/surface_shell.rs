@@ -1,3 +1,5 @@
+#[path = "usage_activity.rs"]
+mod usage_activity;
 #[path = "usage_chart.rs"]
 mod usage_chart;
 #[path = "usage_page.rs"]
@@ -21,6 +23,7 @@ use crate::quick_open;
 use crate::settings::{HostDraft, SettingsNav, SettingsTab, theme};
 mod account_settings;
 mod import_settings;
+mod new_agent_settings;
 mod privacy_settings;
 use crate::sidebar::DraggedSidebarItem;
 use crate::store::{Prefs, SessionStore, StoreRuntime, WindowMaterial};
@@ -427,6 +430,13 @@ pub struct UtilitySurfaces {
     /// A display-link frame is already requested for the chart motion.
     usage_chart_frame_pending: bool,
     usage_numbers: crate::number_flow::Bank,
+    /// Activity heatmap bins, rebuilt when the snapshot or source changes.
+    usage_activity: usage_activity::ActivityCell,
+    usage_activity_hover: Option<usage_activity::ActivityHover>,
+    usage_activity_metric: crate::usage::activity::ActivityMetric,
+    /// Monday-zero first weekday of the calendar's rows.
+    usage_week_start: u8,
+    usage_rhythm_width: Rc<Cell<f32>>,
     release_notes: ReleaseNotesState,
     /// Finished-state stills of the newest release's What's New clips, for
     /// the thumbnails on the What's New page, in the appearance they match.
@@ -659,6 +669,11 @@ impl UtilitySurfaces {
             usage_scrub: None,
             usage_chart_frame_pending: false,
             usage_numbers: crate::number_flow::Bank::default(),
+            usage_activity: Default::default(),
+            usage_activity_hover: None,
+            usage_activity_metric: Default::default(),
+            usage_week_start: usage_activity::system_week_start(),
+            usage_rhythm_width: Rc::new(Cell::new(0.0)),
             release_notes: ReleaseNotesState::default(),
             whats_new_posters: None,
             settings_scroll: ScrollHandle::new(),
@@ -3110,6 +3125,7 @@ impl UtilitySurfaces {
                     ),
                     colors,
                 ))
+                .child(self.new_agent_start_settings(cx))
                 .child(setting_section(
                     "Behavior",
                     div()
@@ -8453,6 +8469,62 @@ mod tests {
         });
     }
 
+    /// Deterministic local working hours for the last 26 weeks.
+    #[cfg(target_os = "macos")]
+    fn seed_usage_activity(history: &mut crate::usage::dashboard::UsageHistory, now: i64) {
+        let offset = crate::usage::activity::system_offset(now);
+        let today = (now + offset).div_euclid(86_400);
+        for back in 0..182_i64 {
+            let day = today - back;
+            let weekday = crate::usage::activity::weekday(day);
+            let mix = (day * 7919).rem_euclid(97);
+            if (60..74).contains(&back) || (weekday >= 5 && mix % 3 != 0) || mix % 11 == 0 {
+                continue;
+            }
+            let start = 9 + mix % 3;
+            let length = if weekday >= 5 {
+                2 + mix % 3
+            } else {
+                4 + mix % 8
+            };
+            let late = mix % 5 == 0;
+            for local in (start..start + length).chain(if late { 21..24 } else { 0..0 }) {
+                if local == 13 && mix % 2 == 0 {
+                    continue;
+                }
+                let hour = (day * 86_400 + local * 3_600 - offset).div_euclid(3_600);
+                let volume = 1 + (hour * 31).rem_euclid(17);
+                let (models, model, pricing) = if hour % 4 == 0 {
+                    (
+                        &mut history.codex,
+                        "gpt-5.4",
+                        diri_usage::match_openai("gpt-5.4"),
+                    )
+                } else {
+                    (
+                        &mut history.claude,
+                        "claude-opus-4-6",
+                        diri_usage::match_claude("claude-opus-4-6"),
+                    )
+                };
+                crate::usage::dashboard::record(
+                    models,
+                    model,
+                    hour,
+                    crate::usage::UsageHourAgg {
+                        i: volume * 400,
+                        o: volume * 3_000,
+                        cr: volume * 160_000,
+                        cw: volume * 12_000,
+                        c: volume as f64 * 0.11,
+                    },
+                    pricing,
+                    0,
+                );
+            }
+        }
+    }
+
     /// Fixture-only visual review, never populates the live usage tracker.
     #[cfg(target_os = "macos")]
     #[test]
@@ -8475,8 +8547,12 @@ mod tests {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(1200.0);
+        let height = std::env::var("DIRI_VISUAL_HEIGHT")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(900.0);
         let window = cx
-            .open_window(size(px(width), px(900.0)), move |window, cx| {
+            .open_window(size(px(width), px(height)), move |window, cx| {
                 let harness =
                     cx.new(|cx| SettingsWorkbenchHarness::open_at(SettingsTab::Usage, window, cx));
                 harness.update(cx, |harness, cx| {
@@ -8530,6 +8606,28 @@ mod tests {
                             );
                         }
                         history.merge(crate::usage::UsageProvider::Codex, &models);
+                        // `DIRI_VISUAL_ACTIVITY` adds half a year of working
+                        // hours (weekdays, a quiet fortnight, late nights) so
+                        // the activity calendar and rhythm have shape.
+                        if std::env::var_os("DIRI_VISUAL_ACTIVITY").is_some() {
+                            history = Default::default();
+                            seed_usage_activity(&mut history, now);
+                        }
+                        // `DIRI_VISUAL_ACTIVITY_HOVER=day:<n>|slot:<n>` shows
+                        // that cell's tooltip.
+                        if let Some((kind, index)) = std::env::var("DIRI_VISUAL_ACTIVITY_HOVER")
+                            .ok()
+                            .and_then(|value| {
+                                let (kind, index) = value.split_once(':')?;
+                                Some((kind.to_owned(), index.parse::<usize>().ok()?))
+                            })
+                        {
+                            surfaces.usage_activity_hover = Some(if kind == "slot" {
+                                usage_activity::ActivityHover::Slot(index)
+                            } else {
+                                usage_activity::ActivityHover::Day(index)
+                            });
+                        }
                         if std::env::var_os("DIRI_VISUAL_EMPTY").is_some() {
                             history = Default::default();
                         }

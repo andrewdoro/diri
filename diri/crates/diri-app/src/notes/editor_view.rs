@@ -3683,6 +3683,8 @@ impl NoteEditorView {
                 }
                 (Some(agent), _) => AgentLogo::new(agent, MENU_LOGO, colors)
                     .badged(false)
+                    .inset(MENU_LOGO_INSET)
+                    .monochrome(true)
                     .into_any_element(),
                 (None, _) => crate::icons::sf_symbol("doc.text", MENU_ICON, colors.secondary),
             };
@@ -3938,10 +3940,11 @@ const SLASH_MENU_WIDTH: f32 = 240.0;
 const MENTION_MENU_WIDTH: f32 = 340.0;
 /// Glyphs and agent marks at the New Agent menu's sizes.
 pub(super) const MENU_ICON: f32 = 13.0;
-pub(super) const MENU_LOGO: f32 = 20.0;
-/// A status mark is inset 0.08 where a bare logo is inset 0.28; this size
-/// draws the mark exactly as large as the New Agent menu's 20 pt logos.
-const MENU_STATUS_MARK: f32 = MENU_LOGO * (1.0 - 2.0 * 0.28) / (1.0 - 2.0 * 0.08);
+pub(super) const MENU_LOGO: f32 = crate::floating::MENU_AGENT_LOGO;
+use crate::floating::MENU_AGENT_LOGO_INSET as MENU_LOGO_INSET;
+/// A status mark is inset 0.08; this size draws the mark exactly as large
+/// as the New Agent menu's logos.
+const MENU_STATUS_MARK: f32 = MENU_LOGO * (1.0 - 2.0 * MENU_LOGO_INSET) / (1.0 - 2.0 * 0.08);
 const MENU_GAP: f32 = 6.0;
 const MENU_MARGIN: f32 = 8.0;
 /// A separator's hairline plus its padding.

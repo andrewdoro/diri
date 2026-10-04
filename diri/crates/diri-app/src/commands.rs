@@ -1104,6 +1104,8 @@ fn bind_active_keys(cx: &mut App, overrides: &ShortcutOverrides) {
     // The Notes window's editing keys live in their own key contexts, so
     // they never shadow terminal or app shortcuts in the main window.
     cx.bind_keys(crate::notes::key_bindings());
+    // The Files surface's editor keys, likewise scoped to its contexts.
+    cx.bind_keys(crate::code_viewer::key_bindings());
 }
 
 fn active_shortcut_overrides() -> &'static RwLock<ShortcutOverrides> {

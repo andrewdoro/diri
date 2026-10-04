@@ -453,14 +453,23 @@ tokio::spawn(async move { clone_repository(request).await });
 #[cfg(all(test, target_os = "macos"))]
 impl SidebarPreviewFixture {
     pub(crate) fn bench_fleet(total: usize, working: usize) -> Self {
+        Self::bench_fleet_across(total, working, 5)
+    }
+
+    /// [`Self::bench_fleet`] spread over `projects` projects (the first five
+    /// keep their names; the rest are numbered).
+    pub(crate) fn bench_fleet_across(total: usize, working: usize, projects: usize) -> Self {
         let now = 1_750_000_000_000.0;
-        let projects: Vec<Project> = ["dirijor", "anara", "settings-kit", "infra", "notes"]
-            .iter()
-            .map(|name| {
+        let names = ["dirijor", "anara", "settings-kit", "infra", "notes"];
+        let projects: Vec<Project> = (0..projects.max(1))
+            .map(|index| {
+                let name = names
+                    .get(index)
+                    .map_or_else(|| format!("project-{index}"), |name| (*name).to_owned());
                 project(
                     &format!("bench-{name}"),
                     &format!("/Users/preview/Projects/{name}"),
-                    name,
+                    &name,
                 )
             })
             .collect();
@@ -619,6 +628,7 @@ fn session(
         listening_ports: None,
         foreground_agent: None,
         terminal_cwd: None,
+        agent_workspace: None,
         note_id: None,
         foreground_ports: None,
         terminal_progress: None,

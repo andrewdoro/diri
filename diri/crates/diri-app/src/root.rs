@@ -986,6 +986,16 @@ impl RootView {
                         }
                         cx.notify();
                     }
+                    InspectorEvent::NewAgentFromDefaultBranch(session) => {
+                        let repo = this
+                            .window_store
+                            .read()
+                            .expect("store")
+                            .repository_root_of(session);
+                        if let Some(repo) = repo {
+                            this.spawn_from_default_branch(repo, window, cx);
+                        }
+                    }
                     InspectorEvent::Browser(action) => {
                         #[cfg(target_os = "macos")]
                         match action {
@@ -1244,7 +1254,7 @@ impl RootView {
                                 .read()
                                 .expect("session store lock poisoned")
                                 .has_pending_ui_request();
-                            let (open_launcher, open_settings) = if pending {
+                            let (open_launcher, open_settings, api_requests) = if pending {
                                 let mut store = this
                                     .window_store
                                     .write()
@@ -1252,10 +1262,12 @@ impl RootView {
                                 (
                                     store.take_open_launcher_request(),
                                     store.take_open_settings_request(),
+                                    store.take_api_requests(),
                                 )
                             } else {
-                                (false, false)
+                                (false, false, Vec::new())
                             };
+                            this.open_api_requests(api_requests, cx);
                             if open_launcher {
                                 this.open_launcher(&OpenLauncher, window, cx);
                             }
@@ -2295,7 +2307,9 @@ impl RootView {
             // unavailability is visible and another Agent is one keystroke
             // away, instead of a shortcut that silently does nothing.
             CommandId::NewDefaultSession => {
-                if self.spawn_default() {
+                if self.spawn_default_in_fresh_worktree(window, cx) {
+                    // Lands once the default branch is fetched.
+                } else if self.spawn_default() {
                     self.focus_spawned_session(window, cx);
                 } else {
                     self.open_launcher(&OpenLauncher, window, cx);
@@ -2750,6 +2764,100 @@ impl RootView {
         }
         self.focus_active_terminal(window, cx);
         cx.notify();
+    }
+
+    /// ⌘T for a project whose new Agents start in a fresh worktree from the
+    /// default branch (Settings › General). Every other project, and every
+    /// remote default, keeps the synchronous current-checkout launch.
+    fn spawn_default_in_fresh_worktree(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.preview {
+            return false;
+        }
+        let source = self.active_session_id(cx);
+        let repo = {
+            let store = self.window_store.read().expect("store");
+            store
+                .default_spawn_host()
+                .is_none()
+                .then(|| store.fresh_worktree_repo(source.as_ref()))
+                .flatten()
+        };
+        let Some(repo) = repo else {
+            return false;
+        };
+        self.spawn_from_default_branch(repo, window, cx);
+        true
+    }
+
+    /// Fetches the repository's default branch off the main thread, then
+    /// opens the default Agent in a new Diri worktree branched from it. The
+    /// remote-tracking ref is the base: a local `main` may be hundreds of
+    /// commits old. Offline, the last-fetched ref is used and the toast says so.
+    fn spawn_from_default_branch(
+        &mut self,
+        repo: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace_target = self.workspace_spawn_target();
+        let fetch = cx.background_spawn({
+            let repo = repo.clone();
+            async move { crate::workspace_follow::fetch_default_base(std::path::Path::new(&repo)) }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let fresh = fetch.await;
+            let _ = crate::floating::update_in_owner(&this, cx, |this, window, cx| {
+                let Some(fresh) = fresh else {
+                    this.show_feedback(
+                        "fresh_worktree",
+                        Toast::warning(
+                            "No default branch found, so the Agent starts in this checkout",
+                        ),
+                        cx,
+                    );
+                    if this.spawn_default() {
+                        this.focus_spawned_session(window, cx);
+                    }
+                    return;
+                };
+                let spawned = this
+                    .window_store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .spawn_default(SpawnOptions {
+                        workspace_target,
+                        cwd: Some(repo),
+                        worktree: Some(crate::store::WorktreeSpawn {
+                            create: true,
+                            branch: None,
+                            base: Some(fresh.base.reference.clone()),
+                        }),
+                        ..SpawnOptions::default()
+                    });
+                if !fresh.fetched {
+                    let message = if fresh.base.remote {
+                        format!(
+                            "Couldn't fetch {}; started from the last-fetched {}",
+                            fresh.base.branch, fresh.base.reference
+                        )
+                    } else {
+                        format!(
+                            "No remote default branch; started from local {}",
+                            fresh.base.reference
+                        )
+                    };
+                    this.show_feedback("fresh_worktree", Toast::info(message), cx);
+                }
+                if spawned {
+                    this.focus_spawned_session(window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn spawn_default(&self) -> bool {
@@ -3537,6 +3645,28 @@ impl RootView {
         }
         self.begin_inspector_slide(cx);
         cx.notify();
+    }
+
+    /// Opens requests agents sent with `open_api_request` in their Session's
+    /// API tab. One for the Session in front also opens the panel; the rest
+    /// wait in their Session's tabs.
+    fn open_api_requests(
+        &mut self,
+        requests: Vec<diri_proto::SessionOpenApiRequestParams>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(inspector) = self.inspector.clone() else {
+            return;
+        };
+        let mut reveal = false;
+        for params in requests {
+            reveal |= inspector.update(cx, |inspector, cx| {
+                inspector.open_api_request(params.session_id, params.request, cx)
+            });
+        }
+        if reveal {
+            self.reveal_inspector(cx);
+        }
     }
 
     fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
@@ -6528,6 +6658,92 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Windowed rows paint exactly what building every row paints: 1,000
+    /// sessions over 20 projects, scrolled into the middle, captured with
+    /// only the rows near the viewport built and again with every row built.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal pixel comparison; run explicitly on macOS"]
+    fn windowed_sidebar_rows_paint_like_every_row_built() {
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        let services = test_services();
+        services
+            .store
+            .store
+            .write()
+            .unwrap()
+            .hydrate(SidebarPreviewFixture::bench_fleet_across(1000, 0, 20).list);
+        services
+            .store
+            .store
+            .write()
+            .unwrap()
+            .update_preferences(|prefs| prefs.sidebar_visible = true)
+            .unwrap();
+        let window = cx
+            .open_window(size(px(1600.0), px(1000.0)), |window, cx| {
+                cx.new(|cx| RootView::new(services, false, PreviewScenario::Empty, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let root = cx
+            .update_window(window.into(), |root, _, _| {
+                root.downcast::<RootView>().unwrap()
+            })
+            .unwrap();
+        let sidebar = cx.update(|cx| root.read(cx).sidebar.clone());
+        // The scroll thumb fades in over wall-clock time; reduced motion shows
+        // it at once, so both captures agree on it.
+        cx.update(|cx| cx.set_reduce_motion(true));
+        cx.capture_screenshot(window.into()).unwrap();
+        let mut captures = Vec::new();
+        for windowing in [true, false] {
+            cx.update(|cx| {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_row_windowing_for_test(windowing, cx);
+                    sidebar.scroll_list_for_test(12_345.0, cx);
+                })
+            });
+            cx.run_until_parked();
+            // Edge fades and the new band settle over the next frames, which
+            // the headless window delivers only when asked.
+            for _ in 0..4 {
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.draw(cx).clear();
+                    window.simulate_next_frame(cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+            }
+            captures.push(cx.capture_screenshot(window.into()).unwrap());
+        }
+        let (windowed, everything) = (&captures[0], &captures[1]);
+        if let Ok(dir) = std::env::var("DIRI_VISUAL_OUTPUT_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            windowed.save(dir.join("sidebar-windowed.png")).unwrap();
+            everything.save(dir.join("sidebar-every-row.png")).unwrap();
+        }
+        assert_eq!(windowed.dimensions(), everything.dimensions());
+        let differing = windowed
+            .pixels()
+            .zip(everything.pixels())
+            .filter(|(left, right)| left != right)
+            .count();
+        assert_eq!(differing, 0, "windowed rows painted differently");
+        drop(root);
+        drop(sidebar);
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     /// Process CPU time (user + system) so far, for render-cost benches.
     #[cfg(target_os = "macos")]
     fn bench_cpu_seconds() -> f64 {
@@ -6596,12 +6812,16 @@ mod tests {
         diri_ui::set_mark_rasterizer(bench_stand_in_raster);
         let services = test_services();
         services.store.store.write().unwrap().hydrate(
-            SidebarPreviewFixture::bench_fleet(
+            SidebarPreviewFixture::bench_fleet_across(
                 std::env::var("DIRI_BENCH_SESSIONS")
                     .ok()
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(51),
                 4,
+                std::env::var("DIRI_BENCH_PROJECTS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(5),
             )
             .list,
         );
@@ -6637,9 +6857,17 @@ mod tests {
                 root.downcast::<RootView>().unwrap()
             })
             .unwrap();
-        let cases: [&str; 3] = ["activity-tick", "noop-store-change", "root-only-frame"];
+        let cases: [&str; 6] = [
+            "activity-tick",
+            "noop-store-change",
+            "root-only-frame",
+            "sidebar-notify",
+            "scroll-step",
+            "full-refresh",
+        ];
         for name in cases {
-            let step = |cx: &mut HeadlessAppContext| {
+            let mut scrolled = false;
+            let mut step = |cx: &mut HeadlessAppContext| {
                 let start = Instant::now();
                 cx.update(|cx| match name {
                     "activity-tick" => sidebar.update(cx, |sidebar, cx| {
@@ -6648,8 +6876,21 @@ mod tests {
                     "noop-store-change" => {
                         sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx))
                     }
+                    // A notify the props cannot account for: every row
+                    // renders again.
+                    "sidebar-notify" => sidebar.update(cx, |_, cx| cx.notify()),
+                    "scroll-step" => {
+                        scrolled = !scrolled;
+                        sidebar.update(cx, |sidebar, cx| {
+                            sidebar.scroll_list_for_test(if scrolled { 240.0 } else { 0.0 }, cx)
+                        })
+                    }
                     _ => root.update(cx, |_, cx| cx.notify()),
                 });
+                if name == "full-refresh" {
+                    cx.update_window(window.into(), |_, window, _| window.refresh())
+                        .unwrap();
+                }
                 cx.run_until_parked();
                 cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
                     .unwrap();

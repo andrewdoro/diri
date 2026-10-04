@@ -1,4 +1,5 @@
 //! Shared incremental transcript accounting. Contains no UI or provider credentials.
+pub mod activity;
 mod cache;
 pub mod dashboard;
 mod model;

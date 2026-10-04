@@ -46,6 +46,8 @@ pub(super) enum WriteAction<'a> {
         repo: &'a str,
     },
     Browser,
+    /// Open a request in the caller's own API tab (nothing is sent for it).
+    ApiRequest,
     TestRun,
     ReportToParent {
         target: &'a str,
@@ -141,9 +143,10 @@ impl<'a> McpPolicy<'a> {
                 }
                 relation
             }
-            WriteAction::QuickOpenInclude | WriteAction::Browser | WriteAction::TestRun => {
-                Relation::Unrelated
-            }
+            WriteAction::QuickOpenInclude
+            | WriteAction::Browser
+            | WriteAction::ApiRequest
+            | WriteAction::TestRun => Relation::Unrelated,
             WriteAction::Worktree { repo } => {
                 let project = self
                     .projects
@@ -413,6 +416,7 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            agent_workspace: None,
             note_id: None,
             foreground_ports: None,
             terminal_progress: None,
