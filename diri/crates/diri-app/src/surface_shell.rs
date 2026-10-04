@@ -1962,7 +1962,10 @@ impl UtilitySurfaces {
 
         crate::commands::rebind_keys(cx, &self.prefs.shortcut_overrides);
         crate::refresh_app_menus(cx);
-        self.activity = format!("Updated {}", command.shortcut_metadata().title);
+        self.activity = tf(
+            "settings.shortcuts.updated",
+            &[("command", &command.shortcut_metadata().title)],
+        );
         true
     }
 
@@ -1971,9 +1974,9 @@ impl UtilitySurfaces {
             crate::commands::shortcut_conflict(command, &binding, &self.prefs.shortcut_overrides)
         {
             if let Some(editor) = &mut self.shortcut_editor {
-                editor.error = Some(format!(
-                    "Already used by {}.",
-                    conflict.id.shortcut_metadata().title
+                editor.error = Some(tf(
+                    "settings.shortcuts.conflict",
+                    &[("command", &conflict.id.shortcut_metadata().title)],
                 ));
             }
             cx.notify();
@@ -1982,7 +1985,7 @@ impl UtilitySurfaces {
         if self.save_shortcut_override(command, Some(Some(binding)), cx) {
             self.shortcut_editor = None;
         } else if let Some(editor) = &mut self.shortcut_editor {
-            editor.error = Some("Could not save this shortcut.".to_owned());
+            editor.error = Some(t("settings.shortcuts.save_failed").to_owned());
         }
         cx.notify();
     }
@@ -2009,7 +2012,7 @@ impl UtilitySurfaces {
             crate::commands::rebind_keys(cx, &self.prefs.shortcut_overrides);
             crate::refresh_app_menus(cx);
             self.shortcut_editor = None;
-            self.activity = "Restored every keyboard shortcut".to_owned();
+            self.activity = t("settings.shortcuts.restored_all").to_owned();
         }
         cx.notify();
     }
@@ -2044,7 +2047,7 @@ impl UtilitySurfaces {
             .is_some_and(|number| (1..=35).contains(&number));
         if !key.modifiers.modified() && !function_key {
             if let Some(editor) = &mut self.shortcut_editor {
-                editor.error = Some("Include Command, Control, Option, or a function key.".into());
+                editor.error = Some(t("settings.shortcuts.needs_modifier").into());
             }
             cx.notify();
             return true;
@@ -3549,7 +3552,7 @@ impl UtilitySurfaces {
         } else if self.shortcut_search.is_empty() {
             div()
                 .text_color(colors.tertiary)
-                .child("Search shortcuts…")
+                .child(t("settings.shortcuts.search_placeholder"))
                 .into_any_element()
         } else {
             div()
@@ -3668,20 +3671,20 @@ impl UtilitySurfaces {
                         .text_size(px(Typo::ROW_EMPHASIZED.size))
                         .font_weight(Typo::ROW_EMPHASIZED.weight)
                         .text_color(colors.primary)
-                        .child("No shortcuts found"),
+                        .child(t("settings.shortcuts.empty_title")),
                 )
                 .child(
                     div()
                         .text_size(px(Typo::META.size))
                         .text_color(colors.tertiary)
-                        .child("Try an action name, description, or key."),
+                        .child(t("settings.shortcuts.empty_detail")),
                 )
                 .into_any_element()
         };
 
         let modified_count = self.prefs.shortcut_overrides.len();
         settings_page(
-            "Keyboard shortcuts",
+            t("settings.shortcuts.title"),
             div()
                 .flex()
                 .flex_col()
@@ -3691,9 +3694,7 @@ impl UtilitySurfaces {
                         .text_size(px(Typo::ROW.size))
                         .line_height(px(18.0))
                         .text_color(colors.secondary)
-                        .child(
-                            "Choose an action, then press a new key combination. Changes apply immediately.",
-                        ),
+                        .child(t("settings.shortcuts.intro")),
                 )
                 .child(
                     div()
@@ -3703,7 +3704,10 @@ impl UtilitySurfaces {
                         .child(search)
                         .when(modified_count > 0, |toolbar| {
                             toolbar.child(surface_button(
-                                format!("Reset all ({modified_count})"),
+                                tf(
+                                    "settings.shortcuts.reset_all",
+                                    &[("count", &modified_count)],
+                                ),
                                 "reset-all-shortcuts",
                                 colors,
                                 cx,
@@ -6642,20 +6646,26 @@ fn shortcut_matches(
     query: &str,
     overrides: &crate::commands::ShortcutOverrides,
 ) -> bool {
-    let query = query.trim().to_ascii_lowercase();
+    let query = query.trim().to_lowercase();
     if query.is_empty() {
         return true;
     }
+    // English always matches too, so a search typed from muscle memory or
+    // the docs still finds its shortcut in another interface language.
     let metadata = command.id.shortcut_metadata();
+    let english = command.id.english_shortcut_metadata();
     let searchable = format!(
-        "{} {} {} {} {}",
+        "{} {} {} {} {} {} {} {}",
         metadata.title,
         metadata.description,
         metadata.category.label(),
+        english.title,
+        english.description,
+        english.category.english_label(),
         command.stable_id,
         command.shortcut_label_for(overrides).unwrap_or_default()
     )
-    .to_ascii_lowercase();
+    .to_lowercase();
     query
         .split_whitespace()
         .all(|word| searchable.contains(word))
@@ -6677,9 +6687,15 @@ fn shortcut_row(
     let modified = command.is_overridden(overrides);
     let command_id = command.id;
     let binding_label: SharedString = if editing {
-        "Press keys…".into()
+        t("settings.shortcuts.press_keys").into()
     } else {
-        spaced_shortcut_label(assignment.as_deref().unwrap_or("Unassigned")).into()
+        assignment
+            .as_deref()
+            .map_or_else(
+                || t("settings.shortcuts.unassigned").to_owned(),
+                spaced_shortcut_label,
+            )
+            .into()
     };
     let detail: SharedString = error.unwrap_or(metadata.description).to_owned().into();
 
