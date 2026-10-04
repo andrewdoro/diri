@@ -5826,6 +5826,7 @@ impl WorkbenchInspector {
 
 impl Render for WorkbenchInspector {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("inspector");
         let colors = {
             let store = self
                 .runtime
@@ -5931,6 +5932,7 @@ impl Render for WorkbenchInspector {
             .when(self.workspace_chooser_open, |panel| {
                 panel.child(self.render_add_menu(colors, cx))
             })
+            .children(crate::perf_overlay::badge("inspector"))
     }
 }
 

@@ -331,6 +331,8 @@ fn append_management_actions(
                             | CommandId::ToggleNotifications
                             | CommandId::CheckForUpdates
                             | CommandId::ShowWhatsNew
+                            | CommandId::TogglePerfOverlay
+                            | CommandId::ToggleRenderCounters
                     )
             )
         }),
@@ -573,6 +575,8 @@ pub fn actions_for_default_host(
         },
         registered_action(CommandId::CheckForUpdates),
         registered_action(CommandId::ShowWhatsNew),
+        registered_action(CommandId::TogglePerfOverlay),
+        registered_action(CommandId::ToggleRenderCounters),
     ]);
     result
 }
@@ -1154,6 +1158,8 @@ mod tests {
                 "color-theme",
                 "check-for-updates",
                 "whats-new",
+                "toggle-perf-overlay",
+                "toggle-render-counters",
             ]
         );
         assert_eq!(result[0].title, "New Codex Session");

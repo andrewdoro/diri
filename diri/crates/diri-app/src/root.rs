@@ -5,6 +5,8 @@ mod held_hint_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "root/peek_profile.rs"]
 mod peek_profile;
+#[cfg(test)]
+mod perf_overlay_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod progress_frames;
 #[cfg(all(test, target_os = "macos"))]
@@ -58,6 +60,7 @@ use crate::commands::{
     ShowWhatsNew, ToggleAuxiliaryTerminal, ToggleCommandPalette, ToggleHistory, ToggleInspector,
     ToggleOverview, ToggleQuickOpen, ToggleSidebar, ToggleTabPeek,
 };
+use crate::commands::{TogglePerfOverlay, ToggleRenderCounters};
 use crate::external_drop::ExternalDropAction;
 use crate::haptics::{self, Haptic};
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
@@ -366,6 +369,9 @@ pub struct RootView {
     /// Hold-⌘ shortcut hints for this window; published while it is key.
     held_hints: crate::held_hints::HeldHints,
     _held_hint_timer: Option<Task<()>>,
+    /// Waits for frames to stop while the performance overlay shows, then
+    /// repaints it once as idle. See `crate::perf_overlay`.
+    perf_idle_repaint: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     _service_events: Task<()>,
     _surface_sync: Option<Task<()>>,
@@ -1473,6 +1479,7 @@ impl RootView {
             inspector_resize_origin: None,
             seam_limit: haptics::Crossing::default(),
             window_bounds_save: None,
+            perf_idle_repaint: None,
             toast: ToastSlot::default(),
             toast_style: ToastStyle::from_env(),
             _telemetry_window: crate::telemetry::WindowGuard::new("main", window),
@@ -1798,6 +1805,93 @@ impl RootView {
             }
         }
         cx.notify();
+    }
+
+    /// ⌥⌘P / ⌥⌘R: flips the performance overlay or render counters, saved
+    /// like any preference so it survives a relaunch.
+    fn toggle_perf_tool(&mut self, overlay: bool, cx: &mut Context<Self>) {
+        let result = {
+            let mut store = self
+                .window_store
+                .write()
+                .expect("session store lock poisoned");
+            let result = store.update_preferences(|prefs| {
+                if overlay {
+                    prefs.perf_overlay = !prefs.perf_overlay;
+                } else {
+                    prefs.render_counters = !prefs.render_counters;
+                }
+            });
+            crate::perf_overlay::apply_prefs(store.preferences());
+            result
+        };
+        if let Err(error) = result {
+            self.show_feedback(
+                "prefs",
+                Toast::error("Couldn’t save the developer setting").detail(error.to_string()),
+                cx,
+            );
+        }
+        self.perf_idle_repaint = None;
+        // Every window shows the overlay, and views cached since their last
+        // render must render again to put on or take off their badges.
+        cx.refresh_windows();
+    }
+
+    /// The performance overlay, while it is on. It reads the frames this
+    /// window draws anyway and never requests one, except a single repaint
+    /// once frames stop, so it can say "idle" instead of freezing on the
+    /// last burst's numbers. That repaint is left out of the stats.
+    fn perf_overlay(
+        &mut self,
+        colors: SemanticColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !crate::perf_overlay::overlay_enabled() {
+            self.perf_idle_repaint = None;
+            return None;
+        }
+        let window_id = window.window_handle().window_id().as_u64();
+        if self.perf_idle_repaint.is_none() && !crate::perf_overlay::repaint_pending(window_id) {
+            self.perf_idle_repaint = Some(cx.spawn(async move |this, cx| {
+                let idle = crate::perf_overlay::IDLE_AFTER;
+                let mut wait = idle;
+                loop {
+                    cx.background_executor().timer(wait).await;
+                    let now = cx.background_executor().now();
+                    match crate::perf_overlay::since_last_frame(window_id, now) {
+                        Some(since) if since < idle => wait = idle - since,
+                        _ => break,
+                    }
+                }
+                crate::perf_overlay::skip_next_frame(window_id);
+                let _ = this.update(cx, |this, cx| {
+                    this.perf_idle_repaint = None;
+                    cx.notify();
+                });
+            }));
+        }
+        let actions = crate::perf_overlay::OverlayActions {
+            move_corner: Box::new(cx.listener(|_, _, _, cx| {
+                crate::perf_overlay::cycle_corner();
+                cx.notify();
+            })),
+            reset: Box::new(cx.listener(|_, _, _, cx| {
+                crate::perf_overlay::reset();
+                cx.notify();
+            })),
+            close: Box::new(cx.listener(|this, _, window, cx| {
+                this.run_command(CommandId::TogglePerfOverlay, window, cx);
+            })),
+        };
+        let now = cx.background_executor().now();
+        let model = crate::perf_overlay::OverlayModel::current(window_id, now);
+        Some(
+            deferred(crate::perf_overlay::overlay(model, colors, actions))
+                .with_priority(2)
+                .into_any_element(),
+        )
     }
 
     fn frame_context(&self, cx: &App) -> crate::telemetry::FrameContext {
@@ -2521,6 +2615,8 @@ impl RootView {
             }
             CommandId::CheckForUpdates => self.services.updates.check(true),
             CommandId::ShowWhatsNew => self.open_whats_new_at(0, window, cx),
+            CommandId::TogglePerfOverlay => self.toggle_perf_tool(true, cx),
+            CommandId::ToggleRenderCounters => self.toggle_perf_tool(false, cx),
             CommandId::SelectPreviousSession if !self.arrow_surface_visible() => {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.select_relative(-1, cx));
@@ -4861,6 +4957,7 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let frame_started = crate::telemetry::frame_start();
+        crate::perf_overlay::rendered("root");
         self.main_viewport = window.viewport_size();
         if self.pending_notification_open.is_some()
             && self
@@ -5349,6 +5446,12 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &ShowWhatsNew, window, cx| {
                 this.run_command(CommandId::ShowWhatsNew, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &TogglePerfOverlay, window, cx| {
+                this.run_command(CommandId::TogglePerfOverlay, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRenderCounters, window, cx| {
+                this.run_command(CommandId::ToggleRenderCounters, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &SelectPreviousSession, window, cx| {
                 this.run_command(CommandId::SelectPreviousSession, window, cx);
             }))
@@ -5578,6 +5681,9 @@ impl Render for RootView {
         }
         if let Some(build) = &self.services.dev_build {
             root = root.child(dev_build_marker(build.marker_label(), colors, 10.0));
+        }
+        if let Some(overlay) = self.perf_overlay(colors, window, cx) {
+            root = root.child(overlay);
         }
         root.child(crate::telemetry::frame_probe(
             frame_started,

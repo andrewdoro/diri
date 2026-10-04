@@ -2110,6 +2110,7 @@ impl Focusable for NavigationOverlay {
 
 impl Render for NavigationOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("palette");
         let layout = OverlayLayout::command_palette(window.viewport_size());
         self.main_window = Some(window.window_handle());
         self.main_viewport = window.viewport_size();
@@ -2131,7 +2132,9 @@ impl Render for NavigationOverlay {
             // collapses to its in-flow content, which is nothing.
             .size_full();
         if let Some(overlay) = overlay {
-            root.inset_0().child(overlay)
+            root.inset_0()
+                .child(overlay)
+                .children(crate::perf_overlay::badge("palette"))
         } else {
             root.size(px(0.0))
         }

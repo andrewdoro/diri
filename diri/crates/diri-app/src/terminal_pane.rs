@@ -5241,6 +5241,7 @@ fn quote_from_terminal_element(session_id: SessionId, element: &TerminalElement)
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("terminal");
         #[cfg(test)]
         {
             self.render_count += 1;
@@ -5442,6 +5443,7 @@ impl TerminalPane {
             .on_modifiers_changed(cx.listener(Self::handle_modifiers_changed))
             .child(content)
             .children(drop_overlay)
+            .children(crate::perf_overlay::badge("terminal"))
     }
 }
 

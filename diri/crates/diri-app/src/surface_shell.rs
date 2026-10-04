@@ -3453,9 +3453,58 @@ impl UtilitySurfaces {
                         ),
                     colors,
                 ))
-                .child(self.privacy_settings(cx)),
+                .child(self.privacy_settings(cx))
+                .child(self.developer_settings(cx)),
             colors,
         )
+    }
+
+    /// Settings › General › Developer: the performance overlay and render
+    /// counters. Shows the live switches, which ⌥⌘P / ⌥⌘R may have flipped
+    /// since this panel copied the preferences.
+    fn developer_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.settings_colors();
+        setting_section(
+            "Developer",
+            div()
+                .flex()
+                .flex_col()
+                .child(toggle_row(
+                    "Performance overlay",
+                    "Frame rate, frame times, dropped frames and memory over the window.",
+                    crate::perf_overlay::overlay_enabled(),
+                    "toggle-perf-overlay",
+                    colors,
+                    cx,
+                    |this, cx| {
+                        let enabled = !crate::perf_overlay::overlay_enabled();
+                        this.set_developer_pref(move |prefs| prefs.perf_overlay = enabled, cx);
+                    },
+                ))
+                .child(setting_divider(colors))
+                .child(toggle_row(
+                    "Render counters",
+                    "Badge the main views with how often they render, and list them in the overlay.",
+                    crate::perf_overlay::render_counters_enabled(),
+                    "toggle-render-counters",
+                    colors,
+                    cx,
+                    |this, cx| {
+                        let enabled = !crate::perf_overlay::render_counters_enabled();
+                        this.set_developer_pref(move |prefs| prefs.render_counters = enabled, cx);
+                    },
+                )),
+            colors,
+        )
+    }
+
+    fn set_developer_pref(&mut self, update: impl FnOnce(&mut Prefs), cx: &mut Context<Self>) {
+        if self.update_prefs(update) {
+            crate::perf_overlay::apply_prefs(&self.prefs);
+        }
+        // Every window shows the overlay, and cached views must render again
+        // to put on or take off their badges.
+        cx.refresh_windows();
     }
 
     fn shortcuts_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5961,6 +6010,7 @@ impl Focusable for UtilitySurfaces {
 
 impl Render for UtilitySurfaces {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("settings");
         self.release_retired_share_images(window, cx);
         // Every surface or tab change notifies, so this render sees it.
         self.remote_usage_viewer.set_viewing(
@@ -6857,7 +6907,7 @@ fn settings_tab_matches(tab: SettingsTab, query: &str) -> bool {
     }
     let searchable = match tab {
         SettingsTab::General => {
-            "general default startup login sessions close confirmation sounds chimes support diagnostics privacy telemetry share report name support id quick open search roots choose folder finder picker updates diri-include include gitignore worktrees hidden folders import herdr migrate move tmux"
+            "general default startup login sessions close confirmation sounds chimes support diagnostics privacy telemetry share report name support id quick open search roots choose folder finder picker updates diri-include include gitignore worktrees hidden folders import herdr migrate move tmux developer performance perf overlay fps frame rate render counters debug"
         }
         SettingsTab::WhatsNew => {
             "what's new whats new release notes latest version changes features improvements"

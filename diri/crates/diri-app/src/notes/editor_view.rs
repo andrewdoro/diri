@@ -2586,6 +2586,7 @@ struct PaintState {
 
 impl Render for NoteEditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("note editor");
         let colors = self.colors;
         let focused = self.focus.is_focused(window);
         self.focused_last_frame = focused;

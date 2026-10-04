@@ -786,6 +786,7 @@ impl WorkspaceWorkbench {
 
 impl Render for WorkspaceWorkbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("workbench");
         let colors = {
             let store = self.runtime.store.read().expect("store");
             crate::app_theme::colors_in(&store)

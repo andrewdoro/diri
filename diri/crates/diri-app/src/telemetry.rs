@@ -384,6 +384,7 @@ impl Drop for WindowGuard {
         let lived_s = self.opened.elapsed().as_secs();
         if self.kind == "main" {
             LAST_FRAME_END.with(|ends| ends.borrow_mut().remove(&self.window));
+            crate::perf_overlay::forget_window(self.window);
             event!(
                 "window.close",
                 kind = self.kind,
@@ -558,6 +559,21 @@ pub(crate) fn frame_probe(started: FrameStart, context: FrameContext) -> impl In
     canvas(
         |_, _, _| {},
         move |_, _, window, cx| {
+            if crate::perf_overlay::overlay_enabled() {
+                let gpui = window.frame_stats_so_far();
+                crate::perf_overlay::record_frame(
+                    window.window_handle().window_id().as_u64(),
+                    crate::perf_overlay::FrameSample {
+                        end: cx.background_executor().now(),
+                        cost: started.at.elapsed(),
+                        views_rendered: gpui.views_rendered,
+                        views_reused: gpui.views_reused,
+                        terminal_paints: diri_term::element::PaintTotals::now()
+                            .since(started.paints)
+                            .paints,
+                    },
+                );
+            }
             if !diri_telemetry::is_enabled() {
                 return;
             }
