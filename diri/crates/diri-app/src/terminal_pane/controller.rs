@@ -117,7 +117,9 @@ impl InputAtRisk {
 }
 
 /// What the pane says after a reconnect that may have lost typing.
-const INPUT_AT_RISK_NOTICE: &str = "Reconnected. Your last keystrokes may not have arrived.";
+fn input_at_risk_notice() -> &'static str {
+    t("terminal.input.at_risk")
+}
 
 /// Accepted means queued locally. There is no PTY delivery acknowledgement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,11 +139,11 @@ impl InputRejection {
     }
 
     fn message(self) -> &'static str {
-        match self {
-            Self::PassiveView => "This terminal is active in another view. Focus it to type here.",
-            Self::Disconnected => "Terminal input was not accepted while reconnecting.",
-            Self::Overloaded => "Terminal input queue is full. The latest input was not accepted.",
-        }
+        t(match self {
+            Self::PassiveView => "terminal.input.passive_view",
+            Self::Disconnected => "terminal.input.disconnected",
+            Self::Overloaded => "terminal.input.overloaded",
+        })
     }
 }
 
@@ -866,7 +868,7 @@ fn spawn_transport(
                 // for typing the dropped connection may have swallowed. An
                 // idle or backgrounded pane (App Nap) reconnects silently.
                 if input_at_risk {
-                    let _ = events.send(PaneEvent::InputFeedback(id.clone(), INPUT_AT_RISK_NOTICE.into()));
+                    let _ = events.send(PaneEvent::InputFeedback(id.clone(), input_at_risk_notice().into()));
                 }
                 if painted {
                     backoff = REATTACH_DELAY;
@@ -1282,7 +1284,7 @@ mod tests {
 
     #[test]
     fn a_dropped_connection_right_after_typing_says_keystrokes_may_be_lost() {
-        assert_eq!(notices_after_drop(Some(b"x")), [INPUT_AT_RISK_NOTICE]);
+        assert_eq!(notices_after_drop(Some(b"x")), [input_at_risk_notice()]);
     }
 
     #[test]

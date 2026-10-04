@@ -15,12 +15,3 @@ pub fn local_machine_label_lowercase() -> &'static str {
         "this computer"
     }
 }
-
-/// "your Mac" / "your computer", for sentences about the machine itself.
-pub fn your_machine() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "your Mac"
-    } else {
-        "your computer"
-    }
-}

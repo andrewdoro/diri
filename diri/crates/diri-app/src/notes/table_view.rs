@@ -165,30 +165,38 @@ pub(super) enum TableAction {
 impl TableAction {
     fn row(self, current: Align) -> (&'static str, &'static str, Option<&'static str>) {
         match self {
-            Self::RowAbove => ("arrow.up", "Insert row above", Some(KEY_TABLE_ROW_ABOVE)),
-            Self::RowBelow => ("arrow.down", "Insert row below", Some(KEY_TABLE_ROW_BELOW)),
+            Self::RowAbove => (
+                "arrow.up",
+                crate::i18n::t("notes.table.row_above"),
+                Some(KEY_TABLE_ROW_ABOVE),
+            ),
+            Self::RowBelow => (
+                "arrow.down",
+                crate::i18n::t("notes.table.row_below"),
+                Some(KEY_TABLE_ROW_BELOW),
+            ),
             Self::ColLeft => (
                 "arrow.left.solid",
-                "Insert column left",
+                crate::i18n::t("notes.table.col_left"),
                 Some(KEY_TABLE_COL_LEFT),
             ),
             Self::ColRight => (
                 "arrow.right",
-                "Insert column right",
+                crate::i18n::t("notes.table.col_right"),
                 Some(KEY_TABLE_COL_RIGHT),
             ),
             Self::Align(align) => {
                 let icon = if align == current { "checkmark" } else { "" };
                 let label = match align {
-                    Align::Center => "Align center",
-                    Align::Right => "Align right",
-                    _ => "Align left",
+                    Align::Center => crate::i18n::t("notes.table.align_center"),
+                    Align::Right => crate::i18n::t("notes.table.align_right"),
+                    _ => crate::i18n::t("notes.table.align_left"),
                 };
                 (icon, label, None)
             }
-            Self::DeleteRow => ("trash", "Delete row", None),
-            Self::DeleteCol => ("trash", "Delete column", None),
-            Self::DeleteTable => ("trash", "Delete table", None),
+            Self::DeleteRow => ("trash", crate::i18n::t("notes.table.delete_row"), None),
+            Self::DeleteCol => ("trash", crate::i18n::t("notes.table.delete_col"), None),
+            Self::DeleteTable => ("trash", crate::i18n::t("notes.table.delete_table"), None),
         }
     }
 }

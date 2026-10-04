@@ -264,7 +264,7 @@ impl BacklinksView {
                             cx.emit(BacklinksEvent::Link(reference.clone()));
                         }),
                     )
-                    .child("Link")
+                    .child(crate::i18n::t("notes.backlinks.link"))
             });
             rows.push(
                 div()
@@ -339,7 +339,7 @@ impl Render for BacklinksView {
                 12.0,
                 colors.secondary,
             ))
-            .child("Graph");
+            .child(crate::i18n::t("notes.graph.title"));
         let mut root = div()
             .id("note-backlinks")
             .w_full()
@@ -357,7 +357,7 @@ impl Render for BacklinksView {
                     .justify_between()
                     .child(self.section_header(
                         "note-backlinks-linked",
-                        "Linked mentions",
+                        crate::i18n::t("notes.backlinks.linked"),
                         linked.len(),
                         None,
                         cx,
@@ -371,9 +371,9 @@ impl Render for BacklinksView {
                     .text_size(px(diri_ui::Typo::ROW.size))
                     .text_color(colors.tertiary)
                     .child(if self.outgoing > 0 {
-                        "No notes link here yet."
+                        crate::i18n::t("notes.backlinks.empty")
                     } else {
-                        "No notes link here yet. Type [[ to link another note."
+                        crate::i18n::t("notes.backlinks.empty_hint")
                     }),
             );
         } else {
@@ -383,7 +383,7 @@ impl Render for BacklinksView {
             let open = self.show_unlinked;
             root = root.child(div().mt(px(14.0)).child(self.section_header(
                 "note-backlinks-unlinked",
-                "Unlinked mentions",
+                crate::i18n::t("notes.backlinks.unlinked"),
                 unlinked.len(),
                 Some(open),
                 cx,

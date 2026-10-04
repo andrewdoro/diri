@@ -312,7 +312,7 @@ fn render_commit(props: &CommitListProps, index: usize) -> AnyElement {
                                     .items_center()
                                     .gap(px(2.0))
                                     .child(sf_symbol("arrow.up", 8.5, palette.modified))
-                                    .child("not pushed"),
+                                    .child(crate::i18n::t("git.commit.not_pushed")),
                             )
                         }),
                 ),
