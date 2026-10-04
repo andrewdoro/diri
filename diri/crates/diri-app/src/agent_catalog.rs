@@ -168,7 +168,7 @@ pub(crate) fn display_name(kind: &AgentKind, catalog: &AgentReadinessResult) -> 
     // shell falls through to `title_case_id` and surfaces as "Shell" — a name
     // no other launch surface uses for it.
     if kind.is_terminal() {
-        return "Terminal".to_owned();
+        return crate::i18n::t("settings.agents.terminal_name").to_owned();
     }
     agent_options(catalog)
         .into_iter()
@@ -288,7 +288,7 @@ pub(crate) fn setup_candidates(catalog: &AgentReadinessResult, limit: usize) -> 
 fn terminal_option() -> AgentOption {
     AgentOption {
         kind: AgentKind::SHELL,
-        display_name: "Terminal".to_owned(),
+        display_name: crate::i18n::t("settings.agents.terminal_name").to_owned(),
         binary: "login shell".to_owned(),
         available: true,
         show_in_quick_create: true,
