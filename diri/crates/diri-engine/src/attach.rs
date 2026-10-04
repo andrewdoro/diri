@@ -527,7 +527,16 @@ impl AttachHub {
             }
         };
         if let Some(handle) = completed {
-            self.serve_completed(handle, output, reader, buffered, session_id, preview);
+            // A retained run whose terminal never made it to disk (the Mac
+            // restarted before the checkpoint, or it no longer loads) has
+            // nothing to show. Refuse it like a missing session: a bare close
+            // reads as a dropped connection, and the pane would retry it every
+            // 30 s for as long as it stays open.
+            if !self.serve_completed(handle, output, reader, buffered, session_id, preview)
+                && !preview
+            {
+                self.reject(&writer, session_id, AttachRejection::SessionNotFound);
+            }
             return;
         }
         // The pump serving this sink can reseed it when it falls behind.
@@ -702,6 +711,7 @@ impl AttachHub {
     /// pings are answered, every other frame is swallowed because there is no
     /// child to receive it, and nothing is ever published again. The pane
     /// sees the same thing a live exited session shows, its last screen.
+    /// False when there was no screen to seed, before anything was written.
     fn serve_completed(
         &self,
         handle: crate::registry::CompletedRunHandle,
@@ -710,19 +720,19 @@ impl AttachHub {
         buffered: Vec<u8>,
         session_id: &str,
         preview: bool,
-    ) {
+    ) -> bool {
         let Ok(Some(terminal)) = handle.load() else {
-            return;
+            return false;
         };
         let Some(mut screen) = terminal.screen() else {
-            return;
+            return false;
         };
         let Ok(grid) = Frame::grid(&screen.grid_update(true))
             .ok()
             .and_then(|frame| FrameCodec::encode(&frame).ok())
             .ok_or(())
         else {
-            return;
+            return false;
         };
         let grid = if preview {
             let ready = diri_proto::preview::PreviewReady {
@@ -730,7 +740,7 @@ impl AttachHub {
                 version: diri_proto::preview::PREVIEW_VERSION,
             };
             let Ok(mut bytes) = serde_json::to_vec(&ready) else {
-                return;
+                return false;
             };
             bytes.push(b'\n');
             bytes.extend_from_slice(&grid);
@@ -739,7 +749,7 @@ impl AttachHub {
             grid
         };
         if !output.enqueue(Arc::from(grid)) {
-            return;
+            return false;
         }
         let Ok(modes) = encoded(&Frame::modes_with_keyboard_capability(
             screen.is_alt_screen(),
@@ -748,10 +758,14 @@ impl AttachHub {
             terminal.checkpoint.keyboard,
             output.enhanced_keyboard,
         )) else {
-            return;
+            return false;
         };
-        if !output.enqueue(modes) || !drain_output(&mut output) {
-            return;
+        if !output.enqueue(modes) {
+            return false;
+        }
+        // Part of the seed may be on the wire: never splice a rejection after it.
+        if !drain_output(&mut output) {
+            return true;
         }
         let mut codec = FrameCodec::new();
         let mut chunk = [0u8; 4096];
@@ -786,6 +800,7 @@ impl AttachHub {
             }
         }
         output.close();
+        true
     }
 
     fn handle_frame(
@@ -1607,6 +1622,39 @@ mod tests {
             "a retained terminal registers no publisher"
         );
         drop(client);
+        serve.join().unwrap();
+    }
+
+    #[test]
+    fn a_completed_run_whose_terminal_was_never_retained_is_refused() {
+        // A reboot ends the Holder before the final checkpoint is published:
+        // the run is still recorded, but there is no screen to seed. A bare
+        // close read as a dropped connection and the pane retried it forever.
+        let temp = tempfile::tempdir().unwrap();
+        let registry = retained_registry(temp.path());
+        let dir = temp
+            .path()
+            .join(crate::registry::COMPLETED_TERMINALS_DIR_NAME);
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let hub = AttachHub::new();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let writer = Arc::new(Mutex::new(server.try_clone().unwrap()));
+        let serve = {
+            let registry = Arc::clone(&registry);
+            let hub = hub.clone();
+            std::thread::spawn(move || hub.serve(&registry, "finished", server, Vec::new(), writer))
+        };
+        client
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let mut codec = FrameCodec::new();
+        let frames = read_frames(&mut codec, &mut client, 1);
+        assert_eq!(
+            frames[0].attach_rejected_payload(),
+            Some(AttachRejection::SessionNotFound)
+        );
         serve.join().unwrap();
     }
 

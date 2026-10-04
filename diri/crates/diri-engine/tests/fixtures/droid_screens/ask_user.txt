@@ -1,0 +1,30 @@
+                                            █████████    █████████     ████████    ███   █████████
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   █████████    ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            █████████    ███    ███    ████████    ███   █████████
+
+                                                              v0.233.0 - Airgap
+
+                                             TIP: Use /share to share your session with your team
+
+                                               shift+tab to cycle modes · ctrl+N to cycle models
+                                                    ctrl+L for autonomy · tab for reasoning
+
+                                                    Skills (22) ✓  MCPs (0) ✗  AGENTS.md ✗
+
+
+   ask me
+
+⛬  Working on it slowly now.
+
+   Ask User
+   Which color should the button use?
+
+   1. Red
+   2. Blue
+   Or type your own answer...
+
+   ↑/↓ Navigate • Space/Enter/1–9 Select • ESC stop agent

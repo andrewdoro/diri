@@ -26,20 +26,50 @@ fn wait_until(what: &str, timeout: Duration, mut check: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
-#[test]
-fn resume_launches_at_the_previous_size_without_waiting_for_the_app() {
-    let temp = tempfile::tempdir().unwrap();
+struct Control {
+    writer: UnixStream,
+    replies: BufReader<UnixStream>,
+    next: u64,
+}
+
+impl Control {
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, diri_proto::ControlError> {
+        self.next += 1;
+        let message = ControlMessage::Request {
+            id: self.next,
+            method: method.into(),
+            params: Some(params),
+        };
+        let mut bytes = serde_json::to_vec(&message).unwrap();
+        bytes.push(b'\n');
+        self.writer.write_all(&bytes).unwrap();
+        let mut line = String::new();
+        self.replies.read_line(&mut line).unwrap();
+        match serde_json::from_str::<ControlMessage>(&line).unwrap() {
+            ControlMessage::Response { result, .. } => result,
+            other => panic!("{method}: unexpected {other:?}"),
+        }
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        self.call(method, params)
+            .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+    }
+}
+
+/// A held-transport Engine on a private socket, as the app runs it.
+fn start(temp: &std::path::Path) -> (Arc<Mutex<Registry>>, Control) {
     let (engine, _) =
         ManifestEngine::load_dir(&diri_engine::detect::bundled_manifest_dir()).unwrap();
     let registry = Arc::new(Mutex::new(Registry::new(
         Arc::new(engine),
-        temp.path().join("state.json"),
+        temp.join("state.json"),
     )));
     let server = Arc::new(
-        ControlServer::new(Arc::clone(&registry), temp.path().join("daemon.sock"))
-            .with_logs_dir(temp.path().join("logs"))
+        ControlServer::new(Arc::clone(&registry), temp.join("daemon.sock"))
+            .with_logs_dir(temp.join("logs"))
             .with_holder(HolderConfig {
-                holders_dir: temp.path().join("holders"),
+                holders_dir: temp.join("holders"),
                 executable: env!("CARGO_BIN_EXE_diri-holder").into(),
             }),
     );
@@ -57,30 +87,24 @@ fn resume_launches_at_the_previous_size_without_waiting_for_the_app() {
     control
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    let mut writer = control.try_clone().unwrap();
-    let mut replies = BufReader::new(control);
-    let mut request = |id, method: &str, params: Value| {
-        let message = ControlMessage::Request {
-            id,
-            method: method.into(),
-            params: Some(params),
-        };
-        let mut bytes = serde_json::to_vec(&message).unwrap();
-        bytes.push(b'\n');
-        writer.write_all(&bytes).unwrap();
-        let mut line = String::new();
-        replies.read_line(&mut line).unwrap();
-        match serde_json::from_str::<ControlMessage>(&line).unwrap() {
-            ControlMessage::Response {
-                result: Ok(value), ..
-            } => value,
-            other => panic!("{method} failed: {other:?}"),
-        }
-    };
+    let writer = control.try_clone().unwrap();
+    (
+        registry,
+        Control {
+            writer,
+            replies: BufReader::new(control),
+            next: 0,
+        },
+    )
+}
+
+#[test]
+fn resume_launches_at_the_previous_size_without_waiting_for_the_app() {
+    let temp = tempfile::tempdir().unwrap();
+    let (registry, mut control) = start(temp.path());
 
     // The previous run: sized by the App to its pane, then gone.
-    let spawned = request(
-        1,
+    let spawned = control.request(
         "session.spawn",
         json!({ "kind": { "shell": {} }, "cwd": "/tmp", "argv": ["/bin/sh", "-c", "read line"] }),
     );
@@ -109,7 +133,7 @@ fn resume_launches_at_the_previous_size_without_waiting_for_the_app() {
     });
 
     let started = Instant::now();
-    request(2, "session.resume", json!({ "sessionID": id }));
+    control.request("session.resume", json!({ "sessionID": id }));
     wait_until("resumed child", Duration::from_secs(5), || {
         let pid = child();
         pid != 0 && pid != first_pid
@@ -129,4 +153,50 @@ fn resume_launches_at_the_previous_size_without_waiting_for_the_app() {
         .lock()
         .unwrap()
         .terminate(&id, Duration::from_secs(2));
+}
+
+/// A session whose project or worktree folder was deleted cannot be brought
+/// back. Resume used to evict the dead run, launch a Holder that could only
+/// fail with ENOENT, and answer `internal` after the launch wait (~7 s). It
+/// now refuses at once with `cwd_missing` and leaves the record untouched.
+#[test]
+fn resuming_a_session_whose_folder_is_gone_is_refused_at_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (registry, mut control) = start(temp.path());
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let spawned = control.request(
+        "session.spawn",
+        json!({ "kind": { "shell": {} }, "cwd": project, "argv": ["/bin/sh", "-c", "exit 3"] }),
+    );
+    let id = spawned["id"].as_str().unwrap().to_owned();
+    let exited = || {
+        registry
+            .lock()
+            .unwrap()
+            .record(&id)
+            .is_some_and(|record| matches!(record.status, diri_proto::SessionStatus::Exited(_)))
+    };
+    wait_until("the run exits", Duration::from_secs(5), exited);
+    std::fs::remove_dir(&project).unwrap();
+
+    let started = Instant::now();
+    let error = control
+        .call("session.resume", json!({ "sessionID": id }))
+        .expect_err("a missing folder cannot be resumed");
+    assert_eq!(error.code, diri_proto::control::CWD_MISSING, "{error:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "refused after {:?}",
+        started.elapsed()
+    );
+    assert!(exited(), "the record keeps its last run");
+
+    let error = control
+        .call(
+            "session.spawn",
+            json!({ "kind": { "shell": {} }, "cwd": project, "argv": ["/bin/true"] }),
+        )
+        .expect_err("nothing spawns in a missing folder");
+    assert_eq!(error.code, diri_proto::control::CWD_MISSING, "{error:?}");
 }

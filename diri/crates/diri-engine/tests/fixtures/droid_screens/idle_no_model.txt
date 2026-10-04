@@ -1,0 +1,25 @@
+                                            █████████    █████████     ████████    ███   █████████
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   █████████    ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            █████████    ███    ███    ████████    ███   █████████
+
+                                                              v0.233.0 - Airgap
+
+                                     TIP: Run /readiness-report to evaluate this repo for agent readiness.
+
+                                               shift+tab to cycle modes · ctrl+N to cycle models
+                                                    ctrl+L for autonomy · tab for reasoning
+
+                                                    Skills (22) ✓  MCPs (0) ✗  AGENTS.md ✗
+
+
+ Auto (Off) · all actions require approval                                                                                    GPT-6 Sol (High)
+ Airgap Mode is enabled and no BYOK custom model is configured. Add a custom model in settings.json to proceed. See
+ https://docs.factory.ai/cli/byok/overview
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ > Try "Set up GitHub Actions for CI/CD"                                                                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+? for help                                                                                                                                IDE ◌

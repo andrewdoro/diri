@@ -226,13 +226,25 @@ pub fn record_rpc(
     }
     if let Some(error) = error {
         diri_telemetry::count("rpc.errors", 1);
-        diri_telemetry::error_event!(
-            "rpc.error",
-            method = diri_telemetry::id(method),
-            code = diri_telemetry::id(&error.code),
-            ms = elapsed,
-            session = session.map(diri_telemetry::id),
-        );
+        // A folder the user deleted is their state, not a fault: keep it
+        // visible without counting it as an error.
+        if error.code == diri_proto::control::CWD_MISSING {
+            diri_telemetry::warn_event!(
+                "rpc.error",
+                method = diri_telemetry::id(method),
+                code = diri_telemetry::id(&error.code),
+                ms = elapsed,
+                session = session.map(diri_telemetry::id),
+            );
+        } else {
+            diri_telemetry::error_event!(
+                "rpc.error",
+                method = diri_telemetry::id(method),
+                code = diri_telemetry::id(&error.code),
+                ms = elapsed,
+                session = session.map(diri_telemetry::id),
+            );
+        }
     }
 }
 
