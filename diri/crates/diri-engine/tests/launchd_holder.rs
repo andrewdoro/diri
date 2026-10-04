@@ -52,13 +52,17 @@ fn parent(pid: i32) -> i32 {
         .args(["-o", "ppid=", "-p", &pid.to_string()])
         .output()
         .unwrap();
-    String::from_utf8_lossy(&output.stdout).trim().parse().unwrap()
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap()
 }
 
 fn executable(pid: i32) -> PathBuf {
     let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: the buffer is the documented maximum size.
-    let length = unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    let length =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
     assert!(length > 0, "pid {pid}");
     buffer.truncate(length as usize);
     PathBuf::from(String::from_utf8(buffer).unwrap())
