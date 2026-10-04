@@ -41,6 +41,7 @@ use crate::git_ui::diff_view::{
 use crate::git_ui::{
     CommitDiffLoad, DiffLayout, DiffPalette, HistoryLoad, LoadedHistory, ReviewMode, ReviewUi,
 };
+use crate::i18n::{t, tf};
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::markdown::MarkdownDocument;
 use crate::markdown_view::render_markdown;
@@ -130,13 +131,13 @@ pub struct BrowserState {
 impl InspectorTab {
     const DETAILS: [Self; 2] = [Self::Info, Self::Artifacts];
 
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Info => "Info",
-            Self::Changes => "Review",
-            Self::Code => "Code",
-            Self::Artifacts => "Artifacts",
-        }
+    fn label(self) -> &'static str {
+        t(match self {
+            Self::Info => "panel.tab.info",
+            Self::Changes => "panel.tab.review",
+            Self::Code => "panel.tab.code",
+            Self::Artifacts => "panel.tab.artifacts",
+        })
     }
 
     const fn index(self) -> i8 {
@@ -181,15 +182,15 @@ impl WorkspaceSurface {
         Self::Details,
     ];
 
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Details => "Details",
-            Self::Browser => "Browser",
-            Self::Terminal => "Terminal",
-            Self::Files => "Files",
-            Self::Review => "Review",
-            Self::Api => "API",
-        }
+    fn label(self) -> &'static str {
+        t(match self {
+            Self::Details => "panel.surface.details",
+            Self::Browser => "panel.surface.browser",
+            Self::Terminal => "panel.surface.terminal",
+            Self::Files => "panel.surface.files",
+            Self::Review => "panel.tab.review",
+            Self::Api => "panel.surface.api",
+        })
     }
 
     const fn icon(self) -> &'static str {
@@ -1153,7 +1154,7 @@ impl WorkbenchInspector {
     }
 
     /// ⌘W on the focused shell closes this tab. Leaving it open shows an empty
-    /// "Select a session" pane that cannot select anything.
+    /// t("panel.select_session") pane that cannot select anything.
     pub(crate) fn close_active_terminal(&mut self, cx: &mut Context<Self>) -> bool {
         if self.workspace_selected != Some(WorkspaceSurface::Terminal) {
             return false;
@@ -1687,7 +1688,7 @@ impl WorkbenchInspector {
                 } else {
                     self.armed_hunk = Some(hunk.fingerprint);
                     self.review_feedback =
-                        Some((false, "Click Confirm discard to drop this hunk".to_owned()));
+                        Some((false, t("panel.review.confirm_discard_hint").to_owned()));
                     cx.notify();
                 }
             }
@@ -1803,7 +1804,7 @@ impl WorkbenchInspector {
                 let read = tokio
                     .spawn(async move { client.read_diff(&session_id, comparison).await })
                     .await
-                    .map_err(|error| format!("Diff request stopped: {error}"))
+                    .map_err(|error| tf("panel.review.diff_stopped", &[("error", &error)]))
                     .and_then(|result| result.map_err(|error| error.to_string()));
                 // Parsing also marks changed words; keep it off the UI thread.
                 cx.background_spawn(async move { read.map(snapshot_from_read_diff) })
@@ -1959,28 +1960,31 @@ impl WorkbenchInspector {
                     match action {
                         ReviewAction::Stage(paths) => {
                             repository.stage_paths(&paths)?;
-                            Ok("Changes staged".to_owned())
+                            Ok(t("panel.review.staged").to_owned())
                         }
                         ReviewAction::Unstage(paths) => {
                             repository.unstage_paths(&paths)?;
-                            Ok("Changes moved back to the working tree".to_owned())
+                            Ok(t("panel.review.unstaged").to_owned())
                         }
                         ReviewAction::Discard(paths) => {
                             repository.discard_unstaged(&paths)?;
-                            Ok("Unstaged edits discarded".to_owned())
+                            Ok(t("panel.review.discarded").to_owned())
                         }
                         ReviewAction::Patch { patch, mutation } => {
                             repository.apply_patch(&patch, mutation)?;
-                            Ok(match mutation {
-                                PatchMutation::Stage => "Hunk staged",
-                                PatchMutation::Unstage => "Hunk moved back to the working tree",
-                                PatchMutation::Discard => "Hunk discarded",
-                            }
+                            Ok(t(match mutation {
+                                PatchMutation::Stage => "panel.review.hunk_staged",
+                                PatchMutation::Unstage => "panel.review.hunk_unstaged",
+                                PatchMutation::Discard => "panel.review.hunk_discarded",
+                            })
                             .to_owned())
                         }
                         ReviewAction::Commit(message) => {
                             let commit = repository.commit(&message)?;
-                            Ok(format!("Committed {} · {}", commit.oid, commit.summary))
+                            Ok(tf(
+                                "panel.review.committed",
+                                &[("oid", &commit.oid), ("summary", &commit.summary)],
+                            ))
                         }
                     }
                 })
@@ -2010,7 +2014,7 @@ impl WorkbenchInspector {
     fn submit_commit(&mut self, cx: &mut Context<Self>) {
         let message = self.commit_query.text().trim().to_owned();
         if message.is_empty() {
-            self.review_feedback = Some((false, "Write a commit message first".to_owned()));
+            self.review_feedback = Some((false, t("panel.review.need_message").to_owned()));
             cx.notify();
             return;
         }
@@ -2026,7 +2030,7 @@ impl WorkbenchInspector {
         let label = if evidence.len() == 1 {
             evidence[0].label()
         } else {
-            format!("{} review contexts", evidence.len())
+            tf("panel.review.contexts", &[("count", &evidence.len())])
         };
         self.ask_draft = Some(AskDraft { evidence, label });
         self.ask_feedback = None;
@@ -2063,7 +2067,7 @@ impl WorkbenchInspector {
             }
         };
         let Some(session) = self.selected_session() else {
-            self.ask_feedback = Some((false, "Select an agent first".to_owned()));
+            self.ask_feedback = Some((false, t("panel.ask.select_agent").to_owned()));
             cx.notify();
             return;
         };
@@ -2078,13 +2082,14 @@ impl WorkbenchInspector {
             let result = tokio
                 .spawn(async move { client.send_text(&session_id, prompt.text, true).await })
                 .await
-                .map_err(|error| format!("Agent send stopped: {error}"))
+                .map_err(|error| tf("panel.ask.send_stopped", &[("error", &error)]))
                 .and_then(|result| result.map_err(|error| error.to_string()));
             let _ = this.update(cx, |this, cx| {
                 this.ask_busy = false;
                 match result {
                     Ok(()) => {
-                        this.ask_feedback = Some((true, format!("Sent · {subject}")));
+                        this.ask_feedback =
+                            Some((true, tf("panel.ask.sent", &[("subject", &subject)])));
                         this.ask_query.clear();
                     }
                     Err(error) => this.ask_feedback = Some((false, error)),
@@ -2275,7 +2280,7 @@ impl WorkbenchInspector {
                 div()
                     .text_size(px(Typo::META.size))
                     .text_color(colors.tertiary)
-                    .child("No open tabs"),
+                    .child(t("panel.no_open_tabs")),
             )
             .child(choices)
             .into_any_element()
@@ -2534,7 +2539,7 @@ impl WorkbenchInspector {
                 .id(SharedString::from(format!("close-workspace-{}", id)))
                 .debug_selector(move || format!("close-workspace-{id}"))
                 .role(gpui::Role::Button)
-                .aria_label("Close tab")
+                .aria_label(t("panel.close_tab"))
                 .size(px(crate::right_panel::TAB_CLOSE_SIZE))
                 .flex_none()
                 .flex()
@@ -2637,7 +2642,7 @@ impl WorkbenchInspector {
                     .id("workspace-add-surface")
                     .debug_selector(|| "workspace-add-surface".into())
                     .role(gpui::Role::Button)
-                    .aria_label("New tab")
+                    .aria_label(t("panel.new_tab"))
                     .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
                     .flex_none()
                     .flex()
@@ -2831,7 +2836,7 @@ impl WorkbenchInspector {
         let url_label = if self.browser_query.is_empty() {
             div()
                 .text_color(colors.tertiary)
-                .child("Enter a URL or local preview address")
+                .child(t("panel.browser.placeholder"))
                 .into_any_element()
         } else {
             crate::navigation::query_label(&self.browser_query)
@@ -2852,9 +2857,27 @@ impl WorkbenchInspector {
                     .gap(px(3.0))
                     .border_b_1()
                     .border_color(colors.primary.alpha(0.065))
-                    .child(nav_button("browser-back", "chevron.left", BrowserAction::Back, self.browser_state.can_go_back, cx))
-                    .child(nav_button("browser-forward", "chevron.right", BrowserAction::Forward, self.browser_state.can_go_forward, cx))
-                    .child(nav_button("browser-reload", "arrow.triangle.2.circlepath", BrowserAction::Reload, has_url, cx))
+                    .child(nav_button(
+                        "browser-back",
+                        "chevron.left",
+                        BrowserAction::Back,
+                        self.browser_state.can_go_back,
+                        cx,
+                    ))
+                    .child(nav_button(
+                        "browser-forward",
+                        "chevron.right",
+                        BrowserAction::Forward,
+                        self.browser_state.can_go_forward,
+                        cx,
+                    ))
+                    .child(nav_button(
+                        "browser-reload",
+                        "arrow.triangle.2.circlepath",
+                        BrowserAction::Reload,
+                        has_url,
+                        cx,
+                    ))
                     .child(
                         div()
                             .id("browser-address")
@@ -2868,14 +2891,21 @@ impl WorkbenchInspector {
                             .rounded(px(Radius::BADGE))
                             .bg(colors.primary.alpha(0.045))
                             .border_1()
-                            .border_color(if self.browser_address_focused { rgba(0x4f83f1cc) } else { colors.primary.alpha(0.075) })
+                            .border_color(if self.browser_address_focused {
+                                rgba(0x4f83f1cc)
+                            } else {
+                                colors.primary.alpha(0.075)
+                            })
                             .text_size(px(10.5))
                             .text_color(colors.primary)
                             .cursor_text()
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                                this.focus_browser_address(window, cx);
-                                cx.stop_propagation();
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.focus_browser_address(window, cx);
+                                    cx.stop_propagation();
+                                }),
+                            )
                             .child(url_label),
                     )
                     .child(
@@ -2887,15 +2917,38 @@ impl WorkbenchInspector {
                             .items_center()
                             .justify_center()
                             .rounded(px(Radius::BADGE))
-                            .text_color(if has_url { colors.secondary } else { colors.primary.alpha(0.24) })
-                            .when(has_url, |button| button.cursor_pointer().hover(move |button| button.bg(colors.primary.alpha(0.07)))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(url) = this.browser_state.url.clone().or_else(|| this.browser_url()) {
-                                        cx.emit(InspectorEvent::Browser(BrowserAction::OpenExternal(url)));
-                                    }
-                                    cx.stop_propagation();
-                                })))
-                            .child(sf_symbol("link", 10.5, if has_url { colors.secondary } else { colors.primary.alpha(0.24) })),
+                            .text_color(if has_url {
+                                colors.secondary
+                            } else {
+                                colors.primary.alpha(0.24)
+                            })
+                            .when(has_url, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(move |button| button.bg(colors.primary.alpha(0.07)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(url) = this
+                                            .browser_state
+                                            .url
+                                            .clone()
+                                            .or_else(|| this.browser_url())
+                                        {
+                                            cx.emit(InspectorEvent::Browser(
+                                                BrowserAction::OpenExternal(url),
+                                            ));
+                                        }
+                                        cx.stop_propagation();
+                                    }))
+                            })
+                            .child(sf_symbol(
+                                "link",
+                                10.5,
+                                if has_url {
+                                    colors.secondary
+                                } else {
+                                    colors.primary.alpha(0.24)
+                                },
+                            )),
                     ),
             )
             .child(
@@ -2911,12 +2964,29 @@ impl WorkbenchInspector {
                     .gap(px(8.0))
                     .text_center()
                     .text_color(colors.tertiary)
-                    .when(!has_url, |body| body
-                        .child(sf_symbol("network", 26.0, colors.tertiary))
-                        .child(div().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(colors.secondary).child("Open a page"))
-                        .child(div().max_w(px(230.0)).text_size(px(11.0)).line_height(px(17.0)).child("Browse a local preview or any secure web address without leaving the workspace.")))
-                    .when_some(self.browser_state.error.clone(), |body, error| body.child(div().max_w(px(260.0)).text_size(px(12.0)).child(error)))
-                    .when(self.browser_state.is_loading, |body| body.child(div().text_size(px(10.0)).child("Loading…")))
+                    .when(!has_url, |body| {
+                        body.child(sf_symbol("network", 26.0, colors.tertiary))
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(colors.secondary)
+                                    .child(t("panel.browser.empty_title")),
+                            )
+                            .child(
+                                div()
+                                    .max_w(px(230.0))
+                                    .text_size(px(11.0))
+                                    .line_height(px(17.0))
+                                    .child(t("panel.browser.empty_detail")),
+                            )
+                    })
+                    .when_some(self.browser_state.error.clone(), |body, error| {
+                        body.child(div().max_w(px(260.0)).text_size(px(12.0)).child(error))
+                    })
+                    .when(self.browser_state.is_loading, |body| {
+                        body.child(div().text_size(px(10.0)).child(t("panel.loading")))
+                    })
                     .map(|body| {
                         #[cfg(target_os = "macos")]
                         let body = body.when_some(self.native_browser.clone(), |body, browser| {
@@ -2934,8 +3004,8 @@ impl WorkbenchInspector {
                 self.render_message(
                     colors,
                     "terminal",
-                    "Select a session",
-                    "A shell follows the active agent here.",
+                    t("panel.select_session"),
+                    t("panel.terminal.empty"),
                 )
                 .into_any_element()
             },
@@ -2960,8 +3030,8 @@ impl WorkbenchInspector {
                 .render_message(
                     colors,
                     "sidebar.left",
-                    "Select a session",
-                    "Info follows the active agent.",
+                    t("panel.select_session"),
+                    t("panel.info.empty"),
                 )
                 .into_any_element();
         };
@@ -3089,7 +3159,7 @@ impl WorkbenchInspector {
                                     .text_size(px(12.5))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(colors.primary)
-                                    .child("Needs your input"),
+                                    .child(t("panel.info.needs_input")),
                             )
                             .child(
                                 div()
@@ -3104,7 +3174,7 @@ impl WorkbenchInspector {
         }
 
         content = content.child(details_ui::section(
-            "Changes",
+            t("panel.info.changes"),
             None,
             self.render_git_summary(colors, cx),
             colors,
@@ -3123,9 +3193,9 @@ impl WorkbenchInspector {
             }
             content = content.child(details_ui::section(
                 if pull_requests.len() == 1 {
-                    "Pull request"
+                    t("panel.pull_request")
                 } else {
-                    "Pull requests"
+                    t("panel.pull_requests")
                 },
                 (pull_requests.len() > 1)
                     .then(|| details_ui::count_label(pull_requests.len(), colors)),
@@ -3137,19 +3207,19 @@ impl WorkbenchInspector {
         if artifact_total > 0 {
             let kinds = artifact_kind_summary(session);
             content = content.child(details_ui::section(
-                "Artifacts",
+                t("panel.tab.artifacts"),
                 None,
                 details_ui::card(colors).child(
                     details_ui::list_row(
                         "inspector-artifacts-summary",
                         details_ui::icon_tile(IconName::Stack, colors.secondary, colors),
-                        format!(
-                            "{artifact_total} {}",
+                        tf(
                             if artifact_total == 1 {
-                                "artifact"
+                                "panel.artifacts.count_one"
                             } else {
-                                "artifacts"
-                            }
+                                "panel.artifacts.count_other"
+                            },
+                            &[("count", &artifact_total)],
                         ),
                         (!kinds.is_empty()).then_some(kinds),
                         Some(details_ui::icon(
@@ -3169,26 +3239,26 @@ impl WorkbenchInspector {
         }
 
         let mut details = details_ui::DescriptionList::new()
-            .text("Project", project_name, false, colors)
-            .text("Directory", session.cwd.clone(), true, colors);
+            .text(t("panel.info.project"), project_name, false, colors)
+            .text(t("panel.info.directory"), session.cwd.clone(), true, colors);
         if let Some(branch) = &session.git_branch {
-            details = details.text("Branch", branch.clone(), true, colors);
+            details = details.text(t("panel.info.branch"), branch.clone(), true, colors);
         }
         if let Some(host) = host_name {
-            details = details.text("Host", host, false, colors);
+            details = details.text(t("panel.info.host"), host, false, colors);
         }
         if let Some(bytes) = session.memory_bytes {
-            details = details.text("Memory", format_bytes(bytes), false, colors);
+            details = details.text(t("panel.info.memory"), format_bytes(bytes), false, colors);
         }
         details = details.text(
-            "Updated",
+            t("panel.info.updated"),
             details_ui::relative_time(session.updated_at.0),
             false,
             colors,
         );
         content
             .child(details_ui::section(
-                "Details",
+                t("panel.surface.details"),
                 None,
                 details.render(colors),
                 colors,
@@ -3270,14 +3340,21 @@ impl WorkbenchInspector {
                                         div()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(colors.primary)
-                                            .child(turn.role),
+                                            .child(if from_person {
+                                                t("panel.transcript.you")
+                                            } else {
+                                                turn.role
+                                            }),
                                     )
                                     .child(
                                         div()
                                             .ml_auto()
                                             .font_weight(FontWeight::NORMAL)
                                             .text_color(colors.tertiary)
-                                            .child(format!("line {}", turn.line)),
+                                            .child(tf(
+                                                "panel.transcript.line",
+                                                &[("line", &turn.line)],
+                                            )),
                                     ),
                             )
                             .child(render_markdown(&document, colors)),
@@ -3298,7 +3375,7 @@ impl WorkbenchInspector {
         }
         Some(
             details_ui::section(
-                "Recent conversation",
+                t("panel.transcript.title"),
                 Some(details_ui::count_label(shown, colors)),
                 list,
                 colors,
@@ -3346,7 +3423,7 @@ impl WorkbenchInspector {
                         .text_size(px(Typo::SECTION_HEADER.size))
                         .font_weight(Typo::SECTION_HEADER.weight)
                         .text_color(colors.secondary)
-                        .child("Why Diri thinks this"),
+                        .child(t("panel.evidence.title")),
                 )
                 .child(
                     div()
@@ -3356,7 +3433,7 @@ impl WorkbenchInspector {
                         .text_size(px(Typo::META.size))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(colors.tertiary)
-                        .child(evidence.map_or("No evidence", |evidence| {
+                        .child(evidence.map_or(t("panel.evidence.none"), |evidence| {
                             crate::status_debug::source_name(evidence.source)
                         })),
                 )
@@ -3371,10 +3448,9 @@ impl WorkbenchInspector {
             return disclosure.into_any_element();
         }
 
-        let explanation = evidence.map_or(
-            "This session record predates decision evidence. Its normal status remains available above.",
-            |evidence| status_evidence_explanation(evidence.source),
-        );
+        let explanation = evidence.map_or(t("panel.evidence.predates"), |evidence| {
+            status_evidence_explanation(evidence.source)
+        });
         let mut details = div()
             .pt(px(4.0))
             .pl(px(18.0))
@@ -3391,7 +3467,7 @@ impl WorkbenchInspector {
             );
         if let Some(evidence) = evidence {
             let mut facts = details_ui::DescriptionList::new().text(
-                "Signal",
+                t("panel.evidence.signal"),
                 details_ui::relative_time(evidence.signal_at.0),
                 false,
                 colors,
@@ -3402,7 +3478,7 @@ impl WorkbenchInspector {
                 let version =
                     crate::status_debug::safe_identifier(evidence.manifest_version.as_deref());
                 facts = facts.text(
-                    "Manifest",
+                    t("panel.evidence.manifest"),
                     version.map_or(manifest.clone(), |version| format!("{manifest}@{version}")),
                     true,
                     colors,
@@ -3411,17 +3487,27 @@ impl WorkbenchInspector {
             if let Some(rule) =
                 crate::status_debug::safe_identifier(evidence.matched_rule_id.as_deref())
             {
-                facts = facts.text("Rule", rule, true, colors);
+                facts = facts.text(t("panel.evidence.rule"), rule, true, colors);
             }
             if evidence.startup_grace_active {
-                facts = facts.text("Startup", "Holding weak early signals", false, colors);
+                facts = facts.text(
+                    t("panel.evidence.startup"),
+                    t("panel.evidence.startup_detail"),
+                    false,
+                    colors,
+                );
             }
             if evidence.anti_flicker_active {
-                facts = facts.text("Flicker", "Waiting for confirmation", false, colors);
+                facts = facts.text(
+                    t("panel.evidence.flicker"),
+                    t("panel.evidence.flicker_detail"),
+                    false,
+                    colors,
+                );
             }
             if let Some(reason) = evidence.fallback_reason {
                 facts = facts.text(
-                    "Fallback",
+                    t("panel.evidence.fallback"),
                     crate::status_debug::fallback_name(reason),
                     false,
                     colors,
@@ -3437,7 +3523,7 @@ impl WorkbenchInspector {
             details_ui::ghost_button(
                 "copy-status-debug-info",
                 IconName::File,
-                Some("Copy status debug info"),
+                Some(t("panel.evidence.copy")),
                 colors.secondary,
                 colors.primary.alpha(0.09),
             )
@@ -3453,13 +3539,14 @@ impl WorkbenchInspector {
     }
 
     fn render_git_summary(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let default_base = || match self.comparison {
+            SessionDiffBase::DefaultBranch => t("panel.git.the_default_branch"),
+            SessionDiffBase::Head => "HEAD",
+        };
         let comparison = |base: Option<&str>| {
-            format!(
-                "Against {}",
-                base.unwrap_or(match self.comparison {
-                    SessionDiffBase::DefaultBranch => "the default branch",
-                    SessionDiffBase::Head => "HEAD",
-                })
+            tf(
+                "panel.git.against",
+                &[("base", &base.unwrap_or(default_base()))],
             )
         };
         let (glyph, title, detail, accent, can_open): (
@@ -3471,10 +3558,13 @@ impl WorkbenchInspector {
         ) = match &self.state {
             LoadState::Ready(snapshot) if snapshot.files > 0 => (
                 Some(IconName::Branch),
-                format!(
-                    "{} {} changed",
-                    snapshot.files,
-                    if snapshot.files == 1 { "file" } else { "files" }
+                tf(
+                    if snapshot.files == 1 {
+                        "panel.git.files_changed_one"
+                    } else {
+                        "panel.git.files_changed_other"
+                    },
+                    &[("count", &snapshot.files)],
                 ),
                 div()
                     .flex()
@@ -3500,11 +3590,14 @@ impl WorkbenchInspector {
             ),
             LoadState::Ready(snapshot) => (
                 Some(IconName::CheckCircle),
-                "No changes".to_owned(),
+                t("panel.git.no_changes").to_owned(),
                 meta_text(
-                    snapshot.base_ref.as_deref().map_or_else(
-                        || comparison(None).replacen("Against", "Matches", 1),
-                        |base| format!("Matches {base}"),
+                    tf(
+                        "panel.git.matches",
+                        &[(
+                            "base",
+                            &snapshot.base_ref.as_deref().unwrap_or(default_base()),
+                        )],
                     ),
                     colors,
                 ),
@@ -3513,39 +3606,36 @@ impl WorkbenchInspector {
             ),
             LoadState::Loading => (
                 None,
-                "Reading working tree".to_owned(),
-                meta_text("Git status is updating…".to_owned(), colors),
+                t("panel.git.reading").to_owned(),
+                meta_text(t("panel.git.updating").to_owned(), colors),
                 colors.secondary,
                 false,
             ),
             LoadState::Error(error) if git_is_not_a_repository(error) => (
                 Some(IconName::Folder),
-                "Not a Git repository".to_owned(),
-                meta_text("This folder has no Git working tree.".to_owned(), colors),
+                t("panel.git.not_repo").to_owned(),
+                meta_text(t("panel.git.not_repo_detail").to_owned(), colors),
                 colors.tertiary,
                 false,
             ),
             LoadState::Error(error) if git_is_not_installed(error) => (
                 Some(IconName::Terminal),
-                "Git unavailable".to_owned(),
-                meta_text("Git is not installed on this host.".to_owned(), colors),
+                t("panel.git.unavailable").to_owned(),
+                meta_text(t("panel.git.not_installed").to_owned(), colors),
                 colors.tertiary,
                 false,
             ),
             LoadState::Error(error) => (
                 Some(IconName::Warning),
-                "Git status unavailable".to_owned(),
+                t("panel.git.status_unavailable").to_owned(),
                 meta_text(error.clone(), colors),
                 Ink::ATTENTION,
                 false,
             ),
             LoadState::NoSession => (
                 Some(IconName::Info),
-                "No session selected".to_owned(),
-                meta_text(
-                    "Select an agent to inspect its working tree.".to_owned(),
-                    colors,
-                ),
+                t("panel.git.no_session").to_owned(),
+                meta_text(t("panel.git.no_session_detail").to_owned(), colors),
                 colors.tertiary,
                 false,
             ),
@@ -3619,8 +3709,8 @@ impl WorkbenchInspector {
                 .render_message(
                     colors,
                     "sidebar.left",
-                    "Select a session",
-                    "Artifacts follow the active agent.",
+                    t("panel.select_session"),
+                    t("panel.artifacts.empty_session"),
                 )
                 .into_any_element();
         };
@@ -3629,8 +3719,8 @@ impl WorkbenchInspector {
                 .render_message(
                     colors,
                     "square.stack.3d.up",
-                    "No artifacts yet",
-                    "Pull requests, previews, Linear issues, links, and local ports appear here as they’re discovered.",
+                    t("panel.artifacts.empty"),
+                    t("panel.artifacts.empty_detail"),
                 )
                 .into_any_element();
         }
@@ -3656,9 +3746,9 @@ impl WorkbenchInspector {
             }
             content = content.child(details_ui::section(
                 if pull_requests.len() == 1 {
-                    "Pull request"
+                    t("panel.pull_request")
                 } else {
-                    "Pull requests"
+                    t("panel.pull_requests")
                 },
                 (pull_requests.len() > 1)
                     .then(|| details_ui::count_label(pull_requests.len(), colors)),
@@ -3688,7 +3778,7 @@ impl WorkbenchInspector {
                 group = group.child(render_artifact_row(artifact, colors));
             }
             content = content.child(details_ui::section(
-                "Links",
+                t("panel.artifacts.links"),
                 Some(details_ui::count_label(links.len(), colors)),
                 group,
                 colors,
@@ -3721,7 +3811,7 @@ impl WorkbenchInspector {
                 );
             }
             content = content.child(details_ui::section(
-                "Local servers",
+                t("panel.artifacts.local_servers"),
                 Some(details_ui::count_label(ports.len(), colors)),
                 group,
                 colors,
@@ -4038,7 +4128,7 @@ impl WorkbenchInspector {
             return base_ref.to_owned();
         }
         match self.comparison {
-            SessionDiffBase::DefaultBranch => "default branch".to_owned(),
+            SessionDiffBase::DefaultBranch => t("panel.git.default_branch_lower").to_owned(),
             SessionDiffBase::Head => "HEAD".to_owned(),
         }
     }
@@ -4051,11 +4141,11 @@ impl WorkbenchInspector {
     ) -> AnyElement {
         let (title, detail, selector) = match comparison {
             SessionDiffBase::DefaultBranch => (
-                "Default branch",
-                "Committed and working changes",
+                t("panel.git.default_branch"),
+                t("panel.git.default_branch_detail"),
                 "INSPECTOR_COMPARE_DEFAULT",
             ),
-            SessionDiffBase::Head => ("HEAD", "Uncommitted changes only", "INSPECTOR_COMPARE_HEAD"),
+            SessionDiffBase::Head => ("HEAD", t("panel.git.head_detail"), "INSPECTOR_COMPARE_HEAD"),
         };
         let selected = self.comparison == comparison;
         div()
@@ -4115,9 +4205,21 @@ impl WorkbenchInspector {
         diff_view::segmented(
             "review-layer",
             &[
-                (DiffLayer::Branch, "Branch", "INSPECTOR_LAYER_BRANCH"),
-                (DiffLayer::Working, "Working", "INSPECTOR_LAYER_WORKING"),
-                (DiffLayer::Staged, "Staged", "INSPECTOR_LAYER_STAGED"),
+                (
+                    DiffLayer::Branch,
+                    t("panel.info.branch"),
+                    "INSPECTOR_LAYER_BRANCH",
+                ),
+                (
+                    DiffLayer::Working,
+                    t("panel.review.layer_working"),
+                    "INSPECTOR_LAYER_WORKING",
+                ),
+                (
+                    DiffLayer::Staged,
+                    t("panel.review.layer_staged"),
+                    "INSPECTOR_LAYER_STAGED",
+                ),
             ],
             self.diff_layer,
             palette,
@@ -4399,22 +4501,21 @@ impl WorkbenchInspector {
             let line = match &self.review_state {
                 ReviewLoadState::NoSession => message_line(
                     "minus.circle",
-                    "Select an agent to review".to_owned(),
+                    t("panel.review.select_agent").to_owned(),
                     palette.muted,
                 ),
                 ReviewLoadState::Remote => {
                     return container()
                         .child(message_line(
                             "network",
-                            "Remote changes are view-only until Git actions move into the daemon"
-                                .to_owned(),
+                            t("panel.review.remote_view_only").to_owned(),
                             palette.muted,
                         ))
                         .into_any_element();
                 }
                 ReviewLoadState::Loading => message_line(
                     "ellipsis",
-                    "Reading index and working tree…".to_owned(),
+                    t("panel.review.reading").to_owned(),
                     palette.muted,
                 ),
                 ReviewLoadState::Error(error) => {
@@ -4457,7 +4558,7 @@ impl WorkbenchInspector {
             .branch
             .name
             .clone()
-            .unwrap_or_else(|| "Detached HEAD".to_owned());
+            .unwrap_or_else(|| t("panel.review.detached_head").to_owned());
         let busy = self.review_action_busy;
         let commit_open = self.commit_open;
         let discard_armed = self.discard_armed;
@@ -4467,7 +4568,7 @@ impl WorkbenchInspector {
             let paths = stage_paths;
             actions = actions.child(Self::review_button(
                 "review-stage-all",
-                "Stage all",
+                t("panel.review.stage_all"),
                 Some("plus"),
                 if staged_count == 0 {
                     palette.accent
@@ -4485,7 +4586,7 @@ impl WorkbenchInspector {
             let paths = staged_paths;
             actions = actions.child(Self::review_button(
                 "review-unstage-all",
-                "Unstage",
+                t("panel.review.unstage"),
                 None,
                 palette.secondary,
                 false,
@@ -4498,7 +4599,11 @@ impl WorkbenchInspector {
             ));
             actions = actions.child(Self::review_button(
                 "review-open-commit",
-                if commit_open { "Cancel" } else { "Commit" },
+                if commit_open {
+                    t("panel.review.cancel")
+                } else {
+                    t("panel.review.commit")
+                },
                 (!commit_open).then_some("checkmark"),
                 if commit_open {
                     palette.secondary
@@ -4526,7 +4631,11 @@ impl WorkbenchInspector {
             let paths = discard_paths;
             actions = actions.child(Self::review_button(
                 "review-discard-all",
-                if discard_armed { "Discard?" } else { "Discard" },
+                if discard_armed {
+                    t("panel.review.discard_confirm")
+                } else {
+                    t("panel.review.discard")
+                },
                 Some("trash"),
                 if discard_armed {
                     palette.removed
@@ -4559,10 +4668,13 @@ impl WorkbenchInspector {
                         .gap(px(6.0))
                         .text_size(px(10.0))
                         .text_color(palette.muted)
-                        .child(format!(
-                            "{} file{}",
-                            snapshot.files,
-                            if snapshot.files == 1 { "" } else { "s" }
+                        .child(tf(
+                            if snapshot.files == 1 {
+                                "panel.review.files_one"
+                            } else {
+                                "panel.review.files_other"
+                            },
+                            &[("count", &snapshot.files)],
                         ))
                         .child(diff_view::diff_stat(
                             snapshot.additions,
@@ -4580,14 +4692,16 @@ impl WorkbenchInspector {
             (0, behind) => Some(format!("↓{behind}")),
             (ahead, behind) => Some(format!("↑{ahead} ↓{behind}")),
         };
-        let counts = format!(
-            "{staged_count} staged · {working_count} working{}",
-            if conflicted_count > 0 {
-                format!(" · {conflicted_count} conflicted")
-            } else {
-                String::new()
-            }
+        let mut counts = tf(
+            "panel.review.counts",
+            &[("staged", &staged_count), ("working", &working_count)],
         );
+        if conflicted_count > 0 {
+            counts.push_str(&tf(
+                "panel.review.conflicted",
+                &[("count", &conflicted_count)],
+            ));
+        }
         let mut panel = container()
             .child(
                 div()
@@ -4678,7 +4792,7 @@ impl WorkbenchInspector {
                             .child(if empty {
                                 div()
                                     .text_color(palette.muted)
-                                    .child("Commit message…")
+                                    .child(t("panel.review.commit_placeholder"))
                                     .into_any_element()
                             } else {
                                 crate::navigation::query_label(&self.commit_query)
@@ -4686,7 +4800,7 @@ impl WorkbenchInspector {
                     )
                     .child(Self::review_button(
                         "review-submit-commit",
-                        "Commit",
+                        t("panel.review.commit"),
                         None,
                         palette.accent,
                         !empty,
@@ -4979,12 +5093,12 @@ impl WorkbenchInspector {
             &[
                 (
                     ReviewMode::Changes,
-                    "Changes",
+                    t("panel.info.changes"),
                     "INSPECTOR_REVIEW_MODE_CHANGES",
                 ),
                 (
                     ReviewMode::Commits,
-                    "Commits",
+                    t("panel.review.commits"),
                     "INSPECTOR_REVIEW_MODE_COMMITS",
                 ),
             ],
@@ -5001,8 +5115,16 @@ impl WorkbenchInspector {
             diff_view::segmented(
                 "review-layout",
                 &[
-                    (DiffLayout::Inline, "Inline", "INSPECTOR_DIFF_INLINE"),
-                    (DiffLayout::Split, "Split", "INSPECTOR_DIFF_SPLIT"),
+                    (
+                        DiffLayout::Inline,
+                        t("panel.review.inline"),
+                        "INSPECTOR_DIFF_INLINE",
+                    ),
+                    (
+                        DiffLayout::Split,
+                        t("panel.review.split"),
+                        "INSPECTOR_DIFF_SPLIT",
+                    ),
                 ],
                 self.review_ui.layout,
                 &palette,
@@ -5035,7 +5157,7 @@ impl WorkbenchInspector {
                             .text_size(px(10.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(palette.secondary)
-                            .child(format!("vs {label}")),
+                            .child(tf("panel.review.versus", &[("base", &label)])),
                     )
                     .child(sf_symbol("chevron.down", 8.5, palette.muted))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -5082,9 +5204,13 @@ impl WorkbenchInspector {
                             }))
                     })
                     .child(sf_symbol("list.bullet", 10.0, palette.muted))
-                    .child(format!(
-                        "{file_count} file{}",
-                        if file_count == 1 { "" } else { "s" }
+                    .child(tf(
+                        if file_count == 1 {
+                            "panel.review.files_one"
+                        } else {
+                            "panel.review.files_other"
+                        },
+                        &[("count", &file_count)],
                     ))
                     .child(sf_symbol("chevron.down", 8.5, palette.muted))
                     .into_any_element()
@@ -5116,13 +5242,18 @@ impl WorkbenchInspector {
     ) -> AnyElement {
         let label = self.comparison_label();
         let empty_detail = match self.diff_layer {
-            DiffLayer::Branch => format!("This branch matches {label}."),
-            DiffLayer::Working => "The working tree matches the index.".to_owned(),
-            DiffLayer::Staged => "The index matches HEAD.".to_owned(),
+            DiffLayer::Branch => tf("panel.review.branch_matches", &[("base", &label)]),
+            DiffLayer::Working => t("panel.review.working_matches").to_owned(),
+            DiffLayer::Staged => t("panel.review.index_matches").to_owned(),
         };
         match self.state.clone() {
             LoadState::Ready(snapshot) if snapshot.rows.is_empty() => self
-                .render_message(colors, "checkmark.circle", "No changes", empty_detail)
+                .render_message(
+                    colors,
+                    "checkmark.circle",
+                    t("panel.git.no_changes"),
+                    empty_detail,
+                )
                 .into_any_element(),
             LoadState::Ready(snapshot) => self
                 .render_diff(snapshot, colors, window, cx)
@@ -5131,23 +5262,23 @@ impl WorkbenchInspector {
                 .render_message(
                     colors,
                     "ellipsis",
-                    "Loading changes",
-                    "Reading the working tree…",
+                    t("panel.review.loading"),
+                    t("panel.review.reading_tree"),
                 )
                 .into_any_element(),
             LoadState::NoSession => self
                 .render_message(
                     colors,
                     "sidebar.left",
-                    "Select a session",
-                    "Changes follow the active agent.",
+                    t("panel.select_session"),
+                    t("panel.review.empty_session"),
                 )
                 .into_any_element(),
             LoadState::Error(error) => self
                 .render_message(
                     colors,
                     "exclamationmark.triangle",
-                    "Couldn't load changes",
+                    t("panel.review.load_failed"),
                     error,
                 )
                 .into_any_element(),
@@ -5169,8 +5300,8 @@ impl WorkbenchInspector {
                 .render_message(
                     colors,
                     "network",
-                    "History is local-only",
-                    "Commit history reads the local checkout. Remote sessions show their branch in Changes.",
+                    t("panel.history.local_only"),
+                    t("panel.history.local_only_detail"),
                 )
                 .into_any_element();
         }
@@ -5179,15 +5310,20 @@ impl WorkbenchInspector {
                 .render_message(
                     colors,
                     "sidebar.left",
-                    "Select a session",
-                    "Commits follow the active agent.",
+                    t("panel.select_session"),
+                    t("panel.history.empty_session"),
                 )
                 .into_any_element();
         }
         let loaded = match &self.review_ui.history {
             HistoryLoad::Idle | HistoryLoad::Loading => {
                 return self
-                    .render_message(colors, "ellipsis", "Loading history", "Reading commits…")
+                    .render_message(
+                        colors,
+                        "ellipsis",
+                        t("panel.history.loading"),
+                        t("panel.history.reading"),
+                    )
                     .into_any_element();
             }
             HistoryLoad::Error(error) => {
@@ -5195,7 +5331,7 @@ impl WorkbenchInspector {
                     .render_message(
                         colors,
                         "exclamationmark.triangle",
-                        "Couldn't load history",
+                        t("panel.history.load_failed"),
                         error.clone(),
                     )
                     .into_any_element();
@@ -5208,23 +5344,41 @@ impl WorkbenchInspector {
                 .render_message(
                     colors,
                     "checkmark.circle",
-                    "No commits yet",
-                    "This branch has no commits.",
+                    t("panel.history.empty"),
+                    t("panel.history.empty_detail"),
                 )
                 .into_any_element();
         }
 
         let summary = match (&history.base, history.ahead) {
-            (Some(base), ahead) if ahead > 0 => format!(
-                "{ahead}{} commit{} ahead of {base}",
-                if history.truncated { "+" } else { "" },
-                if ahead == 1 { "" } else { "s" }
+            (Some(base), ahead) if ahead > 0 => tf(
+                if ahead == 1 {
+                    "panel.history.ahead_one"
+                } else {
+                    "panel.history.ahead_other"
+                },
+                &[
+                    (
+                        "count",
+                        &format!("{ahead}{}", if history.truncated { "+" } else { "" }),
+                    ),
+                    ("base", base),
+                ],
             ),
-            _ => format!(
-                "{}{} recent commit{}",
-                history.commits.len(),
-                if history.truncated { "+" } else { "" },
-                if history.commits.len() == 1 { "" } else { "s" }
+            _ => tf(
+                if history.commits.len() == 1 {
+                    "panel.history.recent_one"
+                } else {
+                    "panel.history.recent_other"
+                },
+                &[(
+                    "count",
+                    &format!(
+                        "{}{}",
+                        history.commits.len(),
+                        if history.truncated { "+" } else { "" }
+                    ),
+                )],
             ),
         };
         let unpushed = loaded.unpushed();
@@ -5252,7 +5406,7 @@ impl WorkbenchInspector {
                         .gap(px(3.0))
                         .text_color(palette.modified)
                         .child(sf_symbol("arrow.up", 9.0, palette.modified))
-                        .child(format!("{unpushed} not pushed")),
+                        .child(tf("panel.history.not_pushed", &[("count", &unpushed)])),
                 )
             });
 
@@ -5302,8 +5456,8 @@ impl WorkbenchInspector {
                 .render_message(
                     colors,
                     "checkmark.circle",
-                    "No file changes",
-                    "This commit changes no files against its first parent.",
+                    t("panel.commit.no_files"),
+                    t("panel.commit.no_files_detail"),
                 )
                 .into_any_element(),
             Some(CommitDiffLoad::Ready(snapshot)) => self
@@ -5313,12 +5467,17 @@ impl WorkbenchInspector {
                 .render_message(
                     colors,
                     "exclamationmark.triangle",
-                    "Couldn't load this commit",
+                    t("panel.commit.load_failed"),
                     error,
                 )
                 .into_any_element(),
             Some(CommitDiffLoad::Loading) | None => self
-                .render_message(colors, "ellipsis", "Loading commit", "Reading its changes…")
+                .render_message(
+                    colors,
+                    "ellipsis",
+                    t("panel.commit.loading"),
+                    t("panel.commit.reading"),
+                )
                 .into_any_element(),
         };
         let stat = match &self.review_ui.commit_diff {
@@ -5463,7 +5622,7 @@ impl WorkbenchInspector {
                             .text_size(px(10.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.primary)
-                            .child("Ask active agent"),
+                            .child(t("panel.ask.title")),
                     )
                     .child(
                         div()
@@ -5502,21 +5661,21 @@ impl WorkbenchInspector {
                     .gap(px(5.0))
                     .child(self.render_ask_preset(
                         "ask-preset-review",
-                        "Review",
+                        t("panel.tab.review"),
                         "Review this for correctness, regressions, and missing tests.",
                         colors,
                         cx,
                     ))
                     .child(self.render_ask_preset(
                         "ask-preset-risks",
-                        "Find risks",
+                        t("panel.ask.find_risks"),
                         "Find the highest-risk behavior changes and explain why they matter.",
                         colors,
                         cx,
                     ))
                     .child(self.render_ask_preset(
                         "ask-preset-tests",
-                        "Suggest tests",
+                        t("panel.ask.suggest_tests"),
                         "Identify missing tests and propose concrete cases for this context.",
                         colors,
                         cx,
@@ -5553,7 +5712,7 @@ impl WorkbenchInspector {
                             .child(if empty {
                                 div()
                                     .text_color(colors.tertiary)
-                                    .child("Ask a follow-up…")
+                                    .child(t("panel.ask.placeholder"))
                                     .into_any_element()
                             } else {
                                 crate::navigation::query_label(&self.ask_query)
@@ -5591,7 +5750,11 @@ impl WorkbenchInspector {
                                         cx.stop_propagation();
                                     }))
                             })
-                            .child(if busy { "Sending…" } else { "Send" })
+                            .child(if busy {
+                                t("panel.ask.sending")
+                            } else {
+                                t("panel.ask.send")
+                            })
                             .child(sf_symbol(
                                 "arrow.up",
                                 9.0,
@@ -5713,8 +5876,8 @@ impl WorkbenchInspector {
                 .render_message(
                     colors,
                     "server.rack",
-                    "Select a session",
-                    "Requests belong to a project.",
+                    t("panel.select_session"),
+                    t("panel.api.empty"),
                 )
                 .into_any_element(),
         }
@@ -5955,29 +6118,15 @@ impl crate::workspace_follow::FollowHost for WorkbenchInspector {
 }
 
 fn status_evidence_explanation(source: diri_proto::StatusEvidenceSource) -> &'static str {
-    match source {
-        diri_proto::StatusEvidenceSource::Hook => {
-            "A structured lifecycle hook from the agent drove this status."
-        }
-        diri_proto::StatusEvidenceSource::Notify => {
-            "A structured completion notification from the agent drove this status."
-        }
-        diri_proto::StatusEvidenceSource::ScreenRule => {
-            "A privacy-safe manifest rule matched the terminal state; no screen content is included."
-        }
-        diri_proto::StatusEvidenceSource::ProcessLiveness => {
-            "The agent exposes process-only status, so process activity or exit is authoritative."
-        }
-        diri_proto::StatusEvidenceSource::Staleness => {
-            "Authoritative signals stopped arriving, so Diri fell back to unknown instead of guessing."
-        }
-        diri_proto::StatusEvidenceSource::Transport => {
-            "The remote transport failed; the agent process exit has not been confirmed."
-        }
-        diri_proto::StatusEvidenceSource::Unknown => {
-            "This daemon reported an evidence source this app does not recognize yet."
-        }
-    }
+    t(match source {
+        diri_proto::StatusEvidenceSource::Hook => "panel.evidence.source.hook",
+        diri_proto::StatusEvidenceSource::Notify => "panel.evidence.source.notify",
+        diri_proto::StatusEvidenceSource::ScreenRule => "panel.evidence.source.screen_rule",
+        diri_proto::StatusEvidenceSource::ProcessLiveness => "panel.evidence.source.process",
+        diri_proto::StatusEvidenceSource::Staleness => "panel.evidence.source.staleness",
+        diri_proto::StatusEvidenceSource::Transport => "panel.evidence.source.transport",
+        diri_proto::StatusEvidenceSource::Unknown => "panel.evidence.source.unknown",
+    })
 }
 
 /// A quiet one-line caption under a row title.
@@ -5994,10 +6143,12 @@ fn meta_text(text: String, colors: SemanticColors) -> AnyElement {
 
 fn artifact_look(kind: &ArtifactKind) -> (IconName, &'static str) {
     match kind {
-        ArtifactKind::PullRequest => (IconName::PullRequest, "Pull request"),
-        ArtifactKind::LinearIssue => (IconName::Linear, "Linear issue"),
-        ArtifactKind::Preview => (IconName::Monitor, "Preview"),
-        ArtifactKind::Link | ArtifactKind::Unknown => (IconName::ExternalLink, "Link"),
+        ArtifactKind::PullRequest => (IconName::PullRequest, t("panel.pull_request")),
+        ArtifactKind::LinearIssue => (IconName::Linear, t("panel.artifact.linear_issue")),
+        ArtifactKind::Preview => (IconName::Monitor, t("panel.artifact.preview")),
+        ArtifactKind::Link | ArtifactKind::Unknown => {
+            (IconName::ExternalLink, t("panel.artifact.link"))
+        }
     }
 }
 
@@ -6049,15 +6200,35 @@ fn artifact_kind_summary(session: &SessionRecord) -> String {
     let links = count_of(ArtifactKind::Link) + count_of(ArtifactKind::Unknown);
     let ports = session.listening_ports.as_deref().unwrap_or_default().len();
     [
-        (pull_requests, "pull request", "pull requests"),
-        (count_of(ArtifactKind::LinearIssue), "issue", "issues"),
-        (count_of(ArtifactKind::Preview), "preview", "previews"),
-        (links, "link", "links"),
-        (ports, "port", "ports"),
+        (
+            pull_requests,
+            "panel.artifacts.kind.pull_requests_one",
+            "panel.artifacts.kind.pull_requests_other",
+        ),
+        (
+            count_of(ArtifactKind::LinearIssue),
+            "panel.artifacts.kind.issues_one",
+            "panel.artifacts.kind.issues_other",
+        ),
+        (
+            count_of(ArtifactKind::Preview),
+            "panel.artifacts.kind.previews_one",
+            "panel.artifacts.kind.previews_other",
+        ),
+        (
+            links,
+            "panel.artifacts.kind.links_one",
+            "panel.artifacts.kind.links_other",
+        ),
+        (
+            ports,
+            "panel.artifacts.kind.ports_one",
+            "panel.artifacts.kind.ports_other",
+        ),
     ]
     .iter()
     .filter(|(count, _, _)| *count > 0)
-    .map(|(count, one, many)| format!("{count} {}", if *count == 1 { one } else { many }))
+    .map(|(count, one, many)| tf(if *count == 1 { one } else { many }, &[("count", count)]))
     .collect::<Vec<_>>()
     .join(" · ")
 }
@@ -6092,15 +6263,15 @@ fn ui_agent_kind(kind: &ProtoAgentKind) -> AgentKind {
 
 fn session_status(session: &SessionRecord, colors: SemanticColors) -> (&'static str, gpui::Rgba) {
     if session.hibernation.is_some() {
-        return ("Sleeping", colors.secondary);
+        return (t("panel.status.sleeping"), colors.secondary);
     }
     match session.status {
         SessionStatus::Starting => (
-            "Starting",
+            t("panel.status.starting"),
             Ink::working(ui_agent_kind(session.effective_kind()), colors),
         ),
         SessionStatus::Working => (
-            "Working",
+            t("panel.status.working"),
             Ink::working(ui_agent_kind(session.effective_kind()), colors),
         ),
         SessionStatus::NeedsInput(_) => {
@@ -6109,7 +6280,7 @@ fn session_status(session: &SessionRecord, colors: SemanticColors) -> (&'static 
                 .as_ref()
                 .is_some_and(|detail| detail.risk_hint == diri_proto::RiskHint::Destructive);
             (
-                "Needs input",
+                t("panel.status.needs_input"),
                 if destructive {
                     Ink::DANGER
                 } else {
@@ -6118,11 +6289,11 @@ fn session_status(session: &SessionRecord, colors: SemanticColors) -> (&'static 
             )
         }
         SessionStatus::Idle if session.attention() == diri_proto::AttentionLevel::DoneUnseen => {
-            ("Finished", Ink::FRESH)
+            (t("panel.status.finished"), Ink::FRESH)
         }
-        SessionStatus::Idle => ("Idle", colors.secondary),
-        SessionStatus::Exited(_) => ("Ended", colors.tertiary),
-        SessionStatus::Unknown => ("Unknown", colors.tertiary),
+        SessionStatus::Idle => (t("panel.status.idle"), colors.secondary),
+        SessionStatus::Exited(_) => (t("panel.status.ended"), colors.tertiary),
+        SessionStatus::Unknown => (t("panel.status.unknown"), colors.tertiary),
     }
 }
 
@@ -6130,9 +6301,9 @@ fn artifact_title(artifact: &SessionArtifact) -> String {
     match artifact.kind {
         ArtifactKind::PullRequest => pr_number(&artifact.url)
             .map(|number| format!("PR #{number}"))
-            .unwrap_or_else(|| "Pull request".to_owned()),
+            .unwrap_or_else(|| t("panel.pull_request").to_owned()),
         ArtifactKind::LinearIssue => {
-            linear_key(&artifact.url).unwrap_or_else(|| "Linear issue".to_owned())
+            linear_key(&artifact.url).unwrap_or_else(|| t("panel.artifact.linear_issue").to_owned())
         }
         ArtifactKind::Preview => url_authority(&artifact.url),
         ArtifactKind::Link | ArtifactKind::Unknown => url_authority(&artifact.url),
@@ -6284,6 +6455,13 @@ mod tests {
         let output = std::env::var_os("DIRI_VISUAL_OUTPUT")
             .map(PathBuf::from)
             .expect("output path");
+        // DIRI_VISUAL_LANGUAGE=zh-Hans renders the page in that catalog.
+        if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            diri_i18n::set_language(language);
+        }
         let platform = gpui_platform::current_platform(true);
         let mut cx = gpui::HeadlessAppContext::with_platform(
             platform.text_system(),
@@ -6603,6 +6781,13 @@ index 1111111..2222222 100644
         let output = std::env::var_os("DIRI_VISUAL_OUTPUT")
             .map(PathBuf::from)
             .expect("output path");
+        // DIRI_VISUAL_LANGUAGE=zh-Hans renders the page in that catalog.
+        if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            diri_i18n::set_language(language);
+        }
         let dimension = |name: &str, fallback: f32| {
             std::env::var(name)
                 .ok()

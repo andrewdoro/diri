@@ -7369,6 +7369,13 @@ mod tests {
         use diri_proto::grid::{ChangedRow, GridCell, LinkSpan};
         use gpui::{AppContext as _, HeadlessAppContext};
         let output = std::env::var("DIRI_QOL_SCREENSHOT").expect("output path");
+        // DIRI_VISUAL_LANGUAGE=zh-Hans renders the page in that catalog.
+        if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            diri_i18n::set_language(language);
+        }
         let scene = std::env::var("DIRI_QOL_SCENE").unwrap_or_default();
         let width: f32 = std::env::var("DIRI_QOL_WIDTH")
             .ok()
