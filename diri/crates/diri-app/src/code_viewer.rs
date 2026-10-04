@@ -2684,6 +2684,7 @@ impl Focusable for CodeViewer {
 
 impl Render for CodeViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("files");
         if self.workspace_cwd.is_some() && !self.tree.has_loaded_anything() {
             self.load_directory(PathBuf::new(), cx);
         }

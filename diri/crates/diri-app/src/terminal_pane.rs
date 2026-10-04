@@ -12,6 +12,9 @@ mod find_overlay;
 pub(crate) mod find_workflow_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod keystroke_latency_tests;
+mod messages;
+#[cfg(all(test, target_os = "macos"))]
+mod messages_tests;
 mod path_picker;
 mod qol;
 mod reconnect;
@@ -572,6 +575,28 @@ impl PaneMailboxState {
     }
 }
 
+/// What a refused or dropped attach waits to see change. A remote session's
+/// keyboard modes are unknown until its Bridge connects, so the Engine refuses
+/// a legacy controller until then; the connection coming up is the moment to
+/// try again, which no status change marks.
+#[derive(Clone, Debug, PartialEq)]
+struct RetryKey {
+    status: SessionStatus,
+    remote: Option<diri_proto::RemoteConnectionState>,
+}
+
+impl RetryKey {
+    fn of(session: &SessionRecord) -> Self {
+        Self {
+            status: session.status.clone(),
+            remote: session
+                .remote_connection
+                .as_ref()
+                .map(|connection| connection.state),
+        }
+    }
+}
+
 struct ResidentTerminal {
     controller: ControllerLease,
     keyboard: Option<diri_proto::terminal_input::KeyboardState>,
@@ -581,9 +606,10 @@ struct ResidentTerminal {
     /// predecessor was detached.
     attachment_generation: AttachmentGeneration,
     attachment_state: AttachmentState,
-    /// The record's status when the attach was last refused or dropped; a
-    /// different status (resumed, relaunched) asks the transport to retry.
-    retry_after: Option<SessionStatus>,
+    /// The record's status and remote connection when the attach was last
+    /// refused or dropped; a change (resumed, relaunched, a remote Bridge
+    /// that came up) asks the transport to retry.
+    retry_after: Option<RetryKey>,
     /// Last mode advertised by this attachment generation. Reset while the
     /// transport is not live so paste never trusts state from a dead child.
     bracketed_paste: bool,
@@ -1415,8 +1441,9 @@ impl TerminalPane {
             let Some(session) = store.sessions().get(id) else {
                 continue;
             };
-            if &session.status != waiting {
-                resident.retry_after = Some(session.status.clone());
+            let key = RetryKey::of(session);
+            if &key != waiting {
+                resident.retry_after = Some(key);
                 resident.attachment.retry();
             }
         }
@@ -1852,7 +1879,7 @@ impl TerminalPane {
                             .expect("store")
                             .sessions()
                             .get(&id)
-                            .map(|session| session.status.clone())
+                            .map(|session| RetryKey::of(session))
                     })
                     .flatten();
                 }
@@ -3278,6 +3305,7 @@ impl TerminalPane {
                 let Some(button) = terminal_mouse_button(event.button) else {
                     return;
                 };
+                resident.element.note_pointer_input();
                 if let Some(bytes) = encode_mouse_event(
                     resident.element.mouse_modes(),
                     TerminalMouseEvent::Press(button),
@@ -5241,6 +5269,7 @@ fn quote_from_terminal_element(session_id: SessionId, element: &TerminalElement)
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("terminal");
         #[cfg(test)]
         {
             self.render_count += 1;
@@ -5442,6 +5471,7 @@ impl TerminalPane {
             .on_modifiers_changed(cx.listener(Self::handle_modifiers_changed))
             .child(content)
             .children(drop_overlay)
+            .children(crate::perf_overlay::badge("terminal"))
     }
 }
 
@@ -6821,6 +6851,25 @@ mod tests {
         // to it; releasing on it would paint the pre-reflow grid.
         let mut hold = reflow_hold();
         assert!(!hold.park(grid_frame(120, false)));
+    }
+
+    /// A new remote tab's first attach is refused until its Bridge connects
+    /// (keyboard modes unknown). The record's status does not change then, so
+    /// keyed on status alone the pane sat blank until the Agent next changed
+    /// status: ~3 s for every new remote Claude tab.
+    #[test]
+    fn a_remote_connection_coming_up_retries_a_refused_attach() {
+        use diri_proto::{RemoteConnection, RemoteConnectionState};
+        let mut session = fixture_session();
+        let connection = |state| RemoteConnection {
+            state,
+            since: DateMillis(0.0),
+        };
+        session.remote_connection = Some(connection(RemoteConnectionState::Connecting));
+        let refused = RetryKey::of(&session);
+        assert_eq!(RetryKey::of(&session), refused);
+        session.remote_connection = Some(connection(RemoteConnectionState::Connected));
+        assert_ne!(RetryKey::of(&session), refused);
     }
 
     pub(super) fn fixture_session() -> SessionRecord {

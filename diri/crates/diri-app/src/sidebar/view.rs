@@ -8387,12 +8387,13 @@ pub(crate) mod render_probe {
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("sidebar");
         #[cfg(test)]
         let render_started = std::time::Instant::now();
         let root = self.render_sidebar(window, cx);
         #[cfg(test)]
         render_probe::render_finished(render_started.elapsed());
-        root
+        root.children(crate::perf_overlay::badge("sidebar"))
     }
 }
 

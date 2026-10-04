@@ -1,14 +1,15 @@
 {
   "_notice": "Screen-detection predicates adapted from the herdr project (https://github.com/herdrdev/herdr, src/detect/manifests/*.toml), licensed Apache-2.0. Translated from herdr's TOML rule schema into Dirijor's JSON predicate schema and re-prioritised for this engine; the agent capability block is Dirijor's own.",
+  "_screensNotice": "Rules match screens captured from Droid 0.233.0 driven through the Engine (tests/droid_real.rs, fixtures in tests/fixtures/droid_screens).",
   "schemaVersion": 2,
   "id": "droid",
-  "version": "2026.07.31.1",
+  "version": "2026.10.04.1",
   "statusModel": "full",
   "agent": {
     "id": "droid",
     "displayName": "Droid",
     "shortLabel": "droid",
-    "glyph": "\u25c8",
+    "glyph": "◈",
     "aliases": [
       "droid",
       "factory",
@@ -26,12 +27,44 @@
       "style": "flag",
       "token": "--resume"
     },
+    "conversation": {
+      "resume": {
+        "latestArgs": [
+          "--resume",
+          "--last"
+        ]
+      },
+      "stripArgs": [
+        {
+          "token": "--resume",
+          "value": "nonoption"
+        },
+        {
+          "token": "-r",
+          "value": "nonoption"
+        },
+        {
+          "token": "--last"
+        },
+        {
+          "token": "--fork",
+          "value": "any"
+        }
+      ]
+    },
+    "_resumeNotice": "Verified against Droid 0.233.0 (`droid --help` and a PTY run): a bare `--resume` opens the session picker; `--resume --last` reopens the most recent session in the current folder. Droid has no flag for a caller-minted session id, so resume is the folder's latest conversation, like Kimi's and Copilot's `--continue`. Declared under `conversation` so an exited Droid stays resumable without a provider id.",
     "returnToLoginShell": true,
     "foregroundExecNames": [
       "droid"
     ],
-    "_resumeNotice": "Verified against Factory's CLI reference: 'droid --resume [sessionId] | Resume a session (defaults to last modified).' https://docs.factory.ai/droid-cli/cli-reference",
-    "_resumeStyleNotice": "Rust's AgentDescriptor::resume_args implements only \"flag\" and \"sessionIDFlag\"; Swift's \"latest\" has no implementation there and would silently resume nothing. Declared as \"flag\": this agent has no sessionIDFlag, so it never carries a caller-minted id and resume_args emits the bare token \u2014 exactly the semantics the token was chosen for.",
+    "approve": {
+      "text": "",
+      "submit": true
+    },
+    "deny": {
+      "text": "\u001b",
+      "submit": false
+    },
     "envScrubPrefixes": [
       "DIRI_",
       "DIRIJOR_"
@@ -39,41 +72,87 @@
   },
   "rules": [
     {
-      "id": "blocked-select-dialog",
+      "id": "workspace-trust-dialog",
+      "state": "blockedQuestion",
+      "priority": 390,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 20,
+      "when": {
+        "all": [
+          {
+            "contains": "Trust this folder?"
+          },
+          {
+            "contains": "Enter to confirm · Esc to exit"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ]
+    },
+    {
+      "id": "blocked-approval-panel",
       "state": "blockedPermission",
       "priority": 300,
-      "region": "whole_recent",
+      "region": "bottom_non_empty_lines",
+      "regionLines": 14,
       "when": {
         "all": [
           {
             "any": [
               {
-                "contains": "enter to select"
+                "contains": "enter select"
               },
               {
-                "contains": "enter select"
+                "contains": "enter to select"
               }
             ]
           },
           {
             "any": [
-              {
-                "contains": "esc to cancel"
-              },
               {
                 "contains": "esc cancel"
+              },
+              {
+                "contains": "esc to cancel"
               }
             ]
           },
           {
             "any": [
               {
-                "lineRegex": "(?i)^\\s*[\u276f>]?\\s*yes, allow"
+                "lineRegex": "(?i)^\\s*│?\\s*[❯>]?\\s*yes, allow"
               },
               {
-                "lineRegex": "(?i)^\\s*[\u276f>]?\\s*no, cancel"
+                "lineRegex": "(?i)^\\s*│?\\s*[❯>]?\\s*no, cancel"
               }
             ]
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 12,
+        "maxChars": 400
+      }
+    },
+    {
+      "id": "blocked-ask-user",
+      "state": "blockedQuestion",
+      "priority": 290,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 3,
+      "when": {
+        "all": [
+          {
+            "contains": "Navigate"
+          },
+          {
+            "contains": "Select • ESC stop agent"
           }
         ]
       },
@@ -90,25 +169,37 @@
       "id": "working-spinner-stop",
       "state": "working",
       "priority": 110,
-      "region": "whole_recent",
+      "region": "bottom_non_empty_lines",
+      "regionLines": 8,
       "when": {
-        "all": [
-          {
-            "contains": "esc to stop"
-          },
-          {
-            "lineRegex": "^\\s*[\\u2800-\\u28FF]"
-          }
-        ]
+        "lineRegex": "^\\s*[\\u2800-\\u28FF]\\s.*\\(Press ESC to stop\\)"
       }
     },
     {
       "id": "working-esc-stop",
       "state": "working",
       "priority": 100,
-      "region": "whole_recent",
+      "region": "bottom_non_empty_lines",
+      "regionLines": 8,
       "when": {
-        "contains": "esc to stop"
+        "contains": "(press esc to stop)"
+      }
+    },
+    {
+      "id": "idle-composer",
+      "state": "idle",
+      "priority": 50,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 4,
+      "when": {
+        "all": [
+          {
+            "lineRegex": "^\\s*│ >.*│\\s*$"
+          },
+          {
+            "lineRegex": "\\? for help"
+          }
+        ]
       }
     }
   ]

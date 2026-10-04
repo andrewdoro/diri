@@ -1,0 +1,33 @@
+                                            █████████    █████████     ████████    ███   █████████
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   █████████    ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            █████████    ███    ███    ████████    ███   █████████
+
+                                                              v0.233.0 - Airgap
+
+                                        TIP: Press Ctrl+Enter to queue a message while Droid is working
+
+                                               shift+tab to cycle modes · ctrl+N to cycle models
+                                                    ctrl+L for autonomy · tab for reasoning
+
+                                                    Skills (22) ✓  MCPs (0) ✗  AGENTS.md ✗
+
+
+   make a file
+
+⛬  Working on it slowly now.
+
+   Execute touch made-by-droid.txt
+
+  Command to approve · medium risk
+  ↳ touch made-by-droid.txt
+  Why this needs approval: creates a file
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  Yes, allow                                                                                                                                 │
+│  Yes, and always allow medium impact commands (all commands that are reversible)                                                            │
+│  No, cancel                                                                                                                                 │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ↑↓ navigate   Enter select   Esc cancel   Alt/Option+E to inspect approval details

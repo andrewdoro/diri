@@ -79,13 +79,25 @@ pub(crate) fn rpc_finished(method: &str, started: Instant, error: Option<&Client
                 ClientError::Control(control) => Some(id(&control.code)),
                 _ => None,
             };
-            error_event!(
-                "rpc.error",
-                method = id(method),
-                kind = error_kind(error),
-                code = code,
-                ms = elapsed
-            );
+            // A deleted project folder is the user's state, not a fault.
+            if matches!(error, ClientError::Control(control) if control.code == diri_proto::control::CWD_MISSING)
+            {
+                warn_event!(
+                    "rpc.error",
+                    method = id(method),
+                    kind = error_kind(error),
+                    code = code,
+                    ms = elapsed
+                );
+            } else {
+                error_event!(
+                    "rpc.error",
+                    method = id(method),
+                    kind = error_kind(error),
+                    code = code,
+                    ms = elapsed
+                );
+            }
         }
         None if elapsed >= SLOW_RPC && !is_long_poll(method) => {
             warn_event!("rpc.slow", method = id(method), ms = elapsed);

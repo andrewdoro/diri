@@ -4191,6 +4191,7 @@ impl Focusable for LauncherOverlay {
 
 impl Render for LauncherOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("launcher");
         let root = div()
             .id("new-session-launcher")
             .key_context("DiriLauncher")

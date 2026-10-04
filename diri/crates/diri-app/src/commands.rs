@@ -87,6 +87,8 @@ actions!(
         SelectNextAttentionSession,
         CheckForUpdates,
         ShowWhatsNew,
+        TogglePerfOverlay,
+        ToggleRenderCounters,
         SelectPreviousSession,
         SelectNextSession,
         MoveSelectedSessionUp,
@@ -189,6 +191,8 @@ pub enum CommandId {
     SelectNextAttentionSession,
     CheckForUpdates,
     ShowWhatsNew,
+    TogglePerfOverlay,
+    ToggleRenderCounters,
     SelectPreviousSession,
     SelectNextSession,
     MoveSelectedSessionUp,
@@ -855,6 +859,26 @@ pub const COMMANDS: &[CommandSpec] = &[
         "sparkles",
         "whats new release highlights features changelog demo video tour"
     ),
+    spec!(
+        TogglePerfOverlay,
+        "toggle-perf-overlay",
+        Some("cmd-alt-p"),
+        Some("⌥⌘P"),
+        Some(APP_CONTEXT),
+        "Toggle Performance Overlay",
+        "chart.bar",
+        "developer fps frame meter perf performance overlay jank dropped frames memory debug"
+    ),
+    spec!(
+        ToggleRenderCounters,
+        "toggle-render-counters",
+        Some("cmd-alt-r"),
+        Some("⌥⌘R"),
+        Some(APP_CONTEXT),
+        "Toggle Render Counters",
+        "square.stack.3d.up",
+        "developer renders render count redraw views perf performance debug"
+    ),
     spec_with_alternates!(
         SelectPreviousSession,
         "select-previous-session",
@@ -1051,9 +1075,9 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-up"),
         Some("⌘⇧↑"),
         Some(TERMINAL_CONTEXT),
-        "Previous shell prompt",
+        "Previous message or shell prompt",
         "arrow.up",
-        "terminal prompt previous"
+        "terminal message prompt previous conversation"
     ),
     spec!(
         NextPrompt,
@@ -1061,9 +1085,9 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-down"),
         Some("⌘⇧↓"),
         Some(TERMINAL_CONTEXT),
-        "Next shell prompt",
+        "Next message or shell prompt",
         "arrow.down",
-        "terminal prompt next"
+        "terminal message prompt next conversation"
     ),
 ];
 
@@ -1297,6 +1321,8 @@ impl CommandSpec {
             }
             CommandId::CheckForUpdates => KeyBinding::new(key, CheckForUpdates, context),
             CommandId::ShowWhatsNew => KeyBinding::new(key, ShowWhatsNew, context),
+            CommandId::TogglePerfOverlay => KeyBinding::new(key, TogglePerfOverlay, context),
+            CommandId::ToggleRenderCounters => KeyBinding::new(key, ToggleRenderCounters, context),
             CommandId::SelectPreviousSession => {
                 KeyBinding::new(key, SelectPreviousSession, context)
             }
@@ -1870,13 +1896,13 @@ impl CommandId {
                 category: ShortcutCategory::Terminal,
             },
             Self::PreviousPrompt => ShortcutMetadata {
-                title: "Previous shell prompt",
-                description: "Jump to the preceding OSC 133 shell prompt",
+                title: "Previous message or shell prompt",
+                description: "Jump to the preceding sent Agent message or marked shell prompt",
                 category: ShortcutCategory::Terminal,
             },
             Self::NextPrompt => ShortcutMetadata {
-                title: "Next shell prompt",
-                description: "Jump to the following OSC 133 shell prompt",
+                title: "Next message or shell prompt",
+                description: "Jump to the following sent Agent message or marked shell prompt",
                 category: ShortcutCategory::Terminal,
             },
             Self::CopySelection => ShortcutMetadata {
@@ -1897,6 +1923,16 @@ impl CommandId {
             Self::ShowWhatsNew => ShortcutMetadata {
                 title: "What's New",
                 description: "Replay the highlights of recent releases",
+                category: Application,
+            },
+            Self::TogglePerfOverlay => ShortcutMetadata {
+                title: "Performance overlay",
+                description: "Show frame rate, frame times and memory over the window",
+                category: Application,
+            },
+            Self::ToggleRenderCounters => ShortcutMetadata {
+                title: "Render counters",
+                description: "Count how often each view renders",
                 category: Application,
             },
             Self::NewWindow => ShortcutMetadata {
@@ -1994,6 +2030,8 @@ impl CommandId {
             Self::SelectNextAttentionSession => Box::new(SelectNextAttentionSession),
             Self::CheckForUpdates => Box::new(CheckForUpdates),
             Self::ShowWhatsNew => Box::new(ShowWhatsNew),
+            Self::TogglePerfOverlay => Box::new(TogglePerfOverlay),
+            Self::ToggleRenderCounters => Box::new(ToggleRenderCounters),
             Self::SelectPreviousSession => Box::new(SelectPreviousSession),
             Self::SelectNextSession => Box::new(SelectNextSession),
             Self::MoveSelectedSessionUp => Box::new(MoveSelectedSessionUp),

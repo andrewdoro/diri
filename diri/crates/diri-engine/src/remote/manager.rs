@@ -1067,14 +1067,26 @@ fn record_helper_outcome(
             protocol = helper.protocol.major,
             ms = elapsed,
         ),
-        Err(error) => diri_telemetry::incident!(
-            "remote.helper_failed",
-            host = diri_telemetry::id(&host.id),
-            forced = forced,
-            io = diri_telemetry::io_error(error),
-            ssh = super::ssh_error::SshFailure::from_io(error).map(|failure| failure.class.code()),
-            ms = elapsed,
-        ),
+        // SSH itself failing (host asleep, offline, a mistyped destination)
+        // is the user's network, already explained to them by its class; an
+        // incident is for a Helper that SSH reached and still failed.
+        Err(error) => match super::ssh_error::SshFailure::from_io(error) {
+            Some(failure) => diri_telemetry::warn_event!(
+                "remote.helper_failed",
+                host = diri_telemetry::id(&host.id),
+                forced = forced,
+                io = diri_telemetry::io_error(error),
+                ssh = failure.class.code(),
+                ms = elapsed,
+            ),
+            None => diri_telemetry::incident!(
+                "remote.helper_failed",
+                host = diri_telemetry::id(&host.id),
+                forced = forced,
+                io = diri_telemetry::io_error(error),
+                ms = elapsed,
+            ),
+        },
     }
 }
 

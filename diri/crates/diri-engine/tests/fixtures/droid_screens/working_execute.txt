@@ -1,0 +1,31 @@
+                                            █████████    █████████     ████████    ███   █████████
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   █████████    ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                            █████████    ███    ███    ████████    ███   █████████
+
+                                                              v0.233.0 - Airgap
+
+                                           TIP: Use /bug to report issues directly from your session
+
+                                               shift+tab to cycle modes · ctrl+N to cycle models
+                                                    ctrl+L for autonomy · tab for reasoning
+
+                                                    Skills (22) ✓  MCPs (0) ✗  AGENTS.md ✗
+
+
+   wait please
+
+⛬  Working on it slowly now.
+
+   Execute sleep 8
+
+ ⠉ Executing...  (Press ESC to stop)
+
+ Auto (Off) · all actions require approval                                                                                                Fake
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ > Enter to steer · Ctrl+Enter to queue                                                                                                      │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[⏱ 2s] ? for help                                                                                                                         IDE ◌

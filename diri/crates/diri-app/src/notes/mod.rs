@@ -849,6 +849,7 @@ impl NotePane {
 
 impl Render for NotePane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("notes");
         let colors = self.colors();
         let versions = self.versions_element(_window, cx);
         let root = div()
@@ -893,7 +894,9 @@ impl Render for NotePane {
             }
             None => root,
         };
-        let root = root.when_some(versions, |el, panel| el.child(panel));
+        let root = root
+            .when_some(versions, |el, panel| el.child(panel))
+            .children(crate::perf_overlay::badge("notes"));
         root.when_some(self.error.clone(), |el, error| {
             el.child(
                 div()

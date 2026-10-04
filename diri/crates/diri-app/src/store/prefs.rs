@@ -354,6 +354,12 @@ pub struct Prefs {
     /// projects are written; everything else starts in the current checkout.
     #[serde(default)]
     pub new_agent_start: BTreeMap<String, NewAgentStart>,
+    /// Developer frame meter overlay (⌥⌘P). See `crate::perf_overlay`.
+    #[serde(default)]
+    pub perf_overlay: bool,
+    /// Developer per-view render counters (⌥⌘R).
+    #[serde(default)]
+    pub render_counters: bool,
 }
 
 impl Default for Prefs {
@@ -414,6 +420,8 @@ impl Default for Prefs {
             herdr_imported: Default::default(),
             whats_new_seen_version: crate::updates::CURRENT_VERSION.to_owned(),
             new_agent_start: BTreeMap::new(),
+            perf_overlay: false,
+            render_counters: false,
         }
     }
 }

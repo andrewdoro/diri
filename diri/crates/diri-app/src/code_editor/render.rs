@@ -1653,6 +1653,7 @@ impl CodeEditor {
 
 impl Render for CodeEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("code editor");
         let focused = self.focus.is_focused(window);
         self.sync_focus(focused, cx);
         self.refresh_layout();

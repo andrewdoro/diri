@@ -80,6 +80,7 @@ impl SessionRowView {
 
 impl Render for SessionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_overlay::rendered("sidebar row");
         #[cfg(all(test, target_os = "macos"))]
         {
             self.renders += 1;

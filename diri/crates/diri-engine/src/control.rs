@@ -105,6 +105,9 @@ pub struct ControlServer {
     engine_instance_id: String,
     registry: Arc<Mutex<Registry>>,
     socket_path: PathBuf,
+    /// The app's host catalog. Beside the socket by default (one root on
+    /// macOS); on Linux the socket is in the runtime dir and the app saves
+    /// hosts in the config dir, so the daemon is told where.
     logs_dir: PathBuf,
     holder: Option<crate::session::HolderConfig>,
     remote: Option<Arc<crate::remote::manager::RemoteManager>>,
@@ -1163,7 +1166,7 @@ impl ControlServer {
         }
         let cwd_path = PathBuf::from(&cwd);
         if !cwd_path.is_dir() {
-            return Err(ControlError::bad_request(format!(
+            return Err(ControlError::cwd_missing(format!(
                 "cwd {cwd:?} is not a directory"
             )));
         }
@@ -1459,7 +1462,7 @@ impl ControlServer {
         }
         let cwd = p.cwd.trim().to_owned();
         if cwd.is_empty() || !Path::new(&cwd).is_dir() {
-            return Err(ControlError::bad_request(format!(
+            return Err(ControlError::cwd_missing(format!(
                 "cwd {cwd:?} is not a directory"
             )));
         }
@@ -3187,6 +3190,17 @@ impl ControlServer {
         // A local terminal has no conversation to re-enter: it restarts as a
         // fresh login shell, back in the directory it had `cd`'d to.
         let restored_directory = restored_terminal_directory(&record);
+        // A deleted project or worktree: the Holder's spawn could only fail
+        // with ENOENT, after the dead run had been evicted and the launch
+        // wait had run out. Refuse now and leave the record as it is.
+        if record.host.is_none() && restored_directory.is_none() && !Path::new(&record.cwd).is_dir()
+        {
+            crate::telemetry::record_resume(&record, "cwd_missing", None);
+            return Err(ControlError::cwd_missing(format!(
+                "the session's folder {:?} no longer exists",
+                record.cwd
+            )));
+        }
         let mut spec = if record.host.is_some() {
             crate::telemetry::record_resume(&record, "remote", record.agent_session_id.as_deref());
             self.remote_resume_spec(&record)?
@@ -5145,6 +5159,13 @@ fn prepare_agent_input(
         if kimi {
             accept_kimi_workspace_trust(registry, session_id);
         }
+        let droid = with_session(registry, session_id, |session| {
+            session.manifest_id() == "droid"
+        })
+        .unwrap_or(false);
+        if droid {
+            accept_droid_folder_trust(registry, session_id);
+        }
         let copilot = with_session(registry, session_id, |session| {
             session.manifest_id() == "copilot"
         })
@@ -5719,6 +5740,68 @@ fn is_kimi_workspace_trust_screen(lines: &[String]) -> bool {
             .any(|line| line.trim_start().starts_with("│ >"))
 }
 
+/// Droid asks "Trust this folder?" before its composer exists, in every
+/// folder it has not seen. The injector's paste went into that selector and
+/// was dropped, and its Enter then trusted the folder anyway: the spawn
+/// reported an unconfirmed prompt and the turn never started. Answer it first,
+/// only when a prompt was requested, with the workspace-trust tradeoff
+/// [`accept_claude_workspace_trust`] documents. Without a prompt the dialog is
+/// left to the user, where the manifest reports it as a question.
+///
+/// The composer only ever follows the dialog, so it ends the wait as soon as
+/// it shows. Capped at 20s.
+fn accept_droid_folder_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+    let mut accepted = false;
+    for _ in 0..200 {
+        let Some((exited, screen)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        }) else {
+            return;
+        };
+        if exited {
+            return;
+        }
+        if is_droid_folder_trust_screen(&screen) {
+            if !accepted {
+                diri_telemetry::event!(
+                    "prompt.workspace_trust_accepted",
+                    session = diri_telemetry::id(session_id),
+                );
+                // Enter on the preselected "1. Trust this folder".
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted = true;
+            }
+        } else if is_droid_composer_screen(&screen) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn is_droid_folder_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 20);
+    bottom
+        .iter()
+        .any(|line| line.contains("Trust this folder?"))
+        && bottom
+            .iter()
+            .any(|line| line.trim_start().starts_with("> 1. Trust this folder"))
+        && bottom
+            .iter()
+            .rev()
+            .take(2)
+            .any(|line| line.contains("Enter to confirm · Esc to exit"))
+}
+
+/// Droid's composer box directly over its `? for help` footer.
+fn is_droid_composer_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 4);
+    bottom
+        .iter()
+        .any(|line| line.trim_start().starts_with("│ >"))
+        && bottom.iter().any(|line| line.contains("? for help"))
+}
+
 /// Copilot's folder selector drops pasted text; a blind Enter then accepts
 /// trust with the initial prompt lost. As with Gemini/Pi, explicitly accept
 /// the one-session "Yes" before injecting, only when a prompt was requested.
@@ -6201,6 +6284,19 @@ mod tests {
     mod find_capture_tests;
     mod reconnect_tests;
     mod send_key_tests;
+
+    #[test]
+    fn droid_trust_and_composer_screens_are_told_apart() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let trust = include_str!("../tests/fixtures/droid_screens/trust.txt");
+        let idle = include_str!("../tests/fixtures/droid_screens/idle.txt");
+        let working = include_str!("../tests/fixtures/droid_screens/working_stream.txt");
+        assert!(is_droid_folder_trust_screen(&lines(trust)));
+        assert!(!is_droid_composer_screen(&lines(trust)));
+        assert!(is_droid_composer_screen(&lines(idle)));
+        assert!(!is_droid_folder_trust_screen(&lines(idle)));
+        assert!(!is_droid_folder_trust_screen(&lines(working)));
+    }
 
     #[test]
     fn kimi_trust_requires_the_active_selector() {
@@ -9046,6 +9142,8 @@ mod tests {
         );
     }
 
+    /// Linux keeps the socket in the runtime dir and the app's hosts.json in
+    /// the config dir: every host the app added was "unknown" to the Engine.
     #[test]
     fn host_initialization_fails_closed_without_the_remote_transport() {
         let temp = tempfile::tempdir().expect("temp");

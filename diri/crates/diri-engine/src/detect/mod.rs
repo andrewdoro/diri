@@ -404,7 +404,7 @@ mod tests {
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 126, "the shipped ruleset lost rules");
+        assert_eq!(rules, 129, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
             let expected_empty = matches!(id, "shell" | "generic");
@@ -783,6 +783,72 @@ mod tests {
                 (observation.state, observation.matched_rule_id.as_str()),
                 (state, rule_id),
                 "{lines:#?}"
+            );
+        }
+    }
+
+    /// Visible grids captured from Droid 0.233.0 via `tests/droid_real.rs`.
+    /// Only the temporary project path is normalized in the fixture screens.
+    /// Before these rules Droid had no idle rule, so every finished turn read
+    /// as unknown; its trust dialog matched nothing and stayed "starting";
+    /// and the approval options sit inside a box border the old line regex
+    /// could not get past, so a permission never read as blocked.
+    #[test]
+    fn droid_rules_match_the_screens_droid_draws() {
+        let engine = engine();
+        let cases = [
+            (
+                include_str!("../../tests/fixtures/droid_screens/trust.txt"),
+                ManifestState::BlockedQuestion,
+                "workspace-trust-dialog",
+            ),
+            (
+                include_str!("../../tests/fixtures/droid_screens/idle.txt"),
+                ManifestState::Idle,
+                "idle-composer",
+            ),
+            (
+                include_str!("../../tests/fixtures/droid_screens/idle_no_model.txt"),
+                ManifestState::Idle,
+                "idle-composer",
+            ),
+            (
+                include_str!("../../tests/fixtures/droid_screens/done.txt"),
+                ManifestState::Idle,
+                "idle-composer",
+            ),
+            (
+                include_str!("../../tests/fixtures/droid_screens/working_stream.txt"),
+                ManifestState::Working,
+                "working-spinner-stop",
+            ),
+            (
+                include_str!("../../tests/fixtures/droid_screens/working_execute.txt"),
+                ManifestState::Working,
+                "working-spinner-stop",
+            ),
+            (
+                include_str!("../../tests/fixtures/droid_screens/permission.txt"),
+                ManifestState::BlockedPermission,
+                "blocked-approval-panel",
+            ),
+            (
+                include_str!("../../tests/fixtures/droid_screens/ask_user.txt"),
+                ManifestState::BlockedQuestion,
+                "blocked-ask-user",
+            ),
+        ];
+        for (text, state, rule_id) in cases {
+            let actual = engine
+                .evaluate(
+                    &ScreenSnapshot::from_lines(text.lines().map(str::to_owned)),
+                    "droid",
+                )
+                .expect("captured Droid screen must match");
+            assert_eq!(
+                (actual.state, actual.matched_rule_id.as_str()),
+                (state, rule_id),
+                "{text}"
             );
         }
     }

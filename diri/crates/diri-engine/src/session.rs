@@ -449,6 +449,10 @@ struct Shared {
     launched_at: Option<Instant>,
     /// Set before an explicit stop, so its exit is not read as a crash.
     terminate_requested: AtomicBool,
+    /// A remote stop is in flight. Its Helper `kill` takes the controller
+    /// lease, so the revocation and refused reconnect that follow on the
+    /// attach Bridge are the stop working, not a transport failure.
+    remote_stopping: AtomicBool,
     /// The exit was recorded to telemetry; later observers stay quiet.
     exit_recorded: AtomicBool,
     /// The manifest's `relaunchNotice`, for an agent that declares one.
@@ -1316,17 +1320,10 @@ impl RemoteStop {
         self.shared
             .terminate_requested
             .store(true, Ordering::SeqCst);
-        if !self.shared.exited.load(Ordering::SeqCst) {
-            let _ = self.client.signal(libc::SIGTERM);
-            let deadline = Instant::now() + grace;
-            while Instant::now() < deadline && !self.shared.exited.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        }
         // Preserve terminate's treatment of an already-ended session (its
         // Holder may also be gone). A failed stop of a live session must keep
         // the original tracked owner so another Agent cannot replace it.
-        let exit = accept_remote_stop_result(&self.shared, self.client.kill())?;
+        let exit = stop_remote(&self.shared, &self.client, grace)?;
         self.shared.stop.store(true, Ordering::SeqCst);
         self.client.close();
         Ok(exit)
@@ -1365,6 +1362,28 @@ fn accept_markerless_exit(shared: &Shared, client: &HolderClient) -> Option<Exit
 
 /// The destructive stop channel revokes the prior controller. Its observed
 /// exit must reach the projection even when that controller never saw ProcessExit.
+/// TERM, a grace period, then the Helper `kill` that also ends the Holder.
+fn stop_remote(
+    shared: &Shared,
+    client: &RemoteSessionClient,
+    grace: Duration,
+) -> std::io::Result<Exit> {
+    shared.remote_stopping.store(true, Ordering::SeqCst);
+    if !shared.exited.load(Ordering::SeqCst) {
+        let _ = client.signal(libc::SIGTERM);
+        let deadline = Instant::now() + grace;
+        while Instant::now() < deadline && !shared.exited.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let result = accept_remote_stop_result(shared, client.kill());
+    if result.is_err() {
+        // The session stays tracked and live: its Bridge failures count again.
+        shared.remote_stopping.store(false, Ordering::SeqCst);
+    }
+    result
+}
+
 fn accept_remote_stop_result(
     shared: &Shared,
     result: std::io::Result<ProcessExit>,
@@ -3204,21 +3223,10 @@ impl Session {
                         )
                     })?
             }
-            Transport::Remote(client) => {
-                if !self.shared.exited.load(Ordering::SeqCst) {
-                    let _ = client.signal(libc::SIGTERM);
-                    let deadline = std::time::Instant::now() + grace;
-                    while std::time::Instant::now() < deadline
-                        && !self.shared.exited.load(Ordering::SeqCst)
-                    {
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                }
-                // `kill` also stops the per-session Holder. Do this even when
-                // the Agent already exited naturally; an explicit lifecycle
-                // termination must not leave an idle remote owner behind.
-                accept_remote_stop_result(&self.shared, client.kill())?
-            }
+            // `kill` also stops the per-session Holder. Do this even when
+            // the Agent already exited naturally; an explicit lifecycle
+            // termination must not leave an idle remote owner behind.
+            Transport::Remote(client) => stop_remote(&self.shared, client, grace)?,
         };
         self.shared.stop.store(true, Ordering::SeqCst);
         if let Transport::Remote(client) = &self.transport {
@@ -3345,6 +3353,7 @@ fn new_shared(
         agent: spec.manifest_id.clone(),
         launched_at: fresh.then(Instant::now),
         terminate_requested: AtomicBool::new(false),
+        remote_stopping: AtomicBool::new(false),
         exit_recorded: AtomicBool::new(false),
         relaunch_notice: engine
             .manifest(&spec.manifest_id)
@@ -3880,7 +3889,7 @@ fn pump_remote(
             .as_ref()
             .and_then(|state| state.mirror.sequence());
         let Ok((generation, mut output)) = client.connect(output_offset, grid_sequence) else {
-            set_remote_connection(&shared, diri_proto::RemoteConnectionState::Reconnecting);
+            set_remote_reconnecting(&shared);
             reconnects = reconnects.saturating_add(1);
             if reconnects.is_multiple_of(3) && remote_inspection_exited(&shared, &client) {
                 break;
@@ -3911,10 +3920,10 @@ fn pump_remote(
             mark_remote_transport_failed(&shared);
             break;
         }
-        match disposition {
+        match settle_during_stop(&shared, disposition) {
             RemoteConnectionDisposition::Continue => continue,
             RemoteConnectionDisposition::Reconnect => {
-                set_remote_connection(&shared, diri_proto::RemoteConnectionState::Reconnecting);
+                set_remote_reconnecting(&shared);
                 reconnects = reconnects.saturating_add(1);
                 if reconnects.is_multiple_of(3) && remote_inspection_exited(&shared, &client) {
                     break;
@@ -3936,6 +3945,22 @@ fn pump_remote(
         }
     }
     let _ = shared.log.lock().expect("log").flush();
+}
+
+/// A requested stop's `kill` revokes this Bridge's lease and refuses its
+/// reconnect. That is the stop working: wait for it to record the exit
+/// instead of failing the transport (and reporting an incident).
+fn settle_during_stop(
+    shared: &Shared,
+    disposition: RemoteConnectionDisposition,
+) -> RemoteConnectionDisposition {
+    if disposition == RemoteConnectionDisposition::Fatal
+        && shared.remote_stopping.load(Ordering::SeqCst)
+    {
+        RemoteConnectionDisposition::Reconnect
+    } else {
+        disposition
+    }
 }
 
 fn remote_inspection_exited(shared: &Shared, client: &RemoteSessionClient) -> bool {
@@ -4259,10 +4284,12 @@ fn handle_remote_message(
             }
         }
         RemoteMessage::ControlRevoked(_) => {
-            diri_telemetry::warn_event!(
-                "remote.control_revoked",
-                session = diri_telemetry::id(&shared.id),
-            );
+            if !shared.remote_stopping.load(Ordering::SeqCst) {
+                diri_telemetry::warn_event!(
+                    "remote.control_revoked",
+                    session = diri_telemetry::id(&shared.id),
+                );
+            }
             RemoteConnectionDisposition::Reconnect
         }
         RemoteMessage::ProcessExit(exit) => {
@@ -4488,6 +4515,9 @@ fn set_remote_connection(shared: &Shared, state: diri_proto::RemoteConnectionSta
         let mut remote = shared.remote_grid.lock().expect("remote grid");
         if let Some(remote) = remote.as_mut()
             && remote.connection.state != state
+            // An exit is final; a Bridge closing after it is no reconnect.
+            && !(remote.connection.state == diri_proto::RemoteConnectionState::Exited
+                && state == diri_proto::RemoteConnectionState::Reconnecting)
         {
             let event = |kind| {
                 diri_telemetry::record(
@@ -4566,6 +4596,15 @@ fn mark_remote_transport_failed(shared: &Shared) {
     set_remote_connection(shared, diri_proto::RemoteConnectionState::Failed);
     // The last PID/grid remain observable. Neither transport failure nor an
     // uncertain write supplies an Agent exit code or permission to replay input.
+}
+
+/// A lost Bridge is a reconnect, unless the session already ended or is
+/// stopping: an exit recorded by a racing stop must not flip back.
+fn set_remote_reconnecting(shared: &Shared) {
+    if shared.stop.load(Ordering::SeqCst) || shared.exited.load(Ordering::SeqCst) {
+        return;
+    }
+    set_remote_connection(shared, diri_proto::RemoteConnectionState::Reconnecting);
 }
 
 fn wait_for_remote_retry(shared: &Shared, duration: Duration) {
@@ -6762,6 +6801,87 @@ mod notification_tests {
 #[cfg(test)]
 mod remote_stop_tests {
     use super::*;
+
+    fn remote_shared(temp: &tempfile::TempDir, id: &str) -> Arc<Shared> {
+        let spec = SessionSpec {
+            id: id.into(),
+            pty: PtySpec::new(vec!["/bin/sh".into()], "/"),
+            manifest_id: "shell".into(),
+            authority: Authority::ProcessOnly,
+            logs_dir: temp.path().to_path_buf(),
+            holder: None,
+            remote: None,
+            defer_launch: false,
+        };
+        let shared = new_shared(
+            &spec,
+            OutputLog::writer(temp.path(), &spec.id).unwrap(),
+            &ManifestEngine::new(Vec::new()),
+            true,
+        );
+        *shared.remote_grid.lock().unwrap() = Some(RemoteGridState {
+            reset_required: false,
+            reset_staged: None,
+            reset_committed: None,
+            keyboard: RemoteKeyboardProjection::default(),
+            connection: diri_proto::RemoteConnection {
+                state: diri_proto::RemoteConnectionState::Connected,
+                since: diri_proto::DateMillis::from(SystemTime::now()),
+            },
+            mirror: GridMirror::new(),
+            revision: 0,
+            pending: None,
+        });
+        shared
+    }
+
+    fn connection(shared: &Shared) -> diri_proto::RemoteConnectionState {
+        shared
+            .remote_grid
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .connection
+            .state
+    }
+
+    /// Closing a remote tab: the Helper `kill` takes the controller lease, so
+    /// the Bridge is revoked and its reconnect refused. That must wait for the
+    /// stop, not fail the session (a `remote.connection` incident per close).
+    #[test]
+    fn a_requested_stop_does_not_fail_the_bridge_it_revokes() {
+        use RemoteConnectionDisposition as D;
+        let temp = tempfile::tempdir().unwrap();
+        let shared = remote_shared(&temp, "stop-revoke");
+        assert_eq!(settle_during_stop(&shared, D::Fatal), D::Fatal);
+        shared.remote_stopping.store(true, Ordering::SeqCst);
+        assert_eq!(settle_during_stop(&shared, D::Fatal), D::Reconnect);
+        for other in [D::Continue, D::Reconnect, D::Exited, D::Stopped] {
+            assert_eq!(settle_during_stop(&shared, other), other);
+        }
+    }
+
+    #[test]
+    fn a_bridge_closing_after_the_exit_is_not_a_reconnect() {
+        use diri_proto::RemoteConnectionState as State;
+        let temp = tempfile::tempdir().unwrap();
+        let shared = remote_shared(&temp, "stop-exited");
+        set_remote_reconnecting(&shared);
+        assert_eq!(connection(&shared), State::Reconnecting);
+        // The stop's `kill` records the exit while the Bridge is retrying.
+        record_remote_exit(
+            &shared,
+            ProcessExit {
+                code: Some(143),
+                signal: None,
+            },
+        );
+        assert_eq!(connection(&shared), State::Exited);
+        set_remote_reconnecting(&shared);
+        set_remote_connection(&shared, State::Reconnecting);
+        assert_eq!(connection(&shared), State::Exited);
+    }
     #[test]
     fn remote_stop_failure_preserves_only_already_observed_exit() {
         let temp = tempfile::tempdir().unwrap();

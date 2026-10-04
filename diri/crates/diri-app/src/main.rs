@@ -56,6 +56,7 @@ mod palette_chrome;
 mod palette_workspace;
 mod path_picker;
 mod peek_settle;
+mod perf_overlay;
 mod phone_access;
 mod platform;
 mod pr_card;
@@ -395,6 +396,13 @@ fn main() {
             }
         });
     }
+    perf_overlay::apply_prefs(
+        store_runtime
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences(),
+    );
     let updates = if preview {
         updates::inert()
     } else {
