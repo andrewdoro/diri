@@ -118,8 +118,8 @@ Diri follows the XDG base-directory specification. The defaults are:
 | Purpose | Default location |
 |---|---|
 | Data, PTY holders, injected helpers | `~/.local/share/diri` |
-| Session state and logs | `~/.local/state/diri` |
-| Host config and manifest overrides | `~/.config/diri` |
+| Session state, logs and remote session bindings | `~/.local/state/diri` |
+| Host, Agent and account config, manifest overrides | `~/.config/diri` |
 | Cache | `~/.cache/diri` |
 | Control socket and daemon lock | `$XDG_RUNTIME_DIR/diri` |
 

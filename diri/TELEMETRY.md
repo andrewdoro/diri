@@ -12,7 +12,7 @@ Worker (`telemetry/worker`) and the investigation CLI (`telemetry/cli`).
   separate step the Engine performs, and the user can turn it off in
   Settings > General > Privacy. Recording itself costs a channel send per event.
 - **No content.** Fields are numbers, booleans, `&'static str`
-  literals, `Id`s (`[A-Za-z0-9_.:-]{1,96}`) or scrubbed diagnostic symbols/OS crash facts in `Text`. Never record terminal output, prompts, clipboard or pasted contents, file
+  literals, `Id`s (`[A-Za-z0-9_.:+-]{1,96}`) or scrubbed diagnostic symbols/OS crash facts in `Text`. Never record terminal output, prompts, clipboard or pasted contents, file
   contents, environment variables, command lines, or URLs. Paths are recorded
   only as `path_hash`. Arbitrary error messages, subprocess stderr and panic
   payloads are excluded, not passed through a best-effort scrubber. Conversation UUIDs, session ids, agent ids, error codes
@@ -119,9 +119,10 @@ recorded by the Engine, not the Holder.
 
 | kind | sev | fields | catches |
 |---|---|---|---|
-| `engine.start` | info | `build, fd_soft, exit_when_orphaned` | which build ran; launchd fd limit not raised |
+| `engine.start` | info | `build, fd_soft, exit_when_orphaned`; on Linux `cgroup` (`app_scope`, `terminal_scope`, `session_scope`, `app_service`, `service`, …: the class of systemd unit, never its name) | which build ran; launchd fd limit not raised; Linux Holders lost together because the unit the Engine (and so every Holder) lives in was stopped |
 | `engine.login_path` | info | `ok, ms, shell, entries` | agents "not found" because the login PATH capture failed or timed out |
 | `engine.duplicate_exit` | debug | | a relaunch racing the singleton lock |
+| `engine.layout_migrated` | info | `files, failed` | Linux only, once: `agents.json`, `accounts.json` and `remote-bindings/` moved out of the runtime tmpfs (`$XDG_RUNTIME_DIR/diri`) where Engines up to 0.9.2 kept them |
 | `engine.catalog` | info | `manifests, failed` | a short or unparsable Agent catalog |
 | `engine.no_manifests` | incident | `failed` | the Engine refusing to start with no catalog |
 | `engine.state_loaded` | info | `records, ms` | slow or empty state loads |
@@ -289,7 +290,7 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 
 | kind | sev | fields | catches |
 |---|---|---|---|
-| `app.launch` | info | `ms` (main → first painted frame), `version`, `windows` | slow launches; the app's version (`process.start.version` is the recorder crate's) |
+| `app.launch` | info | `ms` (main → first painted frame), `version`, `windows`; on Linux also `display: wayland\|x11`, `desktop` (closed class of `XDG_CURRENT_DESKTOP`: `gnome`, `kde`, `hyprland`, … `other`), `package: appimage\|system\|source`, `gpu` (Vulkan driver family: `nvidia`, `amd`, `intel`, `software`, `nouveau`, `asahi`, … `other`), `gpu_software` | slow launches; the app's version (`process.start.version` is the recorder crate's); which Linux display stack a launch or rendering report came from (never a device name, driver version or path) |
 | `app.activate` / `app.deactivate` | info | | context for stalls, OSC 52 refusals |
 | `app.sleep` / `app.wake` | info | | gaps that are sleep, not hangs; reconnect storms after wake |
 | `app.quit` | info | `uptime_s, windows_main, windows_opened` | clean exit vs crash (a timeline that just stops) |
@@ -324,7 +325,7 @@ hang that ends in Force Quit still leaves a record. Durations are lower bounds
 | `pane.drop` | info | `session, files, outcome` (`paste`\|`upload`\|`refused`), `partial, remote` | Finder drops that did nothing |
 | `pane.drop_upload_failed` | error | `session` | remote drop copy failed |
 | `clipboard.copy` | info | `source` (`selection`\|`osc52`), `outcome` (`ok`\|`not_on_pasteboard`\|`empty_selection`\|`relayed`\|`stale`\|`app_inactive`\|`unknown_session`\|`no_listener`), `size`, `ms`/`age_ms`, `mouse_captured`, `session` | "copy doesn't work" (incl. agent-captured mouse) |
-| `clipboard.write_failed` | error | `source, size` | an agent's OSC 52 copy that never reached the pasteboard |
+| `clipboard.write_failed` | error | `source, size, reason: readback_mismatch\|unfocused` | an agent's OSC 52 copy that never reached the pasteboard. macOS reads the pasteboard back; Linux selections are asynchronous, so a read-back there was a false failure (Wayland) and a multi-second main-thread stall, and Linux only reports `unfocused` (Wayland drops a copy made while no diri window has focus) |
 | `clipboard.paste` | info | `outcome` (`sent`\|`review`\|`into_find`\|`image_staged`\|`image_stage_failed`\|`empty_clipboard`\|`no_session`\|`no_terminal`\|`no_text`\|`copy_mode`\|`ignored_in_find`), `kind, size, bracketed, ms` | "paste doesn't work" |
 | `clipboard.image_upload_failed` | error | `session` | image paste into a remote session |
 | `term.slow_paint` | warn | `ms, cols, rows, shape_misses` | one terminal paint ≥ 50 ms |
@@ -423,6 +424,12 @@ The first line is the batch header:
 ```json
 {"v":1,"type":"batch","install":"<uuid>","support_id":"D-7K3MQ9XA","name":"alex","app_version":"0.9.0","build":"<sha>","channel":"stable","os":"macos","os_version":"27.0","arch":"aarch64","sent_at":1790581979447,"lines":1234}
 ```
+
+`app_version` is the product version (the macOS bundle's, otherwise the
+`diri-app` crate's), `channel` is `stable` for a release bundle or Linux
+package and `dev` for a cargo build, and on Linux `os_version` is os-release's
+`"<ID> <VERSION_ID>"` (`fedora 44`, `ubuntu 26.04`, `arch` for a rolling
+release).
 
 The rest are records as above. Responses: `2xx` accepted; `400/413/422`
 rejected permanently (the client skips the batch); `429/5xx` retried next

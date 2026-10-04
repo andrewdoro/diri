@@ -121,6 +121,8 @@ pub struct ControlServer {
     workspaces: crate::workspace::WorkspaceStore,
     agent_catalog: Arc<Mutex<crate::agent_catalog::AgentCatalogStore>>,
     accounts: Mutex<crate::accounts::AccountStore>,
+    /// `hosts.json`, `agents.json` and `accounts.json` live here.
+    config_dir: PathBuf,
     account_operations: std::sync::RwLock<()>,
     session_operations: Mutex<std::collections::HashSet<String>>,
     agent_scans: Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
@@ -195,21 +197,13 @@ impl ControlServer {
             .parent()
             .map(|parent| parent.join("logs"))
             .unwrap_or_else(|| PathBuf::from("logs"));
-        let remote_bindings = socket_path.parent().and_then(|parent| {
-            crate::remote::binding::RemoteBindingStore::new(parent.join("remote-bindings")).ok()
-        });
-        let agent_config_path = socket_path
+        // Beside the socket unless the daemon names its config and state
+        // directories, which differ from the socket's on Linux.
+        let config_dir = socket_path
             .parent()
-            .map(|parent| parent.join("agents.json"))
-            .unwrap_or_else(|| PathBuf::from("agents.json"));
-        let agent_catalog = crate::agent_catalog::AgentCatalogStore::new(&agent_config_path)
-            .unwrap_or_else(|error| {
-                eprintln!("diri-engine: Agent configuration unavailable: {error}");
-                crate::agent_catalog::AgentCatalogStore::empty(&agent_config_path)
-            });
-        let accounts = Mutex::new(crate::accounts::AccountStore::new(
-            agent_config_path.with_file_name("accounts.json"),
-        ));
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let remote_bindings = remote_binding_store(&config_dir);
+        let (agent_catalog, accounts) = agent_config_stores(&config_dir);
         let events = crate::events::EventBus::new();
         let activity_path = logs_dir
             .parent()
@@ -241,7 +235,8 @@ impl ControlServer {
             worktree_scan: Default::default(),
             workspaces,
             agent_catalog: Arc::new(Mutex::new(agent_catalog)),
-            accounts,
+            accounts: Mutex::new(accounts),
+            config_dir,
             account_operations: std::sync::RwLock::new(()),
             session_operations: Mutex::new(std::collections::HashSet::new()),
             agent_scans: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -301,6 +296,25 @@ impl ControlServer {
         if let Err(error) = self.events.enable_activity_log(activity_path) {
             eprintln!("diri-engine: activity history unavailable: {error}");
         }
+        self
+    }
+
+    /// Where the user's host, Agent and account configuration lives. Defaults
+    /// to the socket's directory, which is right on macOS (one App Support
+    /// root) and wrong on Linux, where the socket sits in the runtime tmpfs
+    /// and the app writes `hosts.json` to the XDG config directory.
+    pub fn with_config_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.config_dir = dir.into();
+        let (agent_catalog, accounts) = agent_config_stores(&self.config_dir);
+        self.agent_catalog = Arc::new(Mutex::new(agent_catalog));
+        self.accounts = Mutex::new(accounts);
+        self
+    }
+
+    /// Where remote session bindings are kept. They must outlive a reboot of
+    /// this machine, since the remote Holders do.
+    pub fn with_remote_bindings_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.remote_bindings = remote_binding_store(&dir.into());
         self
     }
 
@@ -2431,10 +2445,8 @@ impl ControlServer {
     /// a stateless SSH action. Live Holder operations deliberately use their
     /// session binding's creation-time Helper instead.
     fn hosts_file(&self) -> PathBuf {
-        self.socket_path
-            .parent()
-            .map(|parent| parent.join("hosts.json"))
-            .unwrap_or_else(|| PathBuf::from("hosts.json"))
+        self.config_dir
+            .join(diri_proto::paths::HOSTS_CONFIG_FILE_NAME)
     }
 
     /// `session.list` and `state.snapshot` are the same view: every record
@@ -4988,6 +5000,30 @@ fn migrate_control_error(error: crate::migrate::MigrateError) -> ControlError {
         crate::migrate::MigrateError::BadRequest(message) => ControlError::bad_request(message),
         crate::migrate::MigrateError::Internal(message) => ControlError::internal(message),
     }
+}
+
+fn agent_config_stores(
+    config_dir: &Path,
+) -> (
+    crate::agent_catalog::AgentCatalogStore,
+    crate::accounts::AccountStore,
+) {
+    let agent_config_path = config_dir.join("agents.json");
+    let agent_catalog = crate::agent_catalog::AgentCatalogStore::new(&agent_config_path)
+        .unwrap_or_else(|error| {
+            eprintln!("diri-engine: Agent configuration unavailable: {error}");
+            crate::agent_catalog::AgentCatalogStore::empty(&agent_config_path)
+        });
+    let accounts = crate::accounts::AccountStore::new(config_dir.join("accounts.json"));
+    (agent_catalog, accounts)
+}
+
+/// `dir` is the parent of `remote-bindings/`.
+fn remote_binding_store(dir: &Path) -> Option<crate::remote::binding::RemoteBindingStore> {
+    crate::remote::binding::RemoteBindingStore::new(
+        dir.join(crate::layout_migration::REMOTE_BINDINGS_DIR_NAME),
+    )
+    .ok()
 }
 
 fn io_control_error(error: std::io::Error) -> ControlError {
@@ -9033,6 +9069,43 @@ mod tests {
         ));
 
         assert_eq!(error.code, crate::remote::TRANSPORT_UNAVAILABLE_CODE);
+    }
+
+    /// Linux keeps the socket in `$XDG_RUNTIME_DIR/diri` and the app saves
+    /// hosts to `~/.config/diri/hosts.json`. Reading hosts beside the socket
+    /// answered every Settings "Connect" with `bad_request` (unknown host).
+    #[test]
+    fn hosts_come_from_the_config_dir_not_the_socket_dir() {
+        let temp = tempfile::tempdir().expect("temp");
+        let runtime = temp.path().join("run");
+        let config = temp.path().join("config");
+        std::fs::create_dir_all(&runtime).unwrap();
+        diri_proto::HostsConfig {
+            hosts: vec![diri_proto::HostEntry {
+                id: "forge".into(),
+                name: Some("Forge".into()),
+                ssh: "you@forge".into(),
+                default_cwd: None,
+                node: None,
+            }],
+        }
+        .save(config.join(diri_proto::paths::HOSTS_CONFIG_FILE_NAME))
+        .expect("host catalog");
+        let registry = Registry::new(engine(), temp.path().join("state.json"));
+        let server = Arc::new(
+            ControlServer::new(Arc::new(Mutex::new(registry)), runtime.join("daemon.sock"))
+                .with_config_dir(&config)
+                .with_remote_bindings_dir(temp.path().join("state")),
+        );
+
+        let listed = ok_of(call(&server, Method::HOST_LIST, None));
+
+        assert_eq!(listed["hosts"][0]["id"], "forge");
+        assert_eq!(
+            server.resolve_host("forge").map(|host| host.ssh).ok(),
+            Some("you@forge".to_owned())
+        );
+        assert!(temp.path().join("state/remote-bindings").is_dir());
     }
 
     #[test]

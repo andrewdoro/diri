@@ -30,7 +30,8 @@ pub enum Value {
 }
 
 /// A machine identifier: session ids, conversation UUIDs, agent ids, RPC
-/// method names, error codes. Anything outside `[A-Za-z0-9_.:-]{1,96}` is
+/// method names, error codes, build identities (`0.1.0+catalog.…`). Anything
+/// outside `[A-Za-z0-9_.:+-]{1,96}` is
 /// replaced by `"!invalid"` rather than recorded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Id(String);
@@ -64,7 +65,7 @@ pub fn id(value: impl AsRef<str>) -> Id {
         && value.len() <= ID_MAX
         && value
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'));
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'+' | b'-'));
     Id(if valid {
         value.to_owned()
     } else {
@@ -240,6 +241,12 @@ mod tests {
             "0a40e747-fa0c-4e9a-b755-c195ab079cda"
         );
         assert_eq!(id("session.spawn").as_str(), "session.spawn");
+        // The Engine's handshake build identity was "!invalid" on every
+        // install because of its semver build-metadata separator.
+        assert_eq!(
+            id("diri-engine-0.1.0+catalog.645c4c7d1e94f75d").as_str(),
+            "diri-engine-0.1.0+catalog.645c4c7d1e94f75d"
+        );
         assert_eq!(id("/Users/alex/x").as_str(), "!invalid");
         assert_eq!(id("hello world").as_str(), "!invalid");
         assert_eq!(id("").as_str(), "!invalid");

@@ -53,6 +53,7 @@ pub mod hosts;
 pub mod inject;
 #[cfg(feature = "latency-trace")]
 pub mod latency_trace;
+pub mod layout_migration;
 mod lifecycle;
 pub mod limits;
 pub mod local_path;

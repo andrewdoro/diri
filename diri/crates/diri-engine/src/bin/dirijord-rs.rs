@@ -118,6 +118,11 @@ fn main() {
         build = diri_telemetry::id(diri_engine::telemetry::build_id()),
         fd_soft = fd_limit.as_ref().map(|limit| limit.soft),
         exit_when_orphaned = std::env::args().any(|arg| arg == EXIT_WHEN_ORPHANED_FLAG),
+        cgroup = cfg!(target_os = "linux").then(|| {
+            std::fs::read_to_string("/proc/self/cgroup").map_or("unknown", |text| {
+                diri_engine::telemetry::cgroup_class(&text)
+            })
+        }),
     );
     diri_telemetry::event!(
         "engine.login_path",
@@ -152,6 +157,22 @@ fn main() {
         std::process::exit(0);
     }
     std::mem::forget(lock);
+
+    // Under the lock, before any store opens: earlier Linux builds kept
+    // configuration and remote bindings in the runtime tmpfs.
+    let moved =
+        diri_engine::layout_migration::adopt_runtime_files(&runtime_dir, &config_dir, &state_dir);
+    if moved != Default::default() {
+        eprintln!(
+            "dirijord-rs: moved {} file(s) out of the runtime directory ({} failed)",
+            moved.files, moved.failed
+        );
+        diri_telemetry::event!(
+            "engine.layout_migrated",
+            files = moved.files,
+            failed = moved.failed,
+        );
+    }
 
     let manifest_overrides = DirijorPaths::manifest_overrides_dir(&home);
     let (engine, failed) = load_manifests(&exe_dir, &manifest_overrides);
@@ -240,6 +261,8 @@ fn main() {
     let cli_path = install_cli_helpers(&exe_dir, &app_support);
     let mut server = ControlServer::new(Arc::clone(&registry), DirijorPaths::socket(&home))
         .with_logs_dir(&logs_dir)
+        .with_config_dir(&config_dir)
+        .with_remote_bindings_dir(&state_dir)
         .with_notes_dir(app_support.join("notes"))
         .with_holder(holder)
         .with_injection(InjectionConfig {
@@ -298,10 +321,7 @@ fn main() {
         let registry = Arc::clone(&registry);
         let logs_dir = logs_dir.clone();
         let holders_dir = app_support.join("holders");
-        let bindings_dir = DirijorPaths::socket(&home).parent().map_or_else(
-            || PathBuf::from("remote-bindings"),
-            |dir| dir.join("remote-bindings"),
-        );
+        let bindings_dir = state_dir.join(diri_engine::layout_migration::REMOTE_BINDINGS_DIR_NAME);
         let _ = std::thread::Builder::new()
             .name("diri-orphan-sweep".into())
             .spawn(move || {

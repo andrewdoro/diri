@@ -392,13 +392,14 @@ pub fn request_session(params: Option<&serde_json::Value>) -> Option<String> {
 #[must_use]
 pub fn upload_meta(exe_dir: &Path) -> diri_telemetry::upload::Meta {
     let bundle = bundle_versions(exe_dir);
+    let released = bundle.is_some() || (cfg!(target_os = "linux") && linux_package(exe_dir));
     diri_telemetry::upload::Meta {
         app_version: bundle
             .as_ref()
             .map(|(short, _)| short.clone())
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned()),
+            .unwrap_or_else(|| env!("DIRI_APP_VERSION").to_owned()),
         build: build_id(),
-        channel: if bundle.is_some() && !cfg!(debug_assertions) {
+        channel: if released && !cfg!(debug_assertions) {
             "stable"
         } else {
             "dev"
@@ -440,6 +441,74 @@ fn bundle_versions(exe_dir: &Path) -> Option<(String, Option<String>)> {
     Some((short, build))
 }
 
+/// A Linux AppImage or Debian package: `<prefix>/bin/dirijord-rs` beside
+/// `<prefix>/lib/diri` (see `DirijorPaths::packaged_resources`). A cargo build
+/// runs from `target/<profile>/` and has neither.
+fn linux_package(exe_dir: &Path) -> bool {
+    exe_dir.file_name().is_some_and(|name| name == "bin")
+        && exe_dir
+            .parent()
+            .is_some_and(|prefix| prefix.join("lib/diri").is_dir())
+}
+
+/// The kind of systemd unit this process runs in, from `/proc/self/cgroup`.
+/// Holders `setsid` but stay in the Engine's cgroup, so stopping that unit
+/// (closing the terminal tab whose scope launched diri, an app scope torn
+/// down at quit, systemd-oomd) kills every session at once without an exit
+/// record. Only the unit's class is kept, never its name.
+#[must_use]
+pub fn cgroup_class(proc_self_cgroup: &str) -> &'static str {
+    let Some(path) = proc_self_cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .or_else(|| {
+            proc_self_cgroup
+                .lines()
+                .find_map(|line| line.split_once(":name=systemd:").map(|(_, path)| path))
+        })
+    else {
+        return "unknown";
+    };
+    let unit = path.trim().rsplit('/').next().unwrap_or_default();
+    if unit.is_empty() {
+        return "root";
+    }
+    let terminal = [
+        "vte-spawn-",
+        "konsole",
+        "alacritty",
+        "kitty",
+        "wezterm",
+        "ghostty",
+        "foot",
+        "terminal",
+        "tilix",
+        "terminator",
+        "code-",
+        "cursor-",
+    ];
+    if let Some(name) = unit.strip_suffix(".scope") {
+        let name = name.to_ascii_lowercase();
+        return if terminal.iter().any(|needle| name.contains(needle)) {
+            "terminal_scope"
+        } else if name.starts_with("session-") {
+            "session_scope"
+        } else if name.starts_with("app-") {
+            "app_scope"
+        } else {
+            "other_scope"
+        };
+    }
+    if unit.ends_with(".service") {
+        return if unit.starts_with("app-") {
+            "app_service"
+        } else {
+            "service"
+        };
+    }
+    "other"
+}
+
 #[cfg(target_os = "macos")]
 fn os_version() -> Option<String> {
     let mut buffer = [0_u8; 64];
@@ -468,16 +537,126 @@ fn os_version() -> Option<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn os_version() -> Option<String> {
-    let release = std::fs::read_to_string("/etc/os-release").ok()?;
-    release.lines().find_map(|line| {
-        line.strip_prefix("VERSION_ID=")
-            .map(|value| value.trim_matches('"').to_owned())
-    })
+    // os-release(5): /etc first, /usr/lib as the vendor fallback.
+    ["/etc/os-release", "/usr/lib/os-release"]
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .and_then(|release| os_release_version(&release))
+}
+
+/// `"<ID> <VERSION_ID>"` from an os-release file, e.g. `fedora 44` or
+/// `ubuntu 26.04`; just `arch` for rolling releases, which have no
+/// VERSION_ID. A bare VERSION_ID (`44`, `4.0.1`) did not say which distro it
+/// numbered. Both keys are machine-readable by spec; anything else in a value
+/// is dropped so free text cannot ride along.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn os_release_version(release: &str) -> Option<String> {
+    let value = |key: &str| {
+        release.lines().find_map(|line| {
+            let value = line.trim().strip_prefix(key)?.strip_prefix('=')?;
+            let value: String = value
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                .take(24)
+                .collect::<String>()
+                .to_ascii_lowercase();
+            (!value.is_empty()).then_some(value)
+        })
+    };
+    match (value("ID"), value("VERSION_ID")) {
+        (Some(id), Some(version)) => Some(format!("{id} {version}")),
+        (Some(id), None) => Some(id),
+        (None, version) => version,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn os_release_names_the_distro_and_its_version() {
+        let fedora = "NAME=\"Fedora Linux\"\nVERSION=\"44 (Workstation Edition)\"\nID=fedora\nVERSION_ID=44\nPRETTY_NAME=\"Fedora Linux 44\"\n";
+        assert_eq!(os_release_version(fedora).as_deref(), Some("fedora 44"));
+        let ubuntu = "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.04\"\n";
+        assert_eq!(os_release_version(ubuntu).as_deref(), Some("ubuntu 26.04"));
+        // Rolling releases have no VERSION_ID: the old parser sent "".
+        let arch = "NAME=\"Arch Linux\"\nID=arch\nBUILD_ID=rolling\n";
+        assert_eq!(os_release_version(arch).as_deref(), Some("arch"));
+        let quoted = "ID='nixos'\nVERSION_ID='25.11 <me@host>'\n";
+        assert_eq!(
+            os_release_version(quoted).as_deref(),
+            Some("nixos 25.11mehost")
+        );
+        assert_eq!(os_release_version("PRETTY_NAME=x\n"), None);
+    }
+
+    #[test]
+    fn cgroup_units_are_reduced_to_their_class() {
+        let v2 = |path: &str| format!("0::{path}\n");
+        assert_eq!(
+            cgroup_class(&v2(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-diri-4412.scope"
+            )),
+            "app_scope"
+        );
+        assert_eq!(
+            cgroup_class(&v2(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/vte-spawn-0f1e.scope"
+            )),
+            "terminal_scope"
+        );
+        assert_eq!(
+            cgroup_class(&v2(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.kde.konsole-1234.scope"
+            )),
+            "terminal_scope"
+        );
+        assert_eq!(
+            cgroup_class(&v2("/user.slice/user-1000.slice/session-3.scope")),
+            "session_scope"
+        );
+        assert_eq!(
+            cgroup_class(&v2(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/app-diri@a1b2.service"
+            )),
+            "app_service"
+        );
+        assert_eq!(cgroup_class(&v2("/")), "root");
+        assert_eq!(
+            cgroup_class("12:pids:/\n1:name=systemd:/user.slice/user-1000.slice/session-2.scope\n"),
+            "session_scope"
+        );
+        assert_eq!(cgroup_class(""), "unknown");
+    }
+
+    #[test]
+    fn linux_packages_are_told_apart_from_cargo_builds() {
+        let temp = tempfile::tempdir().unwrap();
+        let prefix = temp.path().join("usr");
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        assert!(!linux_package(&prefix.join("bin")));
+        std::fs::create_dir_all(prefix.join("lib/diri")).unwrap();
+        assert!(linux_package(&prefix.join("bin")));
+        let cargo = temp.path().join("target/release");
+        std::fs::create_dir_all(&cargo).unwrap();
+        assert!(!linux_package(&cargo));
+    }
+
+    #[test]
+    fn the_reported_app_version_is_the_products_not_the_crates() {
+        assert_eq!(
+            env!("DIRI_APP_VERSION"),
+            include_str!("../../diri-app/Cargo.toml")
+                .lines()
+                .find_map(|line| line.strip_prefix("version = "))
+                .map(|value| value.trim_matches('"'))
+                .unwrap()
+        );
+        assert_ne!(env!("DIRI_APP_VERSION"), env!("CARGO_PKG_VERSION"));
+    }
 
     #[test]
     fn bundle_versions_come_from_the_enclosing_app() {

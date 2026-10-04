@@ -19,6 +19,41 @@ pub(crate) struct ApplicationNotifications {
 }
 impl Global for ApplicationNotifications {}
 
+/// How an OSC 52 copy can be confirmed on this display server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipboardCheck {
+    /// The macOS pasteboard is synchronous: reading it back proves the write.
+    ReadBack,
+    /// Linux selections are owned and served asynchronously. On Wayland a
+    /// read right after the write still sees the previous offer (a false
+    /// failure), and on both servers it can block the main thread for
+    /// seconds on another client's pipe: 3-4 s `ui.stall`s followed every
+    /// such check in the field.
+    Unverifiable,
+    /// Wayland grants the selection only with a recent input serial from a
+    /// focused surface; GPUI drops the write when no diri window has focus.
+    DroppedUnfocused,
+}
+
+impl ClipboardCheck {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::ReadBack => "readback_mismatch",
+            Self::Unverifiable => "unverifiable",
+            Self::DroppedUnfocused => "unfocused",
+        }
+    }
+}
+
+/// `compositor` is [`gpui::App::compositor_name`]: empty off Linux.
+fn osc52_check(compositor: &str, has_active_window: bool) -> ClipboardCheck {
+    match compositor {
+        "" => ClipboardCheck::ReadBack,
+        "Wayland" if !has_active_window => ClipboardCheck::DroppedUnfocused,
+        _ => ClipboardCheck::Unverifiable,
+    }
+}
+
 pub(crate) fn install(
     services: Arc<AppServices>,
     preview: bool,
@@ -41,19 +76,26 @@ pub(crate) fn install(
                     Ok(text) => {
                         cx.update(|cx| {
                             let bytes = text.len();
+                            let check =
+                                osc52_check(cx.compositor_name(), cx.active_window().is_some());
                             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                             // The agent's copy (OSC 52) must land on the
                             // pasteboard, or "copy does nothing" is all the
                             // user sees.
-                            let verified = cx
-                                .read_from_clipboard()
-                                .and_then(|item| item.text())
-                                .is_some_and(|written| written.len() == bytes);
-                            if !verified {
+                            let failed = match check {
+                                ClipboardCheck::ReadBack => cx
+                                    .read_from_clipboard()
+                                    .and_then(|item| item.text())
+                                    .is_none_or(|written| written.len() != bytes),
+                                ClipboardCheck::Unverifiable => false,
+                                ClipboardCheck::DroppedUnfocused => true,
+                            };
+                            if failed {
                                 diri_telemetry::error_event!(
                                     "clipboard.write_failed",
                                     source = "osc52",
-                                    size = crate::telemetry::size_bucket(bytes)
+                                    size = crate::telemetry::size_bucket(bytes),
+                                    reason = check.reason()
                                 );
                             }
                         });
@@ -225,5 +267,22 @@ pub(crate) fn route(
             cx.global_mut::<ApplicationNotifications>().health = message;
             cx.refresh_windows();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn osc52_copies_are_only_read_back_where_the_pasteboard_is_synchronous() {
+        assert_eq!(osc52_check("", true), ClipboardCheck::ReadBack);
+        assert_eq!(osc52_check("", false), ClipboardCheck::ReadBack);
+        assert_eq!(osc52_check("X11", false), ClipboardCheck::Unverifiable);
+        assert_eq!(osc52_check("Wayland", true), ClipboardCheck::Unverifiable);
+        assert_eq!(
+            osc52_check("Wayland", false),
+            ClipboardCheck::DroppedUnfocused
+        );
     }
 }

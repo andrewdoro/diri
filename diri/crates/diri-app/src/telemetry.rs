@@ -581,11 +581,17 @@ pub(crate) fn frame_probe(started: FrameStart, context: FrameContext) -> impl In
             };
             breakdown.observe();
             if !LAUNCH_RECORDED.swap(true, Ordering::Relaxed) {
+                let platform = LaunchPlatform::current(cx.compositor_name(), window.gpu_specs());
                 event!(
                     "app.launch",
                     ms = process_started().elapsed(),
                     version = crate::updates::CURRENT_VERSION,
-                    windows = MAIN_WINDOWS.load(Ordering::Relaxed)
+                    windows = MAIN_WINDOWS.load(Ordering::Relaxed),
+                    display = platform.display,
+                    desktop = platform.desktop,
+                    package = platform.package,
+                    gpu = platform.gpu,
+                    gpu_software = platform.gpu_software
                 );
             }
             if breakdown.total >= SLOW_FRAME {
@@ -605,6 +611,130 @@ pub(crate) fn frame_probe(started: FrameStart, context: FrameContext) -> impl In
     )
     .absolute()
     .size_0()
+}
+
+/// Linux display facts for `app.launch`, as closed classes: which display
+/// server, desktop, package and GPU driver a launch or rendering report came
+/// from. All `None` on macOS. Never a device name, driver version or path.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LaunchPlatform {
+    display: Option<&'static str>,
+    desktop: Option<&'static str>,
+    package: Option<&'static str>,
+    gpu: Option<&'static str>,
+    gpu_software: Option<bool>,
+}
+
+impl LaunchPlatform {
+    fn current(compositor: &'static str, gpu: Option<gpui::GpuSpecs>) -> Self {
+        if !cfg!(target_os = "linux") {
+            return Self::default();
+        }
+        let executable = std::env::current_exe().ok();
+        Self {
+            display: display_class(compositor),
+            desktop: std::env::var("XDG_CURRENT_DESKTOP")
+                .ok()
+                .map(|desktop| desktop_class(&desktop)),
+            package: Some(package_class(
+                std::env::var_os("APPIMAGE").is_some(),
+                executable.as_deref(),
+            )),
+            gpu: gpu
+                .as_ref()
+                .map(|gpu| gpu_class(&gpu.driver_name, &gpu.device_name)),
+            gpu_software: gpu.map(|gpu| gpu.is_software_emulated),
+        }
+    }
+}
+
+fn display_class(compositor: &str) -> Option<&'static str> {
+    match compositor {
+        "Wayland" => Some("wayland"),
+        "X11" => Some("x11"),
+        "" => None,
+        _ => Some("other"),
+    }
+}
+
+/// `XDG_CURRENT_DESKTOP` is a colon-separated list, most specific first
+/// (`ubuntu:GNOME`, `Budgie:GNOME`).
+fn desktop_class(value: &str) -> &'static str {
+    const KNOWN: [&str; 21] = [
+        "gnome",
+        "kde",
+        "xfce",
+        "cinnamon",
+        "mate",
+        "lxqt",
+        "lxde",
+        "budgie",
+        "pantheon",
+        "cosmic",
+        "unity",
+        "deepin",
+        "sway",
+        "hyprland",
+        "niri",
+        "river",
+        "wayfire",
+        "i3",
+        "labwc",
+        "enlightenment",
+        "gamescope",
+    ];
+    for part in value.split(':') {
+        let part = part.trim().to_ascii_lowercase();
+        let part = part.strip_prefix("x-").unwrap_or(&part);
+        if part == "ubuntu" || part == "pop" || part == "zorin" {
+            continue;
+        }
+        if let Some(known) = KNOWN.iter().find(|known| part.starts_with(*known)) {
+            return known;
+        }
+    }
+    if value.trim().is_empty() {
+        "none"
+    } else {
+        "other"
+    }
+}
+
+/// `appimage`, `system` (a distro package: `<prefix>/bin` beside
+/// `<prefix>/lib/diri`) or `source` (a cargo build).
+fn package_class(appimage: bool, executable: Option<&std::path::Path>) -> &'static str {
+    if appimage {
+        return "appimage";
+    }
+    let packaged = executable
+        .and_then(std::path::Path::parent)
+        .filter(|dir| dir.file_name().is_some_and(|name| name == "bin"))
+        .and_then(std::path::Path::parent)
+        .is_some_and(|prefix| prefix.join("lib/diri").is_dir());
+    if packaged { "system" } else { "source" }
+}
+
+/// The Vulkan driver family from wgpu's adapter info.
+fn gpu_class(driver: &str, device: &str) -> &'static str {
+    let text = format!("{driver} {device}").to_ascii_lowercase();
+    const CLASSES: [(&str, &[&str]); 9] = [
+        (
+            "software",
+            &["llvmpipe", "lavapipe", "softpipe", "swiftshader"],
+        ),
+        ("nouveau", &["nvk", "nouveau"]),
+        ("nvidia", &["nvidia"]),
+        ("amd", &["radv", "amd", "radeon"]),
+        ("intel", &["intel", "anv"]),
+        ("asahi", &["honeykrisp", "asahi", "apple"]),
+        ("adreno", &["turnip", "freedreno", "adreno"]),
+        ("mali", &["panvk", "panfrost", "mali"]),
+        ("virtual", &["venus", "virtio", "vmware", "virgl"]),
+    ];
+    CLASSES
+        .iter()
+        .find(|(_, needles)| needles.iter().any(|needle| text.contains(needle)))
+        .map_or("other", |(class, _)| class)
 }
 
 /// One sampled over-budget frame per [`OVER_BUDGET_SAMPLE_EVERY`].
@@ -1297,6 +1427,53 @@ pub(crate) fn install_latency_trace() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_launch_facts_are_closed_classes() {
+        assert_eq!(display_class("Wayland"), Some("wayland"));
+        assert_eq!(display_class("X11"), Some("x11"));
+        assert_eq!(display_class(""), None);
+        assert_eq!(desktop_class("ubuntu:GNOME"), "gnome");
+        assert_eq!(desktop_class("KDE"), "kde");
+        assert_eq!(desktop_class("X-Cinnamon"), "cinnamon");
+        assert_eq!(desktop_class("Hyprland"), "hyprland");
+        assert_eq!(desktop_class("Budgie:GNOME"), "budgie");
+        assert_eq!(desktop_class("my-own-wm"), "other");
+        assert_eq!(desktop_class(""), "none");
+        assert_eq!(gpu_class("NVIDIA", "NVIDIA GeForce RTX 4070"), "nvidia");
+        assert_eq!(gpu_class("radv", "AMD Radeon 780M (RADV PHOENIX)"), "amd");
+        assert_eq!(
+            gpu_class("Intel open-source Mesa driver", "Intel(R) Graphics (RPL-P)"),
+            "intel"
+        );
+        assert_eq!(
+            gpu_class("llvmpipe", "llvmpipe (LLVM 19.1.7, 256 bits)"),
+            "software"
+        );
+        assert_eq!(gpu_class("NVK", "NVIDIA GeForce GTX 1060"), "nouveau");
+        assert_eq!(gpu_class("Honeykrisp", "Apple M2 Pro (G14S B1)"), "asahi");
+        assert_eq!(gpu_class("", ""), "other");
+    }
+
+    #[test]
+    fn linux_package_kind_follows_the_install_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("usr/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("diri");
+        assert_eq!(package_class(true, Some(&exe)), "appimage");
+        assert_eq!(package_class(false, Some(&exe)), "source");
+        std::fs::create_dir_all(temp.path().join("usr/lib/diri")).unwrap();
+        assert_eq!(package_class(false, Some(&exe)), "system");
+        assert_eq!(package_class(false, None), "source");
+    }
+
+    #[test]
+    fn macos_launches_carry_no_linux_facts() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(LaunchPlatform::current("", None), LaunchPlatform::default());
+        }
+    }
 
     #[test]
     fn privacy_changes_are_committed_only_after_a_successful_save() {
