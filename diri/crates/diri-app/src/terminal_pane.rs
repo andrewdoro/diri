@@ -61,7 +61,7 @@ use tokio::sync::mpsc;
 use crate::clipboard_transfer::{StagedClipboardImage, upload_dropped_file};
 use crate::commands::{
     CloseFind, CopySelection, FindNext, FindPrevious, OpenFind, Paste, ResetZoom, TERMINAL_CONTEXT,
-    ToggleInspector, ToggleSidebar, ZoomIn, ZoomOut,
+    ToggleSidebar, ZoomIn, ZoomOut,
 };
 use crate::external_drop::{TerminalDropAction, plan_terminal_drop, terminal_drop_text};
 use crate::haptics::{self, Haptic};
@@ -4365,8 +4365,8 @@ impl TerminalPane {
                     .gap(px(Metrics::TOOLBAR_ITEM_GAP))
                     .when(shell_controls, |trailing| {
                         trailing
-                            .child(self.render_inspector_toggle(colors, self.held_hint, cx))
                             .child(self.render_notification_button(colors, self.held_hint))
+                            .children(self.render_inspector_toggle(colors, self.held_hint))
                     }),
             )
             .into_any_element()
@@ -4418,49 +4418,17 @@ impl TerminalPane {
         )
     }
 
+    /// The right sidebar toggle, drawn only while the panel is closed: an
+    /// open panel carries its own at the same trailing edge (see
+    /// `crate::right_panel::toggle_button`).
     fn render_inspector_toggle(
         &self,
         colors: SemanticColors,
         held_hint: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let inspector_open = self.inspector_open;
-        let toggle = div()
-            .id("toggle-inspector")
-            .debug_selector(|| "toggle-inspector".into())
-            .role(gpui::Role::Button)
-            .aria_label("Toggle inspector")
-            .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(Radius::BADGE))
-            .cursor_pointer()
-            .when(inspector_open, |button| button.bg(Fill::subtle(colors)))
-            .hover(move |button| button.bg(Fill::subtle(colors)))
-            .child(sf_symbol(
-                "sidebar.right",
-                15.0,
-                if inspector_open {
-                    colors.primary
-                } else {
-                    colors.secondary
-                },
-            ))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|_, _, window, cx| {
-                window.dispatch_action(Box::new(ToggleInspector), cx);
-                cx.stop_propagation();
-            }))
-            .into_any_element();
-        crate::held_hints::below(
-            toggle,
-            "toggle-inspector",
-            crate::held_hints::label(crate::commands::CommandId::ToggleInspector),
-            held_hint,
-            colors,
-        )
+    ) -> Option<AnyElement> {
+        (!self.inspector_open).then(|| {
+            crate::right_panel::dispatching_toggle("toggle-inspector", false, colors, held_hint)
+        })
     }
 
     fn render_notification_button(&self, colors: SemanticColors, held_hint: f32) -> AnyElement {
@@ -4546,8 +4514,8 @@ impl TerminalPane {
                 .when_some(session, |actions, session| {
                     actions.child(self.render_session_links_trigger(&session, colors, cx))
                 })
-                .child(self.render_inspector_toggle(colors, held_hint, cx))
                 .child(self.render_notification_button(colors, held_hint))
+                .children(self.render_inspector_toggle(colors, held_hint))
                 .into_any_element(),
         )
     }
@@ -5378,13 +5346,20 @@ impl TerminalPane {
             let show_sidebar = self.shows_navigation_control() && !self.header_hidden;
             let sidebar_reveal =
                 show_sidebar.then(|| self.render_sidebar_reveal_control(sidebar_colors, cx));
+            // With no session there is no title bar to carry the right sidebar
+            // toggle, so this empty one does.
+            let inspector_toggle = (matches!(self.session_source, SessionSource::FollowSelection)
+                && !self.header_hidden)
+                .then(|| self.render_inspector_toggle(sidebar_colors, self.held_hint))
+                .flatten();
+            let has_header = sidebar_reveal.is_some() || inspector_toggle.is_some();
             div()
                 .flex_1()
                 .h_full()
                 .flex()
                 .flex_col()
                 .bg(colors.terminal_surface())
-                .when_some(sidebar_reveal, |pane, control| {
+                .when(has_header, |pane| {
                     pane.child(
                         div()
                             .h(px(Metrics::TITLE_BAR))
@@ -5392,8 +5367,10 @@ impl TerminalPane {
                             .px(px(Metrics::TOOLBAR_EDGE_INSET))
                             .flex()
                             .items_center()
+                            .justify_between()
                             .bg(colors.work_surface_nested())
-                            .child(control),
+                            .child(div().flex().items_center().children(sidebar_reveal))
+                            .children(inspector_toggle),
                     )
                 })
                 .child(self.render_empty_workbench(colors))

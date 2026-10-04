@@ -905,11 +905,16 @@ impl RootView {
                 window,
                 |this, _, event, window, cx| match event {
                     InspectorEvent::Close => {
-                        // A removed focus path cannot route workbench shortcuts.
-                        window.focus(&this.focus, cx);
+                        // A removed focus path cannot route workbench
+                        // shortcuts, so focus inside the panel goes back to
+                        // the session before the panel unmounts.
+                        let stranded = this.focus_is_in_inspector(window, cx);
                         this.inspector_toggled_at = None;
                         this.set_inspector_open(false, cx);
                         this.inspector_toggled_at = None;
+                        if stranded {
+                            this.focus_after_inspector_close(window, cx);
+                        }
                     }
                     InspectorEvent::SessionChanged => {
                         this.inspector_open = this
@@ -975,7 +980,9 @@ impl RootView {
                             this.close_workspace_terminal(*terminal_slot, window, cx);
                         }
                         if !this.focus_remaining_workspace(window, cx) {
-                            window.focus(&this.focus, cx);
+                            // The last tab is gone and the panel is closing
+                            // with it: hand the keyboard back to the session.
+                            this.focus_after_inspector_close(window, cx);
                         }
                         cx.notify();
                     }
@@ -2463,9 +2470,13 @@ impl RootView {
                     .update(cx, |sidebar, cx| sidebar.focus(window, cx));
             }
             CommandId::ToggleInspector => {
+                // Only focus the closing panel held needs a new home. A toggle
+                // dropped mid-slide, or a close while typing in the session,
+                // leaves focus exactly where it was.
+                let stranded = self.inspector_open && self.focus_is_in_inspector(window, cx);
                 self.toggle_inspector(cx);
-                if !self.inspector_open {
-                    window.focus(&self.focus, cx);
+                if stranded && !self.inspector_open {
+                    self.focus_after_inspector_close(window, cx);
                 }
             }
             CommandId::ToggleAuxiliaryTerminal => {
@@ -2779,7 +2790,7 @@ impl RootView {
                 self.set_inspector_open(false, cx);
                 self.inspector_toggled_at = None;
                 if !self.inspector_open {
-                    window.focus(&self.focus, cx);
+                    self.focus_after_inspector_close(window, cx);
                 }
                 return true;
             }
@@ -3532,6 +3543,38 @@ impl RootView {
         self.set_inspector_open(!self.inspector_open, cx);
     }
 
+    /// Whether keyboard focus lives in the right panel -- its own surfaces,
+    /// or the shell it hosts -- or nowhere at all, which is where a panel
+    /// that unmounted under it leaves it.
+    fn focus_is_in_inspector(&self, window: &Window, cx: &App) -> bool {
+        let Some(inspector) = &self.inspector else {
+            return false;
+        };
+        let inspector = inspector.read(cx);
+        window.focused(cx).is_none()
+            || inspector.focus_handle(cx).contains_focused(window, cx)
+            || (inspector.is_terminal_tab()
+                && self
+                    .auxiliary_terminal
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.read(cx).is_focused(window)))
+    }
+
+    /// Where the keyboard goes when the panel that held it closes: the
+    /// session in the main pane, ready to type, or the window itself when the
+    /// main pane is not a single session.
+    fn focus_after_inspector_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_workspace.is_none()
+            && !self.todos_open
+            && !self.launcher.read(cx).is_open()
+            && let Some(terminal) = &self.terminal
+        {
+            terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+        } else {
+            window.focus(&self.focus, cx);
+        }
+    }
+
     /// Source navigation is an explicit destination, so it must not be lost
     /// behind the short debounce that protects repeated panel toggles.
     fn reveal_inspector(&mut self, cx: &mut Context<Self>) {
@@ -3837,9 +3880,11 @@ impl RootView {
                 outline.rounded_tr(px(Radius::CARD))
             })
             .border_t_1()
-            .border_r_1()
             .border_b_1()
             .when(seam <= 0.0, |outline| outline.border_l_1())
+            // Mirror of the left edge: the right panel owns the divider while
+            // it is on screen, so the seam is one hairline rather than two.
+            .when(inspector_seam <= 0.0, |outline| outline.border_r_1())
             .border_color(terminal.primary.alpha(0.10));
 
         if let Some(workbench) = &self.workspace_workbench {
@@ -3853,8 +3898,10 @@ impl RootView {
             } else {
                 None
             };
+            let inspector_toggle = !self.inspector_open && !self.preview;
             workbench.update(cx, |workbench, _| {
-                workbench.set_external_owner(external_owner)
+                workbench.set_external_owner(external_owner);
+                workbench.set_inspector_toggle(inspector_toggle);
             });
         }
         if terminal_in_workspace_panel && let Some(auxiliary) = &self.auxiliary_terminal {
@@ -5285,8 +5332,10 @@ impl Render for RootView {
                         .h_full()
                         .w(px(inspector_seam))
                         .overflow_hidden()
+                        // The panel paints the terminal's own fill, so this
+                        // hairline is all that separates the two surfaces.
                         .border_l_1()
-                        .border_color(colors.primary.alpha(0.08))
+                        .border_color(crate::right_panel::panel_divider(colors))
                         .child(
                             div()
                                 .absolute()
@@ -11016,7 +11065,7 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        let close = cx.debug_bounds("INSPECTOR_CLOSE").expect("close button");
+        let close = cx.debug_bounds("INSPECTOR_TOGGLE").expect("panel toggle");
         cx.simulate_click(close.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(!root.read_with(cx, |root, _| root.inspector_open));
@@ -11032,6 +11081,149 @@ mod tests {
             root.read_with(cx, |root, _| root.inspector_open),
             "shortcut must reopen after X removes the focused panel"
         );
+    }
+
+    fn root_with_selected_session(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<RootView>, &mut gpui::VisualTestContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let services = test_services();
+        let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+        {
+            let mut store = services.store.store.write().unwrap();
+            store.hydrate(fixture.list);
+            store.select(fixture.selected_session_id.unwrap());
+        }
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            RootView::new(services, false, PreviewScenario::Empty, window, cx)
+        });
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
+        root.update(cx, |root, cx| {
+            root.preview = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        (root, cx)
+    }
+
+    /// The right sidebar has one toggle, always the last control in the title
+    /// bar: the session's while the panel is closed, the panel's own while it
+    /// is open. There is no separate close button.
+    #[gpui::test]
+    fn the_right_sidebar_toggle_is_always_in_the_title_bar(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = root_with_selected_session(cx);
+        assert!(!root.read_with(cx, |root, _| root.inspector_open));
+        let toggle = cx
+            .debug_bounds("toggle-inspector")
+            .expect("a closed panel is toggled from the session title bar");
+        let bell = cx.debug_bounds("notification-inbox-button").unwrap();
+        assert!(
+            toggle.left() >= bell.right(),
+            "the toggle ends the title bar"
+        );
+        assert!(toggle.center().y < px(Metrics::TITLE_BAR));
+        assert!(cx.debug_bounds("INSPECTOR_TOGGLE").is_none());
+
+        cx.simulate_click(toggle.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(root.read_with(cx, |root, _| root.inspector_open));
+        let toggle = cx
+            .debug_bounds("INSPECTOR_TOGGLE")
+            .expect("an open panel carries the toggle in its own title bar");
+        assert!(
+            toggle.right() >= px(1200.0 - Metrics::TOOLBAR_EDGE_INSET - 1.0),
+            "the open panel's toggle ends the window's title bar: {toggle:?}"
+        );
+        assert!(
+            cx.debug_bounds("toggle-inspector").is_none(),
+            "one toggle at a time"
+        );
+        assert!(
+            cx.debug_bounds("workspace-empty").is_none(),
+            "the panel opens on a tab, never on the chooser"
+        );
+
+        root.update(cx, |root, _| root.inspector_toggled_at = None);
+        cx.simulate_click(toggle.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(!root.read_with(cx, |root, _| root.inspector_open));
+        assert!(cx.debug_bounds("toggle-inspector").is_some());
+    }
+
+    /// Closing the panel's last tab closes the panel, hands the keyboard back
+    /// to the session, and the next open restores a real tab.
+    #[gpui::test]
+    fn closing_the_last_panel_tab_closes_the_right_sidebar(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = root_with_selected_session(cx);
+        root.update_in(cx, |root, window, cx| {
+            root.run_command(CommandId::ToggleInspector, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(root.read_with(cx, |root, _| root.inspector_open));
+        let inspector = root.read_with(cx, |root, _| root.inspector.clone().unwrap());
+        root.update_in(cx, |_, window, cx| {
+            let handle = inspector.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        cx.run_until_parked();
+        loop {
+            let closed = inspector.update(cx, |inspector, cx| inspector.close_active_workspace(cx));
+            cx.run_until_parked();
+            if !closed {
+                break;
+            }
+        }
+        assert!(
+            !root.read_with(cx, |root, _| root.inspector_open),
+            "the last tab takes the right sidebar with it"
+        );
+        root.update_in(cx, |root, window, cx| {
+            assert!(
+                root.terminal.as_ref().unwrap().read(cx).is_focused(window),
+                "focus returns to the session, not to a panel that is gone"
+            );
+        });
+        assert!(cx.debug_bounds("workspace-empty").is_none());
+
+        root.update(cx, |root, _| root.inspector_toggled_at = None);
+        root.update_in(cx, |root, window, cx| {
+            root.run_command(CommandId::ToggleInspector, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(root.read_with(cx, |root, _| root.inspector_open));
+        assert!(
+            cx.debug_bounds("workspace-empty").is_none(),
+            "reopening restores a tab instead of the empty chooser"
+        );
+        assert_eq!(
+            inspector.read_with(cx, |inspector, _| inspector.workspace_tab_count()),
+            1
+        );
+    }
+
+    /// A toggle only moves focus the closing panel was holding: closing from
+    /// the session keeps typing in the session, and a press dropped by the
+    /// debounce changes nothing at all.
+    #[gpui::test]
+    fn toggling_the_right_sidebar_keeps_session_focus(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = root_with_selected_session(cx);
+        root.update_in(cx, |root, window, cx| {
+            let terminal = root.terminal.clone().unwrap();
+            terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+            root.run_command(CommandId::ToggleInspector, window, cx);
+            assert!(root.inspector_open);
+            // Held key: the second press lands mid-slide and is dropped.
+            root.run_command(CommandId::ToggleInspector, window, cx);
+            assert!(root.inspector_open, "a press mid-slide is dropped");
+            assert!(terminal.read(cx).is_focused(window));
+            root.inspector_toggled_at = None;
+            root.run_command(CommandId::ToggleInspector, window, cx);
+            assert!(!root.inspector_open);
+            assert!(
+                terminal.read(cx).is_focused(window),
+                "closing from the session leaves the session focused"
+            );
+        });
     }
 
     #[gpui::test]
@@ -11271,7 +11463,10 @@ mod tests {
 
             root.run_command(CommandId::ToggleAuxiliaryTerminal, window, cx);
             assert!(!root.inspector_open);
-            assert!(root.focus.is_focused(window));
+            assert!(
+                root.terminal.as_ref().unwrap().read(cx).is_focused(window),
+                "closing the panel's shell hands the keyboard back to the session"
+            );
             assert_eq!(root.auxiliary_id, shell);
             assert!(root.auxiliary_terminal.is_some());
 

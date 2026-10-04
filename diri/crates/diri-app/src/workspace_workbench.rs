@@ -118,6 +118,9 @@ pub(crate) struct WorkspaceWorkbench {
     enabled: bool,
     placeholder_focus: gpui::FocusHandle,
     external_owner: Option<SessionId>,
+    /// Whether the top-right pane carries the right sidebar toggle: true
+    /// while the panel is closed, when no other title bar shows one.
+    inspector_toggle: bool,
     mounted: HashMap<PaneId, MountedPane>,
     recent: VecDeque<PaneId>,
     /// Panes of the tab on screen. Warm panes of other tabs keep streaming,
@@ -186,6 +189,7 @@ impl WorkspaceWorkbench {
             enabled: false,
             placeholder_focus: cx.focus_handle(),
             external_owner: None,
+            inspector_toggle: false,
             mounted: HashMap::new(),
             recent: VecDeque::new(),
             visible: HashSet::new(),
@@ -483,6 +487,9 @@ impl WorkspaceWorkbench {
     }
     pub(crate) fn set_external_owner(&mut self, session: Option<SessionId>) {
         self.external_owner = session;
+    }
+    pub(crate) fn set_inspector_toggle(&mut self, show: bool) {
+        self.inspector_toggle = show;
     }
     pub(crate) fn visible_session(&self, session: &SessionId) -> bool {
         self.enabled
@@ -879,6 +886,10 @@ impl Render for WorkspaceWorkbench {
             .is_some_and(|tab| matches!(tab.layout, LayoutNode::Split { .. }));
         for pane in &geometry.panes {
             let bounds = pane.bounds;
+            // The pane whose title bar ends at the window's trailing edge.
+            let inspector_toggle = self.inspector_toggle
+                && bounds.y <= 0.5
+                && bounds.x + bounds.width >= self.viewport.width - 0.5;
             let mut surface = div()
                 .id(SharedString::from(format!(
                     "workspace-pane-{}",
@@ -892,8 +903,13 @@ impl Render for WorkspaceWorkbench {
                 .overflow_hidden();
             if let Some(mounted) = self.mounted.get(&pane.identity.pane) {
                 mounted.terminal.update(cx, |terminal, cx| {
-                    terminal
-                        .set_header_trailing_inset(if multiple_panes { 116.0 } else { 26.0 }, cx);
+                    let controls = if multiple_panes { 116.0 } else { 26.0 };
+                    let toggle = if inspector_toggle {
+                        Metrics::TOOLBAR_CONTROL_SIZE + 4.0
+                    } else {
+                        0.0
+                    };
+                    terminal.set_header_trailing_inset(controls + toggle, cx);
                     terminal.set_viewport(
                         TerminalViewport {
                             x: self.viewport.x + bounds.x,
@@ -1081,6 +1097,14 @@ impl Render for WorkspaceWorkbench {
                                 cx.notify();
                             })),
                     )
+                })
+                .when(inspector_toggle, |controls| {
+                    controls.child(crate::right_panel::dispatching_toggle(
+                        "workspace-toggle-inspector",
+                        false,
+                        colors,
+                        0.0,
+                    ))
                 });
             if geometry.panes.len() > 1 && geometry.focused.pane == pane.identity.pane {
                 surface = surface.child(

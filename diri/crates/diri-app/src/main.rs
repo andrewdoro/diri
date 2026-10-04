@@ -60,6 +60,7 @@ pub mod quick_open;
 pub mod quote;
 mod recovery;
 pub mod review_prompt;
+mod right_panel;
 pub mod root;
 mod schedules_page;
 pub mod seam;

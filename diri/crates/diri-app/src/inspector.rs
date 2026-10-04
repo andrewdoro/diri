@@ -15,14 +15,14 @@ use diri_proto::{
     SessionArtifact, SessionDiffBase, SessionId, SessionRecord, SessionStatus,
 };
 use diri_ui::{
-    AgentKind, AgentLogo, Appearance, Fill, FloatingSurface, GlassMenuRow, GlassPill, Ink,
-    LoadingIndicator, Metrics, Radius, SemanticColors, Typo,
+    AgentKind, AgentLogo, Appearance, Fill, FloatingSurface, GlassMenuRow, Ink, LoadingIndicator,
+    Metrics, Radius, SemanticColors, Typo,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Context, DragMoveEvent, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
     Render, ScrollStrategy, SharedString, StatefulInteractiveElement, Task,
-    UniformListScrollHandle, Window, deferred, div, ease_out_quint, point, prelude::*, px, rgba,
+    UniformListScrollHandle, Window, div, ease_out_quint, point, prelude::*, px, rgba,
     uniform_list,
 };
 
@@ -296,6 +296,18 @@ const INSPECTOR_FILES_MENU: crate::floating::Target<WorkbenchInspector> = crate:
     },
 };
 
+/// The panel header's + menu as a panel target.
+const INSPECTOR_ADD_MENU: crate::floating::Target<WorkbenchInspector> = crate::floating::Target {
+    key: "inspector-add-surface",
+    radius: crate::floating::MENU_RADIUS,
+    content: WorkbenchInspector::add_menu_panel_content,
+    dismiss: |this, _, cx| {
+        this.workspace_chooser_open = false;
+        cx.notify();
+    },
+};
+const ADD_MENU_WIDTH: f32 = 184.0;
+
 /// The comparison base menu as a panel target.
 const INSPECTOR_COMPARISON_MENU: crate::floating::Target<WorkbenchInspector> =
     crate::floating::Target {
@@ -526,6 +538,7 @@ impl WorkbenchInspector {
         }
         self.visible = visible;
         if visible {
+            self.seed_default_workspace(cx);
             // One-shot, every tab. Info renders the Git summary and the header
             // renders the Changes badge, so becoming visible always needs one
             // settled read of the working tree — what stays tab-gated is the
@@ -811,6 +824,11 @@ impl WorkbenchInspector {
         });
     }
 
+    #[cfg(test)]
+    pub(crate) fn workspace_tab_count(&self) -> usize {
+        self.workspace_tabs.len()
+    }
+
     #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn session_id_for_test(&self) -> Option<SessionId> {
         self.selected_session().map(|session| session.id)
@@ -984,6 +1002,9 @@ impl WorkbenchInspector {
         {
             cx.emit(InspectorEvent::WorkspaceRestored(surface));
         }
+        if self.visible {
+            self.seed_default_workspace(cx);
+        }
         self.reconcile_diff_polling(cx);
         cx.emit(InspectorEvent::SessionChanged);
         cx.notify();
@@ -1110,7 +1131,12 @@ impl WorkbenchInspector {
         }
     }
 
-    fn add_workspace(&mut self, surface: WorkspaceSurface, cx: &mut Context<Self>) {
+    /// A fresh tab with its own identity and, for Files, its own viewer.
+    fn new_workspace_tab(
+        &mut self,
+        surface: WorkspaceSurface,
+        cx: &mut Context<Self>,
+    ) -> WorkspaceTab {
         let id = self.next_workspace_id;
         self.next_workspace_id += 1;
         let mut tab = WorkspaceTab::new(id, surface);
@@ -1126,6 +1152,12 @@ impl WorkbenchInspector {
             viewer.update(cx, |viewer, cx| viewer.set_workspace(cwd, cx));
             tab.viewer = Some(viewer);
         }
+        tab
+    }
+
+    fn add_workspace(&mut self, surface: WorkspaceSurface, cx: &mut Context<Self>) {
+        let mut tab = self.new_workspace_tab(surface, cx);
+        let id = tab.id;
         if surface == WorkspaceSurface::Terminal {
             tab.terminal_slot = Some(self.next_terminal_slot);
             self.next_terminal_slot += 1;
@@ -1234,7 +1266,31 @@ impl WorkbenchInspector {
             id,
             terminal_slot: tab.terminal_slot,
         });
+        // An empty panel has nothing to offer, so the last tab takes the panel
+        // with it. The next open seeds a default tab (`seed_default_workspace`).
+        if self.workspace_tabs.is_empty() && self.visible {
+            cx.emit(InspectorEvent::Close);
+        }
         cx.notify();
+    }
+
+    /// Gives an emptied panel a tab to open on: the user's last details
+    /// destination, so reopening never lands on an empty chooser. Restored
+    /// rather than activated, so it does not pull keyboard focus.
+    fn seed_default_workspace(&mut self, cx: &mut Context<Self>) {
+        if !self.workspace_tabs.is_empty() {
+            return;
+        }
+        let surface = crate::right_panel::default_surface(self.selected_tab);
+        let mut tab = self.new_workspace_tab(surface, cx);
+        let id = tab.id;
+        if surface == WorkspaceSurface::Details {
+            tab.details_tab = self.details_tab;
+        }
+        self.workspace_tabs.push(tab);
+        if let Some(surface) = self.load_workspace(id, cx) {
+            cx.emit(InspectorEvent::WorkspaceRestored(surface));
+        }
     }
 
     fn select_comparison(&mut self, comparison: SessionDiffBase, cx: &mut Context<Self>) {
@@ -1783,90 +1839,203 @@ impl WorkbenchInspector {
             .child(tabs)
     }
 
+    /// What an emptied panel shows if it is ever open with nothing in it.
+    /// Closing the last tab closes the panel and reopening seeds a default
+    /// tab, so this is a fallback rather than a destination: one quiet line
+    /// and a row of plain choices.
     fn render_surface_chooser(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
-        let choices = [
-            (WorkspaceSurface::Browser, "Open a local app or URL"),
-            (
-                WorkspaceSurface::Terminal,
-                "Start a shell in this workspace",
-            ),
-            (WorkspaceSurface::Files, "Browse workspace files"),
-            (WorkspaceSurface::Review, "Review file changes"),
-        ];
-        let mut cards = div().w_full().flex().flex_col().gap(px(8.0));
-        for pair in choices.chunks_exact(2) {
-            let mut row = div().w_full().flex().gap(px(8.0));
-            for &(surface, description) in pair {
-                row = row.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "workspace-open-{}",
-                            surface.label()
-                        )))
-                        .min_w(px(115.0))
-                        .flex_1()
-                        .p(px(14.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(7.0))
-                        .rounded(px(Radius::CARD))
-                        .border_1()
-                        .border_color(colors.primary.alpha(0.12))
-                        .bg(colors.primary.alpha(0.025))
-                        .cursor_pointer()
-                        .hover(move |card| {
-                            card.bg(colors.primary.alpha(0.055))
-                                .border_color(colors.primary.alpha(0.22))
-                        })
-                        .child(sf_symbol(surface.icon(), 17.0, colors.secondary))
-                        .child(
-                            div()
-                                .mt(px(8.0))
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(surface.label()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(colors.tertiary)
-                                .child(description),
-                        )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.select_workspace(surface, cx)),
-                        ),
-                );
-            }
-            cards = cards.child(row);
+        let mut choices = div()
+            .max_w(px(260.0))
+            .flex()
+            .flex_wrap()
+            .justify_center()
+            .gap(px(2.0));
+        for surface in WorkspaceSurface::CATALOG {
+            choices = choices.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "workspace-open-{}",
+                        surface.label()
+                    )))
+                    .debug_selector(move || format!("workspace-open-{}", surface.label()))
+                    .h(px(crate::right_panel::TAB_HEIGHT))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .rounded(px(Radius::BADGE))
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors.secondary)
+                    .hover(move |choice| {
+                        choice
+                            .bg(crate::right_panel::tab_hover_fill(colors))
+                            .text_color(colors.primary)
+                    })
+                    .child(sf_symbol(surface.icon(), 11.0, colors.tertiary))
+                    .child(surface.label())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_workspace(surface, cx);
+                        cx.stop_propagation();
+                    })),
+            );
         }
         div()
+            .id("workspace-empty")
+            .debug_selector(|| "workspace-empty".into())
             .size_full()
             .p(px(20.0))
             .flex()
             .flex_col()
             .justify_center()
             .items_center()
-            .gap(px(10.0))
+            .gap(px(8.0))
             .child(
                 div()
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Open a surface"),
-            )
-            .child(
-                div()
-                    .mb(px(14.0))
-                    .text_size(px(11.0))
+                    .text_size(px(Typo::META.size))
                     .text_color(colors.tertiary)
-                    .child("Choose what to show in the right panel"),
+                    .child("No open tabs"),
             )
-            .child(cards)
+            .child(choices)
             .into_any_element()
     }
 
+    /// One row of the + menu.
+    fn workspace_catalog_items(&self, colors: SemanticColors, cx: &mut Context<Self>) -> gpui::Div {
+        let mut items = div().p(px(4.0)).flex().flex_col().gap(px(1.0));
+        for surface in WorkspaceSurface::CATALOG {
+            items = items.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "workspace-catalog-{}",
+                        surface.label()
+                    )))
+                    .debug_selector(move || format!("workspace-catalog-{}", surface.label()))
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(9.0))
+                    .rounded(px(Radius::BADGE))
+                    .cursor_pointer()
+                    .hover(move |row| row.bg(colors.primary.alpha(0.08)))
+                    .child(
+                        div()
+                            .w(px(14.0))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .child(sf_symbol(surface.icon(), 11.5, colors.secondary)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(Typo::ROW.size))
+                            .text_color(colors.primary)
+                            .child(surface.label()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.workspace_chooser_open = false;
+                        this.add_workspace(surface, cx);
+                        cx.stop_propagation();
+                    })),
+            );
+        }
+        items
+    }
+
+    /// The + menu's pixels for its floating panel.
+    fn add_menu_panel_content(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.workspace_chooser_open {
+            return None;
+        }
+        let colors = self.panel_colors();
+        let items = self.workspace_catalog_items(colors, cx);
+        Some(
+            crate::floating::surface(colors, crate::floating::MENU_RADIUS, ADD_MENU_WIDTH, items)
+                .into_any_element(),
+        )
+    }
+
+    /// The + menu, dropped from its button. A scrim over the panel and a
+    /// click anywhere else both dismiss it, so the menu never outlives the
+    /// pointer leaving it.
+    fn render_add_menu(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let top = Metrics::TITLE_BAR - 4.0;
+        // Right-aligned under the + button, which sits just before the toggle.
+        let right = Metrics::TOOLBAR_EDGE_INSET
+            + Metrics::TOOLBAR_CONTROL_SIZE
+            + Metrics::TOOLBAR_COMPACT_GAP;
+        let scrim = div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.workspace_chooser_open = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.workspace_chooser_open = false;
+                cx.notify();
+            }));
+        let menu = if crate::floating::uses_panels(false, colors, cx) {
+            crate::floating::host_here(
+                INSPECTOR_ADD_MENU,
+                crate::floating::surface(
+                    colors,
+                    crate::floating::MENU_RADIUS,
+                    ADD_MENU_WIDTH,
+                    self.workspace_catalog_items(colors, cx),
+                )
+                .into_any_element(),
+                Some(ADD_MENU_WIDTH),
+                gpui::Anchor::TopRight,
+                8.0,
+                cx,
+            )
+            .absolute()
+            .top(px(top))
+            .right(px(right))
+            .w(px(0.0))
+            .h(px(0.0))
+            .into_any_element()
+        } else {
+            div()
+                .id("workspace-surface-catalog")
+                .debug_selector(|| "workspace-surface-catalog".into())
+                .absolute()
+                .top(px(top))
+                .right(px(right))
+                .w(px(ADD_MENU_WIDTH))
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    FloatingSurface::new(colors, self.workspace_catalog_items(colors, cx))
+                        .radius(crate::floating::MENU_RADIUS),
+                )
+                .into_any_element()
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .child(scrim)
+            .child(menu)
+            .into_any_element()
+    }
+
+    /// The panel's title bar: the workspace tabs, then + and the toggle that
+    /// hides the panel. The toggle lands exactly where the session pane's
+    /// toggle stands while the panel is closed, so the control does not move
+    /// as the panel slides.
     fn render_workspace_header(
         &self,
         colors: SemanticColors,
+        held_hint: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = self.workspace_active;
@@ -1910,7 +2079,7 @@ impl WorkbenchInspector {
             .flex_1()
             .flex()
             .items_center()
-            .gap(px(3.0));
+            .gap(px(2.0));
 
         for tab in &self.workspace_tabs {
             let surface = tab.surface;
@@ -1951,97 +2120,117 @@ impl WorkbenchInspector {
                     surface.label().into()
                 }
             };
+            let group = SharedString::from(format!("workspace-tab-group-{id}"));
+            let tint = if active {
+                colors.primary
+            } else {
+                colors.tertiary
+            };
+            let glyph = {
+                let state = if active {
+                    &self.browser_state
+                } else {
+                    &tab.browser_state
+                };
+                if surface == WorkspaceSurface::Browser && state.is_loading {
+                    sf_symbol("arrow.triangle.2.circlepath", 10.5, tint)
+                } else if surface == WorkspaceSurface::Browser
+                    && let Some(favicon) = &state.favicon
+                {
+                    use gpui::StyledImage;
+                    gpui::img(favicon.clone())
+                        .size(px(13.0))
+                        .flex_none()
+                        .with_fallback(move || sf_symbol("network", 10.5, tint))
+                        .into_any_element()
+                } else {
+                    sf_symbol(surface.icon(), 10.5, tint)
+                }
+            };
+            // The close slot is always laid out, so a tab never changes width
+            // as its close control comes and goes; only its visibility follows
+            // selection and the pointer.
+            let close = div()
+                .id(SharedString::from(format!("close-workspace-{}", id)))
+                .debug_selector(move || format!("close-workspace-{id}"))
+                .role(gpui::Role::Button)
+                .aria_label("Close tab")
+                .size(px(crate::right_panel::TAB_CLOSE_SIZE))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(Radius::BADGE))
+                .when(
+                    !crate::right_panel::tab_close_visible(active, false),
+                    |close| {
+                        close
+                            .invisible()
+                            .group_hover(group.clone(), |close| close.visible())
+                    },
+                )
+                .hover(move |button| button.bg(colors.primary.alpha(0.10)))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.close_workspace(id, cx);
+                    cx.stop_propagation();
+                }))
+                .child(sf_symbol("xmark", 8.0, colors.secondary));
             tabs = tabs.child(
                 div()
                     .id(SharedString::from(format!("workspace-tab-{}", id)))
                     .debug_selector(move || format!("workspace-tab-{id}"))
-                    .h(px(29.0))
+                    .group(group)
+                    .role(gpui::Role::Tab)
+                    .aria_selected(active)
+                    .aria_label(label.clone())
+                    .h(px(crate::right_panel::TAB_HEIGHT))
                     .flex_none()
-                    .max_w(px(160.0))
+                    .max_w(px(crate::right_panel::TAB_MAX_WIDTH))
                     .min_w(px(0.0))
-                    .px(px(7.0))
+                    .pl(px(8.0))
+                    .pr(px(4.0))
                     .flex()
                     .items_center()
                     .gap(px(5.0))
                     .rounded(px(Radius::BADGE))
-                    .border_1()
-                    .border_color(colors.primary.alpha(0.0))
-                    .glass_pill(colors, active)
+                    .when(active, |tab| {
+                        tab.bg(crate::right_panel::tab_active_fill(colors))
+                    })
                     .text_color(if active {
                         colors.primary
                     } else {
                         colors.secondary
                     })
                     .cursor_pointer()
-                    .hover(move |tab| {
-                        if active {
-                            tab
-                        } else {
-                            tab.bg(colors.primary.alpha(0.055))
-                        }
+                    .when(!active, |tab| {
+                        tab.hover(move |tab| {
+                            tab.bg(crate::right_panel::tab_hover_fill(colors))
+                                .text_color(colors.primary)
+                        })
                     })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child({
-                        let state = if active {
-                            &self.browser_state
-                        } else {
-                            &tab.browser_state
-                        };
-                        let tint = if active {
-                            colors.primary
-                        } else {
-                            colors.tertiary
-                        };
-                        if surface == WorkspaceSurface::Browser && state.is_loading {
-                            sf_symbol("arrow.triangle.2.circlepath", 10.5, tint)
-                        } else if surface == WorkspaceSurface::Browser
-                            && let Some(favicon) = &state.favicon
-                        {
-                            use gpui::StyledImage;
-                            gpui::img(favicon.clone())
-                                .size(px(13.0))
-                                .flex_none()
-                                .with_fallback(move || sf_symbol("network", 10.5, tint))
-                                .into_any_element()
-                        } else {
-                            sf_symbol(surface.icon(), 10.5, tint)
-                        }
-                    })
+                    .child(glyph)
                     .child(
                         div()
                             .min_w(px(0.0))
                             .flex_1()
                             .truncate()
-                            .text_size(px(11.0))
-                            .font_weight(if active {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
+                            .text_size(px(11.5))
+                            // One weight for every state: a bolder selected
+                            // label would widen the tab and shove its
+                            // neighbours whenever the selection moved.
+                            .font_weight(FontWeight::MEDIUM)
                             .child(label),
                     )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("close-workspace-{}", id)))
-                            .debug_selector(move || format!("close-workspace-{id}"))
-                            .size(px(16.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .text_color(colors.tertiary)
-                            .hover(move |button| {
-                                button
-                                    .bg(colors.primary.alpha(0.09))
-                                    .text_color(colors.secondary)
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.close_workspace(id, cx);
-                                cx.stop_propagation();
-                            }))
-                            .child(sf_symbol("xmark", 8.5, colors.tertiary)),
-                    )
+                    .child(close)
+                    // A middle click closes, as in every tabbed editor.
+                    .on_aux_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                        if event.is_middle_click() {
+                            this.close_workspace(id, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.activate_workspace(id, cx);
                         cx.stop_propagation();
@@ -2049,23 +2238,26 @@ impl WorkbenchInspector {
             );
         }
 
-        let mut header = div()
+        let menu_open = self.workspace_chooser_open;
+        div()
             .id("workspace-surface-header")
             .relative()
             .h(px(Metrics::TITLE_BAR))
             .flex_none()
-            .pl(px(8.0))
+            .pl(px(7.0))
             .pr(px(Metrics::TOOLBAR_EDGE_INSET))
             .flex()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(Metrics::TOOLBAR_COMPACT_GAP))
             .border_b_1()
-            .border_color(colors.primary.alpha(0.065))
+            .border_color(crate::right_panel::panel_divider(colors))
             .child(tabs)
             .child(
                 div()
                     .id("workspace-add-surface")
                     .debug_selector(|| "workspace-add-surface".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("New tab")
                     .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
                     .flex_none()
                     .flex()
@@ -2073,6 +2265,7 @@ impl WorkbenchInspector {
                     .justify_center()
                     .rounded(px(Radius::BADGE))
                     .cursor_pointer()
+                    .when(menu_open, |button| button.bg(Fill::subtle(colors)))
                     .hover(move |button| button.bg(Fill::subtle(colors)))
                     .child(sf_symbol("plus", 13.0, colors.secondary))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -2082,80 +2275,14 @@ impl WorkbenchInspector {
                         cx.stop_propagation();
                     })),
             )
-            .child(
-                div()
-                    .id("close-inspector")
-                    .debug_selector(|| "INSPECTOR_CLOSE".to_owned())
-                    .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(Radius::BADGE))
-                    .cursor_pointer()
-                    .hover(move |button| button.bg(Fill::subtle(colors)))
-                    .child(sf_symbol_weighted(
-                        "xmark",
-                        13.5,
-                        SymbolWeight::Bold,
-                        colors.secondary,
-                    ))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.emit(InspectorEvent::Close);
-                        cx.stop_propagation();
-                    })),
-            );
-
-        if self.workspace_chooser_open {
-            let mut catalog = div()
-                .id("workspace-surface-catalog")
-                .absolute()
-                .top(px(Metrics::TITLE_BAR - 2.0))
-                .right(px(35.0))
-                .w(px(196.0))
-                .p(px(5.0))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .rounded(px(Radius::CARD))
-                .bg(colors.sidebar_surface())
-                .border_1()
-                .border_color(colors.primary.alpha(0.14))
-                .shadow_lg();
-            for surface in WorkspaceSurface::CATALOG {
-                catalog = catalog.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "workspace-catalog-{}",
-                            surface.label()
-                        )))
-                        .debug_selector(move || format!("workspace-catalog-{}", surface.label()))
-                        .h(px(32.0))
-                        .px(px(8.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .rounded(px(Radius::BADGE))
-                        .cursor_pointer()
-                        .hover(move |row| row.bg(colors.primary.alpha(0.07)))
-                        .child(sf_symbol(surface.icon(), 11.0, colors.secondary))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(11.5))
-                                .text_color(colors.primary)
-                                .child(surface.label()),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.add_workspace(surface, cx);
-                            cx.stop_propagation();
-                        })),
-                );
-            }
-            header = header.child(deferred(catalog.occlude()));
-        }
-        header.into_any_element()
+            .child(crate::right_panel::toggle_button(
+                "INSPECTOR_TOGGLE",
+                true,
+                colors,
+                held_hint,
+                cx.listener(|_, _: &gpui::ClickEvent, _, cx| cx.emit(InspectorEvent::Close)),
+            ))
+            .into_any_element()
     }
 
     fn browser_url(&self) -> Option<String> {
@@ -3664,14 +3791,15 @@ impl WorkbenchInspector {
         self.context.as_ref().is_some_and(|context| context.remote)
     }
 
-    /// The sidebar palette the inspector paints with, for its panels.
+    /// The palette the right panel paints with; its fill is
+    /// `crate::right_panel::panel_background(colors)`.
     fn panel_colors(&self) -> SemanticColors {
         let store = self
             .runtime
             .store
             .read()
             .expect("session store lock poisoned");
-        crate::app_theme::sidebar_colors_in(&store)
+        crate::right_panel::panel_colors_in(&store)
     }
 
     /// The file navigator's pixels for its floating panel.
@@ -4762,8 +4890,15 @@ impl Render for WorkbenchInspector {
                 .store
                 .read()
                 .expect("session store lock poisoned");
-            crate::app_theme::sidebar_colors_in(&store)
+            crate::right_panel::panel_colors_in(&store)
         };
+        let held_hint = crate::held_hints::opacity(window, cx);
+        // A hosted shell paints the terminal fill itself. Under a glass window
+        // that fill is translucent, and two layers of it would read darker
+        // than the session beside it, so the panel fills only its header then.
+        let background = crate::right_panel::panel_background(colors);
+        let hosted_terminal = self.workspace_selected == Some(WorkspaceSurface::Terminal)
+            && self.terminal_surface.is_some();
         let session = self.selected_session();
         let body = match self.workspace_selected {
             Some(WorkspaceSurface::Details) => {
@@ -4792,6 +4927,11 @@ impl Render for WorkbenchInspector {
             Some(WorkspaceSurface::Terminal) => self.render_terminal(colors),
             Some(WorkspaceSurface::Files) => self.code_viewer.clone().into_any_element(),
             Some(WorkspaceSurface::Review) => self.render_changes(colors, window, cx),
+            // The last tab just closed and the panel is sliding shut: paint
+            // nothing rather than flash the chooser on the way out.
+            None if !self.visible && self.workspace_tabs.is_empty() => {
+                div().size_full().into_any_element()
+            }
             None => self.render_surface_chooser(colors, cx),
         };
         let transition_id = SharedString::from(format!(
@@ -4830,11 +4970,20 @@ impl Render for WorkbenchInspector {
             .overflow_hidden()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::handle_key_down))
-            .bg(colors.sidebar_surface())
+            .relative()
+            .when(!hosted_terminal, |panel| panel.bg(background))
             .text_color(colors.primary)
-            .child(self.render_workspace_header(colors, cx))
+            .child(
+                div()
+                    .flex_none()
+                    .when(hosted_terminal, |header| header.bg(background))
+                    .child(self.render_workspace_header(colors, held_hint, cx)),
+            )
             .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body))
             .when_some(ask_composer, |panel, composer| panel.child(composer))
+            .when(self.workspace_chooser_open, |panel| {
+                panel.child(self.render_add_menu(colors, cx))
+            })
     }
 }
 
@@ -6898,6 +7047,171 @@ mod tests {
         );
     }
 
+    fn test_inspector(
+        cx: &mut TestAppContext,
+    ) -> (Entity<WorkbenchInspector>, &mut gpui::VisualTestContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+        let (inspector, cx) =
+            cx.add_window_view(move |_, cx| WorkbenchInspector::new(runtime, tokio, cx));
+        cx.simulate_resize(gpui::size(px(420.0), px(600.0)));
+        (inspector, cx)
+    }
+
+    /// The last tab takes the panel with it, the panel paints nothing while it
+    /// slides shut, and reopening lands on a real tab rather than a chooser.
+    #[gpui::test]
+    fn closing_the_last_tab_closes_the_panel_and_reopening_seeds_a_tab(cx: &mut TestAppContext) {
+        let (inspector, cx) = test_inspector(cx);
+        let closes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let _subscription = cx.update(|_, cx| {
+            let closes = closes.clone();
+            cx.subscribe(&inspector, move |_, event: &InspectorEvent, _| {
+                if matches!(event, InspectorEvent::Close) {
+                    closes.set(closes.get() + 1);
+                }
+            })
+        });
+        inspector.update(cx, |inspector, cx| {
+            inspector.set_visible(true, cx);
+            inspector.add_workspace(WorkspaceSurface::Review, cx);
+            inspector.add_workspace(WorkspaceSurface::Browser, cx);
+        });
+        cx.run_until_parked();
+        inspector.update(cx, |inspector, cx| {
+            assert!(inspector.close_active_workspace(cx));
+            assert!(inspector.close_active_workspace(cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            closes.get(),
+            0,
+            "closing a tab with siblings keeps the panel"
+        );
+        inspector.update(cx, |inspector, cx| {
+            assert!(inspector.close_active_workspace(cx));
+            assert!(inspector.workspace_tabs.is_empty());
+        });
+        cx.run_until_parked();
+        assert_eq!(closes.get(), 1, "the last tab closes the panel");
+
+        // The root answers Close by hiding the panel; while it slides shut
+        // the body stays blank instead of flashing the chooser.
+        inspector.update(cx, |inspector, cx| inspector.set_visible(false, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-empty").is_none());
+        assert!(cx.debug_bounds("workspace-open-Review").is_none());
+
+        inspector.update(cx, |inspector, cx| {
+            inspector.set_visible(true, cx);
+            assert_eq!(inspector.workspace_tabs.len(), 1);
+            assert_eq!(
+                inspector.workspace_selected,
+                Some(WorkspaceSurface::Details),
+                "reopening lands on the last details destination shown"
+            );
+            assert!(inspector.workspace_active.is_some());
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-empty").is_none());
+        assert!(cx.debug_bounds("INSPECTOR_TOGGLE").is_some());
+
+        // Closing tabs of a hidden panel never asks to close it again.
+        inspector.update(cx, |inspector, cx| {
+            inspector.set_visible(false, cx);
+            assert!(inspector.close_active_workspace(cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(closes.get(), 1);
+    }
+
+    /// If the panel is ever open with nothing in it, the fallback is a quiet
+    /// line of plain choices, not a grid of bordered cards.
+    #[gpui::test]
+    fn an_empty_open_panel_offers_compact_choices(cx: &mut TestAppContext) {
+        let (inspector, cx) = test_inspector(cx);
+        inspector.update(cx, |inspector, cx| {
+            inspector.set_visible(true, cx);
+            inspector.workspace_tabs.clear();
+            inspector.workspace_active = None;
+            inspector.workspace_selected = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-empty").is_some());
+        let review = cx
+            .debug_bounds("workspace-open-Review")
+            .expect("review choice");
+        assert!(review.size.height <= px(crate::right_panel::TAB_HEIGHT + 0.5));
+        cx.simulate_click(review.center(), Modifiers::default());
+        cx.run_until_parked();
+        inspector.read_with(cx, |inspector, _| {
+            assert_eq!(inspector.workspace_selected, Some(WorkspaceSurface::Review));
+        });
+        assert!(cx.debug_bounds("workspace-empty").is_none());
+    }
+
+    /// The + menu is a menu: a click anywhere else dismisses it without
+    /// adding a tab, and a second click on + closes rather than reopens it.
+    #[gpui::test]
+    fn the_add_menu_dismisses_on_an_outside_click(cx: &mut TestAppContext) {
+        let (inspector, cx) = test_inspector(cx);
+        cx.run_until_parked();
+        let before = inspector.read_with(cx, |inspector, _| inspector.workspace_tabs.len());
+        let add = cx.debug_bounds("workspace-add-surface").unwrap();
+        cx.simulate_click(add.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-surface-catalog").is_some());
+        cx.simulate_click(gpui::point(px(200.0), px(400.0)), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-surface-catalog").is_none());
+
+        cx.simulate_click(add.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-surface-catalog").is_some());
+        cx.simulate_click(add.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-surface-catalog").is_none());
+        assert_eq!(
+            inspector.read_with(cx, |inspector, _| inspector.workspace_tabs.len()),
+            before
+        );
+    }
+
+    /// Tabs keep their width when selection moves: one font weight for every
+    /// state and a close slot that is always laid out.
+    #[gpui::test]
+    fn tab_widths_do_not_change_with_selection(cx: &mut TestAppContext) {
+        let (inspector, cx) = test_inspector(cx);
+        let (first, second) = inspector.update(cx, |inspector, cx| {
+            let first = inspector.workspace_active.unwrap();
+            inspector.add_workspace(WorkspaceSurface::Review, cx);
+            (first, inspector.workspace_active.unwrap())
+        });
+        cx.run_until_parked();
+        let width = |cx: &mut gpui::VisualTestContext, id: u64| {
+            cx.debug_bounds(format!("workspace-tab-{id}").leak())
+                .unwrap()
+                .size
+                .width
+        };
+        let (a, b) = (width(cx, first), width(cx, second));
+        inspector.update(cx, |inspector, cx| inspector.activate_workspace(first, cx));
+        cx.run_until_parked();
+        assert_eq!(width(cx, first), a);
+        assert_eq!(width(cx, second), b);
+        assert!(
+            cx.debug_bounds(format!("close-workspace-{second}").leak())
+                .is_some(),
+            "the inactive tab still reserves its close slot"
+        );
+    }
+
     #[gpui::test]
     fn saved_pane_context_is_window_local_and_empty_does_not_fall_back(cx: &mut TestAppContext) {
         let runtime = Arc::new(StoreRuntime::inert());
@@ -7836,7 +8150,7 @@ mod tests {
         let artifacts = cx
             .debug_bounds("INSPECTOR_TAB_ARTIFACTS")
             .expect("Artifacts tab");
-        let close = cx.debug_bounds("INSPECTOR_CLOSE").expect("close button");
+        let close = cx.debug_bounds("INSPECTOR_TOGGLE").expect("panel toggle");
         assert!(info.right() <= artifacts.left());
         assert!(artifacts.right() <= px(300.0));
         assert!(close.right() <= px(300.0));
