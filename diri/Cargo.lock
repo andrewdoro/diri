@@ -1605,6 +1605,7 @@ dependencies = [
  "diri-pty",
  "diri-telemetry",
  "diri-terminal-state",
+ "dirijor-mcp",
  "getrandom 0.4.3",
  "libc",
  "objc2 0.6.4",

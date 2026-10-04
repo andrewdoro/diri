@@ -306,6 +306,23 @@ fn main() {
         }
     };
 
+    // Agents whose CLI speaks MCP over HTTP call this Engine directly instead
+    // of each starting a `dirijor-mcp` process. Needs the bound socket (the
+    // endpoint bridges to it); on failure every Agent keeps the stdio server.
+    // `DIRI_MCP_TRANSPORT=stdio` keeps the old per-session processes.
+    if std::env::var("DIRI_MCP_TRANSPORT").as_deref() != Ok("stdio") {
+        match server.start_mcp_http() {
+            Ok(url) => eprintln!("dirijord-rs: MCP endpoint {url}"),
+            Err(error) => {
+                eprintln!("dirijord-rs: MCP endpoint unavailable, Agents use stdio: {error}");
+                diri_telemetry::event!(
+                    "engine.mcp_http_unavailable",
+                    io = diri_telemetry::io_error(&error),
+                );
+            }
+        }
+    }
+
     // Only once the socket is accepting: remote adoption is SSH-bound and must
     // never be what a client waits behind.
     server.spawn_remote_restore();

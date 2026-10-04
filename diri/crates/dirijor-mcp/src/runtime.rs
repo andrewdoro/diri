@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use dirijor_mcp::cancellation::Cancellation;
 use serde_json::Value;
 
-use crate::{DirectBackend, error, handle_message, success, tool_content};
+use dirijor_mcp::protocol::{
+    DirectBackend, error, handle_message, read_only, success, tool_content,
+};
 
 const MAX_READS: usize = 8;
 const MAX_QUEUED_MUTATIONS: usize = 8;
@@ -111,35 +113,6 @@ fn progress_heartbeat(message: &Value, output: &Output) -> Option<mpsc::Sender<(
         }
     });
     Some(stop)
-}
-
-fn read_only(message: &Value) -> bool {
-    message["method"] == "tools/list"
-        || matches!(
-            message["params"]["name"].as_str(),
-            Some(
-                "list_agents"
-                    | "get_task"
-                    | "wait_for_task"
-                    | "get_status"
-                    | "wait_for_agent"
-                    | "read_output"
-                    | "get_artifacts"
-                    | "list_worktrees"
-                    | "list_tasks"
-                    | "list_schedules"
-                    | "get_skill"
-                    | "wait_any"
-                    | "get_diff"
-                    | "whoami"
-                    | "list_children"
-                    | "wait_for_children"
-                    | "summarize_children"
-                    | "list_notes"
-                    | "read_note"
-                    | "note_links"
-            )
-        )
 }
 
 pub(super) fn serve() {

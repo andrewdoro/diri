@@ -116,6 +116,9 @@ pub struct ControlServer {
     attach: crate::attach::AttachHub,
     pr_monitor_wake: crate::pr_monitor::PrMonitorWake,
     injection: Option<InjectionConfig>,
+    /// The Engine-served MCP endpoint, once [`ControlServer::start_mcp_http`]
+    /// bound it. Unset means every Agent keeps the stdio `dirijor-mcp`.
+    mcp_http: std::sync::OnceLock<crate::mcp_http::McpHttpEndpoint>,
     governor: std::sync::Arc<Mutex<crate::governor::GovernorConfig>>,
     browser: std::sync::OnceLock<crate::browser::BrowserPool>,
     active_connections: Arc<AtomicUsize>,
@@ -231,6 +234,7 @@ impl ControlServer {
             attach: crate::attach::AttachHub::new(),
             pr_monitor_wake: crate::pr_monitor::PrMonitorWake::default(),
             injection: None,
+            mcp_http: std::sync::OnceLock::new(),
             governor: std::sync::Arc::new(Mutex::new(crate::governor::GovernorConfig::default())),
             browser: std::sync::OnceLock::new(),
             active_connections: Arc::new(AtomicUsize::new(0)),
@@ -258,6 +262,39 @@ impl ControlServer {
         let _ = crate::inject::write_claude_skills_plugin(&config.inject_dir);
         self.injection = Some(config);
         self
+    }
+
+    /// Serves the `dirijor` MCP tools over loopback Streamable HTTP so Agents
+    /// whose CLI supports it need no `dirijor-mcp` process. Call once, after
+    /// the control socket is bound (the endpoint bridges to it). On failure
+    /// nothing changes: sessions keep the stdio server.
+    pub fn start_mcp_http(&self) -> std::io::Result<String> {
+        let Some(injection) = &self.injection else {
+            return Err(std::io::Error::other("MCP injection is not configured"));
+        };
+        if let Some(endpoint) = self.mcp_http.get() {
+            return Ok(endpoint.url().to_owned());
+        }
+        let (listener, endpoint) = crate::mcp_http::bind(&self.config_dir)?;
+        crate::inject::write_claude_mcp_http_file(&injection.inject_dir, endpoint.url())?;
+        crate::mcp_http::spawn(
+            listener,
+            endpoint.clone(),
+            Arc::clone(&self.registry),
+            self.socket_path.clone(),
+            self.resolved_notes_dir(),
+        )?;
+        let url = endpoint.url().to_owned();
+        let _ = self.mcp_http.set(endpoint);
+        Ok(url)
+    }
+
+    /// The bearer token a local session uses for the Engine-served MCP
+    /// endpoint, or `None` while the endpoint is not running.
+    pub fn mcp_http_token(&self, session_id: &str) -> Option<String> {
+        self.mcp_http
+            .get()
+            .map(|endpoint| endpoint.token(session_id))
     }
 
     /// The bus this server publishes to — the daemon shares it with the
@@ -1189,10 +1226,11 @@ impl ControlServer {
         // quoted inside the shell's `-c` command.
         let mut launch_args = argv.clone();
         let mut agent_session_id = None;
+        let mut mcp_http_token = None;
         if descriptor.binary.is_some() {
             launch_args.extend(descriptor.spawn_args.iter().cloned());
             if let Some(injection) = &self.injection {
-                launch_args.extend(crate::inject::injection_args_with_cursor(
+                let injected = crate::inject::injection_args_full(
                     &descriptor.injection,
                     &injection.inject_dir,
                     &injection.cli_path,
@@ -1200,7 +1238,15 @@ impl ControlServer {
                         session_id: &id,
                         socket_path: &self.socket_path,
                     }),
-                ));
+                    self.mcp_http
+                        .get()
+                        .map(crate::mcp_http::McpHttpEndpoint::url),
+                );
+                launch_args.extend(injected.argv);
+                mcp_http_token = injected
+                    .mcp_http
+                    .then(|| self.mcp_http.get().map(|endpoint| endpoint.token(&id)))
+                    .flatten();
             }
             let minted = descriptor
                 .mints_conversation_id()
@@ -1294,6 +1340,13 @@ impl ControlServer {
                     crate::inject::CLI_ENV.into(),
                     injection.cli_path.to_string_lossy().into_owned(),
                 ));
+                // Never pass on a token the Engine itself inherited (an Engine
+                // started from inside a Diri session): it names that session.
+                pty.env
+                    .retain(|(key, _)| key != crate::inject::MCP_TOKEN_ENV);
+                if let Some(token) = mcp_http_token.take() {
+                    pty.env.push((crate::inject::MCP_TOKEN_ENV.into(), token));
+                }
                 pty.env.push((
                     diri_proto::paths::ENV_SESSION_RECOVERY_DIR.into(),
                     registry
@@ -3801,8 +3854,9 @@ impl ControlServer {
         let binary = descriptor.binary.clone().expect("checked above");
         descriptor.binary = Some(self.resolve_local_agent_executable(kind, &binary)?);
         let mut launch_args = descriptor.spawn_args.clone();
+        let mut mcp_http_token = None;
         if let Some(injection) = &self.injection {
-            launch_args.extend(crate::inject::injection_args_with_cursor(
+            let injected = crate::inject::injection_args_full(
                 &descriptor.injection,
                 &injection.inject_dir,
                 &injection.cli_path,
@@ -3810,7 +3864,15 @@ impl ControlServer {
                     session_id: id,
                     socket_path: &self.socket_path,
                 }),
-            ));
+                self.mcp_http
+                    .get()
+                    .map(crate::mcp_http::McpHttpEndpoint::url),
+            );
+            launch_args.extend(injected.argv);
+            mcp_http_token = injected
+                .mcp_http
+                .then(|| self.mcp_http.get().map(|endpoint| endpoint.token(id)))
+                .flatten();
         }
         let provider_dir = registry.recovery_directory(id).join("provider");
         let launch = match action {
@@ -3856,6 +3918,11 @@ impl ControlServer {
                 crate::inject::CLI_ENV.into(),
                 injection.cli_path.to_string_lossy().into_owned(),
             ));
+            pty.env
+                .retain(|(key, _)| key != crate::inject::MCP_TOKEN_ENV);
+            if let Some(token) = mcp_http_token.take() {
+                pty.env.push((crate::inject::MCP_TOKEN_ENV.into(), token));
+            }
             pty.env.push((
                 diri_proto::paths::ENV_SESSION_RECOVERY_DIR.into(),
                 registry

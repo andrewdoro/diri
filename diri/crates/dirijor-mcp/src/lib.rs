@@ -8,6 +8,8 @@
 pub mod bridge;
 pub mod cancellation;
 pub mod control;
+pub mod http;
+pub mod protocol;
 pub mod tools;
 
 pub use bridge::Bridge;

@@ -28,15 +28,18 @@ Nothing to do. When diri starts an agent whose manifest opts in, it passes the s
 
 | Agent | How diri connects it |
 | --- | --- |
-| Claude Code | `--mcp-config` pointing at a file diri writes at startup |
-| Codex | `-c mcp_servers.dirijor.command=…` overrides |
-| Cursor | A session-local plugin directory whose `mcp.json` lists the server |
+| Claude Code | `--mcp-config` pointing at a file diri writes at startup. The Engine serves the tools itself over HTTP on `127.0.0.1`, so the session starts no extra process. |
+| Codex | `-c mcp_servers.dirijor.url=…` and `bearer_token_env_var` overrides, served by the Engine like Claude Code |
+| Cursor | A session-local plugin directory whose `mcp.json` lists the `dirijor-mcp` stdio server |
 
-Each agent session also gets three environment variables. The server uses them to know which session is calling.
+If the Engine's HTTP endpoint can't start, Claude Code and Codex fall back to the `dirijor-mcp` stdio server, as do remote sessions. Setting `DIRI_MCP_TRANSPORT=stdio` in the Engine's environment forces the stdio server everywhere.
+
+Each agent session also gets these environment variables. The server uses them to know which session is calling.
 
 | Variable | Meaning |
 | --- | --- |
 | `DIRIJOR_SESSION_ID` | The calling session. Required for anything that starts, messages or changes something. |
+| `DIRIJOR_MCP_TOKEN` | The session's private key for the Engine's HTTP endpoint (Claude Code and Codex only). It identifies the session, stops working when the session ends, and is never written to a file. |
 | `DIRIJOR_SOCKET` | The Engine's control socket. |
 | `DIRIJOR_CLI` | Path to the bundled [`dirijor` CLI](/docs/cli/). |
 
