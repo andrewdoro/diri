@@ -586,7 +586,7 @@ fn registered_action(id: CommandId) -> PaletteAction {
     let title = command
         .palette
         .expect("palette commands must carry palette metadata")
-        .title
+        .title()
         .to_owned();
     registered_action_with_title(id, title)
 }
