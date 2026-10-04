@@ -5,6 +5,8 @@
 
 #[cfg(unix)]
 pub mod checkpoint;
+#[cfg(target_os = "macos")]
+pub mod detached;
 #[cfg(unix)]
 pub mod foreground;
 #[cfg(unix)]

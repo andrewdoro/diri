@@ -35,9 +35,6 @@ use super::protocol::HolderProcessSample;
 
 /// The argument that runs `diri-holder` as a guard.
 pub const GROUP_GUARD_FLAG: &str = "--group-guard";
-/// The `diri-holder --spec` argument that gives a standalone holder (one per
-/// launchd job, with no manager behind it) a guard of its own.
-pub const SPEC_GUARD_FLAG: &str = "--group-guard-spec";
 
 /// The guard loop. Returns once `input` reaches EOF (or fails), after killing
 /// every group and frozen process still registered; returns the groups it

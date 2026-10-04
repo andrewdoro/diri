@@ -27,6 +27,7 @@ pub struct HolderManagerServer {
     paths: HolderManagerPaths,
     idle_timeout: Duration,
     group_guard: bool,
+    agent_launcher: Option<std::path::PathBuf>,
 }
 
 struct State {
@@ -80,7 +81,17 @@ impl HolderManagerServer {
             paths: HolderManagerPaths::new(directory),
             idle_timeout: idle_timeout.max(Duration::from_millis(100)),
             group_guard: false,
+            agent_launcher: None,
         }
+    }
+
+    /// Starts each hosted Agent through the app's main executable as a
+    /// launchd job of its own (macOS; see [`diri_pty::detached`]). Its
+    /// one-shot sockets go in this manager's private directory.
+    #[must_use]
+    pub fn with_agent_launcher(mut self, helper: Option<std::path::PathBuf>) -> Self {
+        self.agent_launcher = helper;
+        self
     }
 
     /// Runs a [`GroupGuard`] beside the manager, spawned from this process's
@@ -221,10 +232,21 @@ impl HolderManagerServer {
                 let state = Arc::clone(state);
                 let guard = guard.cloned();
                 let session_id = spec.session_id.clone();
+                #[cfg(target_os = "macos")]
+                let launcher =
+                    self.agent_launcher
+                        .clone()
+                        .map(|helper| super::server::AgentLauncher {
+                            helper,
+                            rendezvous: self.paths.directory.clone(),
+                        });
+                #[cfg(not(target_os = "macos"))]
+                let launcher: Option<super::server::AgentLauncher> = None;
                 std::thread::Builder::new()
                     .name(format!("holder-{session_id}"))
                     .spawn(move || {
-                        if let Err(error) = HolderServer::run_guarded(spec, guard) {
+                        if let Err(error) = HolderServer::run_hosted(spec, guard, launcher.as_ref())
+                        {
                             eprintln!("diri-holder manager: session {session_id}: {error}");
                             diri_telemetry::error_event!(
                                 "holder.session_failed",

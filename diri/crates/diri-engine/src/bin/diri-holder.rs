@@ -87,13 +87,17 @@ fn main() {
             .map_or(Duration::from_secs(30), Duration::from_secs_f64);
         HolderManagerServer::new(std::path::Path::new(&directory), idle)
             .with_group_guard()
+            .with_agent_launcher(
+                value_after(&arguments, diri_engine::holder::AGENT_LAUNCHER_FLAG)
+                    .map(std::path::PathBuf::from),
+            )
             .run()
     } else if let Some(spec_path) = value_after(&arguments, "--spec") {
         match std::fs::read(&spec_path) {
             Ok(data) => {
                 let _ = std::fs::remove_file(&spec_path);
                 match serde_json::from_slice(&data) {
-                    Ok(spec) => run_spec(spec, &arguments),
+                    Ok(spec) => HolderServer::run(spec),
                     Err(error) => {
                         eprintln!("diri-holder: spec did not parse: {error}");
                         std::process::exit(1);
@@ -120,37 +124,6 @@ fn main() {
         std::process::exit(1);
     }
     diri_telemetry::flush(Duration::from_secs(1));
-}
-
-/// One session's holder, as a launchd job (see `holder::launchd`) or a
-/// manual run. A launchd holder gets the manager's telemetry and its own
-/// liveness guard, since no manager stands behind it.
-#[cfg(unix)]
-fn run_spec(
-    spec: diri_engine::holder::HolderLaunchSpec,
-    arguments: &[String],
-) -> diri_engine::holder::HolderResult<()> {
-    if let Some(state_dir) = value_after(arguments, diri_engine::telemetry::HOLDER_TELEMETRY_FLAG)
-        && diri_telemetry::init(
-            diri_telemetry::Process::Holder,
-            std::path::Path::new(&state_dir),
-        )
-    {
-        diri_telemetry::install_panic_hook();
-    }
-    let _ = diri_engine::limits::raise_fd_limit();
-    let guard = arguments
-        .iter()
-        .any(|argument| argument == diri_engine::holder::guard::SPEC_GUARD_FLAG)
-        .then(|| {
-            std::env::current_exe()
-                .and_then(|executable| diri_engine::holder::guard::GroupGuard::spawn(&executable))
-                .inspect_err(|error| eprintln!("diri-holder: group guard unavailable: {error}"))
-                .ok()
-        })
-        .flatten()
-        .map(std::sync::Arc::new);
-    HolderServer::run_guarded(spec, guard)
 }
 
 fn value_after(arguments: &[String], flag: &str) -> Option<String> {

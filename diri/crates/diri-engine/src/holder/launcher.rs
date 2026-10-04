@@ -14,15 +14,26 @@ use super::paths::{HolderManagerPaths, HolderPaths};
 use super::protocol::HolderLaunchSpec;
 use super::{HolderError, HolderResult};
 
+/// Holder manager launchd jobs (macOS): `<prefix><hex millis>`.
+#[cfg(target_os = "macos")]
+const MANAGER_LABEL_PREFIX: &str = "com.dirijor.diri.holders.";
+/// What a launchd-started manager would otherwise lose from the Engine's
+/// environment: the test idle window and the telemetry switches.
+#[cfg(target_os = "macos")]
+const MANAGER_ENVIRONMENT: [&str; 3] = [
+    "DIRI_HOLDER_IDLE_SECONDS",
+    "DIRI_TELEMETRY",
+    "DIRI_TELEMETRY_ENDPOINT",
+];
+
 /// How long to wait for a freshly spawned manager: 250 × 20ms = 5s.
 const READINESS_ATTEMPTS: u32 = 250;
 
 pub struct HolderLauncher;
 
 impl HolderLauncher {
-    /// Ensures a live holder serves `spec`: on macOS in a launchd job of its
-    /// own when the Engine runs from an app bundle, otherwise in the shared
-    /// manager, launched if needed. Returns the pid serving the session (the manager's, or a
+    /// Ensures a live holder serves `spec`, launching the shared manager if
+    /// needed. Returns the pid serving the session (the manager's, or a
     /// pre-manager holder's when one is adopted).
     pub fn launch(
         executable_path: &Path,
@@ -38,27 +49,6 @@ impl HolderLauncher {
             && let Some(serving_pid) = read_pid_file(&paths.pid_file())
         {
             return Ok(serving_pid);
-        }
-
-        // macOS: a launchd job per session, so no other session (nor the app)
-        // shares its process coalition. Falls back to the manager only when
-        // the job provably never started.
-        #[cfg(target_os = "macos")]
-        if let Some(trampoline) = super::launchd::trampoline_executable() {
-            match super::launchd::launch(&trampoline, executable_path, paths, spec) {
-                Ok(pid) => return Ok(pid),
-                Err(super::launchd::LaunchdFailure::Uncertain(error)) => return Err(error),
-                Err(super::launchd::LaunchdFailure::NotStarted(error)) => {
-                    eprintln!(
-                        "diri-engine: launchd holder launch failed, using the manager: {error}"
-                    );
-                    diri_telemetry::incident!(
-                        "holder.launchd_fallback",
-                        session = diri_telemetry::id(&spec.session_id),
-                        kind = crate::telemetry::holder_error_kind(&error),
-                    );
-                }
-            }
         }
 
         let manager_paths = HolderManagerPaths::new(&paths.directory);
@@ -180,15 +170,61 @@ fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let mut command = Command::new(executable_path);
-    command.arg("--manager").arg(directory);
+    let mut arguments: Vec<std::ffi::OsString> = vec!["--manager".into(), directory.into()];
     // Only an Engine that records hands its Holders a spool; tests and
     // embedders that never start the recorder launch quiet ones.
     if let Some(state_dir) = crate::telemetry::holder_state_dir() {
-        command
-            .arg(crate::telemetry::HOLDER_TELEMETRY_FLAG)
-            .arg(state_dir);
+        arguments.push(crate::telemetry::HOLDER_TELEMETRY_FLAG.into());
+        arguments.push(state_dir.into());
     }
+    let agent_launcher = super::agent_launcher();
+    if let Some(launcher) = &agent_launcher {
+        arguments.push(super::AGENT_LAUNCHER_FLAG.into());
+        arguments.push(launcher.into());
+    }
+
+    // macOS, bundled: the manager as a launchd job too, so it is in no app
+    // launch's process coalition. Force-quitting diri.app, or macOS ending
+    // the app's coalition at an update, would otherwise take the manager and
+    // with it every PTY. One process either way; launchd reaps it.
+    #[cfg(target_os = "macos")]
+    if agent_launcher.is_some() {
+        let label = format!(
+            "{MANAGER_LABEL_PREFIX}{}",
+            diri_pty::detached::label_suffix()
+        );
+        let mut program: Vec<&std::ffi::OsStr> = vec![executable_path.as_os_str()];
+        program.extend(arguments.iter().map(std::ffi::OsString::as_os_str));
+        // A job starts with launchd's environment; carry over only the few
+        // settings the manager reads.
+        let environment: Vec<(&str, String)> = MANAGER_ENVIRONMENT
+            .iter()
+            .filter_map(|&name| std::env::var(name).ok().map(|value| (name, value)))
+            .collect();
+        match diri_pty::detached::bootstrap_job(&label, &program, &environment, directory) {
+            Ok(()) => {
+                let _ = std::thread::Builder::new()
+                    .name("holder-job-sweep".into())
+                    .spawn(|| {
+                        diri_pty::detached::sweep_finished_jobs(
+                            MANAGER_LABEL_PREFIX,
+                            std::time::Duration::from_secs(120),
+                        );
+                    });
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("diri-engine: launchd holder manager unavailable, spawning it: {error}");
+                diri_telemetry::incident!(
+                    "holder.manager_launchd_unavailable",
+                    io = diri_telemetry::io_error(&error),
+                );
+            }
+        }
+    }
+
+    let mut command = Command::new(executable_path);
+    command.args(&arguments);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
