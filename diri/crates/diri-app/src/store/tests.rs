@@ -3938,7 +3938,7 @@ fn a_resumed_session_settles_once_it_reports_a_new_state() {
 }
 
 #[test]
-fn new_agents_follow_the_checkout_the_agent_moved_to_and_carry_a_worktree_base() {
+fn new_agents_start_in_the_launch_checkout_and_carry_a_worktree_base() {
     let (mut store, mut effects) = hydrated(
         vec![session("one", "p", 1.0)],
         vec![project("p", "Project")],
@@ -3952,21 +3952,9 @@ fn new_agents_follow_the_checkout_the_agent_moved_to_and_carry_a_worktree_base()
             other => panic!("expected spawn effect, got {other:?}"),
         };
 
-    // Never left its launch directory: unchanged behavior.
+    // New Sessions start where the source was launched.
     store.spawn_kind(AgentKind::CLAUDE_CODE, super::SpawnOptions::default());
     assert_eq!(spawned_cwd(&mut effects).cwd, "/work/p");
-
-    // The right panel saw the Agent work in another checkout.
-    let followed = std::env::temp_dir();
-    store.set_followed_directory(&id("one"), Some(followed.to_string_lossy().into_owned()));
-    store.spawn_kind(AgentKind::CLAUDE_CODE, super::SpawnOptions::default());
-    assert_eq!(spawned_cwd(&mut effects).cwd, followed.to_string_lossy());
-
-    // A checkout that has since been removed is not a place to start.
-    store.set_followed_directory(&id("one"), Some("/nonexistent/diri-worktree".into()));
-    store.spawn_kind(AgentKind::CLAUDE_CODE, super::SpawnOptions::default());
-    assert_eq!(spawned_cwd(&mut effects).cwd, "/work/p");
-    store.set_followed_directory(&id("one"), None);
 
     // Fresh worktrees are opt-in per project and pass their base through.
     assert_eq!(store.fresh_worktree_repo(Some(&id("one"))), None);

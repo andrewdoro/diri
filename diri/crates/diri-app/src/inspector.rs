@@ -5942,9 +5942,6 @@ impl crate::workspace_follow::FollowHost for WorkbenchInspector {
     }
 
     fn follow_changed(&mut self, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session() {
-            self.follow.publish(&session, &self.runtime.store);
-        }
         self.refresh_if_context_changed(cx);
         cx.notify();
     }
@@ -8301,7 +8298,7 @@ index 1111111..2222222 100644
 
     /// The panel follows an Agent into another worktree of the same
     /// repository: Review/Details/Files read that checkout, a pin can send it
-    /// back, and ⌘T learns the followed directory.
+    /// back, and ⌘T still starts in the launch checkout.
     #[gpui::test]
     fn the_panel_follows_the_agent_into_another_worktree(cx: &mut TestAppContext) {
         fn git(root: &std::path::Path, arguments: &[&str]) {
@@ -8387,6 +8384,18 @@ index 1111111..2222222 100644
         });
         let followed = runtime.store.read().unwrap().fresh_worktree_repo(Some(&id));
         assert_eq!(followed, None, "fresh worktrees stay opt-in");
+        // ⌘T belongs to the project: following the Agent into a worktree
+        // must not move new Sessions there.
+        let spawn_cwd = runtime
+            .store
+            .read()
+            .unwrap()
+            .spawn_params(
+                ProtoAgentKind::CLAUDE_CODE,
+                crate::store::SpawnOptions::default(),
+            )
+            .cwd;
+        assert_eq!(spawn_cwd, main.to_string_lossy());
 
         // Pinning the launch checkout sends the panel back.
         let root = inspector.read_with(cx, |inspector, _| {
