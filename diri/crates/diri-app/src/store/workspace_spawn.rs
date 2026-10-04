@@ -750,6 +750,7 @@ mod engine_tests {
                     worktree: Some(WorktreeSpawn {
                         create: true,
                         branch: Some("receipt-test".into()),
+                        base: None,
                     }),
                     ..Default::default()
                 },

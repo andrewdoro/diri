@@ -742,6 +742,39 @@ pub struct PortInfo {
     pub process_name: String,
 }
 
+/// Where a local Agent reports working, folded from its hooks. `cwd` on the
+/// record stays the launch directory, which owns the Session's project; this
+/// lets a client follow an Agent that moved into, or edits files in, another
+/// checkout (a `git worktree`) of the same repository.
+///
+/// Additive and optional: older Engines never write it, and clients fall back
+/// to the launch directory.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkspace {
+    /// The directory the Agent last reported working in, and when it first
+    /// reported that directory (not the latest report, so an edit elsewhere
+    /// after the move still reads as newer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<AgentPlace>,
+    /// Files the Agent (or one of its subagents) recently edited, most recent
+    /// first, distinct, bounded by [`AgentWorkspace::MAX_EDITS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edits: Vec<AgentPlace>,
+}
+
+impl AgentWorkspace {
+    pub const MAX_EDITS: usize = 12;
+}
+
+/// An absolute path and when the Agent was last seen there.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPlace {
+    pub path: String,
+    pub at: DateMillis,
+}
+
 /// What a program reported with `OSC 9;4` (ConEmu's progress sequence, which
 /// Windows Terminal, Ghostty and cargo speak), as the Engine last published it.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
@@ -893,6 +926,9 @@ pub struct SessionRecord {
     /// the launch directory, which owns the Session's project and worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_cwd: Option<String>,
+    /// Where a local Agent's hooks report it working; see [`AgentWorkspace`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_workspace: Option<AgentWorkspace>,
     /// For a note Session (`kind` = [`AgentKind::NOTE_ID`]): the id of its
     /// Markdown file in the notes store.
     #[serde(default, skip_serializing_if = "Option::is_none")]

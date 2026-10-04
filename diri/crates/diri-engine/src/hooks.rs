@@ -28,6 +28,48 @@ pub struct HookMetadata {
     pub transcript_path: Option<String>,
     pub first_prompt_title: Option<String>,
     pub needs_input: Option<NeedsInputDetail>,
+    /// The directory the main Agent reports working in (`cwd`). Absolute and
+    /// free of `.`/`..` components; subagents never move the Session.
+    pub cwd: Option<String>,
+    /// A file an edit tool just changed, from the Agent or a subagent. Lets a
+    /// client follow work done in another checkout without a `cd`.
+    pub edited_path: Option<String>,
+}
+
+/// Claude's file-editing tools, by the `tool_input` key naming the file.
+const EDIT_TOOLS: [(&str, &str); 4] = [
+    ("Edit", "file_path"),
+    ("MultiEdit", "file_path"),
+    ("Write", "file_path"),
+    ("NotebookEdit", "notebook_path"),
+];
+
+/// The path a payload's edit tool changed, resolved against its `cwd`.
+fn edited_path(payload: &Value) -> Option<String> {
+    let tool = payload.get("tool_name").and_then(Value::as_str)?;
+    let (_, key) = EDIT_TOOLS.iter().find(|(name, _)| *name == tool)?;
+    let raw = payload.get("tool_input")?.get(*key)?.as_str()?;
+    if raw.starts_with('/') {
+        return workspace_path(raw);
+    }
+    let cwd = workspace_path(payload.get("cwd")?.as_str()?)?;
+    workspace_path(&format!("{}/{raw}", cwd.trim_end_matches('/')))
+}
+
+/// Accepts only an absolute, lexically normal path a client can map into a
+/// checkout by prefix: `..` would let a path name one place and mean another.
+pub(crate) fn workspace_path(path: &str) -> Option<String> {
+    if !path.starts_with('/') || path.len() > 4096 || path.contains('\0') {
+        return None;
+    }
+    if path
+        .split('/')
+        .any(|component| component == ".." || component == ".")
+    {
+        return None;
+    }
+    let trimmed = path.trim_end_matches('/');
+    Some(if trimmed.is_empty() { "/" } else { trimmed }.to_owned())
 }
 
 /// Parses a Claude hook payload. Returns `None` for events we do not model.
@@ -68,6 +110,12 @@ pub fn parse_claude_hook(
     // Cursor reports `conversation_id` and has no SessionStart of its own.
     meta.binds_conversation = event == "SessionStart" || string(payload, "session_id").is_none();
     meta.transcript_path = string(payload, "transcript_path");
+    if !is_subagent {
+        meta.cwd = string(payload, "cwd").and_then(|cwd| workspace_path(&cwd));
+    }
+    if matches!(event, "PostToolUse") {
+        meta.edited_path = edited_path(payload);
+    }
 
     let hook = match event {
         "SessionStart" => ClaudeHook::SessionStart,
@@ -167,6 +215,7 @@ pub fn parse_codex_notify(payload: &Value) -> Option<(StatusSignal, HookMetadata
         agent_session_id: string(payload, "thread-id"),
         // Codex learns and changes threads only through notify.
         binds_conversation: true,
+        cwd: string(payload, "cwd").and_then(|cwd| workspace_path(&cwd)),
         ..Default::default()
     };
     if let Some(first) = payload
@@ -593,6 +642,110 @@ mod tests {
         let detail = meta.needs_input.expect("detail");
         assert_eq!(detail.kind, NeedsInputKind::Question);
         assert_eq!(detail.summary, "Waiting for your answer");
+    }
+
+    #[test]
+    fn the_main_agents_cwd_and_edited_files_are_reported() {
+        let (_, meta) = parse_claude_hook(
+            "PostToolUse",
+            &json!({
+                "session_id": "s",
+                "cwd": "/repo/.claude/worktrees/fix/",
+                "tool_name": "Edit",
+                "tool_input": { "file_path": "src/lib.rs" },
+            }),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(meta.cwd.as_deref(), Some("/repo/.claude/worktrees/fix"));
+        assert_eq!(
+            meta.edited_path.as_deref(),
+            Some("/repo/.claude/worktrees/fix/src/lib.rs")
+        );
+
+        let (_, notebook) = parse_claude_hook(
+            "PostToolUse",
+            &json!({
+                "session_id": "s",
+                "cwd": "/repo",
+                "tool_name": "NotebookEdit",
+                "tool_input": { "notebook_path": "/other/n.ipynb" },
+            }),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(notebook.edited_path.as_deref(), Some("/other/n.ipynb"));
+
+        // Only an applied edit counts: a read, a pending edit, or a refused
+        // one names a file without changing it.
+        for (event, tool) in [("PostToolUse", "Read"), ("PreToolUse", "Edit")] {
+            let (_, meta) = parse_claude_hook(
+                event,
+                &json!({
+                    "session_id": "s",
+                    "cwd": "/repo",
+                    "tool_name": tool,
+                    "tool_input": { "file_path": "/repo/a.rs" },
+                }),
+                now(),
+            )
+            .unwrap();
+            assert_eq!(meta.edited_path, None, "{event} {tool}");
+            assert_eq!(meta.cwd.as_deref(), Some("/repo"));
+        }
+    }
+
+    #[test]
+    fn a_subagent_edits_but_never_moves_the_session() {
+        let (_, meta) = parse_claude_hook(
+            "PostToolUse",
+            &json!({
+                "session_id": "s",
+                "agent_id": "child",
+                "cwd": "/repo/.claude/worktrees/agent-1",
+                "tool_name": "Write",
+                "tool_input": { "file_path": "/repo/.claude/worktrees/agent-1/a.rs" },
+            }),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(meta.cwd, None);
+        assert_eq!(
+            meta.edited_path.as_deref(),
+            Some("/repo/.claude/worktrees/agent-1/a.rs")
+        );
+    }
+
+    #[test]
+    fn relative_or_dotted_paths_are_refused() {
+        for path in ["relative/dir", "/repo/../etc", "/repo/./x", "/a\0b"] {
+            assert_eq!(workspace_path(path), None, "{path}");
+        }
+        assert_eq!(workspace_path("/").as_deref(), Some("/"));
+        let (_, meta) = parse_claude_hook(
+            "PostToolUse",
+            &json!({
+                "session_id": "s",
+                "cwd": "/repo",
+                "tool_name": "Edit",
+                "tool_input": { "file_path": "../escape.rs" },
+            }),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(meta.edited_path, None);
+    }
+
+    #[test]
+    fn codex_notify_reports_its_cwd() {
+        let (_, meta) = parse_codex_notify(&json!({
+            "type": "agent-turn-complete",
+            "thread-id": "t",
+            "turn-id": "1",
+            "cwd": "/repo-feature",
+        }))
+        .unwrap();
+        assert_eq!(meta.cwd.as_deref(), Some("/repo-feature"));
     }
 
     #[test]

@@ -889,6 +889,7 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            agent_workspace: None,
             foreground_ports: None,
             note_id: None,
             terminal_progress: None,

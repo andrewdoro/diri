@@ -1641,11 +1641,13 @@ impl Registry {
                 holder = holder.as_deref().map(diri_telemetry::id),
             );
             // The status signal still belongs to this PTY; only the foreign
-            // identity, transcript and prompt title are dropped.
+            // identity, transcript, prompt title and workspace are dropped.
             stripped = crate::hooks::HookMetadata {
                 agent_session_id: None,
                 transcript_path: None,
                 first_prompt_title: None,
+                cwd: None,
+                edited_path: None,
                 ..meta.clone()
             };
             &stripped
@@ -1773,6 +1775,15 @@ impl Registry {
         }
         if let Some(conversation) = cursor {
             changed |= apply_cursor_conversation(record, conversation);
+        }
+        // A remote Agent's paths name the remote host's filesystem.
+        if record.host.is_none() {
+            changed |= crate::agent_workspace::fold(
+                &mut record.agent_workspace,
+                meta.cwd.as_deref(),
+                meta.edited_path.as_deref(),
+                DateMillis::from(std::time::SystemTime::now()),
+            );
         }
         if repair_persisted_agent_title(record) {
             changed = true;
@@ -1987,6 +1998,7 @@ impl Registry {
                 record.git_branch.clone(),
                 record.updated_at,
                 record.terminal_cwd.take(),
+                record.agent_workspace.take(),
             );
             // A terminal moved to another checkout restarts there, not in
             // the directory it had `cd`'d to in the old one.
@@ -2010,6 +2022,7 @@ impl Registry {
             record.git_branch = previous.2;
             record.updated_at = previous.3;
             record.terminal_cwd = previous.4;
+            record.agent_workspace = previous.5;
             self.dirty = was_dirty;
             return Err(error);
         }
@@ -2883,6 +2896,7 @@ fn recovered_record(capsule: diri_proto::recovery::SessionRecoveryCapsule) -> Se
         listening_ports: None,
         foreground_agent: None,
         terminal_cwd: None,
+        agent_workspace: None,
         note_id: None,
         foreground_ports: None,
         terminal_progress: None,
@@ -3115,6 +3129,7 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            agent_workspace: None,
             note_id: None,
             foreground_ports: None,
             terminal_progress: None,
