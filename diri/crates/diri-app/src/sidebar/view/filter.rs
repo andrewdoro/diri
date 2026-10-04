@@ -94,9 +94,9 @@ impl Sidebar {
                     .overflow_hidden()
                     .role(Role::TextInput)
                     .aria_label(if self.workspace_nav.active.is_some() {
-                        "Filter tab labels"
+                        t("sidebar.filter.tabs")
                     } else {
-                        "Filter session labels"
+                        t("sidebar.filter.sessions")
                     })
                     .child(if self.filter_focus.is_focused(window) {
                         query_label(&self.filter_query)
@@ -111,7 +111,7 @@ impl Sidebar {
                     .id("clear-sidebar-filter")
                     .debug_selector(|| "clear-sidebar-filter".into())
                     .role(Role::Button)
-                    .aria_label("Clear filter")
+                    .aria_label(t("sidebar.filter.clear"))
                     .size(px(20.0))
                     .flex_none()
                     .cursor_pointer()
@@ -132,8 +132,8 @@ impl Sidebar {
         } else {
             control = control
                 .role(Role::Button)
-                .aria_label("Filter agents")
-                .child("Filter agents");
+                .aria_label(t("sidebar.filter.agents"))
+                .child(t("sidebar.filter.agents"));
         }
         let expanded = (self.ui.width - Space::INSET * 2.0).max(0.0);
         if self.filter_open && !cx.reduce_motion() {

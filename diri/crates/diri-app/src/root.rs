@@ -63,6 +63,7 @@ use crate::commands::{
 use crate::commands::{TogglePerfOverlay, ToggleRenderCounters};
 use crate::external_drop::ExternalDropAction;
 use crate::haptics::{self, Haptic};
+use crate::i18n::{t, tf};
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::inspector::{BrowserAction, InspectorEvent, WorkbenchInspector};
 use crate::launcher::{LauncherEvent, LauncherOverlay};
@@ -4255,7 +4256,7 @@ impl RootView {
                     div()
                         .p(px(28.0))
                         .text_color(terminal.secondary)
-                        .child("Choose an agent from the sidebar, or start a New Agent"),
+                        .child(t("window.no_session_hint")),
                 );
             }
         } else if self.preview && self.preview_scenario != PreviewScenario::Empty {
@@ -4321,7 +4322,7 @@ impl RootView {
                         .bg(terminal.terminal_surface())
                         .text_size(px(12.0))
                         .text_color(terminal.secondary)
-                        .child("Opening terminal…"),
+                        .child(t("window.opening_terminal")),
                 );
             }
             if let Some(id) = self.auxiliary_id.clone() {
@@ -4495,8 +4496,8 @@ impl RootView {
             &title,
             Some(&message),
             &[
-                gpui::PromptButton::ok("Close"),
-                gpui::PromptButton::cancel("Cancel"),
+                gpui::PromptButton::ok(t("session.close.confirm")),
+                gpui::PromptButton::cancel(t("session.close.cancel")),
             ],
             cx,
         );
@@ -4577,7 +4578,7 @@ impl RootView {
                                         .text_size(px(Typo::ROW.size))
                                         .text_color(colors.secondary)
                                         .hover(move |button| button.bg(colors.primary.alpha(0.06)))
-                                        .child("Cancel")
+                                        .child(t("session.close.cancel"))
                                         .on_click({
                                             let sidebar = self.sidebar.clone();
                                             move |_, _, cx| {
@@ -4600,7 +4601,7 @@ impl RootView {
                                         .text_size(px(Typo::ROW.size))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(diri_ui::Ink::DANGER)
-                                        .child("Close")
+                                        .child(t("session.close.confirm"))
                                         .on_click({
                                             let sidebar = self.sidebar.clone();
                                             move |_, _, cx| {
@@ -4635,11 +4636,11 @@ impl RootView {
             let highlighted = index == picker.highlighted;
             let is_active = active.as_ref() == Some(&session.id);
             let detail = if session.hibernation.is_some() {
-                "Sleeping · stages without waking"
+                t("window.quote.target_sleeping")
             } else if is_active {
-                "Active session"
+                t("window.quote.target_active")
             } else {
-                "Keeps current session active"
+                t("window.quote.target_keeps")
             };
             rows = rows.child(
                 div()
@@ -4751,13 +4752,13 @@ impl RootView {
                                     .text_size(px(Typo::ROW.size))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(colors.primary)
-                                    .child("Quote into…"),
+                                    .child(t("window.quote.title")),
                             )
                             .child(
                                 div()
                                     .text_size(px(Typo::META.size))
                                     .text_color(colors.tertiary)
-                                    .child("↑↓ choose · Return stage · Esc cancel"),
+                                    .child(t("window.quote.keys")),
                             ),
                     )
                     .child(
@@ -10140,7 +10141,9 @@ mod tests {
                     .detail("Terminal contents never leave your Mac.")
                     .action("Settings", ToastCommand::OpenPrivacySettings)
             }),
-            ("error", || Toast::error("Workspace change wasn’t saved")),
+            ("error", || {
+                Toast::error(t("window.toast.workspace_not_saved"))
+            }),
             ("reconnect", || {
                 Toast::warning("Reconnected. Your last keystrokes may not have arrived.")
             }),
