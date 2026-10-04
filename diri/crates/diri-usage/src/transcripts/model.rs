@@ -155,13 +155,12 @@ pub struct RemoteUsageSnapshot {
 }
 
 impl<L> UsageSnapshot<L> {
-    /// None selects all machines; an empty string selects only this machine.
-    pub fn history_for_source(&self, host: Option<&str>) -> super::dashboard::UsageHistory {
-        let mut history = if host.is_none_or(str::is_empty) {
-            (*self.history).clone()
-        } else {
-            super::dashboard::UsageHistory::default()
-        };
+    /// The newest summary of each remote usage store `host` selects. None
+    /// selects all machines; an empty string selects only this machine.
+    pub fn remote_sources(
+        &self,
+        host: Option<&str>,
+    ) -> Vec<&diri_proto::remote_pty::TranscriptUsageResult> {
         let mut sources = std::collections::BTreeMap::new();
         for remote in &self.remote {
             if host.is_none_or(|id| id == remote.host)
@@ -173,7 +172,17 @@ impl<L> UsageSnapshot<L> {
                 }
             }
         }
-        for data in sources.values() {
+        sources.into_values().map(|data| &**data).collect()
+    }
+
+    /// None selects all machines; an empty string selects only this machine.
+    pub fn history_for_source(&self, host: Option<&str>) -> super::dashboard::UsageHistory {
+        let mut history = if host.is_none_or(str::is_empty) {
+            (*self.history).clone()
+        } else {
+            super::dashboard::UsageHistory::default()
+        };
+        for data in self.remote_sources(host) {
             let _ = history.merge_remote(data);
         }
         history

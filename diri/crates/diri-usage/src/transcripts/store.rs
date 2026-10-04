@@ -798,7 +798,7 @@ fn utc_window_starts(now: i64) -> (i64, i64) {
     (day * 86_400, days_from_civil(year, month, 1) * 86_400)
 }
 
-fn civil_from_days(days: i64) -> (i32, i32, i32) {
+pub(crate) fn civil_from_days(days: i64) -> (i32, i32, i32) {
     let shifted = days + 719_468;
     let era = if shifted >= 0 {
         shifted

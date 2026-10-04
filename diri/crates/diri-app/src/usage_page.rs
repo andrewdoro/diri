@@ -15,7 +15,7 @@ const PROVIDERS: [&str; 3] = ["Claude Code", "Codex", "Cursor"];
 const SERIES_LABELS: [&str; 3] = ["Claude", "Codex", "Cursor"];
 const SERIES_HOVER_PILL: u8 = 1;
 const SERIES_HOVER_MENU: u8 = 2;
-fn provider_color(provider: usize, colors: SemanticColors) -> Rgba {
+pub(super) fn provider_color(provider: usize, colors: SemanticColors) -> Rgba {
     match provider {
         0 => rgba(0xcf876dff),
         2 => rgba(0x6d8fcfff),
@@ -458,7 +458,7 @@ impl UtilitySurfaces {
                 .child(label("Available Claude Code and Codex transcripts appear automatically, alongside signed-in Cursor usage on this Mac.", 12.0, colors.secondary))
                 .child(label("Try a longer date range to see earlier activity.", 12.0, colors.secondary)));
         }
-        content = content.child(hero).child(metrics).child(self.usage_breakdown(report, colors))
+        content = content.child(hero).child(metrics).child(self.usage_activity(now, colors, cx)).child(self.usage_breakdown(report, colors))
             .child(div().flex().flex_col().gap(px(7.0))
                 .child(label("About these estimates", 12.0, colors.primary).font_weight(FontWeight::MEDIUM))
                 .child(label(format!("{:.1}% of tokens priced · {} unpriced tokens", ratio(report.total.priced_tokens as f64, total.total_tokens() as f64) * 100.0, UsageFormat::tokens(total.total_tokens() - report.total.priced_tokens)), 11.0, colors.secondary))
@@ -1866,7 +1866,7 @@ fn label(text: impl Into<SharedString>, size: f32, color: Rgba) -> gpui::Div {
         .text_color(color)
         .child(text.into())
 }
-fn usage_control(
+pub(super) fn usage_control(
     id: impl Into<SharedString>,
     text: impl Into<SharedString>,
     selected: bool,
