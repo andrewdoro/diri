@@ -163,6 +163,11 @@ pub(crate) const MENU_ROW_HEIGHT: f32 = 32.0;
 pub(crate) const MENU_ROW_INSET: f32 = 10.0;
 pub(crate) const MENU_ROW_GAP: f32 = 10.0;
 pub(crate) const MENU_ROW_ICON_SLOT: f32 = 22.0;
+/// An agent mark in a menu row. Bare (unbadged), it drops the badge's 0.28
+/// inset, which shrank the mark to ~9 pt beside 13 pt glyphs; at 0.12 it
+/// draws ~15 pt and fills the icon slot like the SF Symbols around it.
+pub(crate) const MENU_AGENT_LOGO: f32 = 20.0;
+pub(crate) const MENU_AGENT_LOGO_INSET: f32 = 0.12;
 pub(crate) const MENU_ROW_RADIUS: f32 = 12.0;
 /// Space between a row's highlight and the panel edge.
 pub(crate) const MENU_ROW_MARGIN: f32 = 6.0;

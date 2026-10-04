@@ -5550,7 +5550,11 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(AgentLogo::new(agent_kind, 20.0, colors).badged(false)),
+                    .child(
+                        AgentLogo::new(agent_kind, MENU_AGENT_LOGO, colors)
+                            .badged(false)
+                            .inset(MENU_AGENT_LOGO_INSET),
+                    ),
             )
             .child(
                 div()
@@ -9460,8 +9464,8 @@ struct WherePanel<'a> {
 // Agents, the location, Manage Agents, machines and folders) and for every
 // other diri menu: see `crate::floating::MENU_ROW_HEIGHT`.
 use crate::floating::{
-    MENU_ROW_GAP, MENU_ROW_HEIGHT, MENU_ROW_ICON_SLOT, MENU_ROW_INSET,
-    MENU_ROW_RADIUS as SIDEBAR_MENU_ROW_RADIUS, menu_separator,
+    MENU_AGENT_LOGO, MENU_AGENT_LOGO_INSET, MENU_ROW_GAP, MENU_ROW_HEIGHT, MENU_ROW_ICON_SLOT,
+    MENU_ROW_INSET, MENU_ROW_RADIUS as SIDEBAR_MENU_ROW_RADIUS, menu_separator,
 };
 
 /// A secondary row of the menu: glyph in the icon slot, then whatever the

@@ -718,6 +718,7 @@ impl NoteEditorView {
                 colors,
             )
             .badged(false)
+            .inset(floating::MENU_AGENT_LOGO_INSET)
             .into_any_element();
             let row = floating::menu_row(
                 ("note-work-agent", index),
