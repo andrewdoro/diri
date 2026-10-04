@@ -21,6 +21,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use diri_proto::{AgentKind, AttentionLevel, SessionId};
 use diri_ui::BrandMarkKind;
 
+use crate::i18n::{t, tf};
 use crate::macos::brand_raster;
 use crate::menu_inbox::{InboxModel, InboxRow, InboxSessionRow, TrailingStatus, build_inbox};
 use crate::store::{SessionStore, WindowAction, WindowStore};
@@ -88,10 +89,10 @@ impl NativeMenuBar {
             .read()
             .expect("session store lock poisoned");
         let label = match store.global_attention() {
-            AttentionLevel::NeedsInput => "Diri — Needs your attention",
-            _ if store.notifications().unread_count() > 0 => "Diri — Unread notifications",
-            AttentionLevel::DoneUnseen => "Diri — Agent finished",
-            AttentionLevel::Working => "Diri — Agents working",
+            AttentionLevel::NeedsInput => t("menubar.tooltip_needs_input"),
+            _ if store.notifications().unread_count() > 0 => t("menubar.tooltip_unread"),
+            AttentionLevel::DoneUnseen => t("menubar.tooltip_done"),
+            AttentionLevel::Working => t("menubar.tooltip_working"),
             _ => "Diri",
         };
         if let Some(button) = self.status_item.button(self.target.mtm()) {
@@ -217,16 +218,19 @@ impl MenuBarTarget {
                         NSControlStateValueOff
                     });
                     item.setImage(agent_image(&session.agent_id).as_deref());
-                    item.setToolTip(Some(&NSString::from_str(&format!(
-                        "{}\nHold Option to close this session",
-                        session.title
+                    item.setToolTip(Some(&NSString::from_str(&tf(
+                        "menubar.session_tooltip",
+                        &[("title", &session.title)],
                     ))));
                     menu.addItem(&item);
 
                     // Native alternate item replaces the old hover-only close
                     // button, keeping the store's existing confirmation flow.
                     let close = self.action_item(
-                        &format!("Close {}", compact_title(&session.title)),
+                        &tf(
+                            "menubar.close_session",
+                            &[("title", &compact_title(&session.title))],
+                        ),
                         sel!(closeSession:),
                         "",
                     );
@@ -242,22 +246,27 @@ impl MenuBarTarget {
         }
         if model.rows.is_empty() {
             menu.addItem(&NSMenuItem::sectionHeaderWithTitle(
-                &NSString::from_str("No active sessions"),
+                &NSString::from_str(t("menubar.no_sessions")),
                 mtm,
             ));
         }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        menu.addItem(&self.action_item("Open Diri", sel!(openDiri:), ""));
-        menu.addItem(&self.action_item("New Agent…", sel!(newAgent:), "n"));
+        menu.addItem(&self.action_item(t("menubar.open_diri"), sel!(openDiri:), ""));
+        menu.addItem(&self.action_item(t("menubar.new_agent"), sel!(newAgent:), "n"));
 
         // Retain the panel's quick-create shortcuts without adding an
         // unfiltered Agent catalog to this navigation menu. Spawn methods
         // still enforce the selected host's cached availability.
         for (tag, title, key, modifiers) in [
-            (0, "Default Agent", "t", NSEventModifierFlags::Command),
+            (
+                0,
+                t("menubar.default_agent"),
+                "t",
+                NSEventModifierFlags::Command,
+            ),
             (
                 1,
-                "Terminal",
+                t("menubar.terminal"),
                 "t",
                 NSEventModifierFlags::Command | NSEventModifierFlags::Option,
             ),
@@ -275,11 +284,11 @@ impl MenuBarTarget {
             item.setAllowsKeyEquivalentWhenHidden(true);
             menu.addItem(&item);
         }
-        let settings = self.action_item("Settings…", sel!(openSettings:), ",");
+        let settings = self.action_item(t("menubar.settings"), sel!(openSettings:), ",");
         settings.setImage(brand_raster::template_settings_ns_image(16.0).as_deref());
         menu.addItem(&settings);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        menu.addItem(&self.action_item("Quit Diri", sel!(quitDiri:), "q"));
+        menu.addItem(&self.action_item(t("menubar.quit"), sel!(quitDiri:), "q"));
     }
 
     fn action_item(&self, title: &str, action: Sel, key: &str) -> Retained<NSMenuItem> {
@@ -321,12 +330,12 @@ fn item_session_id(item: &NSMenuItem) -> Option<SessionId> {
 fn session_title(session: &InboxSessionRow) -> String {
     let title = compact_title(&session.title);
     let status = match session.trailing {
-        Some(TrailingStatus::NeedsYou) if session.destructive => "Needs approval",
-        Some(TrailingStatus::NeedsYou) => "Needs you",
-        Some(TrailingStatus::Unread) => "Unread",
-        Some(TrailingStatus::Done) => "Done",
-        Some(TrailingStatus::Sleeping) => "Sleeping",
-        None if session.working => "Working",
+        Some(TrailingStatus::NeedsYou) if session.destructive => t("menubar.status_needs_approval"),
+        Some(TrailingStatus::NeedsYou) => t("menubar.status_needs_you"),
+        Some(TrailingStatus::Unread) => t("menubar.status_unread"),
+        Some(TrailingStatus::Done) => t("menubar.status_done"),
+        Some(TrailingStatus::Sleeping) => t("menubar.status_sleeping"),
+        None if session.working => t("menubar.status_working"),
         None => return title,
     };
     format!("{title} · {status}")
