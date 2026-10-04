@@ -109,7 +109,7 @@ impl BacklinksView {
         changed
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn expand_unlinked_for_test(&mut self, cx: &mut Context<Self>) {
         self.show_unlinked = true;
         cx.notify();

@@ -450,7 +450,7 @@ impl NoteEditorView {
 
     /// Opens the block menu on the note's first paragraph, or the `/` menu
     /// in a new block under it, for the offscreen screenshots.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn open_menu_for_screenshot(
         &mut self,
         slash: bool,
