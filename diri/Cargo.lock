@@ -1545,6 +1545,7 @@ dependencies = [
  "block2 0.6.2",
  "diri-client",
  "diri-engine",
+ "diri-i18n",
  "diri-notes",
  "diri-proto",
  "diri-telemetry",
@@ -1619,6 +1620,13 @@ dependencies = [
  "socket2",
  "tempfile",
  "toml_edit 0.22.27",
+]
+
+[[package]]
+name = "diri-i18n"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

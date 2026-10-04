@@ -17,11 +17,11 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Personal => "Personal",
-            Self::System => "System",
-        }
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(match self {
+            Self::Personal => "settings.section.personal",
+            Self::System => "settings.section.system",
+        })
     }
 }
 
@@ -74,40 +74,40 @@ impl SettingsTab {
         Self::Phone,
     ];
 
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::General => "General",
-            Self::WhatsNew => "What's New",
-            Self::Agents => "Agents",
-            Self::Skills => "Skills",
-            Self::Schedules => "Schedules",
-            Self::Accounts => "Accounts",
-            Self::Shortcuts => "Shortcuts",
-            Self::Terminal => "Appearance",
-            Self::Usage => "Usage",
-            Self::Worktrees => "Worktrees",
-            Self::Resources => "Resources",
-            Self::Remote => "Remote",
-            Self::Phone => "Phone access",
-        }
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(match self {
+            Self::General => "settings.tab.general",
+            Self::WhatsNew => "settings.tab.whats_new",
+            Self::Agents => "settings.tab.agents",
+            Self::Skills => "settings.tab.skills",
+            Self::Schedules => "settings.tab.schedules",
+            Self::Accounts => "settings.tab.accounts",
+            Self::Shortcuts => "settings.tab.shortcuts",
+            Self::Terminal => "settings.tab.appearance",
+            Self::Usage => "settings.tab.usage",
+            Self::Worktrees => "settings.tab.worktrees",
+            Self::Resources => "settings.tab.resources",
+            Self::Remote => "settings.tab.remote",
+            Self::Phone => "settings.tab.phone",
+        })
     }
 
-    pub const fn subtitle(self) -> &'static str {
-        match self {
-            Self::General => "Startup, sessions, and updates",
-            Self::WhatsNew => "Latest release notes",
-            Self::Agents => "Installed CLIs and quick create",
-            Self::Skills => "Browse local and project skills",
-            Self::Schedules => "Run agents at a set time",
-            Self::Accounts => "Profiles for work and personal accounts",
-            Self::Shortcuts => "Keyboard commands and bindings",
-            Self::Terminal => "Themes and terminal type",
-            Self::Usage => "Costs, tokens, and cache savings",
-            Self::Worktrees => "Pull requests and disk cleanup",
-            Self::Resources => "Idle sessions and memory",
-            Self::Remote => "SSH execution hosts",
-            Self::Phone => "Code from your iPhone",
-        }
+    pub fn subtitle(self) -> &'static str {
+        crate::i18n::t(match self {
+            Self::General => "settings.subtitle.general",
+            Self::WhatsNew => "settings.subtitle.whats_new",
+            Self::Agents => "settings.subtitle.agents",
+            Self::Skills => "settings.subtitle.skills",
+            Self::Schedules => "settings.subtitle.schedules",
+            Self::Accounts => "settings.subtitle.accounts",
+            Self::Shortcuts => "settings.subtitle.shortcuts",
+            Self::Terminal => "settings.subtitle.appearance",
+            Self::Usage => "settings.subtitle.usage",
+            Self::Worktrees => "settings.subtitle.worktrees",
+            Self::Resources => "settings.subtitle.resources",
+            Self::Remote => "settings.subtitle.remote",
+            Self::Phone => "settings.subtitle.phone",
+        })
     }
 
     /// Personal pages change how diri behaves for this user; System pages

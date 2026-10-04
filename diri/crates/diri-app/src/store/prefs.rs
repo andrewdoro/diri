@@ -11,6 +11,38 @@ use crate::launch_recipe::{LaunchRecipeBook, deserialize_recipe_book};
 
 const DEFAULT_THEME: &str = "dirijor-dark";
 
+/// The interface language. `System` follows the reader's preferred languages
+/// (see `crate::i18n`); a pick persists as its tag. A tag this build has no
+/// catalog for, written by a newer diri, reads as `System`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiLanguage {
+    #[default]
+    System,
+    Fixed(diri_i18n::Language),
+}
+
+impl UiLanguage {
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Fixed(language) => language.tag(),
+        }
+    }
+}
+
+impl Serialize for UiLanguage {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.tag())
+    }
+}
+
+impl<'de> Deserialize<'de> for UiLanguage {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let tag = String::deserialize(deserializer)?;
+        Ok(diri_i18n::Language::from_tag(&tag).map_or(Self::System, Self::Fixed))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WindowMode {
@@ -233,6 +265,8 @@ pub struct Prefs {
     #[serde(alias = "lastSpawnHost")]
     pub default_spawn_host: Option<String>,
     pub start_at_login: bool,
+    /// Interface language, persisted as `"system"`, `"en"` or `"zh-Hans"`.
+    pub ui_language: UiLanguage,
     pub confirm_before_closing_session: bool,
     pub status_sounds: bool,
     pub status_notifications: bool,
@@ -368,6 +402,7 @@ impl Default for Prefs {
             default_agent: AgentKind::CLAUDE_CODE,
             default_spawn_host: None,
             start_at_login: false,
+            ui_language: UiLanguage::System,
             confirm_before_closing_session: true,
             status_sounds: true,
             status_notifications: true,

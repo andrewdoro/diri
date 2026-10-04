@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::delegation::worktree_move_proposal;
+use crate::i18n::{t, tf};
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::query_label;
 use crate::query_editor::{self, ClipboardEdit, Edit, LocalEdit, QueryEditor};
@@ -120,6 +121,7 @@ const HIBERNATE_OPTIONS: [(u32, &str); 6] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)] // Remaining dropdowns are introduced incrementally.
 enum SettingsMenu {
+    Language,
     DefaultAgent,
     TerminalTheme,
     TerminalFont,
@@ -148,6 +150,25 @@ fn file_editor_label(choice: crate::store::FileEditor) -> String {
         FileEditor::VsCode => "VS Code".to_owned(),
         FileEditor::Zed => "Zed".to_owned(),
         FileEditor::DefaultApp => "Default app".to_owned(),
+    }
+}
+
+/// Interface language choices, in menu order.
+const UI_LANGUAGE_OPTIONS: [crate::store::UiLanguage; 3] = [
+    crate::store::UiLanguage::System,
+    crate::store::UiLanguage::Fixed(crate::i18n::Language::English),
+    crate::store::UiLanguage::Fixed(crate::i18n::Language::SimplifiedChinese),
+];
+
+/// A language reads in its own name, so a reader can find theirs from any
+/// interface language; System names the language it currently resolves to.
+fn ui_language_label(choice: crate::store::UiLanguage) -> String {
+    match choice {
+        crate::store::UiLanguage::System => crate::i18n::tf(
+            "settings.general.language_system",
+            &[("language", &crate::i18n::resolve(choice).native_name())],
+        ),
+        crate::store::UiLanguage::Fixed(language) => language.native_name().to_owned(),
     }
 }
 
@@ -3105,20 +3126,33 @@ impl UtilitySurfaces {
     fn general_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
         settings_page(
-            "General",
+            t("settings.general.title"),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(SETTINGS_SECTION_GAP))
                 .child(setting_section(
-                    "New sessions",
+                    t("settings.general.language"),
                     setting_row(
-                        "Default agent",
-                        format!(
-                            "Used by {} and Quick Open.",
-                            crate::commands::command(CommandId::NewDefaultSession)
-                                .shortcut_label()
-                                .unwrap_or_default()
+                        t("settings.general.interface_language"),
+                        t("settings.general.interface_language_detail"),
+                        self.language_dropdown(cx),
+                        colors,
+                    ),
+                    colors,
+                ))
+                .child(setting_section(
+                    t("settings.general.new_sessions"),
+                    setting_row(
+                        t("settings.general.default_agent"),
+                        tf(
+                            "settings.general.default_agent_detail",
+                            &[(
+                                "shortcut",
+                                &crate::commands::command(CommandId::NewDefaultSession)
+                                    .shortcut_label()
+                                    .unwrap_or_default(),
+                            )],
                         ),
                         self.default_agent_dropdown(cx),
                         colors,
@@ -3127,7 +3161,7 @@ impl UtilitySurfaces {
                 ))
                 .child(self.new_agent_start_settings(cx))
                 .child(setting_section(
-                    "Behavior",
+                    t("settings.general.behavior"),
                     div()
                         .flex()
                         .flex_col()
@@ -3137,8 +3171,8 @@ impl UtilitySurfaces {
                                 .child(setting_divider(colors))
                         })
                         .child(toggle_row(
-                            "Confirm before closing a session",
-                            "Ask before closing a session with a running process.",
+                            t("settings.general.confirm_close"),
+                            t("settings.general.confirm_close_detail"),
                             self.prefs.confirm_before_closing_session,
                             "toggle-close-confirm",
                             colors,
@@ -3153,8 +3187,8 @@ impl UtilitySurfaces {
                         ))
                         .child(setting_divider(colors))
                         .child(toggle_row(
-                            "Highlight parent and children",
-                            "Mark them while the pointer or keyboard cursor rests on a session.",
+                            t("settings.general.lineage"),
+                            t("settings.general.lineage_detail"),
                             self.prefs.sidebar_lineage_highlights,
                             "toggle-lineage-highlights",
                             colors,
@@ -3169,8 +3203,8 @@ impl UtilitySurfaces {
                         ))
                         .child(setting_divider(colors))
                         .child(toggle_row(
-                            "Gentle status chimes",
-                            "Quiet cues for input, completion, and memory pauses.",
+                            t("settings.general.chimes"),
+                            t("settings.general.chimes_detail"),
                             self.prefs.status_sounds,
                             "toggle-status-sounds",
                             colors,
@@ -3186,12 +3220,12 @@ impl UtilitySurfaces {
                 .child(self.import_settings(cx))
                 .child(self.update_settings(cx))
                 .child(setting_section(
-                    "Support",
+                    t("settings.general.support"),
                     setting_row(
-                        "Copy diagnostics",
-                        "Preview a privacy-safe report before copying it.",
+                        t("settings.general.copy_diagnostics"),
+                        t("settings.general.copy_diagnostics_detail"),
                         surface_button(
-                            "Preview…",
+                            t("settings.general.preview"),
                             "preview-diagnostics",
                             colors,
                             cx,
@@ -3202,7 +3236,7 @@ impl UtilitySurfaces {
                     colors,
                 ))
                 .child(setting_section(
-                    "Quick Open",
+                    t("settings.general.quick_open"),
                     div()
                         .p(px(12.0))
                         .flex()
@@ -3218,7 +3252,7 @@ impl UtilitySurfaces {
                                     div()
                                         .text_size(px(13.0))
                                         .font_weight(FontWeight::MEDIUM)
-                                        .child("Search roots"),
+                                        .child(t("settings.general.search_roots")),
                                 )
                                 .child(
                                     div()
@@ -3238,7 +3272,7 @@ impl UtilitySurfaces {
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.choose_quick_open_root(window, cx);
                                         }))
-                                        .child("Add root"),
+                                        .child(t("settings.general.add_root")),
                                 ),
                         )
                         .child(
@@ -3302,9 +3336,9 @@ impl UtilitySurfaces {
                                 .text_color(colors.tertiary)
                                 .child(wrappable_setting_copy(
                                     if self.roots_editor.is_empty() {
-                                        "Empty uses your home folder plus project parent folders. Add root opens the system picker."
+                                        t("settings.general.roots_empty_hint")
                                     } else {
-                                        "One folder per line, scanned four levels deep. Add root adds another."
+                                        t("settings.general.roots_hint")
                                     }
                                     .into(),
                                 )),
@@ -3333,7 +3367,7 @@ impl UtilitySurfaces {
                                                     div()
                                                         .text_size(px(11.0))
                                                         .text_color(colors.tertiary)
-                                                        .child("Unsaved"),
+                                                        .child(t("settings.general.unsaved")),
                                                 )
                                             },
                                         )
@@ -3346,7 +3380,7 @@ impl UtilitySurfaces {
                                                     div()
                                                         .text_size(px(11.0))
                                                         .text_color(colors.tertiary)
-                                                        .child("Saved"),
+                                                        .child(t("settings.general.saved")),
                                                 )
                                             },
                                         )
@@ -3373,7 +3407,7 @@ impl UtilitySurfaces {
                                                     this.persist_include();
                                                     cx.notify();
                                                 }))
-                                                .child("Save"),
+                                                .child(t("settings.general.save")),
                                         ),
                                 ),
                         )
@@ -3448,7 +3482,7 @@ impl UtilitySurfaces {
                                 .line_height(px(16.0))
                                 .text_color(colors.tertiary)
                                 .child(wrappable_setting_copy(
-                                    "One pattern per line, saved to ~/.diri-include. Hidden folders stay skipped unless they match. Wildcards follow gitignore rules, including nested folders.".into(),
+                                    t("settings.general.include_hint").into(),
                                 )),
                         ),
                     colors,
@@ -3465,13 +3499,13 @@ impl UtilitySurfaces {
     fn developer_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
         setting_section(
-            "Developer",
+            t("settings.general.developer"),
             div()
                 .flex()
                 .flex_col()
                 .child(toggle_row(
-                    "Performance overlay",
-                    "Frame rate, frame times, dropped frames and memory over the window.",
+                    t("settings.general.perf_overlay"),
+                    t("settings.general.perf_overlay_detail"),
                     crate::perf_overlay::overlay_enabled(),
                     "toggle-perf-overlay",
                     colors,
@@ -3483,8 +3517,8 @@ impl UtilitySurfaces {
                 ))
                 .child(setting_divider(colors))
                 .child(toggle_row(
-                    "Render counters",
-                    "Badge the main views with how often they render, and list them in the overlay.",
+                    t("settings.general.render_counters"),
+                    t("settings.general.render_counters_detail"),
                     crate::perf_overlay::render_counters_enabled(),
                     "toggle-render-counters",
                     colors,
@@ -4213,6 +4247,7 @@ impl UtilitySurfaces {
         cx: &mut Context<Self>,
     ) -> Option<(AnyElement, f32)> {
         Some(match self.settings_menu.as_ref()? {
+            SettingsMenu::Language => (self.language_options(colors, cx), 204.0),
             SettingsMenu::DefaultAgent => (self.default_agent_options(colors, cx), 204.0),
             SettingsMenu::TerminalTheme => (self.terminal_theme_options(colors, cx), 252.0),
             SettingsMenu::TerminalFont => (self.terminal_font_options(colors, cx), 252.0),
@@ -4437,6 +4472,46 @@ impl UtilitySurfaces {
         options.into_any_element()
     }
 
+    fn language_options(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let mut options = div().p(px(4.0)).flex().flex_col();
+        for (index, choice) in UI_LANGUAGE_OPTIONS.into_iter().enumerate() {
+            options = options.child(settings_choice_row(
+                format!("language-option-{index}"),
+                ui_language_label(choice),
+                choice == self.prefs.ui_language,
+                colors,
+                cx,
+                move |this, cx| {
+                    this.settings_menu = None;
+                    this.update_prefs(move |prefs| prefs.ui_language = choice);
+                    crate::i18n::apply_live(choice, cx);
+                    cx.notify();
+                },
+            ));
+        }
+        options.into_any_element()
+    }
+
+    fn language_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = self.settings_colors();
+        let open = self.settings_menu == Some(SettingsMenu::Language);
+        let mut control = div()
+            .relative()
+            .min_w(px(154.0))
+            .child(settings_select_button(
+                ui_language_label(self.prefs.ui_language),
+                "language-dropdown",
+                open,
+                SettingsMenu::Language,
+                colors,
+                cx,
+            ));
+        if open {
+            control = control.child(self.settings_menu_host(cx));
+        }
+        control.into_any_element()
+    }
+
     fn file_editor_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = self.settings_colors();
         let open = self.settings_menu == Some(SettingsMenu::FileEditor);
@@ -4531,14 +4606,16 @@ impl UtilitySurfaces {
         let state = self.updates.state();
         let unsupported = matches!(state.phase, UpdatePhase::Unsupported(_));
         let action = match &state.phase {
-            UpdatePhase::Available(_) => Some(("Download", UpdateCommand::Download)),
-            UpdatePhase::Ready(_) => Some(("Restart", UpdateCommand::Install)),
+            UpdatePhase::Available(_) => {
+                Some((t("settings.updates.download"), UpdateCommand::Download))
+            }
+            UpdatePhase::Ready(_) => Some((t("settings.updates.restart"), UpdateCommand::Install)),
             UpdatePhase::Checking | UpdatePhase::Downloading { .. } | UpdatePhase::Installing => {
                 None
             }
             _ if unsupported => None,
             _ => Some((
-                "Check Now",
+                t("settings.updates.check_now"),
                 UpdateCommand::Check {
                     user_initiated: true,
                 },
@@ -4575,13 +4652,13 @@ impl UtilitySurfaces {
             colors,
         ));
 
-        // "Skip" only makes sense for a release that is offered but not yet
+        // t("settings.updates.skip") only makes sense for a release that is offered but not yet
         // downloaded; once it is staged the bytes are already on disk.
         if let UpdatePhase::Available(release) = &state.phase {
             let version = release.version.clone();
             rows = rows.child(setting_divider(colors)).child(setting_row(
-                "Skip this version",
-                "Hide this release until a newer version is available.",
+                t("settings.updates.skip_version"),
+                t("settings.updates.skip_version_detail"),
                 surface_button("Skip", "skip-update", colors, cx, move |this, cx| {
                     let version = version.clone();
                     this.update_prefs(move |prefs| prefs.skipped_update_version = version);
@@ -4598,8 +4675,8 @@ impl UtilitySurfaces {
         }
         if !unsupported {
             rows = rows.child(setting_divider(colors)).child(toggle_row(
-                "Update automatically",
-                "Download verified GitHub releases and install when diri quits.",
+                t("settings.updates.automatic"),
+                t("settings.updates.automatic_detail"),
                 self.prefs.automatic_updates,
                 "toggle-automatic-updates",
                 colors,
@@ -4612,7 +4689,7 @@ impl UtilitySurfaces {
                 },
             ));
         }
-        setting_section("Software updates", rows, colors)
+        setting_section(t("settings.updates.title"), rows, colors)
     }
 
     fn toggle_version_picker(&mut self, cx: &mut Context<Self>) {
@@ -6474,7 +6551,7 @@ fn login_item_row(
                         } else {
                             colors.secondary
                         })
-                        .child("Start diri at login"),
+                        .child(t("settings.general.start_at_login")),
                 )
                 .child(
                     div()
@@ -6901,45 +6978,35 @@ fn settings_note(
 }
 
 fn settings_tab_matches(tab: SettingsTab, query: &str) -> bool {
-    let query = query.trim().to_ascii_lowercase();
+    let query = query.trim().to_lowercase();
     if query.is_empty() {
         return true;
     }
-    let searchable = match tab {
-        SettingsTab::General => {
-            "general default startup login sessions close confirmation sounds chimes support diagnostics privacy telemetry share report name support id quick open search roots choose folder finder picker updates diri-include include gitignore worktrees hidden folders import herdr migrate move tmux developer performance perf overlay fps frame rate render counters debug"
-        }
-        SettingsTab::WhatsNew => {
-            "what's new whats new release notes latest version changes features improvements"
-        }
-        SettingsTab::Agents => {
-            "agents codex claude cursor gemini executable installed command line quick create default"
-        }
-        SettingsTab::Skills => {
-            "skills catalogue catalog instructions personal project plugins search SKILL.md"
-        }
-        SettingsTab::Schedules => {
-            "schedules scheduled tasks cron timer daily weekdays every morning run later catch up missed sleep wake open at login keep awake"
-        }
-        SettingsTab::Accounts => {
-            "accounts profiles work personal login authentication codex claude default config home"
-        }
-        SettingsTab::Shortcuts => {
-            "shortcuts keyboard bindings hotkeys commands keys navigation sessions workspace terminal"
-        }
-        SettingsTab::Terminal => "terminal appearance color theme font text size zoom",
-        SettingsTab::Usage => "usage cost tokens spending cache savings model daily claude codex",
-        SettingsTab::Worktrees => {
-            "worktrees git branches pull requests merged old stale disk space cleanup"
-        }
-        SettingsTab::Resources => {
-            "resources idle sessions hibernate freeze memory limit performance"
-        }
-        SettingsTab::Remote => {
-            "remote ssh openssh hosts machines connections execution tailscale network"
-        }
-        SettingsTab::Phone => "phone iphone ios mobile pairing qr tailscale awake",
+    let keywords = match tab {
+        SettingsTab::General => "settings.keywords.general",
+        SettingsTab::WhatsNew => "settings.keywords.whats_new",
+        SettingsTab::Agents => "settings.keywords.agents",
+        SettingsTab::Skills => "settings.keywords.skills",
+        SettingsTab::Schedules => "settings.keywords.schedules",
+        SettingsTab::Accounts => "settings.keywords.accounts",
+        SettingsTab::Shortcuts => "settings.keywords.shortcuts",
+        SettingsTab::Terminal => "settings.keywords.appearance",
+        SettingsTab::Usage => "settings.keywords.usage",
+        SettingsTab::Worktrees => "settings.keywords.worktrees",
+        SettingsTab::Resources => "settings.keywords.resources",
+        SettingsTab::Remote => "settings.keywords.remote",
+        SettingsTab::Phone => "settings.keywords.phone",
     };
+    // English keywords always match, so a search typed from muscle memory
+    // or the docs still finds its page in another interface language.
+    let searchable = format!(
+        "{} {} {} {}",
+        crate::i18n::english(keywords),
+        t(keywords),
+        tab.label(),
+        tab.subtitle()
+    )
+    .to_lowercase();
     query
         .split_whitespace()
         .all(|word| searchable.contains(word))
@@ -7927,8 +7994,17 @@ mod tests {
             Ok("terminal") => SettingsTab::Terminal,
             Ok("worktrees") => SettingsTab::Worktrees,
             Ok("resources") => SettingsTab::Resources,
+            Ok("usage") => SettingsTab::Usage,
+            Ok("phone") => SettingsTab::Phone,
             _ => SettingsTab::Remote,
         };
+        // DIRI_VISUAL_LANGUAGE=zh-Hans renders the page in that catalog.
+        if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            diri_i18n::set_language(language);
+        }
         let platform = gpui_platform::current_platform(true);
         let mut cx = HeadlessAppContext::with_platform(
             platform.text_system(),
