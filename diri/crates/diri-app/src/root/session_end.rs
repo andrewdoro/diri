@@ -131,19 +131,21 @@ fn unclean_exit_notice(session: &SessionRecord) -> Option<crate::toast::Toast> {
     };
     let how = match (info.reason, info.code, info.signal) {
         (ExitReason::Exited, Some(0), _) => return None,
-        (ExitReason::Exited, Some(code), _) => format!("exited with code {code}"),
-        (ExitReason::Signaled, _, Some(signal)) => format!("was stopped by signal {signal}"),
-        (ExitReason::Signaled, _, None) => "was stopped".to_owned(),
+        (ExitReason::Exited, Some(code), _) => {
+            crate::i18n::tf("toast.session_exited_code", &[("code", &code)])
+        }
+        (ExitReason::Signaled, _, Some(signal)) => {
+            crate::i18n::tf("toast.session_stopped_signal", &[("signal", &signal)])
+        }
+        (ExitReason::Signaled, _, None) => crate::i18n::t("toast.session_stopped").to_owned(),
         _ => return None,
     };
     // The title goes on the second line: a long one in the sentence wraps it
     // and strands the exit code on a line of its own.
-    Some(
-        crate::toast::Toast::warning(format!("Session {how}.")).detail(format!(
-            "“{}” stays in the sidebar with its last screen.",
-            crate::switcher::display_title(session)
-        )),
-    )
+    Some(crate::toast::Toast::warning(how).detail(crate::i18n::tf(
+        "toast.session_ended_detail",
+        &[("title", &crate::switcher::display_title(session))],
+    )))
 }
 
 impl RootView {

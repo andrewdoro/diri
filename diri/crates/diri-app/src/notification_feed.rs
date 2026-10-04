@@ -300,9 +300,13 @@ impl NotificationFeed {
             };
             let agent = crate::notifications::display_name(session.effective_kind(), descriptor);
             let title = match kind {
-                NotificationKind::NeedsInput => format!("{agent} needs you"),
-                NotificationKind::Done => format!("{agent} finished"),
-                _ => format!("{agent} stopped"),
+                NotificationKind::NeedsInput => {
+                    crate::i18n::tf("notify.agent_needs_you", &[("agent", &agent)])
+                }
+                NotificationKind::Done => {
+                    crate::i18n::tf("notify.agent_finished", &[("agent", &agent)])
+                }
+                _ => crate::i18n::tf("notify.agent_stopped", &[("agent", &agent)]),
             };
             let body = event.detail.as_ref().map_or_else(
                 || session.title.clone(),

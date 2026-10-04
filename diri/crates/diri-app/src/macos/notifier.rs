@@ -22,6 +22,7 @@ use objc2_user_notifications::{
 };
 use tokio::sync::mpsc;
 
+use crate::i18n::t;
 use crate::notifications::{
     NotificationRequest as DiriNotification, OPEN_ACTION_ID, REPLY_ACTION_ID,
 };
@@ -75,7 +76,7 @@ impl NativeNotifier {
             center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
             let open = UNNotificationAction::actionWithIdentifier_title_options(
                 &NSString::from_str(OPEN_ACTION_ID),
-                &NSString::from_str("Open session"),
+                &NSString::from_str(t("notify.action_open_session")),
                 UNNotificationActionOptions::Foreground,
             );
             // No Foreground option: answering from the banner is the point,
@@ -84,10 +85,10 @@ impl NativeNotifier {
             let reply: Retained<UNNotificationAction> =
                 UNTextInputNotificationAction::actionWithIdentifier_title_options_textInputButtonTitle_textInputPlaceholder(
                     &NSString::from_str(REPLY_ACTION_ID),
-                    &NSString::from_str("Reply"),
+                    &NSString::from_str(t("notify.action_reply")),
                     UNNotificationActionOptions::AuthenticationRequired,
-                    &NSString::from_str("Send"),
-                    &NSString::from_str("Reply to the agent"),
+                    &NSString::from_str(t("notify.action_send")),
+                    &NSString::from_str(t("notify.reply_placeholder")),
                 )
                 .into_super();
             let category = |identifier: &str, actions: &[Retained<UNNotificationAction>]| {
@@ -112,7 +113,7 @@ impl NativeNotifier {
         });
         if inner.is_none() {
             let _ = sender.send(NativeNotificationEvent::Health(
-                "Mac alerts require the packaged Diri app. Your inbox still works.".into(),
+                t("notify.health_unpackaged").into(),
             ));
         }
         Self {
@@ -144,15 +145,9 @@ impl NativeNotifier {
                 let settings = unsafe { settings.as_ref() };
                 use objc2_user_notifications::UNAuthorizationStatus as Status;
                 let message = match settings.authorizationStatus() {
-                    Status::Denied => {
-                        "Mac alerts are disabled. Enable Diri in System Settings → Notifications."
-                    }
-                    Status::NotDetermined => {
-                        "Use Test alert to enable Mac alerts. Your inbox already works."
-                    }
-                    _ => {
-                        "Mac alerts are enabled. Focus mode and System Settings can silence delivery."
-                    }
+                    Status::Denied => t("notify.health_denied"),
+                    Status::NotDetermined => t("notify.health_not_determined"),
+                    _ => t("notify.health_enabled"),
                 };
                 let _ = sender.send(NativeNotificationEvent::Health(message.into()));
             },
@@ -228,9 +223,9 @@ impl NativeNotifier {
             let sender = inner.sender.clone();
             let completion = RcBlock::new(move |granted: Bool, _error: *mut NSError| {
                 let _ = sender.send(NativeNotificationEvent::Health(if granted.as_bool() {
-                    "Mac alerts are enabled. Focus mode and System Settings can silence delivery.".into()
+                    t("notify.health_enabled").into()
                 } else {
-                    "Mac alerts are disabled. Enable Diri in System Settings → Notifications. Your inbox still works.".into()
+                    t("notify.health_denied_inbox").into()
                 }));
                 if granted.as_bool() {
                     deliver(&request, sender.clone(), active.clone());
@@ -266,8 +261,7 @@ fn deliver(
         }
         if !error.is_null() {
             let _ = sender.send(NativeNotificationEvent::Health(
-                "macOS couldn't deliver an alert. Your notifications are available in the inbox."
-                    .into(),
+                t("notify.health_delivery_failed").into(),
             ));
         }
     });

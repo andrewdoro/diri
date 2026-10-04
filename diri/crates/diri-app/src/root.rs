@@ -629,7 +629,7 @@ impl RootView {
                     if !handled {
                         this.show_feedback(
                             "workspace",
-                            Toast::info("That target is gone. Open the palette to pick again."),
+                            Toast::info(crate::i18n::t("toast.workspace_target_gone")),
                             cx,
                         );
                     }
@@ -1057,9 +1057,12 @@ impl RootView {
             cx.spawn(async move |this, cx| {
                 let _ = this.update(cx, |this, cx| {
                     this.show_toast(
-                        Toast::info("diri sends crash and error reports")
-                            .detail("Terminal contents never leave your Mac.")
-                            .action("Settings", ToastCommand::OpenPrivacySettings)
+                        Toast::info(crate::i18n::t("toast.privacy_reports"))
+                            .detail(crate::i18n::t("toast.privacy_reports_detail"))
+                            .action(
+                                crate::i18n::t("toast.action_settings"),
+                                ToastCommand::OpenPrivacySettings,
+                            )
                             .hold(Duration::from_secs(20)),
                         cx,
                     );
@@ -1304,7 +1307,8 @@ impl RootView {
                                 this.workspace_error = Some(error.clone());
                                 this.show_feedback(
                                     "workspace_rejected",
-                                    Toast::error("Workspace change wasn’t saved").detail(error.1),
+                                    Toast::error(crate::i18n::t("toast.workspace_rejected"))
+                                        .detail(error.1),
                                     cx,
                                 );
                             }
@@ -1828,7 +1832,8 @@ impl RootView {
         if let Err(error) = result {
             self.show_feedback(
                 "prefs",
-                Toast::error("Couldn’t save the developer setting").detail(error.to_string()),
+                Toast::error(crate::i18n::t("toast.developer_setting_failed"))
+                    .detail(error.to_string()),
                 cx,
             );
         }
@@ -2077,7 +2082,7 @@ impl RootView {
         let Some(quote) = self.selected_quote(window, cx) else {
             self.show_feedback(
                 "quote",
-                Toast::info("Select text, a diff hunk or a Markdown turn to quote"),
+                Toast::info(crate::i18n::t("toast.quote_nothing_selected")),
                 cx,
             );
             return;
@@ -2088,7 +2093,11 @@ impl RootView {
                 .unwrap_or(self.last_quote_surface);
             let targets = self.quote_targets();
             if targets.is_empty() {
-                self.show_feedback("quote", Toast::info("Start an agent to quote into"), cx);
+                self.show_feedback(
+                    "quote",
+                    Toast::info(crate::i18n::t("toast.quote_no_targets")),
+                    cx,
+                );
                 return;
             }
             let active = self.active_session_id(cx);
@@ -2109,7 +2118,11 @@ impl RootView {
         }
         let target = self.active_session_id(cx);
         let Some(target) = target else {
-            self.show_feedback("quote", Toast::info("Select an agent to quote into"), cx);
+            self.show_feedback(
+                "quote",
+                Toast::info(crate::i18n::t("toast.quote_select_agent")),
+                cx,
+            );
             return;
         };
         if !self
@@ -2119,7 +2132,7 @@ impl RootView {
         {
             self.show_feedback(
                 "quote",
-                Toast::info("Quotes go to an agent, not a shell"),
+                Toast::info(crate::i18n::t("toast.quote_not_shell")),
                 cx,
             );
             return;
@@ -2142,13 +2155,17 @@ impl RootView {
             .get(&target)
             .cloned();
         let Some(target_record) = target_record else {
-            self.show_feedback("quote", Toast::info("That session no longer exists"), cx);
+            self.show_feedback(
+                "quote",
+                Toast::info(crate::i18n::t("toast.quote_session_missing")),
+                cx,
+            );
             return;
         };
         if !is_quote_target(&target_record) {
             self.show_feedback(
                 "quote",
-                Toast::info("Quotes go to an agent, not a shell"),
+                Toast::info(crate::i18n::t("toast.quote_not_shell")),
                 cx,
             );
             return;
@@ -2174,7 +2191,7 @@ impl RootView {
         let Some(target) = quote_target_id(&picker.targets, index) else {
             self.show_feedback(
                 "quote",
-                Toast::info("That session is gone. Pick another."),
+                Toast::info(crate::i18n::t("toast.quote_session_gone")),
                 cx,
             );
             return;
@@ -2390,7 +2407,7 @@ impl RootView {
             } else {
                 self.show_feedback(
                     "workspace",
-                    Toast::info("Open a workspace to arrange its panes"),
+                    Toast::info(crate::i18n::t("toast.workspace_open_to_arrange")),
                     cx,
                 );
             }
@@ -2526,7 +2543,8 @@ impl RootView {
                 }) {
                     self.show_feedback(
                         "prefs",
-                        Toast::error("Couldn’t save the tab layout").detail(error.to_string()),
+                        Toast::error(crate::i18n::t("toast.tab_layout_failed"))
+                            .detail(error.to_string()),
                         cx,
                     );
                     return;
@@ -2550,7 +2568,7 @@ impl RootView {
                     {
                         self.show_feedback(
                             "prefs",
-                            Toast::error("Couldn’t save the tab bar setting")
+                            Toast::error(crate::i18n::t("toast.tab_bar_failed"))
                                 .detail(error.to_string()),
                             cx,
                         );
@@ -2910,9 +2928,7 @@ impl RootView {
                 let Some(fresh) = fresh else {
                     this.show_feedback(
                         "fresh_worktree",
-                        Toast::warning(
-                            "No default branch found, so the Agent starts in this checkout",
-                        ),
+                        Toast::warning(crate::i18n::t("toast.fresh_worktree_no_default_branch")),
                         cx,
                     );
                     if this.spawn_default() {
@@ -2936,14 +2952,17 @@ impl RootView {
                     });
                 if !fresh.fetched {
                     let message = if fresh.base.remote {
-                        format!(
-                            "Couldn't fetch {}; started from the last-fetched {}",
-                            fresh.base.branch, fresh.base.reference
+                        crate::i18n::tf(
+                            "toast.fresh_worktree_fetch_failed",
+                            &[
+                                ("branch", &fresh.base.branch),
+                                ("reference", &fresh.base.reference),
+                            ],
                         )
                     } else {
-                        format!(
-                            "No remote default branch; started from local {}",
-                            fresh.base.reference
+                        crate::i18n::tf(
+                            "toast.fresh_worktree_local_base",
+                            &[("reference", &fresh.base.reference)],
                         )
                     };
                     this.show_feedback("fresh_worktree", Toast::info(message), cx);
