@@ -1247,7 +1247,7 @@ impl RootView {
                                 .read()
                                 .expect("session store lock poisoned")
                                 .has_pending_ui_request();
-                            let (open_launcher, open_settings) = if pending {
+                            let (open_launcher, open_settings, api_requests) = if pending {
                                 let mut store = this
                                     .window_store
                                     .write()
@@ -1255,10 +1255,12 @@ impl RootView {
                                 (
                                     store.take_open_launcher_request(),
                                     store.take_open_settings_request(),
+                                    store.take_api_requests(),
                                 )
                             } else {
-                                (false, false)
+                                (false, false, Vec::new())
                             };
+                            this.open_api_requests(api_requests, cx);
                             if open_launcher {
                                 this.open_launcher(&OpenLauncher, window, cx);
                             }
@@ -3632,6 +3634,28 @@ impl RootView {
         }
         self.begin_inspector_slide(cx);
         cx.notify();
+    }
+
+    /// Opens requests agents sent with `open_api_request` in their Session's
+    /// API tab. One for the Session in front also opens the panel; the rest
+    /// wait in their Session's tabs.
+    fn open_api_requests(
+        &mut self,
+        requests: Vec<diri_proto::SessionOpenApiRequestParams>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(inspector) = self.inspector.clone() else {
+            return;
+        };
+        let mut reveal = false;
+        for params in requests {
+            reveal |= inspector.update(cx, |inspector, cx| {
+                inspector.open_api_request(params.session_id, params.request, cx)
+            });
+        }
+        if reveal {
+            self.reveal_inspector(cx);
+        }
     }
 
     fn toggle_inspector(&mut self, cx: &mut Context<Self>) {

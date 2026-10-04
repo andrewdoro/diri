@@ -10,7 +10,7 @@ mod work_items;
 mod workspace_spawn;
 mod workspaces;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -463,6 +463,8 @@ pub struct SessionStore {
     pending_open_launcher: bool,
     /// Set by the menu bar's Settings action; drained by Root on UI sync.
     pending_open_settings: bool,
+    /// Requests agents asked to open in their API tab, oldest first.
+    pending_api_requests: VecDeque<diri_proto::SessionOpenApiRequestParams>,
     /// Remote host catalog from hosts.json. Empty when the file is absent or
     /// invalid (pickers show Local only). Reloaded on picker open.
     hosts: Vec<HostEntry>,
@@ -575,6 +577,7 @@ impl SessionStore {
                 prefs_path,
                 pending_open_launcher: false,
                 pending_open_settings: false,
+                pending_api_requests: VecDeque::new(),
                 hosts: Vec::new(),
                 agents: HashMap::new(),
                 agent_catalog_scans: HashMap::new(),
@@ -1772,6 +1775,14 @@ impl SessionStore {
                 }
                 return StoreEventChange::Model;
             }
+            EventName::SESSION_API_REQUEST => {
+                if let Ok(params) =
+                    serde_json::from_value::<diri_proto::SessionOpenApiRequestParams>(event.params)
+                {
+                    self.accept_api_request(params);
+                }
+                return StoreEventChange::None;
+            }
             EventName::SESSION_CLIPBOARD => {
                 if let Ok(event) =
                     serde_json::from_value::<diri_proto::SessionClipboardEvent>(event.params)
@@ -2644,10 +2655,37 @@ impl SessionStore {
         std::mem::take(&mut self.pending_open_settings)
     }
 
+    /// Queues an agent's request for the window to open in that Session's API
+    /// tab. The UI sync loop drains it with [`Self::take_api_requests`]. A
+    /// burst keeps only the newest few; an unknown or archived Session, or a
+    /// draft that fails validation, is dropped.
+    fn accept_api_request(&mut self, params: diri_proto::SessionOpenApiRequestParams) -> bool {
+        const MAX_PENDING: usize = 8;
+        let known = self
+            .sessions
+            .get(&params.session_id)
+            .is_some_and(|session| !session.is_archived());
+        if !known || params.request.validate().is_err() {
+            return false;
+        }
+        if self.pending_api_requests.len() >= MAX_PENDING {
+            self.pending_api_requests.pop_front();
+        }
+        self.pending_api_requests.push_back(params);
+        self.emit(StoreEffect::PublishSnapshot);
+        true
+    }
+
+    pub fn take_api_requests(&mut self) -> Vec<diri_proto::SessionOpenApiRequestParams> {
+        self.pending_api_requests.drain(..).collect()
+    }
+
     /// Cheap read-lock probe so the UI sync loop only takes a write lock on the
     /// rare tick that actually has a menu-bar request to drain.
     pub fn has_pending_ui_request(&self) -> bool {
-        self.pending_open_launcher || self.pending_open_settings
+        self.pending_open_launcher
+            || self.pending_open_settings
+            || !self.pending_api_requests.is_empty()
     }
 
     pub fn rename(&mut self, id: SessionId, title: impl Into<String>) {

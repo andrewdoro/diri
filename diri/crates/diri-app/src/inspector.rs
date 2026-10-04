@@ -164,14 +164,17 @@ pub enum WorkspaceSurface {
     Terminal,
     Files,
     Review,
+    /// HTTP requests (`crate::api_client`).
+    Api,
 }
 
 impl WorkspaceSurface {
-    const CATALOG: [Self; 5] = [
+    const CATALOG: [Self; 6] = [
         Self::Browser,
         Self::Terminal,
         Self::Files,
         Self::Review,
+        Self::Api,
         Self::Details,
     ];
 
@@ -182,6 +185,7 @@ impl WorkspaceSurface {
             Self::Terminal => "Terminal",
             Self::Files => "Files",
             Self::Review => "Review",
+            Self::Api => "API",
         }
     }
 
@@ -192,6 +196,7 @@ impl WorkspaceSurface {
             Self::Terminal => "terminal",
             Self::Files => "folder",
             Self::Review => "checklist",
+            Self::Api => "server.rack",
         }
     }
 }
@@ -201,6 +206,7 @@ struct WorkspaceTab {
     id: u64,
     surface: WorkspaceSurface,
     viewer: Option<Entity<CodeViewer>>,
+    api: Option<Entity<crate::api_client::ApiClient>>,
     terminal_slot: Option<usize>,
     details_tab: InspectorTab,
     scroll: UniformListScrollHandle,
@@ -216,6 +222,7 @@ impl WorkspaceTab {
             id,
             surface,
             viewer: None,
+            api: None,
             terminal_slot: None,
             details_tab: InspectorTab::Info,
             scroll: UniformListScrollHandle::new(),
@@ -348,6 +355,8 @@ pub struct WorkbenchInspector {
     browser_query: QueryEditor,
     browser_address_focused: bool,
     browser_state: BrowserState,
+    /// Where the API surface keeps each project's requests.
+    api_store_root: PathBuf,
     #[cfg(target_os = "macos")]
     native_browser: Option<std::rc::Rc<std::cell::RefCell<crate::macos::browser::NativeBrowser>>>,
     context: Option<DiffContext>,
@@ -486,6 +495,7 @@ impl WorkbenchInspector {
             browser_query: QueryEditor::default(),
             browser_address_focused: false,
             browser_state: BrowserState::default(),
+            api_store_root: crate::api_client::storage::default_root(),
             #[cfg(target_os = "macos")]
             native_browser: None,
             context: None,
@@ -866,6 +876,7 @@ impl WorkbenchInspector {
                 viewer.update(cx, |viewer, cx| viewer.set_colors(colors, cx));
             }
         }
+        self.sync_api_colors(cx);
         if !self.visible {
             return;
         }
@@ -1089,7 +1100,7 @@ impl WorkbenchInspector {
             .is_some_and(|browser| browser.borrow().has_focus());
         #[cfg(not(target_os = "macos"))]
         let browser_focused = false;
-        if !self.is_focused(window) && !browser_focused {
+        if !self.is_focused(window) && !browser_focused && !self.api_focused(window, cx) {
             return false;
         }
         self.close_active_workspace(cx)
@@ -1151,6 +1162,10 @@ impl WorkbenchInspector {
             tab.terminal_slot = Some(self.next_terminal_slot);
             self.next_terminal_slot += 1;
         }
+        if surface == WorkspaceSurface::Api {
+            let project = self.selected_session().map(|session| session.project_id.0);
+            tab.api = Some(self.new_api_client(project.as_deref(), cx));
+        }
         self.workspace_tabs.push(tab);
         self.activate_workspace(id, cx);
     }
@@ -1205,7 +1220,7 @@ impl WorkbenchInspector {
             WorkspaceSurface::Files => Some(InspectorTab::Code),
             WorkspaceSurface::Review => Some(InspectorTab::Changes),
             WorkspaceSurface::Details => Some(self.details_tab),
-            WorkspaceSurface::Browser | WorkspaceSurface::Terminal => None,
+            WorkspaceSurface::Browser | WorkspaceSurface::Terminal | WorkspaceSurface::Api => None,
         };
         if let Some(tab) = preference_tab {
             self.selected_tab = tab;
@@ -4840,6 +4855,152 @@ fn should_show_blocking_git_loading(context_changed: bool, state: &LoadState) ->
     context_changed || matches!(state, LoadState::NoSession)
 }
 
+/// The API surface (`crate::api_client`): tab creation, rendering, and the
+/// `open_api_request` MCP path.
+impl WorkbenchInspector {
+    fn new_api_client(
+        &mut self,
+        project: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::api_client::ApiClient> {
+        let library =
+            crate::api_client::library_for(&self.api_store_root, project.unwrap_or("default"), cx);
+        let colors = self.panel_colors();
+        let tokio = self.tokio.clone();
+        let api = cx.new(|cx| crate::api_client::ApiClient::new(tokio, library, colors, cx));
+        cx.observe(&api, |_, _, cx| cx.notify()).detach();
+        api
+    }
+
+    fn active_api(&self) -> Option<&Entity<crate::api_client::ApiClient>> {
+        self.workspace_tabs
+            .iter()
+            .find(|tab| Some(tab.id) == self.workspace_active)
+            .and_then(|tab| tab.api.as_ref())
+    }
+
+    fn render_api(&self, colors: SemanticColors) -> AnyElement {
+        match self.active_api() {
+            Some(api) => div()
+                .id("workspace-api")
+                .size_full()
+                .child(api.clone())
+                .into_any_element(),
+            None => self
+                .render_message(
+                    colors,
+                    "server.rack",
+                    "Select a session",
+                    "Requests belong to a project.",
+                )
+                .into_any_element(),
+        }
+    }
+
+    fn sync_api_colors(&self, cx: &mut Context<Self>) {
+        let colors = self.panel_colors();
+        for tab in &self.workspace_tabs {
+            if let Some(api) = &tab.api {
+                api.update(cx, |api, cx| api.set_colors(colors, cx));
+            }
+        }
+    }
+
+    fn api_focused(&self, window: &Window, cx: &App) -> bool {
+        self.workspace_selected == Some(WorkspaceSurface::Api)
+            && self
+                .active_api()
+                .is_some_and(|api| api.read(cx).has_focus(window))
+    }
+
+    /// Opens a request an agent sent with `open_api_request` in that
+    /// Session's API tab: a fresh tab, or one still showing an untouched
+    /// request. For the Session in front it becomes the active tab and the
+    /// caller opens the panel (returns true); for another Session it waits as
+    /// that Session's active tab. Only a `GET` marked `autoSend` is sent.
+    pub(crate) fn open_api_request(
+        &mut self,
+        session: SessionId,
+        draft: diri_proto::ApiRequestDraft,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if draft.validate().is_err() {
+            return false;
+        }
+        self.sync_workspace_session(cx);
+        let project = {
+            let store = self
+                .runtime
+                .store
+                .read()
+                .expect("session store lock poisoned");
+            match store.sessions().get(&session) {
+                Some(record) if !record.is_archived() => record.project_id.0.clone(),
+                _ => return false,
+            }
+        };
+        if self.workspace_session.as_ref() == Some(&session) {
+            let reusable = self
+                .workspace_tabs
+                .iter()
+                .find(|tab| {
+                    tab.surface == WorkspaceSurface::Api
+                        && tab
+                            .api
+                            .as_ref()
+                            .is_some_and(|api| api.read(cx).is_pristine())
+                })
+                .map(|tab| tab.id);
+            let id = match reusable {
+                Some(id) => id,
+                None => {
+                    let id = self.next_workspace_id;
+                    self.next_workspace_id += 1;
+                    let mut tab = WorkspaceTab::new(id, WorkspaceSurface::Api);
+                    tab.api = Some(self.new_api_client(Some(&project), cx));
+                    self.workspace_tabs.push(tab);
+                    id
+                }
+            };
+            if let Some(api) = self
+                .workspace_tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .and_then(|tab| tab.api.clone())
+            {
+                api.update(cx, |api, cx| api.open_draft(&draft, cx));
+            }
+            if self.workspace_active == Some(id) {
+                cx.notify();
+            } else if let Some(surface) = self.load_workspace(id, cx) {
+                cx.emit(InspectorEvent::WorkspaceRestored(surface));
+            }
+            return true;
+        }
+        let id = self.next_workspace_id;
+        self.next_workspace_id += 1;
+        let api = self.new_api_client(Some(&project), cx);
+        api.update(cx, |api, cx| api.open_draft(&draft, cx));
+        let mut tab = WorkspaceTab::new(id, WorkspaceSurface::Api);
+        tab.api = Some(api);
+        let details = self.next_workspace_id;
+        self.next_workspace_id += 1;
+        let workspace = self
+            .session_workspaces
+            .entry(Some(session))
+            .or_insert_with(|| SessionWorkspace {
+                tabs: vec![WorkspaceTab::new(details, WorkspaceSurface::Details)],
+                active: None,
+                visible: true,
+                next_terminal_slot: 0,
+            });
+        workspace.tabs.push(tab);
+        workspace.active = Some(id);
+        workspace.visible = true;
+        false
+    }
+}
+
 impl Render for WorkbenchInspector {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = {
@@ -4878,6 +5039,7 @@ impl Render for WorkbenchInspector {
             Some(WorkspaceSurface::Terminal) => self.render_terminal(colors),
             Some(WorkspaceSurface::Files) => self.code_viewer.clone().into_any_element(),
             Some(WorkspaceSurface::Review) => self.render_changes(colors, window, cx),
+            Some(WorkspaceSurface::Api) => self.render_api(colors),
             None => self.render_surface_chooser(colors, cx),
         };
         let transition_id = SharedString::from(format!(
@@ -6109,6 +6271,73 @@ mod tests {
                 .inspector_tab,
             InspectorTab::Info
         );
+    }
+
+    #[gpui::test]
+    fn agent_api_requests_open_in_their_sessions_api_tab(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+        let ids: Vec<_> = fixture
+            .list
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect();
+        {
+            let mut store = runtime.store.write().unwrap();
+            store.hydrate(fixture.list);
+            store.select(ids[0].clone());
+        }
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let inspector = cx.new(|cx| WorkbenchInspector::new(runtime.clone(), tokio, cx));
+        let draft = |method: &str| diri_proto::ApiRequestDraft {
+            method: method.into(),
+            url: "http://localhost:3000/items".into(),
+            ..Default::default()
+        };
+        inspector.update(cx, |inspector, cx| {
+            inspector.api_store_root = temp.path().to_path_buf();
+            // The Session in front: its API tab opens and is active.
+            assert!(inspector.open_api_request(ids[0].clone(), draft("POST"), cx));
+            assert_eq!(inspector.workspace_selected, Some(WorkspaceSurface::Api));
+            let api_tabs = |inspector: &WorkbenchInspector| {
+                inspector
+                    .workspace_tabs
+                    .iter()
+                    .filter(|tab| tab.surface == WorkspaceSurface::Api)
+                    .count()
+            };
+            assert_eq!(api_tabs(inspector), 1);
+            // An untouched tab is reused by the next request.
+            assert!(inspector.open_api_request(ids[0].clone(), draft("GET"), cx));
+            assert_eq!(api_tabs(inspector), 1);
+            let api = inspector.active_api().unwrap().clone();
+            assert_eq!(
+                api.read(cx).draft.method,
+                crate::api_client::model::Method::Get
+            );
+            // Another Session's request waits in that Session's tabs.
+            assert!(!inspector.open_api_request(ids[1].clone(), draft("DELETE"), cx));
+            assert_eq!(api_tabs(inspector), 1);
+            let waiting = &inspector.session_workspaces[&Some(ids[1].clone())];
+            assert!(waiting.visible);
+            let active = waiting.active.unwrap();
+            assert!(
+                waiting
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.id == active && tab.surface == WorkspaceSurface::Api)
+            );
+            // Unknown Sessions and invalid drafts are dropped.
+            assert!(!inspector.open_api_request(SessionId("gone".into()), draft("GET"), cx));
+            assert!(!inspector.open_api_request(ids[0].clone(), draft("TRACE"), cx));
+        });
     }
 
     #[gpui::test]

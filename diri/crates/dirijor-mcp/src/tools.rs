@@ -32,8 +32,8 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
     let mut tools = vec![
         ToolDefinition::new(
             "get_skill",
-            "Read one of Diri's skills: the detailed rules for a Diri capability, as Markdown. Read the matching skill before acting: scheduling (run anything later, at a time, or repeatedly; waking the Mac), notes (work started from or written to a Diri note), orchestration (parallel agents, tasks, waiting, retries). Claude Code sessions also have them as skills named diri:<name>.",
-            json!({"type":"object","properties":{"name":{"type":"string","enum":["scheduling","notes","orchestration"]}},"required":["name"]}),
+            "Read one of Diri's skills: the detailed rules for a Diri capability, as Markdown. Read the matching skill before acting: scheduling (run anything later, at a time, or repeatedly; waking the Mac), notes (work started from or written to a Diri note), orchestration (parallel agents, tasks, waiting, retries), api (HTTP APIs and dev servers: show endpoints in the API tab). Claude Code sessions also have them as skills named diri:<name>.",
+            json!({"type":"object","properties":{"name":{"type":"string","enum":["scheduling","notes","orchestration","api"]}},"required":["name"]}),
         ),
         ToolDefinition::new(
             "submit_task",
@@ -317,6 +317,26 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
             "browser",
             "Drive a real browser isolated to this Diri session. Open a URL, inspect snapshot refs, act on those refs, and request a new snapshot after page changes.",
             browser_schema(),
+        ),
+        ToolDefinition::new(
+            "open_api_request",
+            "Open an HTTP request in the API tab of YOUR session's right panel in Diri, prefilled, so the person can inspect, edit and send it. Use it whenever you build, run or debug an HTTP API: after starting a dev server, open the endpoint you just added or changed (e.g. GET http://localhost:3000/api/health) instead of only pasting a curl command. Put {{name}} placeholders in url/headers/body and pass their values in variables (marking tokens in secrets so they are masked); they land in the project's environment (environment names it, default the active one or \"Local\"). json sets a JSON body and its Content-Type; body sends text as written. auto_send:true sends a GET immediately and shows the response; any other method is never sent until the person presses Send. The call returns once the tab is open, without the response.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "default": "GET"},
+                    "url": {"type": "string", "minLength": 1, "maxLength": 8192, "description": "http(s) URL; may use {{variables}}. No scheme means http:// for localhost."},
+                    "headers": {"type": "object", "description": "Header name to value, e.g. {\"Authorization\": \"Bearer {{token}}\"}."},
+                    "body": {"type": "string", "maxLength": 1048576, "description": "Raw body text."},
+                    "json": {"description": "A JSON value sent as the body, indented, with Content-Type: application/json."},
+                    "name": {"type": "string", "maxLength": 200, "description": "Tab and saved-request title."},
+                    "variables": {"type": "object", "description": "Variable name to value for {{name}} placeholders."},
+                    "secrets": {"type": "array", "items": {"type": "string"}, "description": "Names in variables to mask as secrets."},
+                    "environment": {"type": "string", "maxLength": 200, "description": "Environment the variables go into (created if missing)."},
+                    "auto_send": {"type": "boolean", "default": false, "description": "Send right away. Honoured for GET only."}
+                },
+                "required": ["url"]
+            }),
         ),
         ToolDefinition::new(
             "quick_open_include",

@@ -1016,6 +1016,7 @@ impl ControlServer {
             Method::SESSION_RESUME_FROM_HISTORY => self.session_resume_from_history(params),
             Method::SESSION_REOPEN_LAST => self.session_reopen_last(),
             Method::SESSION_REVEAL => self.session_reveal(params),
+            Method::SESSION_OPEN_API_REQUEST => self.session_open_api_request(params),
             Method::AGENT_READINESS => self.agent_readiness(params),
             Method::AGENT_CONFIGURE => self.agent_configure(params),
             Method::PROJECT_ADD => self.project_add(params),
@@ -4432,6 +4433,30 @@ impl ControlServer {
         Ok(json!({}))
     }
 
+    /// Relays an HTTP request an agent wants opened in its Session's API tab.
+    /// The Engine only validates and forwards it; the app decides whether it
+    /// is ever sent, and never sends anything but a `GET` unasked.
+    fn session_open_api_request(
+        &self,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionOpenApiRequestParams = decode(params)?;
+        p.request.validate().map_err(ControlError::bad_request)?;
+        let id = p.session_id.0.clone();
+        let live = self
+            .registry
+            .lock()
+            .map_err(poisoned)?
+            .record(&id)
+            .is_some_and(|record| !record.is_archived());
+        if !live {
+            return Err(ControlError::not_found(format!("no session {id}")));
+        }
+        self.events
+            .publish_encoded(diri_proto::EventName::SESSION_API_REQUEST, &p, Some(&id));
+        Ok(json!({ "opened": true, "autoSend": p.request.may_auto_send() }))
+    }
+
     fn publish_updated(&self, registry: &Registry, id: &str) {
         // One folded record, not a folded copy of the whole table.
         if let Some(record) = registry.record(id) {
@@ -6151,6 +6176,58 @@ mod tests {
         assert!(!is_kimi_workspace_trust_screen(&lines(&format!(
             "{trust}{idle}"
         ))));
+    }
+
+    #[test]
+    fn open_api_request_relays_a_valid_draft_for_a_live_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = server(temp.path());
+        server
+            .registry
+            .lock()
+            .unwrap()
+            .insert_record(test_record("agent"));
+        let stream = server.events.subscribe(
+            None,
+            crate::events::Filter::new(
+                None,
+                Some(vec![diri_proto::EventName::SESSION_API_REQUEST.to_owned()]),
+            ),
+        );
+        let params = |session: &str, method: &str| {
+            json!({
+                "sessionID": session,
+                "request": {"method": method, "url": "http://localhost:3000/items", "autoSend": true}
+            })
+        };
+        let result = server
+            .dispatch(
+                Method::SESSION_OPEN_API_REQUEST,
+                Some(params("agent", "POST")),
+            )
+            .unwrap();
+        assert_eq!(result["autoSend"], false, "only a GET may send itself");
+        let event = stream.try_recv().expect("relayed to the app");
+        assert_eq!(event.session_id.as_deref(), Some("agent"));
+        let relayed: diri_proto::SessionOpenApiRequestParams =
+            serde_json::from_slice(&event.encoded).unwrap();
+        assert_eq!(relayed.request.method, "POST");
+
+        let missing = server
+            .dispatch(
+                Method::SESSION_OPEN_API_REQUEST,
+                Some(params("gone", "GET")),
+            )
+            .unwrap_err();
+        assert_eq!(missing.code, "not_found");
+        let invalid = server
+            .dispatch(
+                Method::SESSION_OPEN_API_REQUEST,
+                Some(params("agent", "TRACE")),
+            )
+            .unwrap_err();
+        assert_eq!(invalid.code, "bad_request");
+        assert!(stream.try_recv().is_none(), "refusals publish nothing");
     }
 
     #[test]

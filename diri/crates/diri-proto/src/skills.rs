@@ -49,7 +49,13 @@ pub const ORCHESTRATION: Skill = Skill {
     markdown: include_str!("../skills/orchestration.md"),
 };
 
-pub const ALL: [Skill; 3] = [SCHEDULING, NOTES, ORCHESTRATION];
+pub const API: Skill = Skill {
+    name: "api",
+    description: "Building, running or debugging an HTTP API or dev server inside Diri: open the endpoint, prefilled, in the person's API tab with open_api_request (GET can auto-send; other methods wait for Send).",
+    markdown: include_str!("../skills/api.md"),
+};
+
+pub const ALL: [Skill; 4] = [SCHEDULING, NOTES, ORCHESTRATION, API];
 
 pub fn find(name: &str) -> Option<Skill> {
     let name = name.trim().trim_start_matches("diri:");

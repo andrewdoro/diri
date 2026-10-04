@@ -1,6 +1,7 @@
 mod agent_catalog;
 mod agent_setup;
 mod alerts;
+mod api_client;
 mod app_theme;
 mod application_notifications;
 mod clipboard_transfer;
