@@ -1229,7 +1229,10 @@ impl UtilitySurfaces {
                     .text_size(px(Typo::META.size - 1.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.tertiary)
-                    .child(appearance.label()),
+                    .child(crate::i18n::t(match appearance {
+                        ThemeAppearance::Dark => "theme.appearance.dark",
+                        ThemeAppearance::Light => "theme.appearance.light",
+                    })),
             );
             for candidate in TermTheme::CATALOG
                 .into_iter()

@@ -8926,9 +8926,6 @@ fn icon_button(
         .into_any_element()
 }
 
-/// Title `display_title` gives a placeholder-named session that has exited.
-/// The "Ended" chip stands down when the title already says it.
-
 /// One leading column per ancestor level. A column is drawn full height while
 /// that ancestor still has siblings below, and stops halfway on the last child
 /// so a subtree visibly closes instead of trailing a rail into the next row.
