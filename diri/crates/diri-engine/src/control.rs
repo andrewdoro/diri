@@ -105,6 +105,10 @@ pub struct ControlServer {
     engine_instance_id: String,
     registry: Arc<Mutex<Registry>>,
     socket_path: PathBuf,
+    /// The app's host catalog. Beside the socket by default (one root on
+    /// macOS); on Linux the socket is in the runtime dir and the app saves
+    /// hosts in the config dir, so the daemon is told where.
+    hosts_file: PathBuf,
     logs_dir: PathBuf,
     holder: Option<crate::session::HolderConfig>,
     remote: Option<Arc<crate::remote::manager::RemoteManager>>,
@@ -225,6 +229,10 @@ impl ControlServer {
                 bytes.iter().map(|byte| format!("{byte:02x}")).collect()
             },
             registry,
+            hosts_file: socket_path
+                .parent()
+                .map(|parent| parent.join(diri_proto::paths::HOSTS_CONFIG_FILE_NAME))
+                .unwrap_or_else(|| PathBuf::from(diri_proto::paths::HOSTS_CONFIG_FILE_NAME)),
             socket_path,
             logs_dir,
             holder: None,
@@ -288,6 +296,11 @@ impl ControlServer {
     /// socket, matching the Swift daemon's layout.
     pub fn with_notes_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.notes_dir = Some(dir.into());
+        self
+    }
+
+    pub fn with_hosts_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.hosts_file = path.into();
         self
     }
 
@@ -2430,11 +2443,8 @@ impl ControlServer {
     /// Applies the current application build's remote environment gate before
     /// a stateless SSH action. Live Holder operations deliberately use their
     /// session binding's creation-time Helper instead.
-    fn hosts_file(&self) -> PathBuf {
-        self.socket_path
-            .parent()
-            .map(|parent| parent.join("hosts.json"))
-            .unwrap_or_else(|| PathBuf::from("hosts.json"))
+    fn hosts_file(&self) -> &Path {
+        &self.hosts_file
     }
 
     /// `session.list` and `state.snapshot` are the same view: every record
@@ -9008,6 +9018,37 @@ mod tests {
                 .is_empty(),
             "an unavailable remote transport must not create a session record"
         );
+    }
+
+    /// Linux keeps the socket in the runtime dir and the app's hosts.json in
+    /// the config dir: every host the app added was "unknown" to the Engine.
+    #[test]
+    fn hosts_are_read_from_the_catalog_the_app_saves() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = temp.path().join("config");
+        std::fs::create_dir(&config).expect("config dir");
+        diri_proto::HostsConfig {
+            hosts: vec![diri_proto::HostEntry {
+                id: "forge".into(),
+                name: Some("Forge".into()),
+                ssh: "you@forge".into(),
+                default_cwd: None,
+                node: None,
+            }],
+        }
+        .save(config.join("hosts.json"))
+        .expect("host catalog");
+        let registry = Registry::new(engine(), temp.path().join("state.json"));
+        let server = Arc::new(
+            ControlServer::new(
+                Arc::new(Mutex::new(registry)),
+                temp.path().join("runtime").join("daemon.sock"),
+            )
+            .with_hosts_file(config.join("hosts.json")),
+        );
+
+        let hosts = ok_of(call(&server, Method::HOST_LIST, None));
+        assert_eq!(hosts["hosts"][0]["id"], "forge");
     }
 
     #[test]
