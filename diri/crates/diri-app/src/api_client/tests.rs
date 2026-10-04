@@ -942,12 +942,15 @@ fn a_sent_request_shows_its_response_and_lands_in_history(cx: &mut TestAppContex
 
 // MARK: Screenshot
 
-/// Paints the surface on a panel background, as the inspector does.
+/// Paints the surface on a panel background, as the inspector does. Only the
+/// macOS screenshot below hosts it.
+#[cfg(target_os = "macos")]
 struct Frame {
     api: gpui::Entity<ApiClient>,
     colors: SemanticColors,
 }
 
+#[cfg(target_os = "macos")]
 impl gpui::Render for Frame {
     fn render(
         &mut self,
