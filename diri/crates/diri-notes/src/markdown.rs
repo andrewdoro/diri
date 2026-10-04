@@ -1684,7 +1684,7 @@ mod tests {
                 }
                 // Two tables must not touch, or they would read back as one.
                 let touches = |i: usize| blocks.get(i).is_some_and(|b: &Block| b.kind.is_cell());
-                if !touches(at) && !(at > 0 && touches(at - 1)) {
+                if !(touches(at) || at > 0 && touches(at - 1)) {
                     blocks.splice(at..at, table);
                 }
             }

@@ -65,6 +65,7 @@ actions!(
         ShowTodos,
         SearchNotes,
         NoteVersionHistory,
+        NoteGraph,
         OpenSettings,
         // Palette destination: open Settings even when it is already visible.
         // OpenSettings retains the Cmd+, toggle behavior.
@@ -171,6 +172,7 @@ pub enum CommandId {
     ShowTodos,
     SearchNotes,
     NoteVersionHistory,
+    NoteGraph,
     OpenSettings,
     ToggleSidebar,
     ToggleTabOrientation,
@@ -677,6 +679,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Version History…",
         "arrow.counterclockwise",
         "note history versions earlier restore undo changes"
+    ),
+    spec!(
+        NoteGraph,
+        "note-graph",
+        None,
+        None,
+        Some(APP_CONTEXT),
+        "Graph View",
+        "point.3.filled.connected.trianglepath.dotted",
+        "note graph links backlinks connections map related notes"
     ),
     spec!(
         OpenWorktrees,
@@ -1254,6 +1266,7 @@ impl CommandSpec {
             CommandId::ShowTodos => KeyBinding::new(key, ShowTodos, context),
             CommandId::SearchNotes => KeyBinding::new(key, SearchNotes, context),
             CommandId::NoteVersionHistory => KeyBinding::new(key, NoteVersionHistory, context),
+            CommandId::NoteGraph => KeyBinding::new(key, NoteGraph, context),
             CommandId::OpenSettings => KeyBinding::new(key, OpenSettings, context),
             CommandId::ToggleSidebar => KeyBinding::new(key, ToggleSidebar, context),
             CommandId::ToggleTabOrientation => KeyBinding::new(key, ToggleTabOrientation, context),
@@ -1705,6 +1718,11 @@ impl CommandId {
                 description: "See and restore earlier versions of the open note",
                 category: Navigation,
             },
+            Self::NoteGraph => ShortcutMetadata {
+                title: "Graph view",
+                description: "See how the open note links to your other notes",
+                category: Navigation,
+            },
             Self::OpenWorktrees => ShortcutMetadata {
                 title: "Worktrees overview",
                 description: "Open the Git worktrees overview",
@@ -1957,6 +1975,7 @@ impl CommandId {
             Self::ShowTodos => Box::new(ShowTodos),
             Self::SearchNotes => Box::new(SearchNotes),
             Self::NoteVersionHistory => Box::new(NoteVersionHistory),
+            Self::NoteGraph => Box::new(NoteGraph),
             Self::OpenSettings => Box::new(OpenSettings),
             Self::ToggleSidebar => Box::new(ToggleSidebar),
             Self::ToggleTabOrientation => Box::new(ToggleTabOrientation),

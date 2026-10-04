@@ -489,6 +489,7 @@ pub fn actions_for_default_host(
         && session.is_note()
     {
         result.push(registered_action(CommandId::NoteVersionHistory));
+        result.push(registered_action(CommandId::NoteGraph));
     }
 
     // Session handoff: move the SELECTED Claude session across hosts (v1 is

@@ -289,24 +289,45 @@ fn snippet(line: &NoteLine, words: &[String]) -> Snippet {
 
 /// Builds entries for every note in `store`, reusing `previous` entries
 /// whose file did not change. Runs off the main thread.
+#[allow(dead_code, reason = "Used by tests and the bench")]
 pub(crate) fn build_index(
     store: &diri_notes::store::NoteStore,
     previous: &[NoteEntry],
 ) -> Vec<NoteEntry> {
+    build_index_and_links(
+        store,
+        previous,
+        &mut diri_notes::backlinks::LinkIndex::default(),
+    )
+}
+
+/// The search index and, in the same pass, the backlinks index: only files
+/// written since `previous` are read and re-linked; notes that are gone
+/// leave `links`. Off the main thread.
+pub(crate) fn build_index_and_links(
+    store: &diri_notes::store::NoteStore,
+    previous: &[NoteEntry],
+    links: &mut diri_notes::backlinks::LinkIndex,
+) -> Vec<NoteEntry> {
     let Ok(metas) = store.list() else {
         return previous.to_vec();
     };
+    let present: std::collections::HashSet<&str> = metas.iter().map(|m| m.id.as_str()).collect();
+    links.retain(|id| present.contains(id));
     let previous: std::collections::HashMap<(&str, u64), &NoteEntry> = previous
         .iter()
         .map(|entry| ((entry.id.as_str(), entry.modified_ms), entry))
         .collect();
     let mut entries = Vec::with_capacity(metas.len());
     for meta in metas {
-        if let Some(entry) = previous.get(&(meta.id.as_str(), meta.modified_ms)) {
+        if let Some(entry) = previous.get(&(meta.id.as_str(), meta.modified_ms))
+            && links.contains(&meta.id)
+        {
             entries.push((*entry).clone());
             continue;
         }
         if let Ok(note) = store.load(&meta.id) {
+            links.upsert_doc(&meta.id, &note.doc);
             entries.push(NoteEntry::new(&meta.id, &note, meta.modified_ms));
         }
     }

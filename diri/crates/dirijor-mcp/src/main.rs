@@ -86,7 +86,7 @@ fn instructions(browser: &str) -> String {
          CronCreate, /loop, reminders, or a sleeping shell; wake_mac:true wakes a \
          sleeping Mac for the run.\n\
          - notes: if whoami shows origin_note, read_note {{\"note\":\"origin\"}} first; it \
-         is your brief.\n\
+         is your brief. Link related notes with [[Title]]; read_note lists backlinks.\n\
          - orchestration: parallel agents in worktrees, tasks you assign or receive, \
          waiting, retries.\n\n\
          To spawn an agent use its native kind (e.g. `claude`, `codex`; default your own) \

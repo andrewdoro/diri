@@ -37,6 +37,9 @@ use crate::floating;
 #[path = "table_view.rs"]
 mod table_view;
 use table_view::{TABLE_MENU, TableMenu};
+#[path = "block_handle.rs"]
+mod block_handle;
+use block_handle::{BLOCK_MENU, BlockDrag, BlockMenu};
 
 pub(crate) const EDITOR_CONTEXT: &str = "DiriNoteEditor";
 /// The editor's context while the ⌘K link panel owns the keyboard: none of
@@ -290,9 +293,17 @@ enum ChipHit {
 
 struct MentionMenu {
     block_id: u64,
-    /// Byte offset of the `@`.
+    /// Byte offset of the `@` (or of the `[[`).
     at: usize,
     selected: usize,
+    /// Opened by `[[`: links to notes only.
+    notes_only: bool,
+}
+
+impl MentionMenu {
+    fn trigger(&self) -> &'static str {
+        if self.notes_only { "[[" } else { "@" }
+    }
 }
 
 const CARET_BLINK: Duration = Duration::from_millis(530);
@@ -300,6 +311,9 @@ pub(super) const MARKER_WIDTH: f32 = 26.0;
 const INDENT_STEP: f32 = 24.0;
 /// Space above the title inside the scroll area.
 const PAGE_TOP: f32 = 56.0;
+/// Space either side of the text column: room for the block handle, and a
+/// list item's fold chevron beside it.
+const PAGE_SIDE: f32 = 56.0;
 /// Gutter width left of a list item that holds its fold chevron.
 const DISCLOSURE_WIDTH: f32 = 20.0;
 pub(crate) const MEASURE: f32 = 700.0;
@@ -321,6 +335,10 @@ enum SlashAction {
     Image,
     /// A 3 × 3 table.
     Table,
+    /// `[[`: pick a note to link.
+    LinkNote,
+    /// `@`: pick a session or a note to mention.
+    Mention,
 }
 
 #[derive(Clone, Copy)]
@@ -440,7 +458,38 @@ const SLASH_ITEMS: &[SlashItem] = &[
         group: 3,
         keywords: "image picture photo screenshot upload",
     },
+    SlashItem {
+        label: "Link to note",
+        icon: "link",
+        keys: None,
+        action: SlashAction::LinkNote,
+        group: 4,
+        keywords: "link note page wiki backlink reference [[",
+    },
+    SlashItem {
+        label: "Mention",
+        icon: "doc.text",
+        keys: None,
+        action: SlashAction::Mention,
+        group: 4,
+        keywords: "mention session agent note person at @",
+    },
 ];
+
+/// The `/` menu's rows for `query` (what follows the `/`), in menu order:
+/// a label containing the query, or a keyword starting with it.
+fn slash_filter(query: &str) -> Vec<SlashItem> {
+    let query = query.trim().to_lowercase();
+    SLASH_ITEMS
+        .iter()
+        .filter(|item| {
+            query.is_empty()
+                || item.label.to_lowercase().contains(&query)
+                || item.keywords.split(' ').any(|k| k.starts_with(&query))
+        })
+        .copied()
+        .collect()
+}
 
 struct SlashMenu {
     block_id: u64,
@@ -476,6 +525,12 @@ pub(crate) struct NoteEditorView {
     mention: Option<MentionMenu>,
     link_editor: Option<LinkEditor>,
     table_menu: Option<TableMenu>,
+    /// The menu opened from a block's grip.
+    block_menu: Option<BlockMenu>,
+    /// The block whose grip is being dragged.
+    dragging: Option<u64>,
+    /// Shown under the note's last block: its backlinks.
+    footer: Option<gpui::AnyView>,
     /// Each table's sideways scroll, by its first cell's id.
     table_scrolls: std::cell::RefCell<std::collections::HashMap<u64, ScrollHandle>>,
     mentions: Rc<MentionDirectory>,
@@ -534,6 +589,9 @@ impl NoteEditorView {
             mention: None,
             link_editor: None,
             table_menu: None,
+            block_menu: None,
+            dragging: None,
+            footer: None,
             table_scrolls: Default::default(),
             mentions: Rc::default(),
             assets: None,
@@ -556,6 +614,9 @@ impl NoteEditorView {
     /// hop right by the `/`'s width) and move as the query is typed. The
     /// trigger's start is the same in last frame's layout and this one.
     fn trigger_anchor(&self) -> Option<Bounds<Pixels>> {
+        if self.block_menu.is_some() {
+            return self.block_menu_anchor();
+        }
         let (block_id, offset) = if let Some(menu) = &self.slash {
             (menu.block_id, menu.slash)
         } else if let Some(menu) = &self.mention {
@@ -577,6 +638,16 @@ impl NoteEditorView {
 
     pub(crate) fn set_colors(&mut self, colors: SemanticColors) {
         self.colors = colors;
+    }
+
+    /// A view shown under the note's last block (the backlinks).
+    pub(crate) fn set_footer(&mut self, footer: Option<gpui::AnyView>) {
+        self.footer = footer;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_footer_for_test(&self) -> bool {
+        self.footer.is_some()
     }
 
     #[cfg(test)]
@@ -939,16 +1010,7 @@ impl NoteEditorView {
     }
 
     fn slash_matches(&self) -> Vec<SlashItem> {
-        let query = self.slash_query();
-        SLASH_ITEMS
-            .iter()
-            .filter(|item| {
-                query.is_empty()
-                    || item.label.to_lowercase().contains(&query)
-                    || item.keywords.split(' ').any(|k| k.starts_with(&query))
-            })
-            .copied()
-            .collect()
+        slash_filter(&self.slash_query())
     }
 
     fn maybe_open_slash(&mut self) {
@@ -1002,6 +1064,14 @@ impl NoteEditorView {
             SlashAction::Table => {
                 self.editor.insert_empty_table(3, 3, now);
                 crate::telemetry::notes_event("notes.table.inserted", "slash");
+            }
+            SlashAction::LinkNote => {
+                self.editor.insert_text("[[", now);
+                self.open_mention_menu(true);
+            }
+            SlashAction::Mention => {
+                self.editor.insert_text("@", now);
+                self.open_mention_menu(false);
             }
         }
         self.edited(cx);
@@ -1091,10 +1161,11 @@ impl NoteEditorView {
         let Some(menu) = &self.mention else { return };
         let head = self.editor.selection.head;
         let block = self.editor.block(head.block);
+        let trigger = menu.trigger();
         let valid = self.editor.selection.is_collapsed()
             && block.id == menu.block_id
-            && head.offset > menu.at
-            && block.text.get(menu.at..menu.at + 1) == Some("@")
+            && head.offset >= menu.at + trigger.len()
+            && block.text.get(menu.at..menu.at + trigger.len()) == Some(trigger)
             // Typing into an existing chip is editing, not mentioning.
             && mention::at(block, menu.at + 1, false).is_none();
         if !valid {
@@ -1121,12 +1192,18 @@ impl NoteEditorView {
             return String::new();
         };
         let head = self.editor.selection.head;
-        self.editor
+        let query = self
+            .editor
             .block(head.block)
             .text
-            .get(menu.at + 1..head.offset)
-            .unwrap_or_default()
-            .to_owned()
+            .get(menu.at + menu.trigger().len()..head.offset)
+            .unwrap_or_default();
+        // `[[Title]]` typed out whole still matches its note.
+        if menu.notes_only {
+            query.trim_end_matches(']').to_owned()
+        } else {
+            query.to_owned()
+        }
     }
 
     #[cfg(test)]
@@ -1135,7 +1212,13 @@ impl NoteEditorView {
     }
 
     pub(super) fn mention_matches(&self) -> Vec<MentionEntry> {
-        let candidates = self.mentions.candidates();
+        let notes_only = self.mention.as_ref().is_some_and(|m| m.notes_only);
+        let candidates: Vec<Candidate> = self
+            .mentions
+            .candidates()
+            .into_iter()
+            .filter(|c| !notes_only || matches!(c.target, MentionTarget::Note(_)))
+            .collect();
         mention::rank(&self.mention_query(), &candidates, MENTION_LIMIT)
             .into_iter()
             .filter_map(|c| self.mentions.find(&c.target).cloned())
@@ -1161,6 +1244,41 @@ impl NoteEditorView {
             block_id: block.id,
             at,
             selected: 0,
+            notes_only: false,
+        });
+    }
+
+    /// `[[` typed: the same menu, offering notes to link.
+    fn maybe_open_note_link(&mut self) {
+        let head = self.editor.selection.head;
+        let block = self.editor.block(head.block);
+        if matches!(block.kind, BlockKind::Title | BlockKind::Code) || head.offset < 2 {
+            return;
+        }
+        let at = head.offset - 2;
+        if block.text.get(at..head.offset) != Some("[[") {
+            return;
+        }
+        let before = block.text[..at].chars().next_back();
+        if before.is_some_and(|c| !c.is_whitespace() && !"([{\"'".contains(c)) {
+            return;
+        }
+        self.open_mention_menu(true);
+    }
+
+    /// Opens the mention menu on the trigger just before the caret.
+    fn open_mention_menu(&mut self, notes_only: bool) {
+        let head = self.editor.selection.head;
+        let trigger = if notes_only { 2 } else { 1 };
+        if head.offset < trigger {
+            return;
+        }
+        self.slash = None;
+        self.mention = Some(MentionMenu {
+            block_id: self.editor.block(head.block).id,
+            at: head.offset - trigger,
+            selected: 0,
+            notes_only,
         });
     }
 
@@ -1182,9 +1300,10 @@ impl NoteEditorView {
         );
         crate::telemetry::notes_event(
             "notes.mention.inserted",
-            match entry.candidate.target {
-                MentionTarget::Session(_) => "session",
-                MentionTarget::Note(_) => "note",
+            match (&entry.candidate.target, menu.notes_only) {
+                (MentionTarget::Session(_), _) => "session",
+                (MentionTarget::Note(_), false) => "note",
+                (MentionTarget::Note(_), true) => "note_link",
             },
         );
         self.edited(cx);
@@ -1855,6 +1974,7 @@ impl NoteEditorView {
             || self.mention.take().is_some()
             || self.link_editor.take().is_some()
             || self.table_menu.take().is_some()
+            || self.block_menu.take().is_some()
         {
             cx.notify();
             return;
@@ -1980,8 +2100,12 @@ impl NoteEditorView {
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.selecting = false;
+        // A grip let go anywhere but on a block moves nothing.
+        if self.dragging.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn link_at(&self, pos: Pos) -> Option<String> {
@@ -2109,6 +2233,9 @@ impl EntityInputHandler for NoteEditorView {
         }
         if text == "@" && !was_mention_open && !was_slash_open {
             self.maybe_open_mention();
+        }
+        if text == "[" && !was_mention_open && !was_slash_open {
+            self.maybe_open_note_link();
         }
         self.edited(cx);
     }
@@ -2322,8 +2449,10 @@ fn placeholder(kind: BlockKind, only_block: bool) -> &'static str {
         BlockKind::Quote => "Quote",
         BlockKind::Code => "Code",
         BlockKind::Callout(tone) => tone.label(),
-        BlockKind::Paragraph if only_block => "Start writing. Type / for blocks, @ to mention",
-        _ => "Type / for blocks, @ to mention",
+        BlockKind::Paragraph if only_block => {
+            "Start writing. Type / for commands, @ to mention, [[ to link a note"
+        }
+        _ => "Type / for commands, @ to mention",
     }
 }
 
@@ -2471,6 +2600,7 @@ impl Render for NoteEditorView {
             .retain(|(_, at)| at.elapsed() < Duration::from_millis(600));
 
         self.anchor_work_menu();
+        self.place_block_menu();
         self.image_rects.borrow_mut().clear();
         let mut layouts = Vec::with_capacity(self.editor.blocks().len());
         let mut shown_all = Vec::with_capacity(self.editor.blocks().len());
@@ -2720,6 +2850,22 @@ impl Render for NoteEditorView {
                     )
                 }
                 _ => row.child(content),
+            };
+            // The handle in the gutter, and where a dragged block would land.
+            let row = if !folded_away && index > 0 {
+                let gutter = if self.editor.has_children(index) {
+                    indent - DISCLOSURE_WIDTH
+                } else {
+                    indent
+                };
+                let target = block.id;
+                row.child(self.block_handle(index, gutter, look.top, look.line, group.clone(), cx))
+                    .children(self.drop_line(index, group.clone()))
+                    .on_drop(cx.listener(move |this, drag: &BlockDrag, _, cx| {
+                        this.drop_block(drag.block_id, target, cx);
+                    }))
+            } else {
+                row
             };
             let id = block.id;
             let heights = Rc::clone(&heights);
@@ -2989,7 +3135,28 @@ impl Render for NoteEditorView {
         } else {
             None
         };
+        let block_menu = if self.block_menu.is_some() {
+            let height = self.block_menu_height();
+            self.host_menu(
+                BLOCK_MENU,
+                Self::block_menu_rows,
+                Self::block_menu_width(),
+                height,
+                window,
+                cx,
+            )
+        } else {
+            None
+        };
         let work_menu = self.work_menu(window, cx);
+        let footer = self.footer.clone().map(|footer| {
+            div()
+                .w_full()
+                .max_w(px(MEASURE))
+                .mt(px(56.0))
+                .cursor_default()
+                .child(footer)
+        });
 
         div()
             .id("note-editor")
@@ -3085,8 +3252,9 @@ impl Render for NoteEditorView {
                         div()
                             .w_full()
                             .flex()
-                            .justify_center()
-                            .px(px(48.0))
+                            .flex_col()
+                            .items_center()
+                            .px(px(PAGE_SIDE))
                             .pt(px(PAGE_TOP))
                             .pb(px(240.0))
                             .child(
@@ -3097,7 +3265,8 @@ impl Render for NoteEditorView {
                                     .child(chip_backdrop)
                                     .child(column)
                                     .child(overlay),
-                            ),
+                            )
+                            .children(footer),
                     ),
             )
             .children(slash_menu)
@@ -3105,6 +3274,7 @@ impl Render for NoteEditorView {
             .children(work_menu)
             .children(link_menu)
             .children(table_menu)
+            .children(block_menu)
     }
 }
 
@@ -3660,11 +3830,12 @@ impl NoteEditorView {
         let matches = self.mention_matches();
         let mut list = div().flex().flex_col().py(px(floating::MENU_PADDING_Y));
         if matches.is_empty() {
+            let notes_only = self.mention.as_ref().is_some_and(|m| m.notes_only);
             list = list.child(menu_empty(
-                if self.mentions.entries.is_empty() {
-                    "No sessions or notes to mention"
-                } else {
-                    "No matching sessions or notes"
+                match (notes_only, self.mentions.entries.is_empty()) {
+                    (true, _) => "No matching notes",
+                    (false, true) => "No sessions or notes to mention",
+                    (false, false) => "No matching sessions or notes",
                 },
                 colors,
             ));

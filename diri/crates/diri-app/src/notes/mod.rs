@@ -7,8 +7,12 @@
 //! (via `diri_notes::store`), saves continuously, keeps the Session's title in
 //! step with the note's, and reloads writes made by the CLI or agents.
 
+pub(crate) mod backlinks;
 pub(crate) mod chip;
 pub(crate) mod editor_view;
+pub(crate) mod graph;
+#[cfg(test)]
+mod links_tests;
 pub(crate) mod search;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -81,6 +85,14 @@ pub(crate) struct NotePane {
     error: Option<SharedString>,
     /// The open note's Version History panel, while it is shown.
     versions: Option<versions::VersionPanel>,
+    /// The open note's linked and unlinked mentions, shown under it.
+    backlinks: Option<(Entity<backlinks::BacklinksView>, Subscription)>,
+    /// The notes graph, while it is shown over the note.
+    graph: Option<Entity<graph::NoteGraphView>>,
+    /// A note to put the caret in once it is shown: (note id, block), from a
+    /// backlink or the graph.
+    pending_reveal: Option<(String, usize)>,
+
     /// Fixture palette; live panes follow the store's theme.
     colors_override: Option<SemanticColors>,
     /// Prompts Start sent to mentioned sessions, for tests.
@@ -90,6 +102,9 @@ pub(crate) struct NotePane {
 
 impl Focusable for NotePane {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if let Some(graph) = &self.graph {
+            return graph.read(cx).focus_handle(cx);
+        }
         match &self.state {
             PaneState::Open(open) => open.editor.read(cx).focus_handle(cx),
             _ => self.focus.clone(),
@@ -150,6 +165,10 @@ impl NotePane {
             _sessions_task: sessions_task,
             error: None,
             versions: None,
+            backlinks: None,
+            graph: None,
+            pending_reveal: None,
+
             colors_override: None,
             #[cfg(test)]
             sent_for_test: Vec::new(),
@@ -191,6 +210,18 @@ impl NotePane {
         if !same {
             self.save(cx);
             self.load(session, note_id, window, cx);
+        }
+        if let Some(graph) = &self.graph {
+            graph.update(cx, |graph, cx| graph.set_center(note_id, cx));
+        }
+        if self
+            .pending_reveal
+            .as_ref()
+            .is_some_and(|(id, _)| id == note_id)
+            && let Some((_, block)) = self.pending_reveal.take()
+        {
+            self.reveal_block(block, window, cx);
+            return;
         }
         // Arrived from a session's header: show the to-do it works on.
         let reveal = self
@@ -247,6 +278,7 @@ impl NotePane {
             .and_then(|store| store.path_for(note_id).ok())
             .and_then(|path| std::fs::read_to_string(path).ok());
         let Some(source) = source else {
+            self.backlinks = None;
             self.state = PaneState::Missing {
                 session: session.clone(),
                 id: note_id.to_owned(),
@@ -268,20 +300,36 @@ impl NotePane {
             view.fold_started_work();
             view
         });
-        let subscription = cx.subscribe_in(&editor, window, |this, _, event, _, cx| match event {
-            EditorEvent::Changed => this.schedule_save(cx),
-            EditorEvent::Dismiss => {
-                // Escape closes the history panel before it leaves the note.
-                if this.versions_open() {
-                    this.close_versions(cx);
-                    return;
-                }
-                this.save(cx);
-                cx.emit(NotePaneEvent::Dismiss);
-            }
-            EditorEvent::OpenMention(target) => this.open_mention(target, cx),
-            EditorEvent::Work(request) => this.on_work(request, cx),
+        let model = todos::TodosModel::global(&self.runtime, cx);
+        // The links index is read off the main thread; make sure a first
+        // read is under way (a no-op when it is current).
+        model.update(cx, |model, cx| model.sync(cx));
+        let footer =
+            cx.new(|cx| backlinks::BacklinksView::new(model, note_id.to_owned(), colors, cx));
+        let footer_subscription = cx.subscribe_in(&footer, window, |this, _, event, window, cx| {
+            this.on_backlinks(event, window, cx)
         });
+        editor.update(cx, |view, _| view.set_footer(Some(footer.clone().into())));
+        let subscription =
+            cx.subscribe_in(&editor, window, |this, _, event, window, cx| match event {
+                EditorEvent::Changed => this.schedule_save(cx),
+                EditorEvent::Dismiss => {
+                    // Escape closes the graph, then the history panel, before it
+                    // leaves the note.
+                    if this.graph.is_some() {
+                        this.close_graph(window, cx);
+                        return;
+                    }
+                    if this.versions_open() {
+                        this.close_versions(cx);
+                        return;
+                    }
+                    this.save(cx);
+                    cx.emit(NotePaneEvent::Dismiss);
+                }
+                EditorEvent::OpenMention(target) => this.open_mention(target, cx),
+                EditorEvent::Work(request) => this.on_work(request, cx),
+            });
         let synced_title = self
             .runtime
             .store
@@ -303,6 +351,7 @@ impl NotePane {
             resave: false,
             _subscription: subscription,
         });
+        self.backlinks = Some((footer, footer_subscription));
         self.push_mentions(cx);
         self.push_work(cx);
         cx.notify();
@@ -369,6 +418,154 @@ impl NotePane {
         if let Some(session) = session {
             self.save(cx);
             cx.emit(NotePaneEvent::Reveal(session));
+        }
+    }
+
+    /// Opens a note by its file id, with the caret on `block` once shown.
+    fn open_note_at(&mut self, note_id: &str, block: Option<usize>, cx: &mut Context<Self>) {
+        if let PaneState::Open(open) = &self.state
+            && open.id == note_id
+        {
+            return;
+        }
+        self.pending_reveal = block.map(|block| (note_id.to_owned(), block));
+        self.open_mention(&MentionTarget::Note(note_id.to_owned()), cx);
+    }
+
+    fn on_backlinks(
+        &mut self,
+        event: &backlinks::BacklinksEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            backlinks::BacklinksEvent::Open { note_id, block } => {
+                crate::telemetry::notes_event("notes.backlink.opened", "");
+                self.open_note_at(note_id, Some(*block), cx);
+            }
+            backlinks::BacklinksEvent::Link(reference) => self.link_unlinked(reference, cx),
+            backlinks::BacklinksEvent::ShowGraph => {
+                self.show_graph(graph::Scope::Local, window, cx)
+            }
+        }
+    }
+
+    /// Links an unlinked mention of the open note, in the other note's file,
+    /// through the locked store path (so an editor open on it merges it).
+    pub(crate) fn link_unlinked(
+        &mut self,
+        reference: &diri_notes::backlinks::Reference,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(store), PaneState::Open(open)) = (self.store.clone(), &self.state) else {
+            return;
+        };
+        let target = open.id.clone();
+        let footer = self.backlinks.as_ref().map(|(footer, _)| footer.clone());
+        let expected = reference
+            .context
+            .get(reference.mention.clone())
+            .unwrap_or_default()
+            .to_owned();
+        let linked = store.update(
+            &reference.source,
+            &diri_notes::history::Author::User,
+            |note| {
+                Ok(diri_notes::backlinks::link_mention(
+                    &mut note.doc,
+                    reference.block,
+                    reference.range.clone(),
+                    &expected,
+                    &target,
+                ))
+            },
+        );
+        match linked {
+            Ok((_, true)) => {
+                crate::telemetry::notes_event("notes.backlink.linked", "");
+                if let Some(footer) = footer {
+                    footer.update(cx, |view, cx| view.forget_unlinked(reference, cx));
+                }
+                todos::TodosModel::global(&self.runtime, cx)
+                    .update(cx, |model, cx| model.mark_dirty(cx));
+            }
+            Ok((_, false)) => {}
+            Err(err) => {
+                self.error = Some(format!("Couldn't link that mention: {err}").into());
+                cx.notify();
+            }
+        }
+    }
+
+    /// The Graph view command: shows the open note's neighbourhood, or
+    /// closes the graph when it is open.
+    pub(crate) fn toggle_graph(
+        &mut self,
+        _: &crate::commands::NoteGraph,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.graph.is_some() {
+            self.close_graph(window, cx);
+        } else {
+            self.show_graph(graph::Scope::Local, window, cx);
+        }
+    }
+
+    pub(crate) fn show_graph(
+        &mut self,
+        scope: graph::Scope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let PaneState::Open(open) = &self.state else {
+            return;
+        };
+        if let Some(graph) = &self.graph {
+            graph.update(cx, |graph, cx| graph.set_scope(scope, cx));
+            return;
+        }
+        let center = open.id.clone();
+        // The graph reads the saved notes: pending typing goes first.
+        self.save(cx);
+        let model = todos::TodosModel::global(&self.runtime, cx);
+        model.update(cx, |model, cx| model.sync(cx));
+        let colors = self.colors();
+        let view = cx.new(|cx| graph::NoteGraphView::new(model, center, scope, colors, cx));
+        cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
+            graph::GraphEvent::Open(note_id) => {
+                crate::telemetry::notes_event("notes.graph.opened_note", "");
+                this.close_graph(window, cx);
+                this.open_note_at(note_id, None, cx);
+            }
+            graph::GraphEvent::Close => this.close_graph(window, cx),
+        })
+        .detach();
+        crate::telemetry::notes_event("notes.graph.shown", "");
+        let handle = view.read(cx).focus_handle(cx);
+        self.graph = Some(view);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.graph.take().is_some() {
+            let handle = self.focus_handle(cx);
+            window.focus(&handle, cx);
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn graph_for_test(&self) -> Option<Entity<graph::NoteGraphView>> {
+        self.graph.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn backlinks_for_test(&self) -> Option<Entity<backlinks::BacklinksView>> {
+        match &self.state {
+            PaneState::Open(_) => self.backlinks.as_ref().map(|(footer, _)| footer.clone()),
+            _ => None,
         }
     }
 
@@ -658,11 +855,15 @@ impl Render for NotePane {
             .relative()
             .size_full()
             .on_action(cx.listener(Self::open_versions))
+            .on_action(cx.listener(Self::toggle_graph))
             .bg(colors.work_surface_nested())
             .font_family(crate::fonts::ui_family());
         let root = match &self.state {
             PaneState::Open(open) => {
                 open.editor.update(cx, |view, _| view.set_colors(colors));
+                if let Some((footer, _)) = &self.backlinks {
+                    footer.update(cx, |view, _| view.set_colors(colors));
+                }
                 root.child(open.editor.clone())
             }
             PaneState::Missing { .. } => root.track_focus(&self.focus).child(
@@ -684,6 +885,13 @@ impl Render for NotePane {
                     )),
             ),
             PaneState::Empty => root.track_focus(&self.focus),
+        };
+        let root = match &self.graph {
+            Some(graph) => {
+                graph.update(cx, |graph, _| graph.set_colors(colors));
+                root.child(div().absolute().inset_0().child(graph.clone()))
+            }
+            None => root,
         };
         let root = root.when_some(versions, |el, panel| el.child(panel));
         root.when_some(self.error.clone(), |el, error| {

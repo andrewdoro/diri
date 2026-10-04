@@ -4,6 +4,7 @@
 //! share one model, one file format, and one store. The app edits
 //! [`doc::Document`] values; everything else is conversion at the file edge.
 
+pub mod backlinks;
 pub mod doc;
 pub mod edit;
 pub mod handoff;

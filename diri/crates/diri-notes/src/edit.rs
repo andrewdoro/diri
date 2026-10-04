@@ -16,6 +16,7 @@ use crate::doc::{Block, BlockKind, Document, MAX_INDENT, Mark, Style, floor_boun
 use crate::markdown;
 use crate::mention::{self, MentionTarget};
 
+mod blocks;
 mod table;
 pub use table::{RowsSource, TablePos, parse_rows};
 

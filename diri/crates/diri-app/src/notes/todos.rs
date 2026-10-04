@@ -62,6 +62,9 @@ pub(crate) struct TodosModel {
     /// Every note in the folder, for "Search notes": built in the same
     /// off-thread pass as the to-dos, reusing unchanged files.
     notes: Arc<Vec<super::search::NoteEntry>>,
+    /// Links between notes, kept current in the same pass: a write re-links
+    /// only the note it changed.
+    links: Arc<diri_notes::backlinks::LinkIndex>,
     /// The index has been built at least once.
     notes_ready: bool,
     signature: Vec<(SessionId, String)>,
@@ -119,6 +122,7 @@ impl TodosModel {
             store,
             groups: Vec::new(),
             notes: Arc::default(),
+            links: Arc::default(),
             notes_ready: false,
             signature: Vec::new(),
             dirty: true,
@@ -135,6 +139,22 @@ impl TodosModel {
     /// The notes index (live, archived and orphan files alike).
     pub(crate) fn notes(&self) -> Arc<Vec<super::search::NoteEntry>> {
         Arc::clone(&self.notes)
+    }
+
+    /// The backlinks index, as of the last read of the notes folder.
+    pub(crate) fn links(&self) -> Arc<diri_notes::backlinks::LinkIndex> {
+        Arc::clone(&self.links)
+    }
+
+    /// Tests and fixtures set the links directly.
+    #[cfg(test)]
+    pub(crate) fn set_links_for_test(
+        &mut self,
+        links: diri_notes::backlinks::LinkIndex,
+        cx: &mut Context<Self>,
+    ) {
+        self.links = Arc::new(links);
+        cx.notify();
     }
 
     /// Whether the index has been read at least once, for loading states.
@@ -170,17 +190,20 @@ impl TodosModel {
                 .collect()
         };
         let previous = Arc::clone(&self.notes);
+        let previous_links = Arc::clone(&self.links);
         self.refresh = cx.spawn(async move |this, cx| {
-            let (groups, notes) = cx
+            let (groups, notes, links) = cx
                 .background_executor()
                 .spawn(async move {
                     let groups = read_groups(&store, &records);
-                    let notes = super::search::build_index(&store, &previous);
-                    (groups, notes)
+                    let mut links = (*previous_links).clone();
+                    let notes = super::search::build_index_and_links(&store, &previous, &mut links);
+                    (groups, notes, links)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.notes = Arc::new(notes);
+                this.links = Arc::new(links);
                 this.notes_ready = true;
                 this.groups = groups;
                 cx.notify();

@@ -70,6 +70,38 @@ title, status, and whether the session is live. The agent then uses the tools
 it already has on those ids (`read_output`, `wait_for_agent`, `get_diff`,
 `list_children`). No new inspection tools are needed.
 
+## Links between notes and backlinks
+
+A link from one note to another is a note mention, `[@Title](diri://note/<id>)`:
+it names the note by its file id, so renaming a note keeps every link to it.
+In the editor, `[[` (or `/` → Link to note) opens the `@` menu limited to
+notes; agents write `[[Note title]]` or `[[Note title|shown words]]` in
+`create_note`, `write_note`, `edit_note` and `replace_section`, and the tools
+turn each into a mention before the note is stored (only in the blocks the
+write added or changed; the person's own text is never rewritten). A title
+that matches no single note stays as text and comes back in
+`unlinked_titles`.
+
+`diri_notes::backlinks::LinkIndex` answers "what links here". The app keeps
+it in the shared To-dos model, updated in the same off-thread pass as the
+search index: only files written since the last pass are re-read
+(`upsert`), deleted ones leave (`retain`). Nothing is parsed per frame.
+
+- **Under every note:** Linked mentions (each linking note, the words around
+  each link, the link lit; a click opens that note at that line) and, folded,
+  Unlinked mentions (notes that write this note's title as plain text, whole
+  words, outside links and code) with a Link button that turns the words
+  into a link in the other note's file.
+- **Graph view** (palette, or Graph under the backlinks): a force-directed
+  graph of the open note's neighbourhood (two links either way) or of every
+  note. The layout is seeded by note id, steps a bounded number of times per
+  frame and asks for frames only until it settles.
+- **Agents:** `read_note` returns `backlinks` (first 20, `backlinks_total`);
+  `note_links` returns outgoing links, backlinks, unlinked mentions and, with
+  `depth`, the neighbourhood graph; `list_notes {"links_to": ...}` finds every
+  note linking to one. The `diri:notes` skill tells agents to read relevant
+  linked notes and backlinks before starting and to link related notes.
+
 ## To-do ↔ session links
 
 A to-do that has been handed off carries its session as a trailing mention in

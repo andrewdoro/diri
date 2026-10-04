@@ -341,22 +341,27 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "list_notes",
-            "Find the person's Diri Notes (briefs, plans, to-do lists). Notes are kept by Diri, not in the project folder, so use this rather than searching files. Defaults to notes for your project; project:\"all\" lists every note, or pass a project folder. mentions:\"me\" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body. session_id is the note's sidebar Session.",
-            json!({"type":"object","properties":{"project":{"type":"string","minLength":1},"mentions":{"type":"string","minLength":1},"query":{"type":"string","minLength":1},"include_archived":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200}}}),
+            "Find the person's Diri Notes (briefs, plans, to-do lists). Notes are kept by Diri, not in the project folder, so use this rather than searching files. Defaults to notes for your project; project:\"all\" lists every note, or pass a project folder. mentions:\"me\" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body. links_to (a note's id or title) returns the notes that link to that note. session_id is the note's sidebar Session.",
+            json!({"type":"object","properties":{"project":{"type":"string","minLength":1},"mentions":{"type":"string","minLength":1},"query":{"type":"string","minLength":1},"links_to":{"type":"string","minLength":1},"include_archived":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200}}}),
         ),
         ToolDefinition::new(
             "read_note",
-            "Read one Diri note as Markdown. If you were started from a note, read note \"origin\" first: it is your brief. markdown is the note's canonical text (title first as a # line, tidy tables, normalised list markers): exactly what edit_note matches, so copy old_string from it. path is the note's .md file, which you may also edit with your own file tools; Diri keeps the change, a version before it, and the note's identity. Returns the text, its to-dos (block index, checked, linked sessions and their live status) and its @-mentions resolved to sessions or notes. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, part of a title, a note Session id, or \"origin\": the note you were started from (whoami shows it as origin_note).",
+            "Read one Diri note as Markdown. If you were started from a note, read note \"origin\" first: it is your brief. markdown is the note's canonical text (title first as a # line, tidy tables, normalised list markers): exactly what edit_note matches, so copy old_string from it. path is the note's .md file, which you may also edit with your own file tools; Diri keeps the change, a version before it, and the note's identity. Returns the text, its to-dos (block index, checked, linked sessions and their live status), its @-mentions resolved to sessions or notes, and its backlinks: other notes that link to this one, with the words around each link. Linked notes and backlinks are often the background a note was written against; read the relevant ones, and use note_links for the full picture. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, part of a title, a note Session id, or \"origin\": the note you were started from (whoami shows it as origin_note).",
             json!({"type":"object","properties":{"note":{"type":"string","minLength":1}},"required":["note"]}),
         ),
         ToolDefinition::new(
+            "note_links",
+            "How one Diri note connects to the others. links: the notes it links to. backlinks: every note linking to it, with the words around each link (backlinks_total counts them). unlinked_mentions: notes that write its title without linking it (unlinked:false skips them). depth (1-3) adds graph: the notes within that many links, either direction, and the links between them. Check backlinks before changing a note others depend on, and to find the plans, briefs and findings a note belongs to. note is an id, a title, part of a title, a note Session id, or \"origin\".",
+            json!({"type":"object","properties":{"note":{"type":"string","minLength":1},"unlinked":{"type":"boolean"},"depth":{"type":"integer","minimum":1,"maximum":3}},"required":["note"]}),
+        ),
+        ToolDefinition::new(
             "write_note",
-            "Add to a Diri note without rewriting it; never deletes the person's text. entry: one short line when something matters (a decision, a finding, a blocker, a result, a link), filed under your to-do (or the one you name) or in the note's Updates; keep entries sparing, no progress chatter. checked: tick a to-do, e.g. your own sub-tasks as you finish them (the to-do you were started from is the person's to tick). link_session: put a session's chip on a to-do. append: longer Markdown at the end, rarely needed. Pick the to-do by todo (its text or part of it) or todo_index (from read_note). Delegated agents may write only to the note they were started from or notes that mention them.",
+            "Add to a Diri note without rewriting it; never deletes the person's text. entry: one short line when something matters (a decision, a finding, a blocker, a result, a link), filed under your to-do (or the one you name) or in the note's Updates; keep entries sparing, no progress chatter. checked: tick a to-do, e.g. your own sub-tasks as you finish them (the to-do you were started from is the person's to tick). link_session: put a session's chip on a to-do. append: longer Markdown at the end, rarely needed. Pick the to-do by todo (its text or part of it) or todo_index (from read_note). Write [[Note title]] to link another note; it becomes a link by the note's id, so it survives renames. Delegated agents may write only to the note they were started from or notes that mention them.",
             json!({"type":"object","properties":{"note":{"type":"string","minLength":1},"entry":{"type":"string","minLength":1},"append":{"type":"string","minLength":1,"maxLength":65536},"todo":{"type":"string","minLength":1},"todo_index":{"type":"integer","minimum":0},"checked":{"type":"boolean"},"link_session":{"type":"string","minLength":1}},"required":["note"]}),
         ),
         ToolDefinition::new(
             "edit_note",
-            "Change a Diri note in place, like editing a Markdown file: old_string is exact text from read_note's markdown (title line included), new_string replaces it; an empty new_string deletes it. old_string must appear once unless replace_all. Use it when the person asks for a change, or to keep your own entries current (tick a table row, change \"Fix\" to \"Done\"); otherwise prefer write_note. Every version is kept, so the person can restore one. Returns the changed lines and the new version. Diri tidies the text after each change (tables are re-aligned); a table row still matches if only its spacing differs, and the reply says so. For anything else, copy the next old_string from the changed lines or a fresh read_note.",
+            "Change a Diri note in place, like editing a Markdown file: old_string is exact text from read_note's markdown (title line included), new_string replaces it; an empty new_string deletes it. old_string must appear once unless replace_all. Use it when the person asks for a change, or to keep your own entries current (tick a table row, change \"Fix\" to \"Done\"); otherwise prefer write_note. Every version is kept, so the person can restore one. Returns the changed lines and the new version. Diri tidies the text after each change (tables are re-aligned); a table row still matches if only its spacing differs, and the reply says so. For anything else, copy the next old_string from the changed lines or a fresh read_note. [[Note title]] in new_string links that note.",
             json!({"type":"object","properties":{"note":{"type":"string","minLength":1},"old_string":{"type":"string","minLength":1},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["note","old_string","new_string"]}),
         ),
         ToolDefinition::new(
@@ -366,7 +371,7 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "create_note",
-            "Write a new Diri note for the person, e.g. an explanation (\"how sign-in works\") or a write-up. markdown is rich Markdown: headings, lists, to-dos, links, quotes, code. It appears under you in the sidebar, in your project (or project, a folder); open:true shows it to the person right away. Use this for anything longer than a write_note entry.",
+            "Write a new Diri note for the person, e.g. an explanation (\"how sign-in works\") or a write-up. markdown is rich Markdown: headings, lists, to-dos, links, quotes, code. Link the notes it builds on or relates to by writing [[Note title]]: each becomes a link to that note (linked_notes lists them; unlinked_titles matched no single note), and the linked note shows this one among its backlinks. It appears under you in the sidebar, in your project (or project, a folder); open:true shows it to the person right away. Use this for anything longer than a write_note entry.",
             json!({"type":"object","properties":{"title":{"type":"string","minLength":1,"maxLength":200},"markdown":{"type":"string","maxLength":65536},"project":{"type":"string","minLength":1},"open":{"type":"boolean"}},"required":["title"]}),
         ),
         ToolDefinition::new(
@@ -749,6 +754,12 @@ mod tests {
         assert!(describe("report_to_parent").contains("one-paragraph result"));
         assert!(describe("create_note").contains("open:true"));
         assert!(describe("note_history").contains("only the person restores"));
+        // Agents link related notes and read backlinks for context.
+        assert!(describe("create_note").contains("[[Note title]]"));
+        assert!(describe("write_note").contains("[[Note title]]"));
+        assert!(describe("read_note").contains("backlinks"));
+        assert!(describe("note_links").contains("Check backlinks"));
+        assert!(describe("list_notes").contains("links_to"));
         // Plain language for people who are not developers.
         for name in [
             "list_notes",
@@ -758,6 +769,7 @@ mod tests {
             "note_history",
             "edit_note",
             "replace_section",
+            "note_links",
         ] {
             let text = describe(name).to_lowercase();
             for jargon in ["repo", "worktree", "branch", "commit"] {

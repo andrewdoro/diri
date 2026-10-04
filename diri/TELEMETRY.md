@@ -345,7 +345,7 @@ note ids.
 |---|---|---|---|
 | `notes.link_editor.opened` | info | | ⌘K panel use |
 | `notes.link.pasted` | info | `kind` (as `notes.link.set`) | bare links pasted, by tool family |
-| `notes.mention.inserted` | info | `kind` (`session`\|`note`) | `@` use |
+| `notes.mention.inserted` | info | `kind` (`session`\|`note`\|`note_link`) | `@` use; `note_link` is a `[[` link to a note |
 | `notes.fold.toggled` | info | `kind` (`chevron`\|`keyboard`) | folding by hand (not the to-do handoff's programmatic folds) |
 | `notes.link.set` | info | `kind` (`notion`\|`google`\|`linear`\|`hubspot`\|`figma`\|`slack`\|`github`\|`dashboard`\|`mention`\|`web`) | which tools people link, to decide which chips matter |
 | `notes.link.removed` | info | | links taken back out |
@@ -356,6 +356,13 @@ note ids.
 | `notes.table.pasted` | info | `kind` (`markdown`\|`tsv`\|`csv`) | tables pasted, and from where (Sheets/Excel/Numbers arrive as TSV) |
 | `notes.table.row_added` | info | | rows added (menu, ⌃⇧↑/↓, Tab in the last cell, Return in a cell) |
 | `notes.table.col_added` | info | | columns added (menu, ⌃⇧←/→, a wider paste) |
+| `notes.block.moved` | info | `kind` (`drag`) | blocks reordered by dragging their handle |
+| `notes.block.turned` | info | `kind` (`handle`) | kind changes from the block menu |
+| `notes.block.menu` | info | `kind` (`add`\|`duplicate`\|`up`\|`down`\|`delete`) | which block-menu actions people use |
+| `notes.backlink.opened` | info | | a backlink under a note followed to its note |
+| `notes.backlink.linked` | info | | an unlinked mention turned into a link |
+| `notes.graph.shown` | info | | graph view opened |
+| `notes.graph.opened_note` | info | | a note opened from the graph |
 | `notes.search.opened` | info | | Search notes page opened (⇧⌘F, ⌘K, To-dos header) |
 | `notes.search.result_opened` | info | `kind` (`live`\|`archived`\|`orphan`) | which notes people go back to, and whether archived and Session-less files matter |
 

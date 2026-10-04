@@ -8,7 +8,7 @@
     },
     {
       "description": "Work started from a Diri note, or writing to Diri notes: read the brief, record findings and results, tick to-dos, never delete the person's writing.",
-      "markdown": "# Working in Diri Notes\n\nDiri Notes are the person's plans, briefs, and to-do lists. People who are not developers read them, so write plainly.\n\n- If whoami shows origin_note, you were started from a note: read it first with read_note {\"note\":\"origin\"}. It is your brief.\n- As you find important things (a decision, a finding, a blocker, a result, a link), add one short entry with write_note {\"note\":\"origin\",\"entry\":\"...\"}: one or two plain sentences, no progress chatter, no logs or code dumps. It is filed under your to-do, or in the note's Updates.\n- Prefer adding. Change or remove existing text only when the person asks for it, or to keep your own entries current (tick a row, change \"Fix\" to \"Done\"): use edit_note, which works like editing a file (exact old text, new text), or replace_section for everything under a heading. Never silently delete the person's writing; every version is kept and the person can restore one.\n- Tick your own sub-tasks as you finish them (write_note with todo and checked:true). Leave the to-do you were started from unticked: the person reviews your work and ticks it.\n- Finish with a one-paragraph result: report_to_parent {\"status\":\"done\",\"summary\":\"...\"} is added to the note.\n- To explain something or hand over a longer write-up, use create_note: it makes a new note under you in the sidebar, and open:true shows it to the person.\n",
+      "markdown": "# Working in Diri Notes\n\nDiri Notes are the person's plans, briefs, and to-do lists. People who are not developers read them, so write plainly.\n\n- If whoami shows origin_note, you were started from a note: read it first with read_note {\"note\":\"origin\"}. It is your brief.\n- Notes link to each other. read_note lists a note's backlinks (the notes that link to it, with the words around each link) beside the notes it mentions. Before you start, read the linked notes and backlinks that look relevant: they hold the plan, the decisions, and the earlier findings your note builds on. note_links {\"note\":\"origin\"} shows the full picture, including notes that name it without linking; list_notes {\"links_to\":\"...\"} finds every note that links to one.\n- As you find important things (a decision, a finding, a blocker, a result, a link), add one short entry with write_note {\"note\":\"origin\",\"entry\":\"...\"}: one or two plain sentences, no progress chatter, no logs or code dumps. It is filed under your to-do, or in the note's Updates.\n- Prefer adding. Change or remove existing text only when the person asks for it, or to keep your own entries current (tick a row, change \"Fix\" to \"Done\"): use edit_note, which works like editing a file (exact old text, new text), or replace_section for everything under a heading. Never silently delete the person's writing; every version is kept and the person can restore one.\n- Tick your own sub-tasks as you finish them (write_note with todo and checked:true). Leave the to-do you were started from unticked: the person reviews your work and ticks it.\n- Finish with a one-paragraph result: report_to_parent {\"status\":\"done\",\"summary\":\"...\"} is added to the note.\n- To explain something or hand over a longer write-up, use create_note: it makes a new note under you in the sidebar, and open:true shows it to the person.\n- Link related notes. Write [[Note title]] in create_note, write_note, edit_note, or replace_section to link another note (for example, a write-up links the brief it answers, and an entry links the write-up). The link names the note by its id, so it survives renames, and the linked note lists yours among its backlinks. The reply's linked_notes says what was linked; unlinked_titles matched no single note, so check the title with list_notes or write [[<note id>]].\n",
       "name": "notes"
     },
     {
@@ -1097,7 +1097,7 @@
       "name": "whoami"
     },
     {
-      "description": "Find the person's Diri Notes (briefs, plans, to-do lists). Notes are kept by Diri, not in the project folder, so use this rather than searching files. Defaults to notes for your project; project:\"all\" lists every note, or pass a project folder. mentions:\"me\" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body. session_id is the note's sidebar Session.",
+      "description": "Find the person's Diri Notes (briefs, plans, to-do lists). Notes are kept by Diri, not in the project folder, so use this rather than searching files. Defaults to notes for your project; project:\"all\" lists every note, or pass a project folder. mentions:\"me\" returns notes that @-mention you or an ancestor that started you (mentioned_via says which). query filters title and body. links_to (a note's id or title) returns the notes that link to that note. session_id is the note's sidebar Session.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1108,6 +1108,10 @@
             "maximum": 200,
             "minimum": 1,
             "type": "integer"
+          },
+          "links_to": {
+            "minLength": 1,
+            "type": "string"
           },
           "mentions": {
             "minLength": 1,
@@ -1127,7 +1131,7 @@
       "name": "list_notes"
     },
     {
-      "description": "Read one Diri note as Markdown. If you were started from a note, read note \"origin\" first: it is your brief. markdown is the note's canonical text (title first as a # line, tidy tables, normalised list markers): exactly what edit_note matches, so copy old_string from it. path is the note's .md file, which you may also edit with your own file tools; Diri keeps the change, a version before it, and the note's identity. Returns the text, its to-dos (block index, checked, linked sessions and their live status) and its @-mentions resolved to sessions or notes. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, part of a title, a note Session id, or \"origin\": the note you were started from (whoami shows it as origin_note).",
+      "description": "Read one Diri note as Markdown. If you were started from a note, read note \"origin\" first: it is your brief. markdown is the note's canonical text (title first as a # line, tidy tables, normalised list markers): exactly what edit_note matches, so copy old_string from it. path is the note's .md file, which you may also edit with your own file tools; Diri keeps the change, a version before it, and the note's identity. Returns the text, its to-dos (block index, checked, linked sessions and their live status), its @-mentions resolved to sessions or notes, and its backlinks: other notes that link to this one, with the words around each link. Linked notes and backlinks are often the background a note was written against; read the relevant ones, and use note_links for the full picture. Mentioned sessions may be working on related things: inspect them with read_output/get_diff or wait on them with wait_for_agent. note is an id, a title, part of a title, a note Session id, or \"origin\": the note you were started from (whoami shows it as origin_note).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1144,7 +1148,32 @@
       "name": "read_note"
     },
     {
-      "description": "Add to a Diri note without rewriting it; never deletes the person's text. entry: one short line when something matters (a decision, a finding, a blocker, a result, a link), filed under your to-do (or the one you name) or in the note's Updates; keep entries sparing, no progress chatter. checked: tick a to-do, e.g. your own sub-tasks as you finish them (the to-do you were started from is the person's to tick). link_session: put a session's chip on a to-do. append: longer Markdown at the end, rarely needed. Pick the to-do by todo (its text or part of it) or todo_index (from read_note). Delegated agents may write only to the note they were started from or notes that mention them.",
+      "description": "How one Diri note connects to the others. links: the notes it links to. backlinks: every note linking to it, with the words around each link (backlinks_total counts them). unlinked_mentions: notes that write its title without linking it (unlinked:false skips them). depth (1-3) adds graph: the notes within that many links, either direction, and the links between them. Check backlinks before changing a note others depend on, and to find the plans, briefs and findings a note belongs to. note is an id, a title, part of a title, a note Session id, or \"origin\".",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "maximum": 3,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "note": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "unlinked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "note"
+        ],
+        "type": "object"
+      },
+      "name": "note_links"
+    },
+    {
+      "description": "Add to a Diri note without rewriting it; never deletes the person's text. entry: one short line when something matters (a decision, a finding, a blocker, a result, a link), filed under your to-do (or the one you name) or in the note's Updates; keep entries sparing, no progress chatter. checked: tick a to-do, e.g. your own sub-tasks as you finish them (the to-do you were started from is the person's to tick). link_session: put a session's chip on a to-do. append: longer Markdown at the end, rarely needed. Pick the to-do by todo (its text or part of it) or todo_index (from read_note). Write [[Note title]] to link another note; it becomes a link by the note's id, so it survives renames. Delegated agents may write only to the note they were started from or notes that mention them.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1185,7 +1214,7 @@
       "name": "write_note"
     },
     {
-      "description": "Change a Diri note in place, like editing a Markdown file: old_string is exact text from read_note's markdown (title line included), new_string replaces it; an empty new_string deletes it. old_string must appear once unless replace_all. Use it when the person asks for a change, or to keep your own entries current (tick a table row, change \"Fix\" to \"Done\"); otherwise prefer write_note. Every version is kept, so the person can restore one. Returns the changed lines and the new version. Diri tidies the text after each change (tables are re-aligned); a table row still matches if only its spacing differs, and the reply says so. For anything else, copy the next old_string from the changed lines or a fresh read_note.",
+      "description": "Change a Diri note in place, like editing a Markdown file: old_string is exact text from read_note's markdown (title line included), new_string replaces it; an empty new_string deletes it. old_string must appear once unless replace_all. Use it when the person asks for a change, or to keep your own entries current (tick a table row, change \"Fix\" to \"Done\"); otherwise prefer write_note. Every version is kept, so the person can restore one. Returns the changed lines and the new version. Diri tidies the text after each change (tables are re-aligned); a table row still matches if only its spacing differs, and the reply says so. For anything else, copy the next old_string from the changed lines or a fresh read_note. [[Note title]] in new_string links that note.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1241,7 +1270,7 @@
       "name": "replace_section"
     },
     {
-      "description": "Write a new Diri note for the person, e.g. an explanation (\"how sign-in works\") or a write-up. markdown is rich Markdown: headings, lists, to-dos, links, quotes, code. It appears under you in the sidebar, in your project (or project, a folder); open:true shows it to the person right away. Use this for anything longer than a write_note entry.",
+      "description": "Write a new Diri note for the person, e.g. an explanation (\"how sign-in works\") or a write-up. markdown is rich Markdown: headings, lists, to-dos, links, quotes, code. Link the notes it builds on or relates to by writing [[Note title]]: each becomes a link to that note (linked_notes lists them; unlinked_titles matched no single note), and the linked note shows this one among its backlinks. It appears under you in the sidebar, in your project (or project, a folder); open:true shows it to the person right away. Use this for anything longer than a write_note entry.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

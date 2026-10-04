@@ -137,6 +137,7 @@ fn read_only(message: &Value) -> bool {
                     | "summarize_children"
                     | "list_notes"
                     | "read_note"
+                    | "note_links"
             )
         )
 }
