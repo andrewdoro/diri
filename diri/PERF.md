@@ -2855,3 +2855,62 @@ cargo test --release -p diri-app --bin diri -- --ignored --nocapture \
 frames pixel for pixel against full renders under headless Metal, and
 `working_marks_advance_without_rendering_anything` asserts that a step
 renders no view.
+
+## Sidebar rows outside the viewport are not built (2026-10-04)
+
+**Where the time went.** Session rows are cached views (#517), but the list
+still mounted every row each sidebar render: props computed and compared, a
+view and its wrapper laid out, prepainted, and its cached ranges replayed. A
+notify the props cannot account for (`rows_stale`) re-rendered every row, and
+GPUI notifies the sidebar on every scroll-wheel step, so scrolling a long
+list rebuilt all of it per frame. Even a root-only frame replayed every row.
+
+**What changed.** The list walks its rows top to bottom with a content-space
+cursor (`sidebar/row_window.rs`, the idea of Ely GPUI's `VirtualList`) and
+builds only the rows within the viewport plus overscan (half a viewport,
+at least 240 px, each side). Each skipped run becomes one spacer of the same
+height, so the column lays out exactly as before and the scroll container,
+section lifts and shifts, disclosures, drops and edge fades are unchanged.
+Held rows are always built: selection, keyboard cursor, hover and its card,
+rename, delegation mark, rows a drag carries, and settling titles. Motion
+that moves rows off their walked slot (a disclosure, a section shift, a
+lifted project, a row growing in) builds every row while it runs. The
+keyboard reveals unbuilt rows from their walked slots.
+
+**How it was measured.** `sidebar_fleet_render_cost` (root.rs, ignored,
+macOS, headless Metal) now takes `DIRI_BENCH_PROJECTS` and has three more
+cases: `sidebar-notify` (a notify that stales every row), `scroll-step` (one
+wheel step: offset moved and the sidebar notified) and `full-refresh`
+(`window.refresh()`). Release build, 150 steps, 4 working sessions, 20
+projects, step median (render + layout + prepaint + paint):
+
+| Case | 50 sessions | 200 sessions | 1,000 sessions |
+| --- | ---: | ---: | ---: |
+| Scroll step | 2.67 → 2.51 ms | 5.83 → 2.93 ms | 32.75 → 5.28 ms |
+| Sidebar notify (rows stale) | 2.61 → 2.21 ms | 5.84 → 2.54 ms | 33.10 → 4.87 ms |
+| Full refresh | 2.92 → 2.59 ms | 6.28 → 2.82 ms | 34.52 → 6.20 ms |
+| Activity tick | 1.98 → 1.84 ms | 2.90 → 2.10 ms | 9.26 → 4.13 ms |
+| Store publication (nothing changed) | 1.93 → 1.84 ms | 2.90 → 2.22 ms | 9.94 → 4.16 ms |
+| Root-only frame | 0.36 → 0.33 ms | 0.79 → 0.43 ms | 3.69 → 2.24 ms |
+
+Rows built per stale step fell from 50 / 200 / 1,000 to 28 / 36 / 39. At a
+realistic 50 sessions the win is small; it grows with the list, and at 1,000
+sessions a scroll step goes from below 30 fps to well inside one frame.
+What remains at 1,000 is O(sessions) work outside the rows (projection,
+focus rows, the walk itself).
+
+**Visual checks.** `windowed_sidebar_rows_paint_like_every_row_built`
+captures 1,000 sessions scrolled into the middle with windowing on and off
+and requires identical pixels. Unit and GPUI tests in `row_window.rs` and
+`sidebar/view/windowing.rs` check that walked slots match painted bounds in
+both groupings (archives, collapsed projects, the preview fleet), that every
+row in view is built after scrolling, keyboard reveal of a never-built row,
+shift-click ranges across unbuilt rows, and a drag whose source scrolls out
+of view.
+
+```sh
+DIRI_BENCH_SESSIONS=1000 DIRI_BENCH_PROJECTS=20 DIRI_BENCH_ITERATIONS=150 \
+  cargo test --release -p diri-app --bin diri sidebar_fleet_render_cost -- --ignored --nocapture
+cargo test --release -p diri-app --bin diri -- --ignored --exact \
+  root::tests::windowed_sidebar_rows_paint_like_every_row_built
+```

@@ -6585,6 +6585,92 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Windowed rows paint exactly what building every row paints: 1,000
+    /// sessions over 20 projects, scrolled into the middle, captured with
+    /// only the rows near the viewport built and again with every row built.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "headless Metal pixel comparison; run explicitly on macOS"]
+    fn windowed_sidebar_rows_paint_like_every_row_built() {
+        use gpui::HeadlessAppContext;
+        let platform = gpui_platform::current_platform(true);
+        let mut cx = HeadlessAppContext::with_platform(
+            platform.text_system(),
+            Arc::new(diri_ui::IconAssets),
+            gpui_platform::current_headless_renderer,
+        );
+        cx.update(|cx| crate::fonts::init(cx));
+        let services = test_services();
+        services
+            .store
+            .store
+            .write()
+            .unwrap()
+            .hydrate(SidebarPreviewFixture::bench_fleet_across(1000, 0, 20).list);
+        services
+            .store
+            .store
+            .write()
+            .unwrap()
+            .update_preferences(|prefs| prefs.sidebar_visible = true)
+            .unwrap();
+        let window = cx
+            .open_window(size(px(1600.0), px(1000.0)), |window, cx| {
+                cx.new(|cx| RootView::new(services, false, PreviewScenario::Empty, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let root = cx
+            .update_window(window.into(), |root, _, _| {
+                root.downcast::<RootView>().unwrap()
+            })
+            .unwrap();
+        let sidebar = cx.update(|cx| root.read(cx).sidebar.clone());
+        // The scroll thumb fades in over wall-clock time; reduced motion shows
+        // it at once, so both captures agree on it.
+        cx.update(|cx| cx.set_reduce_motion(true));
+        cx.capture_screenshot(window.into()).unwrap();
+        let mut captures = Vec::new();
+        for windowing in [true, false] {
+            cx.update(|cx| {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_row_windowing_for_test(windowing, cx);
+                    sidebar.scroll_list_for_test(12_345.0, cx);
+                })
+            });
+            cx.run_until_parked();
+            // Edge fades and the new band settle over the next frames, which
+            // the headless window delivers only when asked.
+            for _ in 0..4 {
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.draw(cx).clear();
+                    window.simulate_next_frame(cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+            }
+            captures.push(cx.capture_screenshot(window.into()).unwrap());
+        }
+        let (windowed, everything) = (&captures[0], &captures[1]);
+        if let Ok(dir) = std::env::var("DIRI_VISUAL_OUTPUT_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            windowed.save(dir.join("sidebar-windowed.png")).unwrap();
+            everything.save(dir.join("sidebar-every-row.png")).unwrap();
+        }
+        assert_eq!(windowed.dimensions(), everything.dimensions());
+        let differing = windowed
+            .pixels()
+            .zip(everything.pixels())
+            .filter(|(left, right)| left != right)
+            .count();
+        assert_eq!(differing, 0, "windowed rows painted differently");
+        drop(root);
+        drop(sidebar);
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     /// Process CPU time (user + system) so far, for render-cost benches.
     #[cfg(target_os = "macos")]
     fn bench_cpu_seconds() -> f64 {
@@ -6653,12 +6739,16 @@ mod tests {
         diri_ui::set_mark_rasterizer(bench_stand_in_raster);
         let services = test_services();
         services.store.store.write().unwrap().hydrate(
-            SidebarPreviewFixture::bench_fleet(
+            SidebarPreviewFixture::bench_fleet_across(
                 std::env::var("DIRI_BENCH_SESSIONS")
                     .ok()
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(51),
                 4,
+                std::env::var("DIRI_BENCH_PROJECTS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(5),
             )
             .list,
         );
@@ -6694,9 +6784,17 @@ mod tests {
                 root.downcast::<RootView>().unwrap()
             })
             .unwrap();
-        let cases: [&str; 3] = ["activity-tick", "noop-store-change", "root-only-frame"];
+        let cases: [&str; 6] = [
+            "activity-tick",
+            "noop-store-change",
+            "root-only-frame",
+            "sidebar-notify",
+            "scroll-step",
+            "full-refresh",
+        ];
         for name in cases {
-            let step = |cx: &mut HeadlessAppContext| {
+            let mut scrolled = false;
+            let mut step = |cx: &mut HeadlessAppContext| {
                 let start = Instant::now();
                 cx.update(|cx| match name {
                     "activity-tick" => sidebar.update(cx, |sidebar, cx| {
@@ -6705,8 +6803,21 @@ mod tests {
                     "noop-store-change" => {
                         sidebar.update(cx, |sidebar, cx| sidebar.store_changed(cx))
                     }
+                    // A notify the props cannot account for: every row
+                    // renders again.
+                    "sidebar-notify" => sidebar.update(cx, |_, cx| cx.notify()),
+                    "scroll-step" => {
+                        scrolled = !scrolled;
+                        sidebar.update(cx, |sidebar, cx| {
+                            sidebar.scroll_list_for_test(if scrolled { 240.0 } else { 0.0 }, cx)
+                        })
+                    }
                     _ => root.update(cx, |_, cx| cx.notify()),
                 });
+                if name == "full-refresh" {
+                    cx.update_window(window.into(), |_, window, _| window.refresh())
+                        .unwrap();
+                }
                 cx.run_until_parked();
                 cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
                     .unwrap();
