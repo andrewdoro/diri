@@ -3750,7 +3750,7 @@ impl Sidebar {
         let non_persistent =
             session.remote_persistence == Some(PersistenceCapability::NonPersistent);
         // Read before the title moves into the marquee below.
-        let ended_chip = ended && title != ENDED_TITLE;
+        let ended_chip = ended && title != crate::i18n::t("nav.title.ended");
         let title_available_width = (session_title_available_width(
             width,
             row.depth,
@@ -8928,7 +8928,6 @@ fn icon_button(
 
 /// Title `display_title` gives a placeholder-named session that has exited.
 /// The "Ended" chip stands down when the title already says it.
-const ENDED_TITLE: &str = "Ended";
 
 /// One leading column per ancestor level. A column is drawn full height while
 /// that ancestor still has siblings below, and stops halfway on the last child
