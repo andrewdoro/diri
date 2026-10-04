@@ -3684,6 +3684,7 @@ impl NoteEditorView {
                 (Some(agent), _) => AgentLogo::new(agent, MENU_LOGO, colors)
                     .badged(false)
                     .inset(MENU_LOGO_INSET)
+                    .monochrome(true)
                     .into_any_element(),
                 (None, _) => crate::icons::sf_symbol("doc.text", MENU_ICON, colors.secondary),
             };

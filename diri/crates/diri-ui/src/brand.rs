@@ -234,6 +234,7 @@ pub struct AgentLogo {
     size: f32,
     badged: bool,
     inset: f32,
+    monochrome: bool,
     colors: SemanticColors,
 }
 
@@ -247,8 +248,16 @@ impl AgentLogo {
             size,
             badged: true,
             inset: BADGE_MARK_INSET,
+            monochrome: false,
             colors,
         }
+    }
+
+    /// Draw every kind in the one neutral ink instead of its brand color,
+    /// for lists of agents where color would single some out.
+    pub fn monochrome(mut self, monochrome: bool) -> Self {
+        self.monochrome = monochrome;
+        self
     }
 
     pub fn badged(mut self, badged: bool) -> Self {
@@ -269,6 +278,7 @@ impl RenderOnce for AgentLogo {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let mark_size = self.size * (1.0 - 2.0 * self.inset);
         let fill = match self.kind {
+            _ if self.monochrome => self.colors.primary.alpha(0.82),
             AgentKind::ClaudeCode => Palette::CLAY,
             AgentKind::Codex | AgentKind::Cursor => self.colors.primary.alpha(0.82),
             AgentKind::Gemini => Palette::GEMINI_BLUE,

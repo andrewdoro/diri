@@ -5553,7 +5553,8 @@ impl Sidebar {
                     .child(
                         AgentLogo::new(agent_kind, MENU_AGENT_LOGO, colors)
                             .badged(false)
-                            .inset(MENU_AGENT_LOGO_INSET),
+                            .inset(MENU_AGENT_LOGO_INSET)
+                            .monochrome(true),
                     ),
             )
             .child(
