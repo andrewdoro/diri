@@ -139,7 +139,7 @@ impl Sidebar {
             .id("horizontal-tab-project")
             .debug_selector(|| "horizontal-tab-project".into())
             .role(Role::Button)
-            .aria_label("Projects")
+            .aria_label(t("sidebar.projects.aria"))
             .relative()
             .size(px(26.0))
             .flex_none()
@@ -363,25 +363,48 @@ impl Sidebar {
             let content = div()
                 .id("project-picker-remote-unavailable")
                 .debug_selector(|| "project-picker-remote-unavailable".into())
-                .p(px(14.0)).flex().flex_col().gap(px(8.0))
-                .child(div().text_size(px(Typo::ROW.size)).text_color(colors.primary)
-                    .child("Remote host unavailable"))
-                .child(div().text_size(px(Typo::META.size)).text_color(colors.secondary)
-                    .child(format!("The saved host “{host}” is unavailable. Restore this host to start an agent in this project.")))
-                .child(div().id("project-picker-unavailable-dismiss")
-                    .debug_selector(|| "project-picker-unavailable-dismiss".into())
-                    .role(Role::Button).aria_label("Dismiss")
-                    .py(px(6.0)).px(px(9.0)).rounded(px(7.0)).cursor_pointer()
-                    .bg(colors.primary.alpha(0.06)).text_size(px(Typo::META.size)).text_color(colors.primary)
-                    .child("Dismiss")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.ui.popover = None;
-                        this.project_picker.new_agent = false;
-                        this.in_main_window(window, cx, |this, window, cx| {
-                            this.dismiss_project_picker(window, cx);
-                        });
-                        cx.stop_propagation();
-                    })));
+                .p(px(14.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(Typo::ROW.size))
+                        .text_color(colors.primary)
+                        .child(t("sidebar.projects.host_unavailable")),
+                )
+                .child(
+                    div()
+                        .text_size(px(Typo::META.size))
+                        .text_color(colors.secondary)
+                        .child(tf(
+                            "sidebar.projects.host_unavailable_detail",
+                            &[("host", &host)],
+                        )),
+                )
+                .child(
+                    div()
+                        .id("project-picker-unavailable-dismiss")
+                        .debug_selector(|| "project-picker-unavailable-dismiss".into())
+                        .role(Role::Button)
+                        .aria_label(t("sidebar.projects.dismiss"))
+                        .py(px(6.0))
+                        .px(px(9.0))
+                        .rounded(px(7.0))
+                        .cursor_pointer()
+                        .bg(colors.primary.alpha(0.06))
+                        .text_size(px(Typo::META.size))
+                        .text_color(colors.primary)
+                        .child(t("sidebar.projects.dismiss"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.ui.popover = None;
+                            this.project_picker.new_agent = false;
+                            this.in_main_window(window, cx, |this, window, cx| {
+                                this.dismiss_project_picker(window, cx);
+                            });
+                            cx.stop_propagation();
+                        })),
+                );
             return self.popover_shell_at(
                 self.new_agent_anchor
                     .unwrap_or_else(|| point(px(12.0), px(46.0))),
@@ -656,7 +679,7 @@ impl Sidebar {
         let query = if self.project_picker.query.is_empty() {
             div()
                 .text_color(colors.tertiary)
-                .child("Search projects…")
+                .child(t("sidebar.projects.search_placeholder"))
                 .into_any_element()
         } else {
             query_label(&self.project_picker.query)
@@ -670,7 +693,7 @@ impl Sidebar {
                     .id("project-picker-search")
                     .debug_selector(|| "project-picker-search".into())
                     .role(Role::TextInput)
-                    .aria_label("Search projects")
+                    .aria_label(t("sidebar.projects.search"))
                     .text_size(px(Typo::META.size))
                     .text_color(colors.primary)
                     .h(px(42.0))

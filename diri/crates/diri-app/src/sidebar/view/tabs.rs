@@ -548,7 +548,7 @@ impl Sidebar {
                     id.0
                 )))
                 .role(Role::Image)
-                .aria_label("Progress")
+                .aria_label(t("sidebar.tabs.progress"))
                 .children(progress_mark)
                 .into_any_element(),
             StatusState::IdleSeen | StatusState::None => div()
@@ -690,7 +690,7 @@ impl Sidebar {
                         close_id.0
                     )))
                     .role(Role::Button)
-                    .aria_label("Close session")
+                    .aria_label(t("session.close_session"))
                     .size(px(18.0))
                     .flex_none()
                     .flex()
@@ -939,7 +939,7 @@ impl Sidebar {
                 },
             ))
             .role(Role::TabList)
-            .aria_label("Project sessions")
+            .aria_label(t("sidebar.tabs.project_sessions"))
             .flex_none()
             .h(px(TAB_STRIP_HEIGHT))
             .w_full()
@@ -972,7 +972,7 @@ impl Sidebar {
                     .id("horizontal-peek-tabs")
                     .debug_selector(|| "horizontal-peek-tabs".into())
                     .role(Role::Button)
-                    .aria_label("Peek tabs")
+                    .aria_label(t("sidebar.tabs.peek"))
                     .size(px(28.0))
                     .flex_none()
                     .flex()
@@ -997,7 +997,7 @@ impl Sidebar {
                     .id("horizontal-new-tab")
                     .debug_selector(|| "horizontal-new-tab".into())
                     .role(Role::Button)
-                    .aria_label("New session")
+                    .aria_label(t("sidebar.tabs.new_session"))
                     .size(px(28.0))
                     .flex_none()
                     .flex()

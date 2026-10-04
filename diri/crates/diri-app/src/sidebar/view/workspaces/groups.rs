@@ -102,7 +102,10 @@ impl Sidebar {
                 move || key.clone()
             })
             .role(Role::Button)
-            .aria_label(format!("Workspace {}, {count} tabs", group.name))
+            .aria_label(tf(
+                "sidebar.workspace.heading",
+                &[("name", &group.name), ("count", &count)],
+            ))
             .h(px(32.0))
             .flex_none()
             .flex()
@@ -142,14 +145,13 @@ impl Sidebar {
                         move || key.clone()
                     })
                     .role(Role::Button)
-                    .aria_label(format!(
-                        "{} workspace {}",
+                    .aria_label(tf(
                         if group.collapsed {
-                            "Expand"
+                            "sidebar.workspace.expand"
                         } else {
-                            "Collapse"
+                            "sidebar.workspace.collapse"
                         },
-                        group.name
+                        &[("name", &group.name)],
                     ))
                     .aria_expanded(!group.collapsed)
                     .size(px(18.0))

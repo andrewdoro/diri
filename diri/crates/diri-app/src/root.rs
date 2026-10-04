@@ -63,6 +63,7 @@ use crate::commands::{
 use crate::commands::{TogglePerfOverlay, ToggleRenderCounters};
 use crate::external_drop::ExternalDropAction;
 use crate::haptics::{self, Haptic};
+use crate::i18n::{t, tf};
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::inspector::{BrowserAction, InspectorEvent, WorkbenchInspector};
 use crate::launcher::{LauncherEvent, LauncherOverlay};
@@ -629,7 +630,7 @@ impl RootView {
                     if !handled {
                         this.show_feedback(
                             "workspace",
-                            Toast::info("That target is gone. Open the palette to pick again."),
+                            Toast::info(t("window.toast.target_gone")),
                             cx,
                         );
                     }
@@ -1057,9 +1058,12 @@ impl RootView {
             cx.spawn(async move |this, cx| {
                 let _ = this.update(cx, |this, cx| {
                     this.show_toast(
-                        Toast::info("diri sends crash and error reports")
-                            .detail("Terminal contents never leave your Mac.")
-                            .action("Settings", ToastCommand::OpenPrivacySettings)
+                        Toast::info(t("window.toast.crash_reports"))
+                            .detail(t("window.toast.crash_reports_detail"))
+                            .action(
+                                t("window.toast.settings"),
+                                ToastCommand::OpenPrivacySettings,
+                            )
                             .hold(Duration::from_secs(20)),
                         cx,
                     );
@@ -1304,7 +1308,8 @@ impl RootView {
                                 this.workspace_error = Some(error.clone());
                                 this.show_feedback(
                                     "workspace_rejected",
-                                    Toast::error("Workspace change wasn’t saved").detail(error.1),
+                                    Toast::error(t("window.toast.workspace_not_saved"))
+                                        .detail(error.1),
                                     cx,
                                 );
                             }
@@ -1828,7 +1833,7 @@ impl RootView {
         if let Err(error) = result {
             self.show_feedback(
                 "prefs",
-                Toast::error("Couldn’t save the developer setting").detail(error.to_string()),
+                Toast::error(t("window.toast.developer_not_saved")).detail(error.to_string()),
                 cx,
             );
         }
@@ -2075,11 +2080,7 @@ impl RootView {
 
     fn quote_selection(&mut self, pick_target: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(quote) = self.selected_quote(window, cx) else {
-            self.show_feedback(
-                "quote",
-                Toast::info("Select text, a diff hunk or a Markdown turn to quote"),
-                cx,
-            );
+            self.show_feedback("quote", Toast::info(t("window.quote.nothing_selected")), cx);
             return;
         };
         if pick_target {
@@ -2088,7 +2089,7 @@ impl RootView {
                 .unwrap_or(self.last_quote_surface);
             let targets = self.quote_targets();
             if targets.is_empty() {
-                self.show_feedback("quote", Toast::info("Start an agent to quote into"), cx);
+                self.show_feedback("quote", Toast::info(t("window.quote.no_agents")), cx);
                 return;
             }
             let active = self.active_session_id(cx);
@@ -2109,7 +2110,7 @@ impl RootView {
         }
         let target = self.active_session_id(cx);
         let Some(target) = target else {
-            self.show_feedback("quote", Toast::info("Select an agent to quote into"), cx);
+            self.show_feedback("quote", Toast::info(t("window.quote.select_agent")), cx);
             return;
         };
         if !self
@@ -2117,11 +2118,7 @@ impl RootView {
             .iter()
             .any(|session| session.id == target)
         {
-            self.show_feedback(
-                "quote",
-                Toast::info("Quotes go to an agent, not a shell"),
-                cx,
-            );
+            self.show_feedback("quote", Toast::info(t("window.quote.not_shell")), cx);
             return;
         }
         self.open_quote_draft(target, quote, window, cx);
@@ -2142,15 +2139,11 @@ impl RootView {
             .get(&target)
             .cloned();
         let Some(target_record) = target_record else {
-            self.show_feedback("quote", Toast::info("That session no longer exists"), cx);
+            self.show_feedback("quote", Toast::info(t("window.quote.session_gone")), cx);
             return;
         };
         if !is_quote_target(&target_record) {
-            self.show_feedback(
-                "quote",
-                Toast::info("Quotes go to an agent, not a shell"),
-                cx,
-            );
+            self.show_feedback("quote", Toast::info(t("window.quote.not_shell")), cx);
             return;
         }
         let text = quote.framed();
@@ -2172,11 +2165,7 @@ impl RootView {
         // Resolve against the snapshot shown to the user. A concurrent store
         // reorder must never redirect a click to a different session.
         let Some(target) = quote_target_id(&picker.targets, index) else {
-            self.show_feedback(
-                "quote",
-                Toast::info("That session is gone. Pick another."),
-                cx,
-            );
+            self.show_feedback("quote", Toast::info(t("window.quote.pick_another")), cx);
             return;
         };
         self.open_quote_draft(target, picker.quote, window, cx);
@@ -2390,7 +2379,7 @@ impl RootView {
             } else {
                 self.show_feedback(
                     "workspace",
-                    Toast::info("Open a workspace to arrange its panes"),
+                    Toast::info(t("window.toast.open_workspace")),
                     cx,
                 );
             }
@@ -2526,7 +2515,8 @@ impl RootView {
                 }) {
                     self.show_feedback(
                         "prefs",
-                        Toast::error("Couldn’t save the tab layout").detail(error.to_string()),
+                        Toast::error(t("window.toast.tab_layout_not_saved"))
+                            .detail(error.to_string()),
                         cx,
                     );
                     return;
@@ -2550,7 +2540,7 @@ impl RootView {
                     {
                         self.show_feedback(
                             "prefs",
-                            Toast::error("Couldn’t save the tab bar setting")
+                            Toast::error(t("window.toast.tab_bar_not_saved"))
                                 .detail(error.to_string()),
                             cx,
                         );
@@ -2910,9 +2900,7 @@ impl RootView {
                 let Some(fresh) = fresh else {
                     this.show_feedback(
                         "fresh_worktree",
-                        Toast::warning(
-                            "No default branch found, so the Agent starts in this checkout",
-                        ),
+                        Toast::warning(t("window.toast.no_default_branch")),
                         cx,
                     );
                     if this.spawn_default() {
@@ -2936,14 +2924,17 @@ impl RootView {
                     });
                 if !fresh.fetched {
                     let message = if fresh.base.remote {
-                        format!(
-                            "Couldn't fetch {}; started from the last-fetched {}",
-                            fresh.base.branch, fresh.base.reference
+                        tf(
+                            "window.toast.fetch_failed",
+                            &[
+                                ("branch", &fresh.base.branch),
+                                ("reference", &fresh.base.reference),
+                            ],
                         )
                     } else {
-                        format!(
-                            "No remote default branch; started from local {}",
-                            fresh.base.reference
+                        tf(
+                            "window.toast.no_remote_default",
+                            &[("reference", &fresh.base.reference)],
                         )
                     };
                     this.show_feedback("fresh_worktree", Toast::info(message), cx);
@@ -4236,7 +4227,7 @@ impl RootView {
                     div()
                         .p(px(28.0))
                         .text_color(terminal.secondary)
-                        .child("Choose an agent from the sidebar, or start a New Agent"),
+                        .child(t("window.no_session_hint")),
                 );
             }
         } else if self.preview && self.preview_scenario != PreviewScenario::Empty {
@@ -4302,7 +4293,7 @@ impl RootView {
                         .bg(terminal.terminal_surface())
                         .text_size(px(12.0))
                         .text_color(terminal.secondary)
-                        .child("Opening terminal…"),
+                        .child(t("window.opening_terminal")),
                 );
             }
             if let Some(id) = self.auxiliary_id.clone() {
@@ -4476,8 +4467,8 @@ impl RootView {
             &title,
             Some(&message),
             &[
-                gpui::PromptButton::ok("Close"),
-                gpui::PromptButton::cancel("Cancel"),
+                gpui::PromptButton::ok(t("session.close.confirm")),
+                gpui::PromptButton::cancel(t("session.close.cancel")),
             ],
             cx,
         );
@@ -4558,7 +4549,7 @@ impl RootView {
                                         .text_size(px(Typo::ROW.size))
                                         .text_color(colors.secondary)
                                         .hover(move |button| button.bg(colors.primary.alpha(0.06)))
-                                        .child("Cancel")
+                                        .child(t("session.close.cancel"))
                                         .on_click({
                                             let sidebar = self.sidebar.clone();
                                             move |_, _, cx| {
@@ -4581,7 +4572,7 @@ impl RootView {
                                         .text_size(px(Typo::ROW.size))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(diri_ui::Ink::DANGER)
-                                        .child("Close")
+                                        .child(t("session.close.confirm"))
                                         .on_click({
                                             let sidebar = self.sidebar.clone();
                                             move |_, _, cx| {
@@ -4616,11 +4607,11 @@ impl RootView {
             let highlighted = index == picker.highlighted;
             let is_active = active.as_ref() == Some(&session.id);
             let detail = if session.hibernation.is_some() {
-                "Sleeping · stages without waking"
+                t("window.quote.target_sleeping")
             } else if is_active {
-                "Active session"
+                t("window.quote.target_active")
             } else {
-                "Keeps current session active"
+                t("window.quote.target_keeps")
             };
             rows = rows.child(
                 div()
@@ -4732,13 +4723,13 @@ impl RootView {
                                     .text_size(px(Typo::ROW.size))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(colors.primary)
-                                    .child("Quote into…"),
+                                    .child(t("window.quote.title")),
                             )
                             .child(
                                 div()
                                     .text_size(px(Typo::META.size))
                                     .text_color(colors.tertiary)
-                                    .child("↑↓ choose · Return stage · Esc cancel"),
+                                    .child(t("window.quote.keys")),
                             ),
                     )
                     .child(
@@ -10121,7 +10112,9 @@ mod tests {
                     .detail("Terminal contents never leave your Mac.")
                     .action("Settings", ToastCommand::OpenPrivacySettings)
             }),
-            ("error", || Toast::error("Workspace change wasn’t saved")),
+            ("error", || {
+                Toast::error(t("window.toast.workspace_not_saved"))
+            }),
             ("reconnect", || {
                 Toast::warning("Reconnected. Your last keystrokes may not have arrived.")
             }),
