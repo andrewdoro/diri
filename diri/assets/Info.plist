@@ -4,6 +4,11 @@
 <dict>
     <key>CFBundleDisplayName</key>
     <string>diri</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-Hans</string>
+    </array>
     <key>CFBundleIconName</key>
     <string>diri</string>
     <key>LSMinimumSystemVersion</key>

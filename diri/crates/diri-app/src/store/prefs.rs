@@ -697,6 +697,26 @@ mod tests {
     }
 
     #[test]
+    fn ui_language_persists_as_a_tag_and_unknown_tags_follow_the_system() {
+        let legacy: Prefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.ui_language, UiLanguage::System);
+        let chinese = Prefs {
+            ui_language: UiLanguage::Fixed(diri_i18n::Language::SimplifiedChinese),
+            ..Prefs::default()
+        };
+        let json = serde_json::to_value(&chinese).unwrap();
+        assert_eq!(json["uiLanguage"], "zh-Hans");
+        let restored: Prefs = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.ui_language, chinese.ui_language);
+        // A language a newer diri added reads as System here, not an error
+        // that would discard every other preference.
+        let newer: Prefs =
+            serde_json::from_str(r#"{"uiLanguage":"ja","statusSounds":false}"#).unwrap();
+        assert_eq!(newer.ui_language, UiLanguage::System);
+        assert!(!newer.status_sounds);
+    }
+
+    #[test]
     fn terminal_typography_defaults_round_trips_and_repairs() {
         let legacy: Prefs = serde_json::from_str(r#"{"terminalFontSize":14}"#).unwrap();
         assert_eq!(legacy.terminal_font_family, "");
