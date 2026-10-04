@@ -95,6 +95,7 @@ pub(crate) fn record(id: &str, kind: AgentKind) -> SessionRecord {
         listening_ports: None,
         foreground_agent: None,
         terminal_cwd: None,
+        agent_workspace: None,
         note_id: None,
         foreground_ports: None,
         terminal_progress: None,

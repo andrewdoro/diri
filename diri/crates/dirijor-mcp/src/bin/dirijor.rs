@@ -231,16 +231,35 @@ fn notify(arguments: &[String]) -> Result<(), CliError> {
 }
 
 /// The Engine reads `tool_input` only to summarize a permission request and
-/// never reads `tool_response`; every other hook sends neither, so a large
+/// to learn which file an applied edit changed, and never reads
+/// `tool_response`; every other hook sends neither, so a large
 /// Read/Write/Bash payload is not re-encoded, sent and parsed per callback.
+/// An edit keeps only its path: a Write's content never leaves the hook.
 fn forwarded_hook_payload(event: &str, mut payload: Value) -> Value {
     if let Some(object) = payload.as_object_mut() {
         object.remove("tool_response");
         if event != "PermissionRequest" {
+            let edited = (event == "PostToolUse")
+                .then(|| edited_file_input(object))
+                .flatten();
             object.remove("tool_input");
+            if let Some(edited) = edited {
+                object.insert("tool_input".into(), edited);
+            }
         }
     }
     payload
+}
+
+/// `{ "<key>": path }` for Claude's file-editing tools, else `None`.
+fn edited_file_input(object: &serde_json::Map<String, Value>) -> Option<Value> {
+    let key = match object.get("tool_name").and_then(Value::as_str)? {
+        "Edit" | "MultiEdit" | "Write" => "file_path",
+        "NotebookEdit" => "notebook_path",
+        _ => return None,
+    };
+    let path = object.get("tool_input")?.get(key)?.as_str()?;
+    (path.len() <= 4096).then(|| json!({ key: path }))
 }
 
 /// Records only lifecycle and identity fields before attempting delivery.
@@ -1742,6 +1761,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hooks_forward_only_an_edits_path() {
+        let forwarded = forwarded_hook_payload(
+            "PostToolUse",
+            json!({
+                "cwd": "/repo",
+                "tool_name": "Write",
+                "tool_input": { "file_path": "/repo/a.rs", "content": "secret body" },
+                "tool_response": { "ok": true },
+            }),
+        );
+        assert_eq!(
+            forwarded["tool_input"],
+            json!({ "file_path": "/repo/a.rs" })
+        );
+        assert!(forwarded.get("tool_response").is_none());
+        let bash = forwarded_hook_payload(
+            "PostToolUse",
+            json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }),
+        );
+        assert!(bash.get("tool_input").is_none());
+        let pending = forwarded_hook_payload(
+            "PreToolUse",
+            json!({ "tool_name": "Edit", "tool_input": { "file_path": "/repo/a.rs" } }),
+        );
+        assert!(pending.get("tool_input").is_none());
+    }
+
+    #[test]
     fn run_keeps_every_argument_after_separator_literal() {
         let args = [
             "--cwd",
@@ -1839,6 +1886,7 @@ mod tests {
             listening_ports: None,
             foreground_agent: None,
             terminal_cwd: None,
+            agent_workspace: None,
             note_id: None,
             foreground_ports: None,
             terminal_progress: None,

@@ -30,6 +30,7 @@ pub mod accounts;
 pub mod activity;
 pub mod agent;
 pub mod agent_catalog;
+mod agent_workspace;
 pub mod artifacts;
 pub mod attach;
 pub mod attention;

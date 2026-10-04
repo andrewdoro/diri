@@ -38,8 +38,8 @@ use crate::switcher::{
 };
 
 pub use prefs::{
-    FileEditor, InspectorTab, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering, TabOrientation,
-    WindowMaterial, WindowMode, WindowPlacement,
+    FileEditor, InspectorTab, NewAgentStart, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering,
+    TabOrientation, WindowMaterial, WindowMode, WindowPlacement,
 };
 pub use projection::{SidebarProject, SidebarProjection, SidebarRow};
 pub use residency::{ResidencyUpdate, TerminalResidency};
@@ -330,6 +330,10 @@ pub struct ClickModifiers {
 pub struct WorktreeSpawn {
     pub create: bool,
     pub branch: Option<String>,
+    /// Starting ref; `None` keeps the checkout's HEAD. A fresh worktree from
+    /// the default branch passes the remote-tracking ref (`origin/main`): a
+    /// local `main` is only as new as the user's last pull.
+    pub base: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -422,6 +426,10 @@ pub struct SessionStore {
     syncing_prefs: HashSet<String>,
     /// Popover repo resolution: host key → state (see `RepoTarget`).
     repo_targets: HashMap<String, RepoTarget>,
+    /// Where a Session's Agent is actually working when that is another
+    /// checkout than its launch directory, as the right panel resolved it
+    /// (`crate::workspace_follow`). ⌘T from that Session starts there.
+    followed_directories: HashMap<SessionId, String>,
     window_targets: HashMap<SpawnOwner, window_navigation::WindowTargets>,
     /// The session whose repo the popover preserves (selected at open time).
     repo_target_session: Option<SessionId>,
@@ -540,6 +548,7 @@ impl SessionStore {
                 migrating: HashSet::new(),
                 syncing_prefs: HashSet::new(),
                 repo_targets: HashMap::new(),
+                followed_directories: HashMap::new(),
                 window_targets: HashMap::new(),
                 repo_target_session: None,
                 directory_request_seq: 0,
@@ -1511,6 +1520,18 @@ impl SessionStore {
 
     pub fn toggle_project_pin(&mut self, id: ProjectId) -> io::Result<()> {
         self.update_preferences(|prefs| toggle_vec_member(&mut prefs.sidebar_pinned_projects, id))
+    }
+
+    /// Flips where new Agents from `id` start: current checkout ⇄ fresh
+    /// worktree from the default branch.
+    pub fn toggle_project_fresh_worktree(&mut self, id: ProjectId) -> io::Result<()> {
+        self.update_preferences(|prefs| {
+            let next = match prefs.new_agent_start(&id) {
+                NewAgentStart::CurrentCheckout => NewAgentStart::FreshWorktree,
+                NewAgentStart::FreshWorktree => NewAgentStart::CurrentCheckout,
+            };
+            prefs.set_new_agent_start(&id, next);
+        })
     }
 
     pub fn toggle_session_pin(&mut self, id: SessionId) -> io::Result<()> {
@@ -2801,13 +2822,20 @@ impl SessionStore {
             .then(|| self.terminal_to_follow(source.or_else(|| self.selected_session())))
             .flatten();
         let start_directory = followed.and_then(|terminal| terminal.terminal_cwd.clone());
-        let local_context = followed.or(source).map(|session| {
-            if session.host.is_none() {
-                session.cwd.clone()
-            } else {
-                self.local_fallback_directory_for(Some(session))
-            }
-        });
+        let local_context = followed
+            .map(|terminal| (terminal, false))
+            .or(source.map(|session| (session, true)))
+            .map(|(session, follow)| {
+                if session.host.is_none() {
+                    if follow {
+                        self.launch_directory_of(session)
+                    } else {
+                        session.cwd.clone()
+                    }
+                } else {
+                    self.local_fallback_directory_for(Some(session))
+                }
+            });
         let host = options.host;
         let cwd = if let Some(host_id) = &host {
             // Remote spawn: local directories are meaningless — use the
@@ -2820,6 +2848,11 @@ impl SessionStore {
             options
                 .cwd
                 .or(local_context)
+                .or_else(|| {
+                    self.selected_session()
+                        .filter(|session| session.host.is_none())
+                        .map(|session| self.launch_directory_of(session))
+                })
                 .unwrap_or_else(|| self.active_directory())
         };
         // Worktrees are a local-git feature; drop them for remote spawns (the
@@ -2829,16 +2862,17 @@ impl SessionStore {
         } else {
             options.worktree
         };
-        let (new_worktree, worktree_branch) = worktree.map_or((None, None), |worktree| {
-            (Some(worktree.create), worktree.branch)
-        });
+        let (new_worktree, worktree_branch, worktree_base) = worktree
+            .map_or((None, None, None), |worktree| {
+                (Some(worktree.create), worktree.branch, worktree.base)
+            });
         SessionSpawnParams {
             appearance: Some(crate::app_theme::spawn_appearance(self.theme_id())),
             kind,
             cwd,
             new_worktree,
             worktree_branch,
-            worktree_base: None,
+            worktree_base,
             title: options.title,
             initial_prompt: options.initial_prompt,
             parent: options.parent,
@@ -2850,6 +2884,64 @@ impl SessionStore {
             start_directory,
             note_id: None,
         }
+    }
+
+    /// Where a new Session started from `session` lands: the checkout its
+    /// Agent moved to when the right panel saw it leave, else its launch
+    /// directory (today's behavior for every Session that never left).
+    fn launch_directory_of(&self, session: &SessionRecord) -> String {
+        self.followed_directories
+            .get(&session.id)
+            .filter(|directory| Path::new(directory).is_dir())
+            .cloned()
+            .unwrap_or_else(|| session.cwd.clone())
+    }
+
+    /// Records (or clears) where `id`'s Agent is working when it left its
+    /// launch checkout. Not a store change: nothing renders from it.
+    pub fn set_followed_directory(&mut self, id: &SessionId, directory: Option<String>) {
+        match directory {
+            Some(directory) => {
+                self.followed_directories.insert(id.clone(), directory);
+            }
+            None => {
+                self.followed_directories.remove(id);
+            }
+        }
+    }
+
+    /// A local repository root new Agents from `source` should start in a
+    /// fresh worktree of, when its project opted in (Settings › General ›
+    /// New agents start in). `None` keeps today's current-checkout launch.
+    pub fn fresh_worktree_repo(&self, source: Option<&SessionId>) -> Option<String> {
+        let session = source
+            .and_then(|id| self.sessions.get(id))
+            .map(Arc::as_ref)
+            .or_else(|| self.selected_session())
+            .filter(|session| session.host.is_none() && !session.is_note())?;
+        if self.prefs.new_agent_start(&session.project_id) != NewAgentStart::FreshWorktree {
+            return None;
+        }
+        Some(
+            self.projects
+                .get(&session.project_id)
+                .map(|project| project.root.clone())
+                .unwrap_or_else(|| session.cwd.clone()),
+        )
+    }
+
+    /// The local repository a "New agent from main" action starts from.
+    pub fn repository_root_of(&self, id: &SessionId) -> Option<String> {
+        let session = self.sessions.get(id)?;
+        if session.host.is_some() {
+            return None;
+        }
+        Some(
+            self.projects
+                .get(&session.project_id)
+                .map(|project| project.root.clone())
+                .unwrap_or_else(|| session.cwd.clone()),
+        )
     }
 
     /// The terminal a new terminal starts beside: the focused one, else the

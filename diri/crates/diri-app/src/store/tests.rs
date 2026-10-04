@@ -66,6 +66,7 @@ pub(super) fn session(value: &str, project: &str, created: f64) -> SessionRecord
         listening_ports: None,
         foreground_agent: None,
         terminal_cwd: None,
+        agent_workspace: None,
         note_id: None,
         foreground_ports: None,
         terminal_progress: None,
@@ -2306,6 +2307,7 @@ fn remote_spawn_uses_host_default_cwd_and_drops_worktree() {
             worktree: Some(super::WorktreeSpawn {
                 create: true,
                 branch: None,
+                base: None,
             }),
             ..super::SpawnOptions::default()
         },
@@ -3597,6 +3599,7 @@ fn a_new_terminal_starts_where_the_last_terminal_in_its_project_was() {
     let terminal = |value: &str, project: &str, cwd: &str| SessionRecord {
         kind: AgentKind::SHELL,
         terminal_cwd: Some(cwd.to_owned()),
+        agent_workspace: None,
         note_id: None,
         terminal_progress: None,
         scheduled_run: None,
@@ -3657,6 +3660,7 @@ fn only_terminals_carry_a_location_for_their_hover() {
     let mut terminal = SessionRecord {
         kind: AgentKind::SHELL,
         terminal_cwd: Some("/work/p/web".into()),
+        agent_workspace: None,
         note_id: None,
         terminal_progress: None,
         scheduled_run: None,
@@ -3898,4 +3902,61 @@ fn a_resumed_session_settles_once_it_reports_a_new_state() {
     store.upsert_session(record);
     assert!(store.resume_settled(&id("rebooted")));
     assert!(store.resume_settled(&id("gone")));
+}
+
+#[test]
+fn new_agents_follow_the_checkout_the_agent_moved_to_and_carry_a_worktree_base() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 1.0)],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+    store.select(id("one"));
+    drain(&mut effects);
+    let spawned_cwd =
+        |effects: &mut mpsc::UnboundedReceiver<StoreEffect>| match drain(effects).first() {
+            Some(StoreEffect::Spawn(params)) => params.clone(),
+            other => panic!("expected spawn effect, got {other:?}"),
+        };
+
+    // Never left its launch directory: unchanged behavior.
+    store.spawn_kind(AgentKind::CLAUDE_CODE, super::SpawnOptions::default());
+    assert_eq!(spawned_cwd(&mut effects).cwd, "/work/p");
+
+    // The right panel saw the Agent work in another checkout.
+    let followed = std::env::temp_dir();
+    store.set_followed_directory(&id("one"), Some(followed.to_string_lossy().into_owned()));
+    store.spawn_kind(AgentKind::CLAUDE_CODE, super::SpawnOptions::default());
+    assert_eq!(spawned_cwd(&mut effects).cwd, followed.to_string_lossy());
+
+    // A checkout that has since been removed is not a place to start.
+    store.set_followed_directory(&id("one"), Some("/nonexistent/diri-worktree".into()));
+    store.spawn_kind(AgentKind::CLAUDE_CODE, super::SpawnOptions::default());
+    assert_eq!(spawned_cwd(&mut effects).cwd, "/work/p");
+    store.set_followed_directory(&id("one"), None);
+
+    // Fresh worktrees are opt-in per project and pass their base through.
+    assert_eq!(store.fresh_worktree_repo(Some(&id("one"))), None);
+    store
+        .toggle_project_fresh_worktree(pid("p"))
+        .expect("prefs");
+    assert_eq!(
+        store.fresh_worktree_repo(Some(&id("one"))).as_deref(),
+        Some("/work/p")
+    );
+    store.spawn_kind(
+        AgentKind::CLAUDE_CODE,
+        super::SpawnOptions {
+            cwd: Some("/work/p".into()),
+            worktree: Some(super::WorktreeSpawn {
+                create: true,
+                branch: None,
+                base: Some("origin/main".into()),
+            }),
+            ..super::SpawnOptions::default()
+        },
+    );
+    let params = spawned_cwd(&mut effects);
+    assert_eq!(params.new_worktree, Some(true));
+    assert_eq!(params.worktree_base.as_deref(), Some("origin/main"));
 }

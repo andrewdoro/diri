@@ -11,6 +11,7 @@ mod composer;
 #[cfg(unix)]
 mod daemon_launch;
 mod delegation;
+mod details_ui;
 mod dev_build;
 mod diagnostics;
 pub mod diff;
@@ -54,6 +55,7 @@ mod path_picker;
 mod peek_settle;
 mod phone_access;
 mod platform;
+mod pr_card;
 mod progress_mark;
 mod project_hue;
 pub mod query_editor;
@@ -90,6 +92,7 @@ mod window_restore;
 mod workbench;
 #[cfg(all(test, target_os = "macos"))]
 mod workspace_fixture;
+mod workspace_follow;
 #[cfg_attr(not(test), allow(dead_code))]
 mod workspace_geometry;
 #[cfg_attr(not(test), allow(dead_code))]

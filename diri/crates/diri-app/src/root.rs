@@ -979,6 +979,16 @@ impl RootView {
                         }
                         cx.notify();
                     }
+                    InspectorEvent::NewAgentFromDefaultBranch(session) => {
+                        let repo = this
+                            .window_store
+                            .read()
+                            .expect("store")
+                            .repository_root_of(session);
+                        if let Some(repo) = repo {
+                            this.spawn_from_default_branch(repo, window, cx);
+                        }
+                    }
                     InspectorEvent::Browser(action) => {
                         #[cfg(target_os = "macos")]
                         match action {
@@ -2288,7 +2298,9 @@ impl RootView {
             // unavailability is visible and another Agent is one keystroke
             // away, instead of a shortcut that silently does nothing.
             CommandId::NewDefaultSession => {
-                if self.spawn_default() {
+                if self.spawn_default_in_fresh_worktree(window, cx) {
+                    // Lands once the default branch is fetched.
+                } else if self.spawn_default() {
                     self.focus_spawned_session(window, cx);
                 } else {
                     self.open_launcher(&OpenLauncher, window, cx);
@@ -2739,6 +2751,100 @@ impl RootView {
         }
         self.focus_active_terminal(window, cx);
         cx.notify();
+    }
+
+    /// ⌘T for a project whose new Agents start in a fresh worktree from the
+    /// default branch (Settings › General). Every other project, and every
+    /// remote default, keeps the synchronous current-checkout launch.
+    fn spawn_default_in_fresh_worktree(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.preview {
+            return false;
+        }
+        let source = self.active_session_id(cx);
+        let repo = {
+            let store = self.window_store.read().expect("store");
+            store
+                .default_spawn_host()
+                .is_none()
+                .then(|| store.fresh_worktree_repo(source.as_ref()))
+                .flatten()
+        };
+        let Some(repo) = repo else {
+            return false;
+        };
+        self.spawn_from_default_branch(repo, window, cx);
+        true
+    }
+
+    /// Fetches the repository's default branch off the main thread, then
+    /// opens the default Agent in a new Diri worktree branched from it. The
+    /// remote-tracking ref is the base: a local `main` may be hundreds of
+    /// commits old. Offline, the last-fetched ref is used and the toast says so.
+    fn spawn_from_default_branch(
+        &mut self,
+        repo: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace_target = self.workspace_spawn_target();
+        let fetch = cx.background_spawn({
+            let repo = repo.clone();
+            async move { crate::workspace_follow::fetch_default_base(std::path::Path::new(&repo)) }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let fresh = fetch.await;
+            let _ = crate::floating::update_in_owner(&this, cx, |this, window, cx| {
+                let Some(fresh) = fresh else {
+                    this.show_feedback(
+                        "fresh_worktree",
+                        Toast::warning(
+                            "No default branch found, so the Agent starts in this checkout",
+                        ),
+                        cx,
+                    );
+                    if this.spawn_default() {
+                        this.focus_spawned_session(window, cx);
+                    }
+                    return;
+                };
+                let spawned = this
+                    .window_store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .spawn_default(SpawnOptions {
+                        workspace_target,
+                        cwd: Some(repo),
+                        worktree: Some(crate::store::WorktreeSpawn {
+                            create: true,
+                            branch: None,
+                            base: Some(fresh.base.reference.clone()),
+                        }),
+                        ..SpawnOptions::default()
+                    });
+                if !fresh.fetched {
+                    let message = if fresh.base.remote {
+                        format!(
+                            "Couldn't fetch {}; started from the last-fetched {}",
+                            fresh.base.branch, fresh.base.reference
+                        )
+                    } else {
+                        format!(
+                            "No remote default branch; started from local {}",
+                            fresh.base.reference
+                        )
+                    };
+                    this.show_feedback("fresh_worktree", Toast::info(message), cx);
+                }
+                if spawned {
+                    this.focus_spawned_session(window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn spawn_default(&self) -> bool {
