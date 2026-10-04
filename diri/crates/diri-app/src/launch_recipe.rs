@@ -374,6 +374,7 @@ impl LaunchRecipe {
                     Path::new(&cwd),
                     launch_token,
                 )?),
+                base: None,
             }),
         };
         Ok(ResolvedRecipe {

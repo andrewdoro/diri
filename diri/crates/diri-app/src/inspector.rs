@@ -92,6 +92,9 @@ pub enum InspectorEvent {
     },
     RequestTerminal,
     Browser(BrowserAction),
+    /// Start a new Agent in a fresh worktree from the default branch of this
+    /// Session's repository (the worktree chip's "behind main" action).
+    NewAgentFromDefaultBranch(SessionId),
 }
 
 #[derive(Clone, Debug)]
@@ -222,7 +225,11 @@ impl WorkspaceTab {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DiffContext {
     id: SessionId,
+    /// The checkout the panel shows: the one the Agent works in, which is the
+    /// launch directory unless it moved (`crate::workspace_follow`).
     cwd: PathBuf,
+    /// `SessionRecord.cwd`, which transcripts are validated against.
+    launch_cwd: PathBuf,
     remote: bool,
     agent_session_id: Option<String>,
     transcript_path: Option<PathBuf>,
@@ -339,6 +346,8 @@ pub struct WorkbenchInspector {
     #[cfg(target_os = "macos")]
     native_browser: Option<std::rc::Rc<std::cell::RefCell<crate::macos::browser::NativeBrowser>>>,
     context: Option<DiffContext>,
+    /// Which checkout the panel shows: see `crate::workspace_follow`.
+    follow: crate::workspace_follow::FollowController,
     state: LoadState,
     review_state: ReviewLoadState,
     review_generation: u64,
@@ -473,6 +482,7 @@ impl WorkbenchInspector {
             #[cfg(target_os = "macos")]
             native_browser: None,
             context: None,
+            follow: Default::default(),
             state: LoadState::NoSession,
             review_state: ReviewLoadState::NoSession,
             review_generation: 0,
@@ -526,6 +536,7 @@ impl WorkbenchInspector {
         }
         self.visible = visible;
         if visible {
+            self.sync_workspace_follow(true, cx);
             // One-shot, every tab. Info renders the Git summary and the header
             // renders the Changes badge, so becoming visible always needs one
             // settled read of the working tree — what stays tab-gated is the
@@ -820,7 +831,8 @@ impl WorkbenchInspector {
         let session = self.selected_session()?;
         Some(DiffContext {
             id: session.id.clone(),
-            cwd: PathBuf::from(&session.cwd),
+            cwd: self.follow.directory_for(&session),
+            launch_cwd: PathBuf::from(&session.cwd),
             remote: session.host.is_some(),
             agent_session_id: session.agent_session_id.clone(),
             transcript_path: session.transcript_path.as_deref().map(PathBuf::from),
@@ -830,6 +842,7 @@ impl WorkbenchInspector {
 
     fn refresh_if_context_changed(&mut self, cx: &mut Context<Self>) {
         self.sync_workspace_session(cx);
+        self.sync_workspace_follow(false, cx);
         let colors = {
             let store = self
                 .runtime
@@ -1329,6 +1342,9 @@ impl WorkbenchInspector {
         if context_changed || force {
             self.refresh_transcript(&context, false, cx);
         }
+        if !context.remote {
+            crate::workspace_follow::refresh_staleness(self, &context.id, context.cwd.clone(), cx);
+        }
         self.refresh_review(&context, force, cx);
         if !force && !context_changed && matches!(self.state, LoadState::NoSession) {
             return;
@@ -1409,7 +1425,7 @@ impl WorkbenchInspector {
             return;
         };
         let kind = context.kind.clone();
-        let cwd = context.cwd.to_string_lossy().into_owned();
+        let cwd = context.launch_cwd.to_string_lossy().into_owned();
         let home = self.transcript_home.clone();
         let previous = self.transcript_version;
         if previous.is_none() {
@@ -1650,6 +1666,41 @@ impl WorkbenchInspector {
             self.refresh_if_context_changed(cx);
             cx.notify();
         }
+    }
+
+    /// Resolves which checkout the selected Session's Agent works in when
+    /// its evidence changed; `reveal` also samples its process directory and
+    /// re-reads staleness. See `crate::workspace_follow`.
+    fn sync_workspace_follow(&mut self, reveal: bool, cx: &mut Context<Self>) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let reveal = reveal
+            || (self.visible
+                && self
+                    .context
+                    .as_ref()
+                    .is_some_and(|context| context.id != session.id));
+        if reveal {
+            self.follow.forget_staleness(&session.id);
+        }
+        let runtime = Arc::clone(&self.runtime);
+        let tokio = self.tokio.clone();
+        crate::workspace_follow::sync(self, &session, reveal && self.visible, &runtime, &tokio, cx);
+    }
+
+    fn render_worktree_follow(
+        &self,
+        session: Option<&SessionRecord>,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        matches!(
+            self.workspace_selected,
+            Some(WorkspaceSurface::Details | WorkspaceSurface::Review | WorkspaceSurface::Files)
+        )
+        .then(|| crate::workspace_follow::render_bar(&self.follow, session, colors, cx))
+        .flatten()
     }
 
     fn selected_session(&self) -> Option<SessionRecord> {
@@ -4833,8 +4884,30 @@ impl Render for WorkbenchInspector {
             .bg(colors.sidebar_surface())
             .text_color(colors.primary)
             .child(self.render_workspace_header(colors, cx))
+            .when_some(
+                self.render_worktree_follow(session.as_ref(), colors, cx),
+                |panel, bar| panel.child(bar),
+            )
             .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body))
             .when_some(ask_composer, |panel, composer| panel.child(composer))
+    }
+}
+
+impl crate::workspace_follow::FollowHost for WorkbenchInspector {
+    fn follow(&mut self) -> &mut crate::workspace_follow::FollowController {
+        &mut self.follow
+    }
+
+    fn follow_changed(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = self.selected_session() {
+            self.follow.publish(&session, &self.runtime.store);
+        }
+        self.refresh_if_context_changed(cx);
+        cx.notify();
+    }
+
+    fn new_agent_from_default_branch(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        cx.emit(InspectorEvent::NewAgentFromDefaultBranch(session));
     }
 }
 
@@ -7985,5 +8058,121 @@ mod tests {
             "internal: git is not installed on this host"
         ));
         assert!(!git_is_not_a_repository("ssh connection timed out"));
+    }
+
+    /// The panel follows an Agent into another worktree of the same
+    /// repository: Review/Details/Files read that checkout, a pin can send it
+    /// back, and ⌘T learns the followed directory.
+    #[gpui::test]
+    fn the_panel_follows_the_agent_into_another_worktree(cx: &mut TestAppContext) {
+        fn git(root: &std::path::Path, arguments: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(root)
+                .args(arguments)
+                .env("GIT_AUTHOR_NAME", "diri tests")
+                .env("GIT_AUTHOR_EMAIL", "diri@example.invalid")
+                .env("GIT_COMMITTER_NAME", "diri tests")
+                .env("GIT_COMMITTER_EMAIL", "diri@example.invalid")
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "git {arguments:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let main = temp.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "--quiet"]);
+        std::fs::write(main.join("one.txt"), "one\n").unwrap();
+        git(&main, &["add", "one.txt"]);
+        git(&main, &["commit", "--quiet", "-m", "first"]);
+        let feature = temp.path().join("main-feature");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature",
+                feature.to_str().unwrap(),
+            ],
+        );
+        let feature = std::fs::canonicalize(&feature).unwrap();
+
+        let runtime = Arc::new(StoreRuntime::inert());
+        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+        let session = &mut fixture.list.sessions[0];
+        // A shell reads its directory from the record; an Agent would also
+        // sample its process, which the inert test client cannot answer.
+        session.kind = ProtoAgentKind::SHELL;
+        session.foreground_agent = None;
+        session.terminal_cwd = None;
+        session.cwd = main.to_string_lossy().into_owned();
+        session.host = None;
+        session.agent_workspace = Some(diri_proto::AgentWorkspace {
+            cwd: None,
+            edits: vec![diri_proto::AgentPlace {
+                path: feature.join("two.txt").to_string_lossy().into_owned(),
+                at: diri_proto::DateMillis(4_000_000_000_000.0),
+            }],
+        });
+        let id = session.id.clone();
+        {
+            let mut store = runtime.store.write().unwrap();
+            store.hydrate(fixture.list);
+            store.select(id.clone());
+        }
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let inspector = cx.new(|cx| WorkbenchInspector::new(runtime.clone(), tokio, cx));
+        inspector.update(cx, |inspector, cx| inspector.set_visible(true, cx));
+        cx.executor().advance_clock(Duration::from_millis(500));
+        cx.run_until_parked();
+
+        inspector.read_with(cx, |inspector, _| {
+            let context = inspector.selected_context().expect("context");
+            assert_eq!(context.cwd, feature);
+            assert_eq!(context.launch_cwd, main);
+            assert_eq!(
+                inspector.context.as_ref().map(|c| c.cwd.clone()),
+                Some(feature.clone())
+            );
+        });
+        let followed = runtime.store.read().unwrap().fresh_worktree_repo(Some(&id));
+        assert_eq!(followed, None, "fresh worktrees stay opt-in");
+
+        // Pinning the launch checkout sends the panel back.
+        let root = inspector.read_with(cx, |inspector, _| {
+            inspector
+                .follow
+                .state
+                .resolution(&id)
+                .and_then(|resolution| resolution.candidates.iter().find(|c| c.launch))
+                .map(|candidate| candidate.root.clone())
+                .expect("launch candidate")
+        });
+        inspector.update(cx, |inspector, cx| {
+            inspector.follow.state.set_pin(&id, Some(root));
+            crate::workspace_follow::FollowHost::follow_changed(inspector, cx);
+        });
+        cx.run_until_parked();
+        inspector.read_with(cx, |inspector, _| {
+            assert_eq!(inspector.selected_context().unwrap().cwd, main);
+        });
+        inspector.update(cx, |inspector, _| {
+            inspector.refresh_task = None;
+            inspector.review_task = None;
+            inspector.transcript_task = None;
+            inspector.poll_task = None;
+        });
+        cx.run_until_parked();
     }
 }

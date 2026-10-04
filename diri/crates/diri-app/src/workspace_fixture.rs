@@ -303,6 +303,7 @@ impl LiveWorkspace {
                 worktree: Some(crate::store::WorktreeSpawn {
                     create: true,
                     branch: Some("held-spawn".into()),
+                    base: None,
                 }),
                 ..Default::default()
             },

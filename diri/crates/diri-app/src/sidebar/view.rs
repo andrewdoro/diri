@@ -6230,7 +6230,7 @@ impl Sidebar {
         colors: SemanticColors,
         cx: &mut Context<Self>,
     ) -> PopoverSpec {
-        let (project, host, collapsed, pinned) = {
+        let (project, host, collapsed, pinned, fresh_worktree) = {
             let store = self.store.read().expect("session store lock poisoned");
             let Some(project) = store.projects().get(&id).cloned() else {
                 return PopoverSpec::empty();
@@ -6244,8 +6244,11 @@ impl Sidebar {
                     .and_then(|session| session.host.clone()),
                 store.preferences().sidebar_collapsed_projects.contains(&id),
                 store.preferences().sidebar_pinned_projects.contains(&id),
+                store.preferences().new_agent_start(&id)
+                    == crate::store::NewAgentStart::FreshWorktree,
             )
         };
+        let local = host.is_none() && project.host.is_none();
         let content = div()
             .p(px(4.0))
             .flex()
@@ -6281,6 +6284,28 @@ impl Sidebar {
                     }
                 }),
             ))
+            .when(local, |menu| {
+                menu.child(menu_row(
+                    if fresh_worktree {
+                        "New Agents: This Checkout"
+                    } else {
+                        "New Agents: Fresh Worktree"
+                    },
+                    colors,
+                    cx.listener({
+                        let id = id.clone();
+                        move |this, _, _, cx| {
+                            let _ = this
+                                .store
+                                .write()
+                                .expect("session store lock poisoned")
+                                .toggle_project_fresh_worktree(id.clone());
+                            this.ui.popover = None;
+                            cx.notify();
+                        }
+                    }),
+                ))
+            })
             .child(menu_row(
                 if collapsed { "Expand" } else { "Collapse" },
                 colors,

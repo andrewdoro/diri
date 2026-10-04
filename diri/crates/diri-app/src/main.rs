@@ -89,6 +89,7 @@ mod window_restore;
 mod workbench;
 #[cfg(all(test, target_os = "macos"))]
 mod workspace_fixture;
+mod workspace_follow;
 #[cfg_attr(not(test), allow(dead_code))]
 mod workspace_geometry;
 #[cfg_attr(not(test), allow(dead_code))]

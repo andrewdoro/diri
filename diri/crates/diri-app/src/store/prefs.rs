@@ -33,6 +33,22 @@ pub enum WindowMaterial {
     Opaque,
 }
 
+/// Where a new Agent opened from a project (⌘T, New Agent) starts. Stored
+/// per project; a missing entry, or a name this build does not know, is the
+/// current checkout, which is what every project did before the choice.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NewAgentStart {
+    /// A fresh Diri worktree and branch from the remote default branch,
+    /// fetched first (`origin/HEAD`, else `origin/main`, `origin/master`).
+    FreshWorktree,
+    /// The checkout the source Session works in. Last because serde's
+    /// catch-all must be.
+    #[default]
+    #[serde(other)]
+    CurrentCheckout,
+}
+
 /// Where a terminal `file:line` link opens. Stored by name; a name this
 /// build does not know reads as `Automatic` rather than failing the file.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -334,6 +350,10 @@ pub struct Prefs {
     /// empty, so an update from those versions shows them once.
     #[serde(default)]
     pub whats_new_seen_version: String,
+    /// Per-project [`NewAgentStart`], keyed by project id. Only opted-in
+    /// projects are written; everything else starts in the current checkout.
+    #[serde(default)]
+    pub new_agent_start: BTreeMap<String, NewAgentStart>,
 }
 
 impl Default for Prefs {
@@ -393,11 +413,29 @@ impl Default for Prefs {
             last_selected_session: None,
             herdr_imported: Default::default(),
             whats_new_seen_version: crate::updates::CURRENT_VERSION.to_owned(),
+            new_agent_start: BTreeMap::new(),
         }
     }
 }
 
 impl Prefs {
+    pub fn new_agent_start(&self, project: &ProjectId) -> NewAgentStart {
+        self.new_agent_start
+            .get(&project.0)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Stores `start` for `project`, dropping the default so the file only
+    /// lists projects that opted in.
+    pub fn set_new_agent_start(&mut self, project: &ProjectId, start: NewAgentStart) {
+        if start == NewAgentStart::CurrentCheckout {
+            self.new_agent_start.remove(&project.0);
+        } else {
+            self.new_agent_start.insert(project.0.clone(), start);
+        }
+    }
+
     pub const MIN_TERMINAL_FONT_SIZE: f32 = 10.0;
     pub const MAX_TERMINAL_FONT_SIZE: f32 = 20.0;
     pub const MIN_TERMINAL_LINE_HEIGHT: f32 = 1.0;
@@ -550,6 +588,48 @@ impl Prefs {
 mod tests {
     use super::*;
     use crate::launch_recipe::{LaunchRecipe, RecipeProject};
+
+    #[test]
+    fn new_agents_start_in_the_current_checkout_unless_a_project_opts_in() {
+        let project = ProjectId("p".into());
+        let legacy: Prefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            legacy.new_agent_start(&project),
+            NewAgentStart::CurrentCheckout
+        );
+        assert_eq!(
+            Prefs::default().new_agent_start(&project),
+            NewAgentStart::CurrentCheckout
+        );
+
+        let mut prefs = Prefs::default();
+        prefs.set_new_agent_start(&project, NewAgentStart::FreshWorktree);
+        let json = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(
+            json["newAgentStart"],
+            serde_json::json!({ "p": "freshWorktree" })
+        );
+        let restored: Prefs = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            restored.new_agent_start(&project),
+            NewAgentStart::FreshWorktree
+        );
+        assert_eq!(
+            restored.new_agent_start(&ProjectId("other".into())),
+            NewAgentStart::CurrentCheckout
+        );
+
+        // Turning it off removes the entry instead of writing the default.
+        prefs.set_new_agent_start(&project, NewAgentStart::CurrentCheckout);
+        assert!(prefs.new_agent_start.is_empty());
+        // A value from a newer build reads as the current checkout.
+        let future: Prefs =
+            serde_json::from_str(r#"{"newAgentStart":{"p":"somethingNew"}}"#).unwrap();
+        assert_eq!(
+            future.new_agent_start(&project),
+            NewAgentStart::CurrentCheckout
+        );
+    }
 
     #[test]
     fn system_appearance_is_opt_in_persisted_and_only_changes_with_the_os() {
