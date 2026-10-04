@@ -1568,6 +1568,7 @@ dependencies = [
  "objc2-web-kit",
  "qrcode",
  "raw-window-handle",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

@@ -387,6 +387,15 @@ impl Focusable for WorkbenchInspector {
     }
 }
 
+/// The terminal theme and font family the Files surface's editor paints
+/// with, so code reads in the same palette as the terminal beside it.
+fn code_style(store: &crate::store::SessionStore) -> (diri_term::theme::TermTheme, String) {
+    (
+        crate::app_theme::terminal_theme(store.theme_id()),
+        store.preferences().terminal_font_family.clone(),
+    )
+}
+
 impl WorkbenchInspector {
     pub fn new(
         runtime: Arc<StoreRuntime>,
@@ -394,15 +403,20 @@ impl WorkbenchInspector {
         cx: &mut Context<Self>,
     ) -> Self {
         let tokio = tokio_owner.handle().clone();
-        let (selected_tab, code_colors, workspace_session) = {
+        let (selected_tab, code_colors, workspace_session, code_style) = {
             let store = runtime.store.read().expect("session store lock poisoned");
             (
                 store.preferences().inspector_tab,
                 crate::app_theme::sidebar_colors_in(&store),
                 store.selected_session_id().cloned(),
+                code_style(&store),
             )
         };
-        let code_viewer = cx.new(|cx| CodeViewer::new(tokio.clone(), code_colors, cx));
+        let code_viewer = cx.new(|cx| {
+            let mut viewer = CodeViewer::new(tokio.clone(), code_colors, cx);
+            viewer.set_terminal_style(code_style.0, &code_style.1, cx);
+            viewer
+        });
         cx.observe(&code_viewer, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         let mut changes = runtime.changes();
@@ -830,19 +844,27 @@ impl WorkbenchInspector {
 
     fn refresh_if_context_changed(&mut self, cx: &mut Context<Self>) {
         self.sync_workspace_session(cx);
-        let colors = {
+        let (colors, (theme, font)) = {
             let store = self
                 .runtime
                 .store
                 .read()
                 .expect("session store lock poisoned");
-            crate::app_theme::sidebar_colors_in(&store)
+            (
+                crate::app_theme::sidebar_colors_in(&store),
+                code_style(&store),
+            )
         };
-        self.code_viewer
-            .update(cx, |viewer, cx| viewer.set_colors(colors, cx));
+        self.code_viewer.update(cx, |viewer, cx| {
+            viewer.set_colors(colors, cx);
+            viewer.set_terminal_style(theme, &font, cx);
+        });
         for tab in &self.workspace_tabs {
             if let Some(viewer) = &tab.viewer {
-                viewer.update(cx, |viewer, cx| viewer.set_colors(colors, cx));
+                viewer.update(cx, |viewer, cx| {
+                    viewer.set_colors(colors, cx);
+                    viewer.set_terminal_style(theme, &font, cx);
+                });
             }
         }
         if !self.visible {
@@ -1115,9 +1137,18 @@ impl WorkbenchInspector {
         self.next_workspace_id += 1;
         let mut tab = WorkspaceTab::new(id, surface);
         if surface == WorkspaceSurface::Files {
-            let colors =
-                crate::app_theme::sidebar_colors_in(&self.runtime.store.read().expect("store"));
-            let viewer = cx.new(|cx| CodeViewer::new(self.tokio.clone(), colors, cx));
+            let (colors, (theme, font)) = {
+                let store = self.runtime.store.read().expect("store");
+                (
+                    crate::app_theme::sidebar_colors_in(&store),
+                    code_style(&store),
+                )
+            };
+            let viewer = cx.new(|cx| {
+                let mut viewer = CodeViewer::new(self.tokio.clone(), colors, cx);
+                viewer.set_terminal_style(theme, &font, cx);
+                viewer
+            });
             cx.observe(&viewer, |_, _, cx| cx.notify()).detach();
             let cwd = self
                 .selected_context()
