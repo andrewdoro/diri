@@ -13,6 +13,11 @@ pub const MAX_CONTROL_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// Error code for a terminal or process request aimed at a note Session.
 pub const SESSION_HAS_NO_TERMINAL: &str = "session_has_no_terminal";
 
+/// Error code for a local launch whose working directory no longer exists
+/// (a deleted project or worktree). Expected, and answered at once: nothing
+/// is spawned, and the Session record is left as it was.
+pub const CWD_MISSING: &str = "cwd_missing";
+
 /// The protocol's untyped JSON payload.
 pub type JsonValue = Value;
 
@@ -36,6 +41,10 @@ impl ControlError {
 
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new("bad_request", message)
+    }
+
+    pub fn cwd_missing(message: impl Into<String>) -> Self {
+        Self::new(CWD_MISSING, message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {

@@ -15,7 +15,7 @@ diri runs `droid` exactly as you would in a terminal, with your own install and 
 | Survives restarts | Yes. Each session is owned by its own process, so quitting diri never stops it. |
 | Resume after exit | Yes, through the agent's own continue flag. |
 | Fork a conversation | Not supported. |
-| Approve from a notification | No. Answer permission prompts in the terminal. |
+| Approve from a notification | Yes. Permission prompts get an Approve button on the notification. |
 | Starts other agents | No built-in connection. Claude Code, Codex and Cursor can start Droid sessions for you. |
 
 ## Set up

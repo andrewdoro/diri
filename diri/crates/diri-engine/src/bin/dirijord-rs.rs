@@ -240,6 +240,7 @@ fn main() {
     let cli_path = install_cli_helpers(&exe_dir, &app_support);
     let mut server = ControlServer::new(Arc::clone(&registry), DirijorPaths::socket(&home))
         .with_logs_dir(&logs_dir)
+        .with_hosts_file(DirijorPaths::hosts_config_file(&home))
         .with_notes_dir(app_support.join("notes"))
         .with_holder(holder)
         .with_injection(InjectionConfig {

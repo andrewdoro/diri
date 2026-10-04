@@ -263,13 +263,33 @@ fn roots(
     Ok(roots)
 }
 
+/// Below the Engine's 45 s usage RPC timeout. Two host entries that reach the
+/// same account (an alias and its address) scan one cache; the second waits
+/// for the first and then reads its warm cache instead of failing.
+const SCAN_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn acquire_scan_lock(path: &Path, wait: std::time::Duration) -> io::Result<std::fs::File> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match crate::state::acquire_lock(path) {
+            Ok(lock) => return Ok(lock),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::other("remote usage scan is already running"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn collect_at(
     roots: Vec<(PathBuf, UsageProvider)>,
     cache_root: &Path,
 ) -> io::Result<TranscriptUsageResult> {
     crate::paths::ensure_private_dir(cache_root)?;
-    let _lock = crate::state::acquire_lock(&cache_root.join("scan.lock"))
-        .map_err(|_| io::Error::other("remote usage scan is already running"))?;
+    let _lock = acquire_scan_lock(&cache_root.join("scan.lock"), SCAN_LOCK_WAIT)?;
     let identity = cache_root.join("source-id");
     crate::paths::reject_symlink(&identity)?;
     let source_id = if identity.exists() {
@@ -305,6 +325,26 @@ fn collect_at(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_concurrent_scan_waits_for_the_lock_instead_of_failing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("scan.lock");
+        let held = crate::state::acquire_lock(&path).unwrap();
+        let waiter = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                acquire_scan_lock(&path, std::time::Duration::from_secs(5)).map(drop)
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        drop(held);
+        waiter.join().unwrap().expect("waits for the first scan");
+
+        let _held = crate::state::acquire_lock(&path).unwrap();
+        let error = acquire_scan_lock(&path, std::time::Duration::from_millis(150)).unwrap_err();
+        assert_eq!(error.to_string(), "remote usage scan is already running");
+    }
     #[test]
     fn collector_reuses_the_shared_ledger_and_returns_only_usage() {
         let temp = tempfile::tempdir().unwrap();
