@@ -359,9 +359,139 @@ fn leading_arguments(_: u32) -> io::Result<(String, Option<String>)> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
+/// The values of `names` in another process's environment (this user's
+/// processes only; anyone else's fails). `None` for a name it does not set.
+pub fn environment_values(pid: u32, names: &[&str]) -> io::Result<Vec<Option<String>>> {
+    let block = environment_block(pid)?;
+    Ok(names
+        .iter()
+        .map(|name| {
+            block.iter().find_map(|entry| {
+                let value = entry.strip_prefix(name.as_bytes())?.strip_prefix(b"=")?;
+                String::from_utf8(value.to_vec()).ok()
+            })
+        })
+        .collect())
+}
+
+#[cfg(target_os = "macos")]
+fn environment_block(pid: u32) -> io::Result<Vec<Vec<u8>>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut size = 0usize;
+    // SAFETY: a null buffer asks for the size.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buffer = vec![0u8; size];
+    // SAFETY: mib is a valid three-level name; buffer is writable for size bytes.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            buffer.as_mut_ptr().cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    procargs2_environment(&buffer[..size.min(buffer.len())])
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid argument block"))
+}
+
+/// The environment entries of a `KERN_PROCARGS2` block: past `argc`, the
+/// executable path, its NUL padding and the `argc` arguments.
+#[cfg(any(target_os = "macos", test))]
+fn procargs2_environment(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let argc = i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?);
+    let rest = &bytes[4..];
+    let path_end = rest.iter().position(|byte| *byte == 0)?;
+    let start = path_end + rest[path_end..].iter().position(|byte| *byte != 0)?;
+    let mut entries = rest[start..].split(|byte| *byte == 0);
+    for _ in 0..argc.max(0) {
+        entries.next()?;
+    }
+    Some(
+        entries
+            .take_while(|entry| !entry.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn environment_block(pid: u32) -> io::Result<Vec<Vec<u8>>> {
+    let bytes = std::fs::read(format!("/proc/{pid}/environ"))?;
+    Ok(bytes
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn environment_block(_: u32) -> io::Result<Vec<Vec<u8>>> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The child [`the_environment_follows_the_arguments`] reads.
+    #[test]
+    #[ignore = "a helper process, not a test"]
+    fn sleeper() {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_environment_follows_the_arguments() {
+        let mut block = 2i32.to_ne_bytes().to_vec();
+        block.extend_from_slice(b"/bin/x\0\0\0x\0-a\0K=v\0DIRIJOR_SOCKET=/s\0\0junk");
+        let entries = procargs2_environment(&block).unwrap();
+        assert_eq!(
+            entries,
+            vec![b"K=v".to_vec(), b"DIRIJOR_SOCKET=/s".to_vec()]
+        );
+        // A real child's environment reads back, unset names as None. Not
+        // `/bin/sleep`: macOS withholds Apple platform binaries' environment.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "foreground::tests::sleeper"])
+            .env_clear()
+            .env("DIRIJOR_SOCKET", "/tmp/probe.sock")
+            .spawn()
+            .unwrap();
+        // Until the child has exec'd, it is still a copy of this process.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let values = loop {
+            let values = environment_values(child.id(), &["DIRIJOR_SOCKET", "DIRIJOR_SESSION_ID"]);
+            if values.as_ref().is_ok_and(|values| values[0].is_some())
+                || std::time::Instant::now() > deadline
+            {
+                break values;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            values.unwrap(),
+            vec![Some("/tmp/probe.sock".to_owned()), None]
+        );
+    }
 
     #[test]
     fn programs_are_named_without_their_arguments() {

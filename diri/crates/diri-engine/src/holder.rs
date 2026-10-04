@@ -36,6 +36,8 @@
 pub mod agent_launcher;
 pub mod client;
 #[cfg(unix)]
+pub mod frozen_orphans;
+#[cfg(unix)]
 pub mod guard;
 pub mod launcher;
 pub mod manager;

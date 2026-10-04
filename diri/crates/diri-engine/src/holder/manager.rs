@@ -28,6 +28,22 @@ pub struct HolderManagerServer {
     idle_timeout: Duration,
     group_guard: bool,
     agent_launcher: Option<std::path::PathBuf>,
+    /// Development builds: the Engine whose departure, with no other Engine
+    /// checking in within [`ABANDON_GRACE`], ends the hosted sessions.
+    engine: Option<i32>,
+    abandon_grace: Duration,
+}
+
+/// How long a development manager waits for an Engine to come back before it
+/// ends the sessions nobody will ever attach to again.
+pub const ABANDON_GRACE: Duration = Duration::from_secs(10 * 60);
+/// `--engine-pid <pid>`: retire abandoned sessions (development builds only).
+pub const ENGINE_PID_FLAG: &str = "--engine-pid";
+
+/// The latest Engine to check in, and a wakeup for a waiter on its exit.
+struct EngineWatch {
+    pid: Mutex<i32>,
+    changed: Condvar,
 }
 
 struct State {
@@ -42,14 +58,20 @@ struct State {
     idle_changed: Condvar,
     shutting_down: AtomicBool,
     listen_fd: AtomicI32,
+    /// Development builds only (see [`HolderManagerServer::with_engine`]).
+    engine: Option<EngineWatch>,
     /// Every return from a watchdog wait, so a test can prove it stays parked.
     #[cfg(test)]
     watchdog_wakeups: std::sync::atomic::AtomicUsize,
 }
 
 impl State {
-    fn new(listen_fd: i32) -> Self {
+    fn new(listen_fd: i32, engine: Option<i32>) -> Self {
         Self {
+            engine: engine.map(|pid| EngineWatch {
+                pid: Mutex::new(pid),
+                changed: Condvar::new(),
+            }),
             active: Mutex::new(HashSet::new()),
             idle_since: Mutex::new(Some(Instant::now())),
             idle_changed: Condvar::new(),
@@ -82,7 +104,19 @@ impl HolderManagerServer {
             idle_timeout: idle_timeout.max(Duration::from_millis(100)),
             group_guard: false,
             agent_launcher: None,
+            engine: None,
+            abandon_grace: ABANDON_GRACE,
         }
+    }
+
+    /// Ends the hosted sessions once `engine` has exited and no Engine has
+    /// checked in for [`ABANDON_GRACE`]. Only development Engines ask for
+    /// this: an installed Engine's sessions must outlive its crashes.
+    #[must_use]
+    pub fn with_engine(mut self, engine: Option<i32>, grace: Duration) -> Self {
+        self.engine = engine.filter(|&pid| pid > 1);
+        self.abandon_grace = grace;
+        self
     }
 
     /// Starts each hosted Agent through the app's main executable as a
@@ -129,7 +163,18 @@ impl HolderManagerServer {
             listener.into_raw_fd()
         };
 
-        let state = Arc::new(State::new(listen_fd));
+        let state = Arc::new(State::new(listen_fd, self.engine));
+        if state.engine.is_some() {
+            let state = Arc::clone(&state);
+            let directory = self.paths.directory.clone();
+            std::thread::Builder::new()
+                .name("holder-manager-engine".into())
+                .spawn({
+                    let grace = self.abandon_grace;
+                    move || watch_engine(&state, &directory, grace)
+                })
+                .map_err(|error| HolderError::io("spawn engine watch", error))?;
+        }
         diri_telemetry::event!("holder.manager_start", guard = guard.is_some());
 
         write_pid_file(&self.paths.pid_file())?;
@@ -193,6 +238,15 @@ impl HolderManagerServer {
                 "manager protocol {} is unsupported",
                 request.version
             )));
+        }
+        if let (Some(watch), Some(pid)) = (&state.engine, request.engine_pid)
+            && pid > 1
+        {
+            let mut current = watch.pid.lock().expect("engine");
+            if *current != pid {
+                *current = pid;
+                watch.changed.notify_all();
+            }
         }
         match request.op {
             HolderManagerOperation::Ping => {
@@ -373,6 +427,61 @@ fn write_pid_file(path: &Path) -> HolderResult<()> {
     Ok(())
 }
 
+/// Development managers: once the Engine that checked in last has exited and
+/// none checks in within `grace`, end every hosted session. Nobody will ever
+/// attach to them again, and they would otherwise run (Agents included)
+/// until reboot. Waits on the Engine's exit without polling.
+fn watch_engine(state: &State, directory: &Path, grace: Duration) {
+    let Some(watch) = &state.engine else {
+        return;
+    };
+    loop {
+        let pid = *watch.pid.lock().expect("engine");
+        wait_for_exit(pid);
+        let current = watch.pid.lock().expect("engine");
+        let (current, waited) = watch
+            .changed
+            .wait_timeout_while(current, grace, |current| *current == pid)
+            .expect("engine");
+        if !waited.timed_out() || *current != pid {
+            continue; // another Engine checked in: watch that one
+        }
+        drop(current);
+        let sessions: Vec<String> = state
+            .active
+            .lock()
+            .expect("active")
+            .iter()
+            .cloned()
+            .collect();
+        diri_telemetry::event!("holder.manager_abandoned", sessions = sessions.len());
+        eprintln!(
+            "diri-holder manager: no Engine for {grace:?}; ending {} abandoned session(s)",
+            sessions.len()
+        );
+        for session in sessions {
+            let _ = HolderClient::new(HolderPaths::new(directory, &session).socket()).kill_tree();
+        }
+        return;
+    }
+}
+
+/// Blocks until `pid` exits (or is already gone).
+fn wait_for_exit(pid: i32) {
+    let Ok(watcher) = diri_pty::ExitWatcher::new(pid as u32) else {
+        return; // ESRCH: gone already
+    };
+    let mut descriptor = libc::pollfd {
+        fd: watcher.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd; no timeout. EINTR retried.
+    while unsafe { libc::poll(&mut descriptor, 1, -1) } < 0
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+    {}
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -391,7 +500,7 @@ mod tests {
     #[test]
     fn the_watchdog_never_wakes_while_a_session_is_hosted() {
         let idle_timeout = Duration::from_millis(100);
-        let state = Arc::new(State::new(-1));
+        let state = Arc::new(State::new(-1, None));
         state.set_idle(None);
         let watchdog = watchdog(&state, idle_timeout);
 
@@ -411,7 +520,7 @@ mod tests {
     #[test]
     fn a_new_session_cancels_the_idle_countdown() {
         let idle_timeout = Duration::from_millis(150);
-        let state = Arc::new(State::new(-1));
+        let state = Arc::new(State::new(-1, None));
         let watchdog = watchdog(&state, idle_timeout);
         state.set_idle(None);
 

@@ -117,7 +117,8 @@ fn main() {
         "engine.start",
         build = diri_telemetry::id(diri_engine::telemetry::build_id()),
         fd_soft = fd_limit.as_ref().map(|limit| limit.soft),
-        exit_when_orphaned = std::env::args().any(|arg| arg == EXIT_WHEN_ORPHANED_FLAG),
+        exit_when_orphaned = std::env::args().any(|arg| arg == EXIT_WHEN_ORPHANED_FLAG)
+            || diri_engine::dev_build::is_development_build(),
         cgroup = cfg!(target_os = "linux").then(|| {
             std::fs::read_to_string("/proc/self/cgroup").map_or("unknown", |text| {
                 diri_engine::telemetry::cgroup_class(&text)
@@ -251,6 +252,12 @@ fn main() {
         "dirijord-rs: adopted {} live holder session(s): {adopted:?}",
         adopted.len()
     );
+    // Check in with a manager this Engine adopted sessions from, so one that
+    // retires abandoned sessions (development builds) knows they are not.
+    let _ = diri_engine::holder::HolderManagerClient::new(
+        diri_engine::holder::HolderManagerPaths::new(&holder.holders_dir).socket(),
+    )
+    .ping();
     let registry = Arc::new(Mutex::new(registry));
     register_gauges(&registry);
 
@@ -315,6 +322,14 @@ fn main() {
     server.spawn_agent_relaunch();
     server.spawn_scheduler();
 
+    // Agents a killed Holder left stopped and parentless: once now, then
+    // after each session that ends interrupted (see `holder::frozen_orphans`).
+    #[cfg(unix)]
+    {
+        diri_engine::holder::frozen_orphans::configure(server.socket_path().to_path_buf());
+        diri_engine::holder::frozen_orphans::request_sweep(Arc::clone(&registry));
+    }
+
     // One-shot, off the accept path: reclaim per-session files no record,
     // holder, or remote binding stands behind. Never repeated while idle.
     {
@@ -378,8 +393,14 @@ fn main() {
     // Opt-in from the launcher. A desktop App spawns us detached and asks us
     // to go when it quits; one that was killed never asks. An Engine kept up
     // by a service manager is not given the flag and stays up while idle.
-    if std::env::args().any(|arg| arg == EXIT_WHEN_ORPHANED_FLAG) {
-        server.spawn_orphan_watch(ORPHAN_GRACE, ORPHAN_WATCH_TICK);
+    //
+    // A development build (one cargo left in `target/`) always retires, and
+    // its sessions do not keep it up: agents start these for tests and demos
+    // and never stop them. Its Holder manager then ends those sessions once
+    // no Engine returns (see `holder::manager`).
+    let development = diri_engine::dev_build::is_development_build();
+    if development || std::env::args().any(|arg| arg == EXIT_WHEN_ORPHANED_FLAG) {
+        server.spawn_orphan_watch(ORPHAN_GRACE, ORPHAN_WATCH_TICK, !development);
     }
 
     eprintln!("dirijord-rs: serving {}", server.socket_path().display());

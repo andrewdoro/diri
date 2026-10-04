@@ -177,6 +177,12 @@ fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<()> {
         arguments.push(crate::telemetry::HOLDER_TELEMETRY_FLAG.into());
         arguments.push(state_dir.into());
     }
+    // A development Engine's manager ends its sessions once no Engine comes
+    // back for them; an installed one's outlive every Engine crash.
+    if crate::dev_build::is_development_build() {
+        arguments.push(super::manager::ENGINE_PID_FLAG.into());
+        arguments.push(std::process::id().to_string().into());
+    }
     let agent_launcher = super::agent_launcher();
     if let Some(launcher) = &agent_launcher {
         arguments.push(super::AGENT_LAUNCHER_FLAG.into());

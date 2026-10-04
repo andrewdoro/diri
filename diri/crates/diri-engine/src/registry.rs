@@ -2137,6 +2137,11 @@ impl Registry {
         self.sessions.len()
     }
 
+    /// Whether `id` has a live session (running, or hibernated).
+    pub fn is_live(&self, id: &str) -> bool {
+        self.sessions.contains_key(id)
+    }
+
     pub fn record_count(&self) -> usize {
         self.records.len()
     }

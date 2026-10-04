@@ -87,6 +87,17 @@ fn main() {
             .map_or(Duration::from_secs(30), Duration::from_secs_f64);
         HolderManagerServer::new(std::path::Path::new(&directory), idle)
             .with_group_guard()
+            .with_engine(
+                value_after(&arguments, diri_engine::holder::manager::ENGINE_PID_FLAG)
+                    .and_then(|pid| pid.parse().ok()),
+                std::env::var("DIRI_HOLDER_ABANDON_SECONDS")
+                    .ok()
+                    .and_then(|raw| raw.parse::<f64>().ok())
+                    .map_or(
+                        diri_engine::holder::manager::ABANDON_GRACE,
+                        Duration::from_secs_f64,
+                    ),
+            )
             .with_agent_launcher(
                 value_after(&arguments, diri_engine::holder::AGENT_LAUNCHER_FLAG)
                     .map(std::path::PathBuf::from),
