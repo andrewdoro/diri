@@ -12,6 +12,7 @@ use diri_ui::{AgentLogo, Radius, SemanticColors};
 use gpui::{AnyElement, App, Div, FontWeight, Role, SharedString, Window, div, prelude::*, px};
 
 use crate::agent_catalog::AgentOption;
+use crate::i18n::{t, tf};
 use crate::icons::sf_symbol;
 
 /// Runs once the user has confirmed the sheet that showed the command.
@@ -103,18 +104,29 @@ pub(crate) fn confirm_install(
     };
     let requirement = install
         .requirement
-        .map(|requirement| format!("\n\nNeeds {requirement}."))
+        .map(|requirement| {
+            format!(
+                "\n\n{}",
+                tf(
+                    "settings.agents.needs_sentence",
+                    &[("requirement", &requirement)]
+                )
+            )
+        })
         .unwrap_or_default();
     let answer = window.prompt(
         gpui::PromptLevel::Info,
-        &format!("Install {}?", option.display_name),
-        Some(&format!(
-            "Diri runs its official installer in a new terminal tab:\n\n{}{requirement}",
-            install.command
+        &tf(
+            "settings.agents.install_confirm_title",
+            &[("agent", &option.display_name)],
+        ),
+        Some(&tf(
+            "settings.agents.install_confirm_body",
+            &[("command", &install.command), ("requirement", &requirement)],
         )),
         &[
-            gpui::PromptButton::ok("Install"),
-            gpui::PromptButton::cancel("Cancel"),
+            gpui::PromptButton::ok(t("settings.agents.install")),
+            gpui::PromptButton::cancel(t("settings.agents.cancel")),
         ],
         cx,
     );
@@ -137,13 +149,13 @@ fn setup_row(
 ) -> AnyElement {
     let id = option.kind.id().to_owned();
     let note = if installing {
-        Some("Installing…".to_owned())
+        Some(t("settings.agents.installing").to_owned())
     } else {
         option
             .install
             .as_ref()
             .and_then(|install| install.requirement.as_ref())
-            .map(|requirement| format!("Needs {requirement}"))
+            .map(|requirement| tf("settings.agents.needs", &[("requirement", requirement)]))
     };
     let mut row = div()
         .h(px(36.0))
@@ -187,7 +199,10 @@ fn setup_row(
                     move || selector.clone()
                 })
                 .role(Role::Button)
-                .aria_label(format!("Install {}", option.display_name))
+                .aria_label(tf(
+                    "settings.agents.install_named",
+                    &[("agent", &option.display_name)],
+                ))
                 // The Settings control, not a call-to-action slab. The first
                 // row is the shortest path, so it alone gets the stronger fill.
                 .flex_none()
@@ -208,7 +223,7 @@ fn setup_row(
                 .on_click(move |_, window, cx| {
                     confirm_install(&target, window, cx, Rc::clone(&handler));
                 })
-                .child("Install"),
+                .child(t("settings.agents.install")),
         );
     } else if let Some(url) = option.setup_url.clone().filter(|_| !installing) {
         // No bundled installer: the vendor's guide is the only honest action.
@@ -216,7 +231,10 @@ fn setup_row(
             div()
                 .id(format!("{prefix}-guide-{id}"))
                 .role(Role::Button)
-                .aria_label(format!("Open the {} setup guide", option.display_name))
+                .aria_label(tf(
+                    "settings.agents.open_guide",
+                    &[("agent", &option.display_name)],
+                ))
                 .flex_none()
                 .h(px(22.0))
                 .px(px(7.0))
@@ -232,7 +250,7 @@ fn setup_row(
                         .text_color(colors.primary)
                 })
                 .on_click(move |_, _, cx| cx.open_url(&url))
-                .child("Guide"),
+                .child(t("settings.agents.guide")),
         );
     }
     row.into_any_element()

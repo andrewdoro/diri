@@ -452,9 +452,16 @@ impl Render for WhatsNewSheet {
         };
         let last = index + 1 == count;
         let eyebrow = if count > 1 {
-            format!("New in diri {} · {} of {count}", self.version, index + 1)
+            crate::i18n::tf(
+                "settings.whats_new.new_in_page",
+                &[
+                    ("version", &self.version),
+                    ("page", &(index + 1)),
+                    ("count", &count),
+                ],
+            )
         } else {
-            format!("New in diri {}", self.version)
+            crate::i18n::tf("settings.whats_new.new_in", &[("version", &self.version)])
         };
 
         let dots = div()
@@ -483,7 +490,12 @@ impl Render for WhatsNewSheet {
         });
         let advance = sheet_button(
             "whats-new-next",
-            if last { "Done" } else { "Next" }.into(),
+            crate::i18n::t(if last {
+                "settings.whats_new.done"
+            } else {
+                "settings.whats_new.next"
+            })
+            .into(),
             None,
             true,
             colors,
@@ -553,7 +565,7 @@ impl Render for WhatsNewSheet {
                             .text_color(colors.tertiary)
                             .cursor_pointer()
                             .hover(move |style| style.text_color(colors.secondary))
-                            .child("Release notes")
+                            .child(crate::i18n::t("settings.whats_new.release_notes"))
                             .on_click(
                                 cx.listener(|_, _, _, cx| cx.emit(WhatsNewEvent::ReleaseNotes)),
                             ),

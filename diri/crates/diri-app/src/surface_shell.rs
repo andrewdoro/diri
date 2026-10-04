@@ -1552,7 +1552,7 @@ impl UtilitySurfaces {
                 let path = editor.path.text().trim();
                 if path.is_empty() {
                     if let Some(editor) = &mut self.agent_path_editor {
-                        editor.error = Some("Enter an executable path.".into());
+                        editor.error = Some(t("settings.agents.path_required").into());
                     }
                 } else {
                     self.store
@@ -2991,10 +2991,13 @@ impl UtilitySurfaces {
                                 .text_size(px(Typo::TITLE.size))
                                 .font_weight(Typo::TITLE.weight)
                                 .text_color(colors.primary)
-                                .child(format!("New in diri {}", release.version)),
+                                .child(tf(
+                                    "settings.whats_new.new_in",
+                                    &[("version", &release.version)],
+                                )),
                         )
                         .child(surface_button(
-                            "Watch",
+                            t("settings.whats_new.watch"),
                             "whats-new-watch",
                             colors,
                             cx,
@@ -3023,7 +3026,7 @@ impl UtilitySurfaces {
                     14.0,
                     colors.tertiary,
                 ))
-                .child("Loading the latest release notes…")
+                .child(t("settings.whats_new.loading"))
                 .into_any_element(),
             ReleaseNotesState::Failed(error) => div()
                 .id("release-notes-error")
@@ -3044,7 +3047,7 @@ impl UtilitySurfaces {
                                 .text_size(px(Typo::ROW_EMPHASIZED.size))
                                 .font_weight(Typo::ROW_EMPHASIZED.weight)
                                 .text_color(colors.primary)
-                                .child("Release notes couldn't be loaded"),
+                                .child(t("settings.whats_new.load_failed")),
                         )
                         .child(
                             div()
@@ -3056,7 +3059,7 @@ impl UtilitySurfaces {
                         ),
                 )
                 .child(surface_button(
-                    "Try Again",
+                    t("settings.whats_new.try_again"),
                     "retry-release-notes",
                     colors,
                     cx,
@@ -3069,7 +3072,7 @@ impl UtilitySurfaces {
                     .published_at
                     .as_deref()
                     .and_then(|date| date.split('T').next())
-                    .unwrap_or("Publication date unavailable");
+                    .unwrap_or(t("settings.whats_new.date_unavailable"));
                 div()
                     .id("release-notes-content")
                     .debug_selector(|| "release-notes-content".into())
@@ -3100,7 +3103,10 @@ impl UtilitySurfaces {
                                     .flex_none()
                                     .text_size(px(Typo::META.size))
                                     .text_color(colors.tertiary)
-                                    .child(format!("Released {published}")),
+                                    .child(tf(
+                                        "settings.whats_new.released",
+                                        &[("date", &published)],
+                                    )),
                             ),
                     )
                     .child(HairlineDivider::horizontal(colors))
@@ -3110,15 +3116,23 @@ impl UtilitySurfaces {
         };
 
         settings_page(
-            "What's New",
+            t("settings.tab.whats_new"),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(SETTINGS_SECTION_GAP))
                 .when_some(highlights, |page, highlights| {
-                    page.child(setting_section("HIGHLIGHTS", highlights, colors))
+                    page.child(setting_section(
+                        t("settings.whats_new.highlights"),
+                        highlights,
+                        colors,
+                    ))
                 })
-                .child(setting_section("LATEST RELEASE", content, colors)),
+                .child(setting_section(
+                    t("settings.whats_new.latest_release"),
+                    content,
+                    colors,
+                )),
             colors,
         )
     }
@@ -3784,12 +3798,11 @@ impl UtilitySurfaces {
                 }
             }
         } else if loading {
-            catalog_rows = catalog_rows.child(empty_label("Checking installed Agents…", colors));
+            catalog_rows =
+                catalog_rows.child(empty_label(t("settings.agents.checking_installed"), colors));
         } else {
-            catalog_rows = catalog_rows.child(empty_label(
-                "Agent detection has not run for this host.",
-                colors,
-            ));
+            catalog_rows =
+                catalog_rows.child(empty_label(t("settings.agents.not_detected"), colors));
         }
         if let Some(error) = error {
             catalog_rows = catalog_rows.child(
@@ -3808,23 +3821,33 @@ impl UtilitySurfaces {
 
         let refresh_host = host.clone();
         settings_page(
-            "Agents",
+            t("settings.tab.agents"),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(SETTINGS_SECTION_GAP))
-                .child(setting_section("Execution target", targets, colors))
+                .child(setting_section(
+                    t("settings.agents.execution_target"),
+                    targets,
+                    colors,
+                ))
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().text_size(px(10.0)).text_color(colors.tertiary).child(
-                            "Found through your shell's PATH. Use Add… for an agent \
-                                     installed somewhere else.",
-                        ))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(colors.tertiary)
+                                .child(t("settings.agents.path_hint")),
+                        )
                         .child(surface_button(
-                            if loading { "Checking…" } else { "Refresh" },
+                            if loading {
+                                t("settings.agents.checking")
+                            } else {
+                                t("settings.agents.refresh")
+                            },
                             "refresh-agent-catalog",
                             colors,
                             cx,
@@ -3837,7 +3860,11 @@ impl UtilitySurfaces {
                             },
                         )),
                 )
-                .child(setting_section("Supported Agents", catalog_rows, colors)),
+                .child(setting_section(
+                    t("settings.agents.supported"),
+                    catalog_rows,
+                    colors,
+                )),
             colors,
         )
     }
@@ -3869,13 +3896,18 @@ impl UtilitySurfaces {
                 == Some(&item.kind);
         let path = item.path.clone().unwrap_or_else(|| {
             if installing {
-                "Installing in its own tab. Diri notices when it finishes.".into()
+                t("settings.agents.installing_detail").into()
             } else if let Some(install) =
                 install.as_ref().and_then(|option| option.install.as_ref())
             {
                 install.requirement.as_ref().map_or_else(
                     || install.command.clone(),
-                    |requirement| format!("Needs {requirement} · {}", install.command),
+                    |requirement| {
+                        tf(
+                            "settings.agents.needs_command",
+                            &[("requirement", requirement), ("command", &install.command)],
+                        )
+                    },
                 )
             } else {
                 // The badge already says "Not found"; the line under the name
@@ -3886,14 +3918,14 @@ impl UtilitySurfaces {
                     .and_then(|setup| setup.install_hint.as_deref())
                     .map(str::trim)
                     .filter(|hint| !hint.is_empty())
-                    .map_or_else(|| "Not found".into(), str::to_owned)
+                    .map_or_else(|| t("settings.agents.not_found").into(), str::to_owned)
             }
         });
-        let status = match item.path_source {
-            Some(diri_proto::AgentPathSource::Manual) => "Manual",
-            Some(diri_proto::AgentPathSource::SystemPath) => "Installed",
-            None => "Not found",
-        };
+        let status = t(match item.path_source {
+            Some(diri_proto::AgentPathSource::Manual) => "settings.agents.status_manual",
+            Some(diri_proto::AgentPathSource::SystemPath) => "settings.agents.status_installed",
+            None => "settings.agents.not_found",
+        });
         let status_color = if item.available() {
             Ink::FRESH
         } else {
@@ -3945,7 +3977,7 @@ impl UtilitySurfaces {
                         div()
                             .text_size(px(10.0))
                             .text_color(colors.secondary)
-                            .child("Quick"),
+                            .child(t("settings.agents.quick")),
                     ),
             );
         }
@@ -3975,7 +4007,10 @@ impl UtilitySurfaces {
                 div()
                     .id(format!("agent-install-{index}"))
                     .role(gpui::Role::Button)
-                    .aria_label(format!("Install {}", option.display_name))
+                    .aria_label(tf(
+                        "settings.agents.install_named",
+                        &[("agent", &option.display_name)],
+                    ))
                     .h(px(24.0))
                     .px(px(8.0))
                     .rounded(px(Radius::CHIP))
@@ -4004,7 +4039,7 @@ impl UtilitySurfaces {
                             .text_size(px(10.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.background)
-                            .child("Install"),
+                            .child(t("settings.agents.install")),
                     ),
             );
         }
@@ -4027,7 +4062,7 @@ impl UtilitySurfaces {
                             files: true,
                             directories: false,
                             multiple: false,
-                            prompt: Some("Choose Agent Executable".into()),
+                            prompt: Some(t("settings.agents.choose_executable").into()),
                         });
                         let kind = edit_kind.clone();
                         cx.spawn_in(window, async move |this, cx| {
@@ -4068,7 +4103,11 @@ impl UtilitySurfaces {
                     div()
                         .text_size(px(10.0))
                         .text_color(colors.secondary)
-                        .child(if item.available() { "Change" } else { "Add…" }),
+                        .child(if item.available() {
+                            t("settings.agents.change")
+                        } else {
+                            t("settings.agents.add")
+                        }),
                 ),
         );
         if item.configured_path.is_some() {
@@ -4168,7 +4207,7 @@ impl UtilitySurfaces {
                 div()
                     .text_size(px(10.0))
                     .text_color(colors.secondary)
-                    .child("Remote executable path (absolute or ~/…)"),
+                    .child(t("settings.agents.remote_path_label")),
             )
             .child(
                 div()
@@ -4197,7 +4236,7 @@ impl UtilitySurfaces {
                 .justify_end()
                 .gap(px(7.0))
                 .child(surface_button(
-                    "Cancel",
+                    t("settings.agents.cancel"),
                     "cancel-agent-path",
                     colors,
                     cx,
@@ -4207,7 +4246,7 @@ impl UtilitySurfaces {
                     },
                 ))
                 .child(surface_button(
-                    "Save Path",
+                    t("settings.agents.save_path"),
                     "save-agent-path",
                     colors,
                     cx,
@@ -4218,7 +4257,7 @@ impl UtilitySurfaces {
                         let path = editor.path.text().trim();
                         if path.is_empty() {
                             if let Some(editor) = &mut this.agent_path_editor {
-                                editor.error = Some("Enter an executable path.".into());
+                                editor.error = Some(t("settings.agents.path_required").into());
                             }
                             cx.notify();
                             return;
