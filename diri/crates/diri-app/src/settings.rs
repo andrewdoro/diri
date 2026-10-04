@@ -195,14 +195,14 @@ impl HostDraft {
     pub fn entry(&self, existing: &[HostEntry]) -> Result<HostEntry, String> {
         let name = self.name.trim();
         if name.is_empty() {
-            return Err("Give this host a name.".to_owned());
+            return Err(crate::i18n::t("settings.remote.error_name").to_owned());
         }
         let ssh = self.ssh.trim();
         if ssh.is_empty() {
-            return Err("Enter an SSH destination, such as you@forge.".to_owned());
+            return Err(crate::i18n::t("settings.remote.error_ssh").to_owned());
         }
         if ssh.chars().any(char::is_whitespace) {
-            return Err("The SSH destination cannot contain spaces.".to_owned());
+            return Err(crate::i18n::t("settings.remote.error_ssh_spaces").to_owned());
         }
 
         let id = self
@@ -214,7 +214,7 @@ impl HostDraft {
         let node_token_file = self.node_token_file.trim();
         let node_id = self.node_id.trim();
         if node_endpoint.is_empty() != node_token_file.is_empty() {
-            return Err("Enter both the node endpoint and its local token file.".to_owned());
+            return Err(crate::i18n::t("settings.remote.error_node_pair").to_owned());
         }
         if !node_endpoint.is_empty()
             && (node_endpoint.chars().any(char::is_whitespace)
@@ -223,7 +223,7 @@ impl HostDraft {
                     .unwrap_or(node_endpoint)
                     .contains(':'))
         {
-            return Err("Use a node endpoint like tcp://100.64.0.2:7337.".to_owned());
+            return Err(crate::i18n::t("settings.remote.error_endpoint").to_owned());
         }
         Ok(HostEntry {
             id,

@@ -2340,7 +2340,7 @@ impl Sidebar {
         } else if nav.search.is_empty() {
             div()
                 .text_color(colors.tertiary)
-                .child("Search settings…")
+                .child(crate::i18n::t("settings.general.search_placeholder"))
                 .into_any_element()
         } else {
             div()
