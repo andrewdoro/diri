@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::{t, tf};
 
 impl LauncherOverlay {
     pub(super) fn reconcile_account(&mut self) {
@@ -80,10 +81,19 @@ impl LauncherOverlay {
         let default = profiles
             .iter()
             .find(|p| p.is_default)
-            .map_or("CLI account", |p| p.label.as_str());
+            .map_or(t("settings.accounts.cli_account"), |p| p.label.as_str());
         let mut choices = vec![
-            (None, format!("Default · {default}")),
-            (Some(String::new()), "CLI environment".into()),
+            (
+                None,
+                tf(
+                    "settings.accounts.launcher_default",
+                    &[("account", &default)],
+                ),
+            ),
+            (
+                Some(String::new()),
+                t("settings.accounts.launcher_cli_environment").into(),
+            ),
         ];
         choices.extend(
             profiles
@@ -120,11 +130,11 @@ impl LauncherOverlay {
             .into_iter()
             .find(|(id, _)| *id == self.selected_account)
             .map(|(_, label)| label)
-            .unwrap_or_else(|| "Unavailable account".into());
+            .unwrap_or_else(|| t("settings.accounts.launcher_unavailable_account").into());
         div()
             .id("launcher-account-button")
             .role(Role::Button)
-            .aria_label("Choose account profile")
+            .aria_label(t("settings.accounts.launcher_choose"))
             .h(px(CONTROL_SIZE))
             .max_w(px(135.0))
             .px(px(8.0))
@@ -150,9 +160,9 @@ impl LauncherOverlay {
                     .min_w(px(0.0))
                     .text_ellipsis()
                     .child(if self.accounts_loading {
-                        "Loading accounts…".into()
+                        t("settings.accounts.loading").into()
                     } else if self.accounts_error.is_some() {
-                        "Accounts unavailable".into()
+                        t("settings.accounts.launcher_unavailable").into()
                     } else {
                         label
                     }),
@@ -225,7 +235,7 @@ impl LauncherOverlay {
                 .cursor_pointer()
                 .glass_menu_row(colors, self.highlight == self.account_choices().len())
                 .on_click(cx.listener(|this, _, _, cx| this.manage_accounts(cx)))
-                .child("Manage accounts…"),
+                .child(t("settings.accounts.launcher_manage")),
         );
         list
     }

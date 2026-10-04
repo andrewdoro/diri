@@ -1,4 +1,5 @@
 //! On-device usage share card: caption, tweet intent, and a compact PNG.
+use crate::i18n::{t, tf};
 use crate::usage::UsageFormat;
 use crate::usage::dashboard::{ModelRow, UsageReport};
 use gpui::Rgba;
@@ -27,8 +28,8 @@ impl HostLabel {
     fn phrase(&self) -> Option<&str> {
         match self {
             Self::Hidden => None,
-            Self::All => Some("all machines"),
-            Self::ThisMac => Some("this Mac"),
+            Self::All => Some(t("settings.usage.share_all_machines")),
+            Self::ThisMac => Some(t("settings.usage.share_this_mac")),
             Self::Named(name) => Some(name.as_str()),
         }
     }
@@ -176,10 +177,12 @@ impl ShareCard {
                     detail: if tokens {
                         format!("{} · {}", percent(share), money(provider.tokens.c))
                     } else {
-                        format!(
-                            "{} · {} tokens",
-                            percent(share),
-                            UsageFormat::tokens(provider_tokens)
+                        tf(
+                            "settings.usage.share_provider_tokens",
+                            &[
+                                ("percent", &percent(share)),
+                                ("tokens", &UsageFormat::tokens(provider_tokens)),
+                            ],
                         )
                     },
                     share,
@@ -229,7 +232,10 @@ impl ShareCard {
             head = format!("{BRAND} · {host} · {}", self.period());
         }
         let hero = if self.tokens {
-            format!("{} tokens", self.hero)
+            tf(
+                "settings.usage.share_hero_tokens",
+                &[("tokens", &self.hero)],
+            )
         } else {
             self.hero.clone()
         };
@@ -295,13 +301,13 @@ pub(super) fn render_png(card: &ShareCard, palette: SharePalette) -> Option<Vec<
 }
 
 fn period_phrase(days: usize) -> &'static str {
-    match days {
-        1 => "last 24 hours",
-        7 => "last 7 days",
-        30 => "last 30 days",
-        90 => "last 90 days",
-        _ => "this period",
-    }
+    t(match days {
+        1 => "settings.usage.share_period_24h",
+        7 => "settings.usage.share_period_7d",
+        30 => "settings.usage.share_period_30d",
+        90 => "settings.usage.share_period_90d",
+        _ => "settings.usage.share_period_other",
+    })
 }
 
 fn money(value: f64) -> String {
@@ -394,7 +400,7 @@ fn top_models(report: &UsageReport, tokens: bool) -> Vec<ShareModel> {
                 value: if tokens {
                     UsageFormat::tokens(detail.total_tokens())
                 } else if row.detail.priced_tokens == 0 {
-                    "Unpriced".into()
+                    t("settings.usage.unpriced").into()
                 } else {
                     money(detail.cost)
                 },
@@ -573,7 +579,7 @@ mod macos {
         if card.tokens {
             let hero_w = measure(&card.hero, &hero_font).0;
             draw_text_on_baseline(
-                "tokens",
+                t("settings.usage.share_tokens_unit"),
                 PAD + hero_w + 8.0,
                 layout::HERO_BASELINE,
                 &medium_font(px(14.0)),
@@ -589,7 +595,7 @@ mod macos {
         if let Some(models) = &card.models {
             let mut y = layout::LEGEND_Y + layout::LEGEND_H + layout::MODELS_GAP;
             draw_text(
-                "Top models",
+                t("settings.usage.share_top_models"),
                 PAD,
                 y,
                 &medium_font(px(11.0)),

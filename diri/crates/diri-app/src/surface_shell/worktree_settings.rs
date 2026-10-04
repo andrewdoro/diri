@@ -18,7 +18,7 @@ fn disk_label(bytes: Option<u64>) -> String {
         }
         Some(n) if n >= 1024 * 1024 => format!("{:.0} MB", n as f64 / (1024.0 * 1024.0)),
         Some(n) => format!("{} KB", n / 1024),
-        None => "Size not measured".into(),
+        None => t("settings.worktrees.size_not_measured").into(),
     }
 }
 
@@ -33,24 +33,31 @@ impl UtilitySurfaces {
             .collect();
         let known_bytes: u64 = ready.iter().filter_map(|e| e.health.disk_bytes).sum();
         let size_summary = if ready.iter().any(|e| e.health.disk_bytes.is_some()) {
-            format!("{} measured", disk_label(Some(known_bytes)))
+            tf(
+                "settings.worktrees.size_measured",
+                &[("size", &disk_label(Some(known_bytes)))],
+            )
         } else {
-            "Size not measured".into()
+            t("settings.worktrees.size_not_measured").into()
         };
         let summary = if state.loading {
-            format!(
-                "{} worktrees found · {} checked · scanning…",
-                state.total.max(state.entries.len()),
-                state.checked
+            tf(
+                "settings.worktrees.summary_scanning",
+                &[
+                    ("found", &state.total.max(state.entries.len())),
+                    ("checked", &state.checked),
+                ],
             )
         } else if state.error.is_some() && state.entries.is_empty() {
-            "Worktrees could not be loaded".into()
+            t("settings.worktrees.load_failed").into()
         } else {
-            format!(
-                "{} worktrees · {} ready to clean · {}",
-                state.entries.len(),
-                ready.len(),
-                size_summary
+            tf(
+                "settings.worktrees.summary",
+                &[
+                    ("count", &state.entries.len()),
+                    ("ready", &ready.len()),
+                    ("size", &size_summary),
+                ],
             )
         };
         let mut content = div()
@@ -70,7 +77,7 @@ impl UtilitySurfaces {
                             .gap(px(5.0))
                             .child(label(summary, 13.0, colors.primary))
                             .child(label(
-                                "Local projects · branches and commits are kept after cleanup",
+                                t("settings.worktrees.subtitle"),
                                 11.0,
                                 colors.tertiary,
                             )),
@@ -78,7 +85,7 @@ impl UtilitySurfaces {
                     .when(!state.loading, |row| {
                         row.when(!ready.is_empty(), |row| {
                             row.child(surface_button(
-                                "Measure cleanup size",
+                                t("settings.worktrees.measure"),
                                 "worktrees-measure",
                                 colors,
                                 cx,
@@ -86,7 +93,7 @@ impl UtilitySurfaces {
                             ))
                         })
                         .child(surface_button(
-                            "Refresh",
+                            t("settings.worktrees.refresh"),
                             "worktrees-refresh",
                             colors,
                             cx,
@@ -97,15 +104,25 @@ impl UtilitySurfaces {
             .child(
                 div().flex().items_center().gap(px(5.0)).children(
                     [
-                        ("All", false, false),
-                        ("Ready to clean", true, false),
-                        ("Older than 30 days", false, true),
+                        ("All", t("settings.worktrees.filter_all"), false, false),
+                        (
+                            "Ready to clean",
+                            t("settings.worktrees.ready_to_clean"),
+                            true,
+                            false,
+                        ),
+                        (
+                            "Older than 30 days",
+                            t("settings.worktrees.filter_old"),
+                            false,
+                            true,
+                        ),
                     ]
                     .into_iter()
-                    .map(|(title, ready, old)| {
+                    .map(|(key, title, ready, old)| {
                         div()
-                            .id(SharedString::from(format!("worktrees-filter-{title}")))
-                            .debug_selector(move || format!("worktrees-filter-{title}"))
+                            .id(SharedString::from(format!("worktrees-filter-{key}")))
+                            .debug_selector(move || format!("worktrees-filter-{key}"))
                             .px(px(10.0))
                             .py(px(5.0))
                             .rounded(px(8.0))
@@ -161,20 +178,22 @@ impl UtilitySurfaces {
             let branch = entry
                 .branch
                 .clone()
-                .unwrap_or_else(|| "Detached HEAD".into());
+                .unwrap_or_else(|| t("settings.worktrees.detached_head").into());
             let age = if entry.age_days < 0 {
-                "Age unknown".into()
+                t("settings.worktrees.age_unknown").into()
             } else {
-                format!("{}d old", entry.age_days)
+                tf("settings.worktrees.age_days", &[("days", &entry.age_days)])
             };
             let health = &entry.health;
             let status = health
                 .protection
                 .clone()
-                .unwrap_or_else(|| "Ready to clean".into());
+                .unwrap_or_else(|| t("settings.worktrees.ready_to_clean").into());
             let pr_label = match health.pr_number {
                 Some(n) => format!("#{n} {}", health.pr_state),
-                None if health.pr_state == "Unavailable" => "PR unavailable".into(),
+                None if health.pr_state == "Unavailable" => {
+                    t("settings.worktrees.pr_unavailable").into()
+                }
                 None => health.pr_state.clone(),
             };
             let path = entry.path.clone();
@@ -234,11 +253,11 @@ impl UtilitySurfaces {
                             format!(
                                 "{} · {age} · {}",
                                 if health.protection.as_deref() == Some("Checking…") {
-                                    "Status pending"
+                                    t("settings.worktrees.status_pending")
                                 } else if entry.dirty {
-                                    "Changes"
+                                    t("settings.worktrees.changes")
                                 } else {
-                                    "Clean"
+                                    t("settings.worktrees.clean")
                                 },
                                 disk_label(health.disk_bytes)
                             ),
@@ -262,7 +281,7 @@ impl UtilitySurfaces {
                         )
                         .when(entry.stale_suggestion && !state.loading, |row| {
                             row.child(div().flex_1()).child(surface_button(
-                                "Clean up…",
+                                t("settings.worktrees.clean_up"),
                                 SharedString::from(format!("worktree-clean-{path}")),
                                 colors,
                                 cx,
@@ -278,12 +297,51 @@ impl UtilitySurfaces {
                 .as_ref()
                 .is_some_and(|p| p.path == entry.path)
             {
-                row = row.child(div().mt(px(5.0)).p(px(10.0)).rounded(px(8.0)).bg(Ink::ATTENTION.alpha(0.08)).flex().flex_col().gap(px(8.0))
-                    .child(label(format!("Remove {branch}?"), 12.0, colors.primary))
-                    .child(label("Deletes this checkout and ignored files, including build output. Keeps the Git branch.", 11.0, colors.secondary))
-                    .child(div().flex().gap(px(8.0))
-                        .child(surface_button("Cancel", "worktree-clean-cancel", colors, cx, |this, cx| { this.worktrees.cancel_cleanup(); cx.notify(); }))
-                        .child(surface_button("Remove worktree", "worktree-clean-confirm", colors, cx, |this, cx| { this.confirm_cleanup(cx); cx.notify(); }))));
+                row = row.child(
+                    div()
+                        .mt(px(5.0))
+                        .p(px(10.0))
+                        .rounded(px(8.0))
+                        .bg(Ink::ATTENTION.alpha(0.08))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(label(
+                            tf("settings.worktrees.remove_confirm", &[("branch", &branch)]),
+                            12.0,
+                            colors.primary,
+                        ))
+                        .child(label(
+                            t("settings.worktrees.remove_detail"),
+                            11.0,
+                            colors.secondary,
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.0))
+                                .child(surface_button(
+                                    t("settings.worktrees.cancel"),
+                                    "worktree-clean-cancel",
+                                    colors,
+                                    cx,
+                                    |this, cx| {
+                                        this.worktrees.cancel_cleanup();
+                                        cx.notify();
+                                    },
+                                ))
+                                .child(surface_button(
+                                    t("settings.worktrees.remove"),
+                                    "worktree-clean-confirm",
+                                    colors,
+                                    cx,
+                                    |this, cx| {
+                                        this.confirm_cleanup(cx);
+                                        cx.notify();
+                                    },
+                                )),
+                        ),
+                );
             }
             rows = rows.child(row);
         }
@@ -296,37 +354,83 @@ impl UtilitySurfaces {
                     .gap(px(7.0))
                     .child(label(
                         if state.error.is_some() {
-                            "Couldn't load your worktrees"
+                            t("settings.worktrees.empty_error")
                         } else if state.loading {
-                            "Scanning your local projects…"
+                            t("settings.worktrees.empty_scanning")
                         } else if state.entries.is_empty() {
-                            "Your worktrees will appear here"
+                            t("settings.worktrees.empty_none")
                         } else {
-                            "No worktrees match this view"
+                            t("settings.worktrees.empty_filtered")
                         },
                         13.0,
                         colors.primary,
                     ))
                     .child(label(
-                        if state.error.is_some() { "Refresh to retry. Your worktrees have not been changed." }
-                        else if state.loading { "Worktrees appear as they are found. PR and status checks follow." }
-                        else { "Add a local project to Diri, then refresh to review its linked worktrees." },
+                        if state.error.is_some() {
+                            t("settings.worktrees.empty_error_detail")
+                        } else if state.loading {
+                            t("settings.worktrees.empty_scanning_detail")
+                        } else {
+                            t("settings.worktrees.empty_detail")
+                        },
                         11.0,
                         colors.secondary,
                     )),
             );
         }
-        content = content.child(rows).when(count > PAGE_ROWS, |content| content.child(
-            div().flex().items_center().justify_between().gap(px(8.0))
-                .child(label(format!("{}–{} of {count} worktrees", page * PAGE_ROWS + 1, ((page + 1) * PAGE_ROWS).min(count)), 11.0, colors.secondary))
-                .when(page > 0, |row| row.child(surface_button("Previous", "worktrees-previous", colors, cx, move |this, cx| {
-                    this.worktrees.page = page - 1; this.worktrees.cancel_cleanup(); this.settings_scroll.set_offset(point(px(0.0), px(0.0))); cx.notify();
-                })))
-                .when((page + 1) * PAGE_ROWS < count, |row| row.child(surface_button("Next", "worktrees-next", colors, cx, move |this, cx| {
-                    this.worktrees.page = page + 1; this.worktrees.cancel_cleanup(); this.settings_scroll.set_offset(point(px(0.0), px(0.0))); cx.notify();
-                })))
-        )).child(label("Age is checkout age, not last use. PRs use GitHub CLI access. Disk sizes are measured only on request, for cleanup candidates.", 11.0, colors.tertiary));
-        settings_page("Worktrees", content, colors)
+        content = content
+            .child(rows)
+            .when(count > PAGE_ROWS, |content| {
+                content.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .child(label(
+                            tf(
+                                "settings.worktrees.page_range",
+                                &[
+                                    ("start", &(page * PAGE_ROWS + 1)),
+                                    ("end", &((page + 1) * PAGE_ROWS).min(count)),
+                                    ("count", &count),
+                                ],
+                            ),
+                            11.0,
+                            colors.secondary,
+                        ))
+                        .when(page > 0, |row| {
+                            row.child(surface_button(
+                                t("settings.worktrees.previous"),
+                                "worktrees-previous",
+                                colors,
+                                cx,
+                                move |this, cx| {
+                                    this.worktrees.page = page - 1;
+                                    this.worktrees.cancel_cleanup();
+                                    this.settings_scroll.set_offset(point(px(0.0), px(0.0)));
+                                    cx.notify();
+                                },
+                            ))
+                        })
+                        .when((page + 1) * PAGE_ROWS < count, |row| {
+                            row.child(surface_button(
+                                t("settings.worktrees.next"),
+                                "worktrees-next",
+                                colors,
+                                cx,
+                                move |this, cx| {
+                                    this.worktrees.page = page + 1;
+                                    this.worktrees.cancel_cleanup();
+                                    this.settings_scroll.set_offset(point(px(0.0), px(0.0)));
+                                    cx.notify();
+                                },
+                            ))
+                        }),
+                )
+            })
+            .child(label(t("settings.worktrees.footer"), 11.0, colors.tertiary));
+        settings_page(t("settings.worktrees.title"), content, colors)
     }
 }
 
