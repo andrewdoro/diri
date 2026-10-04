@@ -8887,6 +8887,13 @@ mod tests {
         let output = std::env::var_os("DIRI_VISUAL_OUTPUT")
             .map(PathBuf::from)
             .expect("output PNG path");
+        // DIRI_VISUAL_LANGUAGE=zh-Hans renders the page in that catalog.
+        if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            diri_i18n::set_language(language);
+        }
         let platform = gpui_platform::current_platform(true);
         let mut cx = HeadlessAppContext::with_platform(
             platform.text_system(),
