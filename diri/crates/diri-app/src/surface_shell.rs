@@ -8304,6 +8304,28 @@ mod tests {
         cx.update_window(window.into(), |_, window, _| window.refresh())
             .expect("refresh settings window");
         cx.run_until_parked();
+        // `DIRI_VISUAL_SWITCH_LANGUAGE=zh-Hans` picks that language the way the
+        // General › Language menu does, after the window has rendered once, so
+        // the capture shows whether every cached view followed the switch.
+        if let Some(language) = std::env::var("DIRI_VISUAL_SWITCH_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            cx.update_window(window.into(), |root, _, cx| {
+                let harness = root
+                    .downcast::<SettingsWorkbenchHarness>()
+                    .expect("harness");
+                let surfaces = harness.read(cx).surfaces.clone();
+                surfaces.update(cx, |surfaces, cx| {
+                    let choice = crate::store::UiLanguage::Fixed(language);
+                    surfaces.update_prefs(move |prefs| prefs.ui_language = choice);
+                    crate::i18n::apply_live(choice, cx);
+                    cx.notify();
+                });
+            })
+            .expect("switch language");
+            cx.run_until_parked();
+        }
         // `DIRI_VISUAL_PRIVACY=on|off` seeds Settings > General > Privacy
         // (a fixed Support ID and name, never the real files) and scrolls to
         // it at the bottom of the page.
