@@ -23,6 +23,7 @@ pub mod fuzzy;
 #[cfg(test)]
 mod gesture_delivery;
 mod git_review;
+mod git_ui;
 #[cfg(test)]
 mod gpui_view_cache_tests;
 mod haptics;
