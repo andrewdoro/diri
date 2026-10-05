@@ -17,6 +17,7 @@ use crate::commands::{
     ToggleQuickOpen,
 };
 use crate::fuzzy::{FuzzyMatcher, FuzzyQuery};
+use crate::i18n::{t, tf};
 use crate::icons::sf_symbol;
 use crate::palette::{self, PaletteAction, PaletteCommand, Ranked};
 use crate::palette_chrome::{PaletteTooltip, keycap, scroll_fades};
@@ -1064,7 +1065,7 @@ impl NavigationOverlay {
                     );
                     if matches!(command, CommandId::HorizontalTabs | CommandId::VerticalTabs) {
                         if current {
-                            action.detail = Some("Current".into());
+                            action.detail = Some(t("palette.current").into());
                         } else {
                             action.shortcut =
                                 crate::commands::command(CommandId::ToggleTabOrientation)
@@ -1147,7 +1148,10 @@ impl NavigationOverlay {
         match std::fs::create_dir_all(&path) {
             Ok(()) => Some(path),
             Err(error) => {
-                self.page_error = Some(format!("Could not create {}: {error}", path.display()));
+                self.page_error = Some(tf(
+                    "nav.create_folder_failed",
+                    &[("path", &path.display()), ("error", &error)],
+                ));
                 None
             }
         }
@@ -1283,12 +1287,18 @@ impl NavigationOverlay {
     fn settings_items(&self) -> Vec<usize> {
         let query = self.query.text().trim().to_lowercase();
         [
-            "Color theme appearance dark light",
-            "All settings preferences shortcuts",
+            (
+                t("palette.color_theme"),
+                "Color theme appearance dark light",
+            ),
+            (t("nav.all_settings"), "All settings preferences shortcuts"),
         ]
         .iter()
         .enumerate()
-        .filter_map(|(index, label)| label.to_lowercase().contains(&query).then_some(index))
+        .filter_map(|(index, (title, keywords))| {
+            (title.to_lowercase().contains(&query) || keywords.to_lowercase().contains(&query))
+                .then_some(index)
+        })
         .collect()
     }
 
@@ -1349,7 +1359,7 @@ impl NavigationOverlay {
                 self._runtime.publish_local_change();
             }
             Err(error) => {
-                self.page_error = Some(format!("Could not save theme: {error}"));
+                self.page_error = Some(tf("nav.save_theme_failed", &[("error", &error)]));
                 cx.notify();
             }
         }
@@ -1386,14 +1396,14 @@ impl NavigationOverlay {
         let count = self.visible_count();
         let entity = cx.entity();
         let page = self.overlay.expect("open palette");
-        let placeholder = match page {
-            Overlay::CommandPalette => "Search chats or run a command…",
-            Overlay::QuickOpen => "Open project…",
-            Overlay::History => "Search chats…",
-            Overlay::Notes => "Search notes…",
-            Overlay::Settings => "Settings…",
-            Overlay::Themes => "Color theme…",
-        };
+        let placeholder = t(match page {
+            Overlay::CommandPalette => "nav.placeholder.command_palette",
+            Overlay::QuickOpen => "nav.placeholder.quick_open",
+            Overlay::History => "nav.placeholder.history",
+            Overlay::Notes => "nav.placeholder.notes",
+            Overlay::Settings => "nav.placeholder.settings",
+            Overlay::Themes => "nav.placeholder.themes",
+        });
         let error = if page == Overlay::History {
             self.history_error.clone()
         } else {
@@ -1425,8 +1435,10 @@ impl NavigationOverlay {
                                     .cursor_pointer()
                                     .hover(move |style| style.bg(Fill::hover(colors, true)))
                                     .warm_tooltip(move |_, cx| {
-                                        cx.new(|_| PaletteTooltip("Back · ⌘[".into(), colors))
-                                            .into()
+                                        cx.new(|_| {
+                                            PaletteTooltip(t("nav.back_tooltip").into(), colors)
+                                        })
+                                        .into()
                                     })
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.in_main(window, cx, |this, window, cx| {
@@ -1473,8 +1485,10 @@ impl NavigationOverlay {
                                 .cursor_pointer()
                                 .hover(move |style| style.bg(Fill::hover(colors, true)))
                                 .warm_tooltip(move |_, cx| {
-                                    cx.new(|_| PaletteTooltip("Refresh chats".into(), colors))
-                                        .into()
+                                    cx.new(|_| {
+                                        PaletteTooltip(t("nav.refresh_chats").into(), colors)
+                                    })
+                                    .into()
                                 })
                                 .on_click(cx.listener(|this, _, _, cx| this.refresh_history(cx)))
                                 .child(if self.history_loading {
@@ -1554,15 +1568,15 @@ impl NavigationOverlay {
                                 .text_size(px(13.0))
                                 .text_color(colors.secondary)
                                 .child(if page == Overlay::History && self.history_loading {
-                                    "Finding chats…"
+                                    t("nav.finding_chats")
                                 } else if page == Overlay::Notes {
                                     self.notes_empty_label(cx)
                                 } else if page == Overlay::QuickOpen
                                     && self.directory_index.is_scanning()
                                 {
-                                    "Finding projects…"
+                                    t("nav.finding_projects")
                                 } else {
-                                    "No matches"
+                                    t("nav.no_matches")
                                 }),
                         )
                     }),
@@ -1779,9 +1793,9 @@ impl NavigationOverlay {
         let title = theme.map_or_else(
             || {
                 if self.settings_items()[index] == 0 {
-                    "Color theme"
+                    t("palette.color_theme")
                 } else {
-                    "All settings"
+                    t("nav.all_settings")
                 }
             },
             |theme| theme.name,
@@ -1983,7 +1997,11 @@ impl NavigationOverlay {
             .items_center()
             .gap(px(8.0))
             .min_w_0()
-            .child(div().flex_none().child(format!("Create “{name}”")))
+            .child(
+                div()
+                    .flex_none()
+                    .child(tf("nav.create_folder", &[("name", &name)])),
+            )
             .child(
                 div()
                     .min_w_0()
@@ -1992,10 +2010,15 @@ impl NavigationOverlay {
                     .text_color(colors.tertiary)
                     .child(relative_parent(&path)),
             );
-        let detail = format!(
-            "{}\nEnter to create and open · {} for a terminal",
-            path.display(),
-            crate::commands::primary_shortcut_label("Enter")
+        let detail = tf(
+            "nav.create_folder_tooltip",
+            &[
+                ("path", &path.display()),
+                (
+                    "terminal",
+                    &crate::commands::primary_shortcut_label("Enter"),
+                ),
+            ],
         );
         palette_row(
             title.into_any_element(),
@@ -2057,10 +2080,15 @@ impl NavigationOverlay {
                         .child(parent),
                 )
             });
-        let detail = format!(
-            "{}\nEnter to open · {} for a terminal",
-            item.path.display(),
-            crate::commands::primary_shortcut_label("Enter")
+        let detail = tf(
+            "nav.open_project_tooltip",
+            &[
+                ("path", &item.path.display()),
+                (
+                    "terminal",
+                    &crate::commands::primary_shortcut_label("Enter"),
+                ),
+            ],
         );
         palette_row(
             title.into_any_element(),
@@ -2617,6 +2645,13 @@ mod tests {
         let output = std::env::var_os("DIRI_VISUAL_OUTPUT")
             .map(PathBuf::from)
             .expect("set DIRI_VISUAL_OUTPUT to the target PNG path");
+        // DIRI_VISUAL_LANGUAGE=zh-Hans renders the page in that catalog.
+        if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            diri_i18n::set_language(language);
+        }
         let platform = gpui_platform::current_platform(true);
         let mut cx = HeadlessAppContext::with_platform(
             platform.text_system(),

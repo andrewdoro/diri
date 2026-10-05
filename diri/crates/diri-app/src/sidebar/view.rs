@@ -48,6 +48,7 @@ use crate::commands::{CommandId, OpenSettings, ToggleHistory};
 use crate::delegation::{HandoffProposal, handoff_proposal, sibling_proposal, validate_handoff};
 use crate::external_drop::{ExternalDropPlan, ExternalDropTarget, plan_external_drop};
 use crate::haptics::{self, Haptic};
+use crate::i18n::{t, tf};
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::query_label;
 use crate::query_editor::{self, ClipboardEdit, Edit};
@@ -1081,15 +1082,15 @@ impl Sidebar {
         let store = self.store.read().expect("session store lock poisoned");
         let pending = store.pending_close()?;
         let title = if let Some(project) = &pending.project {
-            format!("Close all sessions in “{project}”?")
+            tf("session.close.title_project", &[("project", project)])
         } else if pending.ids.len() == 1 {
             store
                 .sessions()
                 .get(&pending.ids[0])
-                .map(|session| format!("Close “{}”?", session.title))
-                .unwrap_or_else(|| "Close session?".into())
+                .map(|session| tf("session.close.title_one", &[("title", &session.title)]))
+                .unwrap_or_else(|| t("session.close.title_untitled").into())
         } else {
-            format!("Close {} sessions?", pending.ids.len())
+            tf("session.close.title_many", &[("count", &pending.ids.len())])
         };
         let running = pending
             .ids
@@ -1111,9 +1112,12 @@ impl Sidebar {
             })
             .count();
         let message = if pending.project.is_some() && archived > 0 {
-            format!("{running} still running, {archived} archived.")
+            tf(
+                "session.close.running_archived",
+                &[("running", &running), ("archived", &archived)],
+            )
         } else {
-            format!("{running} still running.")
+            tf("session.close.running", &[("running", &running)])
         };
         Some((title, message))
     }
@@ -1259,7 +1263,7 @@ impl Sidebar {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Start Here".into()),
+            prompt: Some(t("sidebar.start_here").into()),
         });
         // The panel is modeless: the sidebar stays live while it is up, so
         // pin the popover that asked for the pick. Every "never mind" gesture
@@ -2022,7 +2026,7 @@ impl Sidebar {
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .child("New Agent"),
+                    .child(t("sidebar.new_agent")),
             )
             // The agent about to launch is shown by its mark, the way session
             // rows show theirs, rather than spelled out beside the label.
@@ -2077,7 +2081,7 @@ impl Sidebar {
         let primary_button = if in_settings {
             icon_button(
                 "close-settings",
-                "Back to sessions",
+                t("sidebar.back_to_sessions"),
                 "chevron.left",
                 primary_hover,
                 colors,
@@ -2094,7 +2098,7 @@ impl Sidebar {
             crate::held_hints::below(
                 icon_button(
                     "sidebar-search",
-                    "Search sessions",
+                    t("sidebar.search_sessions"),
                     "magnifyingglass",
                     primary_hover,
                     colors,
@@ -2124,7 +2128,7 @@ impl Sidebar {
             .when(!in_settings, |bar| {
                 bar.child(icon_button(
                     "sidebar-layout",
-                    "Group and order sessions",
+                    t("sidebar.group_and_order"),
                     "gearshape",
                     layout_hover,
                     colors,
@@ -2148,9 +2152,9 @@ impl Sidebar {
                 icon_button(
                     "sidebar-toggle",
                     if self.peek_open {
-                        "Pin sidebar open"
+                        t("sidebar.pin_open")
                     } else {
-                        "Hide sidebar"
+                        t("sidebar.hide")
                     },
                     "sidebar.left",
                     toggle_hover,
@@ -2228,7 +2232,7 @@ impl Sidebar {
                     .pt(px(14.0))
                     .text_size(px(Typo::META.size))
                     .text_color(colors.tertiary)
-                    .child("No settings found"),
+                    .child(t("sidebar.settings_no_results")),
             );
         }
         div()
@@ -2340,7 +2344,7 @@ impl Sidebar {
         } else if nav.search.is_empty() {
             div()
                 .text_color(colors.tertiary)
-                .child("Search settings…")
+                .child(crate::i18n::t("settings.general.search_placeholder"))
                 .into_any_element()
         } else {
             div()
@@ -2516,9 +2520,9 @@ impl Sidebar {
                     .text_size(px(Typo::META.size))
                     .text_color(colors.secondary)
                     .child(if revive_offered {
-                        "Drop to revive session"
+                        t("sidebar.drop_revive")
                     } else {
-                        "Drop to fan out a sibling"
+                        t("sidebar.drop_sibling")
                     })
             })
             .drag_over::<DraggedSidebarItem>(move |element, dragged, _, _| {
@@ -2582,7 +2586,7 @@ impl Sidebar {
                 div()
                     .text_size(px(Typo::ROW.size))
                     .text_color(colors.tertiary)
-                    .child("No Sessions"),
+                    .child(t("sidebar.no_sessions")),
             )
             .into_any_element()
     }
@@ -2983,7 +2987,7 @@ impl Sidebar {
                                     move || format!("PROJECT_CLOSE_{}", id.0)
                                 })
                                 .role(Role::Button)
-                                .aria_label("Close all sessions")
+                                .aria_label(t("sidebar.close_all_sessions"))
                                 .size(px(SIDEBAR_TRAILING_SLOT))
                                 .flex()
                                 .items_center()
@@ -3398,11 +3402,11 @@ impl Sidebar {
                 .id("recency-archive-header")
                 .role(Role::Button)
                 .aria_label(if expanded {
-                    "Hide archived sessions"
+                    t("sidebar.archive.hide")
                 } else {
-                    "Show archived sessions"
+                    t("sidebar.archive.show")
                 })
-                .aria_description(format!("{count} archived sessions"))
+                .aria_description(tf("sidebar.archive.count", &[("count", &count)]))
                 .mt(px(4.0))
                 .pl(px(Space::ROW_H))
                 .pr(px(Space::ROW_H))
@@ -3428,7 +3432,7 @@ impl Sidebar {
                     cx.notify();
                 }))
                 .child(project_disclosure(!expanded, colors))
-                .child(div().min_w(px(0.0)).flex_1().child("Archived"))
+                .child(div().min_w(px(0.0)).flex_1().child(t("sidebar.archived")))
                 .child(archive_count(count, colors)),
         );
         let now = Instant::now();
@@ -3746,7 +3750,9 @@ impl Sidebar {
         let non_persistent =
             session.remote_persistence == Some(PersistenceCapability::NonPersistent);
         // Read before the title moves into the marquee below.
-        let ended_chip = ended && title != ENDED_TITLE;
+        // `display_title` names a placeholder-titled exited session "Ended"; the
+        // chip stands down when the title already says it.
+        let ended_chip = ended && title != crate::i18n::t("nav.title.ended");
         let title_available_width = (session_title_available_width(
             width,
             row.depth,
@@ -3872,7 +3878,7 @@ impl Sidebar {
             }
         };
         let drag_label: SharedString = match &drag_item {
-            DragItem::Sessions(ids) => format!("{} sessions", ids.len()).into(),
+            DragItem::Sessions(ids) => tf("sidebar.drag_sessions", &[("count", &ids.len())]).into(),
             _ => title.clone().into(),
         };
         let drag_payload = DraggedSidebarItem(drag_item);
@@ -4086,27 +4092,43 @@ impl Sidebar {
             )
             .when(row.pinned, |element| element.child(pin_mark(colors)))
             .when(marked, |element| {
-                element.child(StateChip::new("Delegating", Palette::CLAY, colors))
+                element.child(StateChip::new(
+                    t("session.chip.delegating"),
+                    Palette::CLAY,
+                    colors,
+                ))
             })
             // Chips, in descending order of how much they explain an otherwise
             // inert-looking row. Each is flex_none and the title absorbs the
             // remaining width, so a narrow sidebar truncates the title rather
             // than dropping the reason it is not moving.
             .when(migrating, |element| {
-                element.child(StateChip::new("Moving…", colors.secondary, colors))
+                element.child(StateChip::new(
+                    t("session.chip.moving"),
+                    colors.secondary,
+                    colors,
+                ))
             })
             .when(non_persistent, |element| {
                 // Louder than the rest of the lane on purpose: this session
                 // cannot survive a detach, so closing the window loses it.
-                element.child(AlertChip::new("No detach"))
+                element.child(AlertChip::new(t("session.chip.no_detach")))
             })
             .when(ended_chip, |element| {
                 // An exited session with a real title otherwise looks alive:
                 // the glyph goes quiet and nothing else says why.
-                element.child(StateChip::new("Ended", colors.tertiary, colors))
+                element.child(StateChip::new(
+                    t("session.chip.ended"),
+                    colors.tertiary,
+                    colors,
+                ))
             })
             .when(loading, |element| {
-                element.child(StateChip::new("Loading", colors.secondary, colors))
+                element.child(StateChip::new(
+                    t("session.chip.loading"),
+                    colors.secondary,
+                    colors,
+                ))
             })
             .when_some(scheduled_run, |element, run| {
                 // A schedule opened this session, perhaps after waking the Mac.
@@ -4132,7 +4154,7 @@ impl Sidebar {
                             move || format!("session-close:{}", id.0)
                         })
                         .role(Role::Button)
-                        .aria_label("Close session")
+                        .aria_label(t("session.close_session"))
                         .size(px(16.0))
                         .flex_none()
                         .flex()
@@ -4360,7 +4382,7 @@ impl Sidebar {
                         }
                     }))
                     .child(project_disclosure(!expanded, colors))
-                    .child(div().min_w(px(0.0)).flex_1().child("Archived"))
+                    .child(div().min_w(px(0.0)).flex_1().child(t("sidebar.archived")))
                     .child(archive_count(group.archived.len(), colors)),
             );
         let now = Instant::now();
@@ -4562,7 +4584,7 @@ impl Sidebar {
                         move || format!("session-revive:{}", id.0)
                     })
                     .role(Role::Button)
-                    .aria_label("Revive session")
+                    .aria_label(t("sidebar.revive_session"))
                     .size(px(SIDEBAR_TRAILING_SLOT))
                     .flex_none()
                     .flex()
@@ -4740,7 +4762,7 @@ impl Sidebar {
                         div()
                             .flex_none()
                             .text_color(colors.secondary)
-                            .child("What's new ·"),
+                            .child(t("sidebar.whats_new_prefix")),
                     )
                     .child(
                         div()
@@ -4914,13 +4936,13 @@ impl Sidebar {
             .flex()
             .flex_col()
             .role(Role::Menu)
-            .aria_label("Sidebar view options")
+            .aria_label(t("sidebar.layout.options"))
             .rounded(px(Radius::FLOATING_MENU))
             .p(px(4.0))
-            .child(section_label("Grouping"))
+            .child(section_label(t("sidebar.layout.grouping")))
             .child(choice_menu_row(
                 "sidebar-group-project",
-                "Project",
+                t("sidebar.layout.project"),
                 "P",
                 grouping == SidebarGrouping::Project,
                 self.ui.layout_menu_index == 0,
@@ -4932,7 +4954,7 @@ impl Sidebar {
             ))
             .child(choice_menu_row(
                 "sidebar-group-recency",
-                "Recency",
+                t("sidebar.layout.recency"),
                 "R",
                 grouping == SidebarGrouping::Recency,
                 self.ui.layout_menu_index == 1,
@@ -4943,11 +4965,11 @@ impl Sidebar {
                 }),
             ))
             .child(menu_divider(colors))
-            .child(section_label("Ordering"));
+            .child(section_label(t("sidebar.layout.ordering")));
         if grouping == SidebarGrouping::Project {
             content = content.child(choice_menu_row(
                 "sidebar-order-custom",
-                "Custom",
+                t("sidebar.layout.custom"),
                 "C",
                 ordering == SidebarOrdering::Custom,
                 self.ui.layout_menu_index == 2,
@@ -4961,7 +4983,7 @@ impl Sidebar {
         content = content
             .child(choice_menu_row(
                 "sidebar-order-newest",
-                "Newest first",
+                t("sidebar.layout.newest_first"),
                 "N",
                 ordering == SidebarOrdering::NewestFirst,
                 self.ui.layout_menu_index
@@ -4978,7 +5000,7 @@ impl Sidebar {
             ))
             .child(choice_menu_row(
                 "sidebar-order-oldest",
-                "Oldest first",
+                t("sidebar.layout.oldest_first"),
                 "O",
                 ordering == SidebarOrdering::OldestFirst,
                 self.ui.layout_menu_index
@@ -5390,9 +5412,10 @@ impl Sidebar {
         let (target, subtitle) = if preserve_repo {
             match repo_state {
                 Some(crate::store::RepoTarget::Resolved(path)) => (path, None),
-                Some(crate::store::RepoTarget::Pending) => {
-                    (fallback_target, Some("locating repo…".to_owned()))
-                }
+                Some(crate::store::RepoTarget::Pending) => (
+                    fallback_target,
+                    Some(t("sidebar.new_agent.locating_repo").to_owned()),
+                ),
                 Some(crate::store::RepoTarget::NotCloned) => {
                     let place = selected_host.as_ref().map_or_else(
                         || crate::platform::local_machine_label_lowercase().to_owned(),
@@ -5405,9 +5428,16 @@ impl Sidebar {
                         .to_owned();
                     (
                         fallback_target,
-                        Some(format!(
-                            "{} not on {place} — opens in {folder}",
-                            repo_name.as_deref().unwrap_or("repo")
+                        Some(tf(
+                            "sidebar.new_agent.repo_missing",
+                            &[
+                                (
+                                    "repo",
+                                    &repo_name.as_deref().unwrap_or(t("sidebar.new_agent.repo")),
+                                ),
+                                ("place", &place),
+                                ("folder", &folder),
+                            ],
                         )),
                     )
                 }
@@ -5587,7 +5617,7 @@ impl Sidebar {
                     .flex_1()
                     .text_size(px(Typo::ROW.size))
                     .text_color(colors.primary)
-                    .child("Manage Agents…"),
+                    .child(t("sidebar.new_agent.manage_agents")),
             ),
         );
         self.popover_shell_at(
@@ -5720,7 +5750,7 @@ impl Sidebar {
                         .bg(Fill::subtle(colors))
                         .hover(move |button| button.bg(colors.primary.alpha(0.10)))
                         .on_click(move |_, _, cx| cx.open_url(&url))
-                        .child("Setup…"),
+                        .child(t("sidebar.new_agent.setup")),
                 )
             })
             .when(!shortcut.is_empty(), |row| {
@@ -5756,7 +5786,7 @@ impl Sidebar {
             syncing,
         } = panel;
         let mut content = div().flex().flex_col().child(panel_header(
-            "Where",
+            t("sidebar.new_agent.where"),
             colors,
             cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
@@ -5765,7 +5795,7 @@ impl Sidebar {
             }),
         ));
         if !hosts.is_empty() {
-            content = content.child(section_label("Machine", colors));
+            content = content.child(section_label(t("sidebar.new_agent.machine"), colors));
             // "This Mac" first: it is a real target, not the absence of one,
             // so the choice can always be undone here.
             //
@@ -5880,10 +5910,10 @@ impl Sidebar {
                     .pb(px(4.0))
                     .text_size(px(Typo::META.size))
                     .text_color(colors.tertiary)
-                    .child("Also where ⌘T opens"),
+                    .child(t("sidebar.new_agent.also_cmd_t")),
             );
         }
-        content = content.child(section_label("Folder", colors));
+        content = content.child(section_label(t("sidebar.new_agent.folder"), colors));
         let current_name = target.rsplit('/').next().unwrap_or(&target).to_owned();
         content = content.child(
             choice_row(
@@ -5929,13 +5959,16 @@ impl Sidebar {
             );
         }
         let browse_label = match &selected_host {
-            None => "Choose Folder…".to_owned(),
-            Some(id) => format!(
-                "Browse {}…",
-                hosts
-                    .iter()
-                    .find(|entry| entry.id == *id)
-                    .map_or(id.as_str(), |entry| entry.display_name())
+            None => t("sidebar.new_agent.choose_folder").to_owned(),
+            Some(id) => tf(
+                "sidebar.new_agent.browse_host",
+                &[(
+                    "host",
+                    &hosts
+                        .iter()
+                        .find(|entry| entry.id == *id)
+                        .map_or(id.as_str(), |entry| entry.display_name()),
+                )],
             ),
         };
         let browse_host = selected_host.clone();
@@ -6058,7 +6091,7 @@ impl Sidebar {
                 choice_row(
                     "use-new-agent-directory",
                     "checkmark.circle",
-                    "Use this folder".to_owned(),
+                    t("sidebar.new_agent.use_folder").to_owned(),
                     true,
                     colors,
                     cx.listener(move |this, _, _, cx| {
@@ -6088,7 +6121,7 @@ impl Sidebar {
                     let parent_host = host.clone();
                     rows = rows.child(directory_row(
                         "arrow.up",
-                        "Parent folder".to_owned(),
+                        t("sidebar.new_agent.parent_folder").to_owned(),
                         colors,
                         cx.listener(move |this, _, _, cx| {
                             this.directory_scroll = ScrollHandle::new();
@@ -6132,7 +6165,7 @@ impl Sidebar {
                             .py(px(7.0))
                             .text_size(px(Typo::META.size))
                             .text_color(colors.tertiary)
-                            .child("Showing the first 512 folders"),
+                            .child(t("sidebar.new_agent.first_512")),
                     );
                 }
                 panel = panel.child(rows);
@@ -6160,7 +6193,7 @@ impl Sidebar {
                                 .id("retry-directory-listing")
                                 .cursor_pointer()
                                 .text_color(colors.primary)
-                                .child("Retry")
+                                .child(t("sidebar.retry"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.store
                                         .write()
@@ -6189,7 +6222,7 @@ impl Sidebar {
                             14.0,
                             colors.tertiary,
                         ))
-                        .child("Loading folders…"),
+                        .child(t("sidebar.new_agent.loading_folders")),
                 );
             }
         }
@@ -6244,9 +6277,9 @@ impl Sidebar {
             );
         if let Some(command) = command {
             let action = match command {
-                UpdateCommand::Download => "Download",
-                UpdateCommand::Install => "Restart",
-                _ => "Check",
+                UpdateCommand::Download => t("sidebar.update.download"),
+                UpdateCommand::Install => t("sidebar.update.restart"),
+                _ => t("sidebar.update.check"),
             };
             row = row
                 .cursor_pointer()
@@ -6321,7 +6354,7 @@ impl Sidebar {
                             .flex_none()
                             .text_size(px(Typo::META.size))
                             .text_color(colors.tertiary)
-                            .child("This Mac"),
+                            .child(t("sidebar.account.this_mac")),
                     ),
             )
             .child(menu_divider(colors))
@@ -6331,7 +6364,7 @@ impl Sidebar {
             .child(menu_divider(colors))
             .child(account_action_row(
                 "account-settings",
-                "Settings",
+                t("sidebar.account.settings"),
                 crate::commands::command(CommandId::OpenSettings).shortcut_label(),
                 colors,
                 cx.listener(|this, _, window, cx| {
@@ -6378,7 +6411,7 @@ impl Sidebar {
             .flex()
             .flex_col()
             .child(menu_row(
-                "New Session Here",
+                t("sidebar.project_menu.new_session_here"),
                 colors,
                 cx.listener({
                     let root = project.root.clone();
@@ -6390,9 +6423,9 @@ impl Sidebar {
             ))
             .child(menu_row(
                 if pinned {
-                    "Unpin Project"
+                    t("sidebar.project_menu.unpin")
                 } else {
-                    "Pin Project"
+                    t("sidebar.project_menu.pin")
                 },
                 colors,
                 cx.listener({
@@ -6411,9 +6444,9 @@ impl Sidebar {
             .when(local, |menu| {
                 menu.child(menu_row(
                     if fresh_worktree {
-                        "New Agents: This Checkout"
+                        t("sidebar.project_menu.new_agents_checkout")
                     } else {
-                        "New Agents: Fresh Worktree"
+                        t("sidebar.project_menu.new_agents_worktree")
                     },
                     colors,
                     cx.listener({
@@ -6431,7 +6464,11 @@ impl Sidebar {
                 ))
             })
             .child(menu_row(
-                if collapsed { "Expand" } else { "Collapse" },
+                if collapsed {
+                    t("sidebar.project_menu.expand")
+                } else {
+                    t("sidebar.project_menu.collapse")
+                },
                 colors,
                 cx.listener({
                     let id = id.clone();
@@ -6448,20 +6485,27 @@ impl Sidebar {
             ))
             .child(menu_divider(colors))
             .child(menu_row(
-                "Close All Sessions",
+                t("sidebar.project_menu.close_all"),
                 colors,
                 cx.listener(move |this, _, _, cx| {
                     this.close_project_sessions(&id, cx);
                 }),
             ));
+        // Wide enough for the longest entry ("New Agents: Fresh Worktree" and
+        // its translations); 184 clipped it even in English.
         match position {
-            Some(position) => {
-                self.popover_shell_at(position, Anchor::TopLeft, 184.0, content, colors, cx)
-            }
+            Some(position) => self.popover_shell_at(
+                position,
+                Anchor::TopLeft,
+                PROJECT_MENU_WIDTH,
+                content,
+                colors,
+                cx,
+            ),
             None => self.popover_shell_at(
                 point(px(12.0), px(96.0)),
                 Anchor::TopLeft,
-                184.0,
+                PROJECT_MENU_WIDTH,
                 content,
                 colors,
                 cx,
@@ -6520,7 +6564,11 @@ impl Sidebar {
             };
             if !active.is_empty() {
                 content = content.child(menu_row(
-                    count_label("Archive", active.len()),
+                    count_label(
+                        active.len(),
+                        "sidebar.bulk.archive_one",
+                        "sidebar.bulk.archive_other",
+                    ),
                     colors,
                     cx.listener(move |this, _, _, cx| {
                         this.archive_sessions(active.clone());
@@ -6531,7 +6579,11 @@ impl Sidebar {
             }
             if !parked.is_empty() {
                 content = content.child(menu_row(
-                    count_label("Revive", parked.len()),
+                    count_label(
+                        parked.len(),
+                        "sidebar.bulk.revive_one",
+                        "sidebar.bulk.revive_other",
+                    ),
                     colors,
                     cx.listener(move |this, _, _, cx| {
                         this.store
@@ -6544,7 +6596,11 @@ impl Sidebar {
                 ));
             }
             content = content.child(menu_row(
-                count_label("Close", bulk.len()),
+                count_label(
+                    bulk.len(),
+                    "sidebar.bulk.close_one",
+                    "sidebar.bulk.close_other",
+                ),
                 colors,
                 cx.listener(move |this, _, _, cx| {
                     this.close_sessions(bulk.clone(), cx);
@@ -6555,7 +6611,7 @@ impl Sidebar {
         } else if session.is_archived() {
             content = content
                 .child(menu_row(
-                    "Revive",
+                    t("sidebar.session_menu.revive"),
                     colors,
                     cx.listener({
                         let id = id.clone();
@@ -6570,7 +6626,7 @@ impl Sidebar {
                     }),
                 ))
                 .child(menu_row(
-                    "Remove from Sidebar",
+                    t("sidebar.session_menu.remove"),
                     colors,
                     cx.listener({
                         let id = id.clone();
@@ -6591,7 +6647,7 @@ impl Sidebar {
                 let url = format!("http://localhost:{port}");
                 content = content
                     .child(menu_row(
-                        format!("Open localhost:{port}"),
+                        tf("sidebar.session_menu.open_localhost", &[("port", &port)]),
                         colors,
                         cx.listener(move |this, _, _, cx| {
                             cx.open_url(&url);
@@ -6606,9 +6662,9 @@ impl Sidebar {
             {
                 content = content.child(menu_row(
                     if session.kind == ProtoAgentKind::CLAUDE_CODE {
-                        "Continue with another account…"
+                        t("sidebar.session_menu.continue_account")
                     } else {
-                        "Switch account for open conversations…"
+                        t("sidebar.session_menu.switch_account")
                     },
                     colors,
                     cx.listener({
@@ -6624,9 +6680,9 @@ impl Sidebar {
             if !running && session.can_resume() {
                 // A local terminal comes back as a fresh shell where it was.
                 let label = if session.kind == ProtoAgentKind::SHELL && session.host.is_none() {
-                    "Restart"
+                    t("sidebar.session_menu.restart")
                 } else {
-                    "Resume"
+                    t("sidebar.session_menu.resume")
                 };
                 content = content.child(menu_row(
                     label,
@@ -6665,7 +6721,7 @@ impl Sidebar {
                 if let Some(current) = &session.host {
                     if hosts.iter().any(|entry| &entry.id == current) {
                         content = content.child(menu_row(
-                            "Move to Local",
+                            t("sidebar.session_menu.move_local"),
                             colors,
                             cx.listener({
                                 let id = id.clone();
@@ -6684,7 +6740,10 @@ impl Sidebar {
                     for entry in &hosts {
                         let target = entry.id.clone();
                         content = content.child(menu_row(
-                            format!("Move to {}", entry.display_name()),
+                            tf(
+                                "sidebar.session_menu.move_to",
+                                &[("host", &entry.display_name())],
+                            ),
                             colors,
                             cx.listener({
                                 let id = id.clone();
@@ -6707,9 +6766,9 @@ impl Sidebar {
                     // Shells/Cursor can't resume a conversation — archiving
                     // still works, but say what reviving will get you.
                     if session.resumability == diri_proto::Resumability::NotResumable {
-                        "Archive (won't be resumable)"
+                        t("sidebar.session_menu.archive_not_resumable")
                     } else {
-                        "Archive Session"
+                        t("sidebar.session_menu.archive")
                     },
                     colors,
                     cx.listener({
@@ -6722,7 +6781,7 @@ impl Sidebar {
                     }),
                 ))
                 .child(menu_row(
-                    "Rename…",
+                    t("sidebar.session_menu.rename"),
                     colors,
                     cx.listener(move |this, _, window, cx| {
                         this.ui.popover = None;
@@ -6734,9 +6793,9 @@ impl Sidebar {
                 ))
                 .child(menu_row(
                     if pinned {
-                        "Unpin Session"
+                        t("sidebar.session_menu.unpin")
                     } else {
-                        "Pin Session"
+                        t("sidebar.session_menu.pin")
                     },
                     colors,
                     cx.listener({
@@ -6755,9 +6814,9 @@ impl Sidebar {
             if let Some(read) = read_toggle(&session, unread) {
                 content = content.child(menu_row(
                     if read {
-                        "Mark as Read"
+                        t("sidebar.session_menu.mark_read")
                     } else {
-                        "Mark as Unread"
+                        t("sidebar.session_menu.mark_unread")
                     },
                     colors,
                     cx.listener({
@@ -6779,7 +6838,7 @@ impl Sidebar {
             }
             content = content
                 .child(menu_row(
-                    "Remove from Sidebar",
+                    t("sidebar.session_menu.remove"),
                     colors,
                     cx.listener({
                         let id = id.clone();
@@ -6890,7 +6949,12 @@ impl Sidebar {
         };
         let mut details = div().flex().flex_col().gap(px(5.0));
         if session.hibernation.is_some() {
-            details = details.child(hover_detail("moon.fill", "Sleeping", false, colors));
+            details = details.child(hover_detail(
+                "moon.fill",
+                t("session.sleeping"),
+                false,
+                colors,
+            ));
         }
         if let Some(project) = &project {
             details = details.child(hover_detail("folder.fill", &project.name, false, colors));
@@ -7162,15 +7226,15 @@ impl Sidebar {
                                         div()
                                             .text_size(px(Typo::ROW_EMPHASIZED.size))
                                             .font_weight(Typo::ROW_EMPHASIZED.weight)
-                                            .child("Create a sibling?"),
+                                            .child(t("sidebar.sibling.title")),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(Typo::META.size))
                                             .text_color(colors.secondary)
-                                            .child(format!(
-                                                "Same agent and project as {}",
-                                                proposal.source_title
+                                            .child(tf(
+                                                "sidebar.sibling.detail",
+                                                &[("title", &proposal.source_title)],
                                             )),
                                     ),
                             )
@@ -7238,7 +7302,7 @@ impl Sidebar {
                                 cx.emit(SidebarEvent::FocusTerminal);
                                 cx.notify();
                             }))
-                            .child("Create sibling"),
+                            .child(t("sidebar.sibling.create")),
                     ),
             ))
             .into_any_element()
@@ -7362,8 +7426,7 @@ impl Sidebar {
                 preview.hidden = true;
                 cx.notify();
             });
-            self.ui.delegation_notice =
-                Some("Choose Custom ordering to rearrange projects.".to_owned());
+            self.ui.delegation_notice = Some(t("sidebar.notice.custom_for_projects").to_owned());
             self.ui.drag = None;
             self.drag_preview = None;
             cx.notify();
@@ -7494,14 +7557,14 @@ impl Sidebar {
                 store.sessions().get(source_id).map_or_else(
                     || {
                         Err(crate::delegation::DelegationRefusal(
-                            "The dragged session no longer exists.".to_owned(),
+                            t("sidebar.notice.dragged_gone").to_owned(),
                         ))
                     },
                     |source| {
                         store.projects().get(&source.project_id).map_or_else(
                             || {
                                 Err(crate::delegation::DelegationRefusal(
-                                    "The session's project no longer exists.".to_owned(),
+                                    t("sidebar.notice.project_gone").to_owned(),
                                 ))
                             },
                             |project| sibling_proposal(source, project),
@@ -7593,14 +7656,13 @@ impl Sidebar {
                 .cloned()
         };
         let Some(target) = selected else {
-            self.ui.delegation_notice = Some("Select a session first.".to_owned());
+            self.ui.delegation_notice = Some(t("sidebar.notice.select_first").to_owned());
             cx.notify();
             return false;
         };
         let Some(source) = self.ui.delegation_mark.clone() else {
             self.ui.delegation_mark = Some(target);
-            self.ui.delegation_notice =
-                Some("Source marked. Focus another session and press ⌃⌘D again.".to_owned());
+            self.ui.delegation_notice = Some(t("sidebar.notice.source_marked").to_owned());
             cx.notify();
             return true;
         };
@@ -7885,8 +7947,7 @@ impl Sidebar {
             .sidebar_ordering
             != SidebarOrdering::Custom
         {
-            self.ui.delegation_notice =
-                Some("Choose Custom ordering before moving sessions.".to_owned());
+            self.ui.delegation_notice = Some(t("sidebar.notice.custom_for_sessions").to_owned());
             cx.notify();
             return true;
         }
@@ -8099,13 +8160,13 @@ impl RecencyBucket {
         Self::Earlier,
     ];
 
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Today => "Today",
-            Self::Yesterday => "Yesterday",
-            Self::PreviousSevenDays => "Previous 7 days",
-            Self::Earlier => "Earlier",
-        }
+    fn label(self) -> &'static str {
+        t(match self {
+            Self::Today => "sidebar.recency.today",
+            Self::Yesterday => "sidebar.recency.yesterday",
+            Self::PreviousSevenDays => "sidebar.recency.previous_7_days",
+            Self::Earlier => "sidebar.recency.earlier",
+        })
     }
 
     const fn for_day(session_day: i64, today: i64) -> Self {
@@ -8703,7 +8764,7 @@ impl Sidebar {
                         .pt(px(18.0))
                         .text_size(px(Typo::META.size))
                         .text_color(colors.tertiary)
-                        .child("No sessions match this filter"),
+                        .child(t("sidebar.filter_empty")),
                 );
             } else if projection.projects.is_empty() {
                 body = body.child(self.empty_state(colors, cx));
@@ -8873,10 +8934,6 @@ fn icon_button(
         .child(sf_symbol(system_image, 15.0, colors.secondary))
         .into_any_element()
 }
-
-/// Title `display_title` gives a placeholder-named session that has exited.
-/// The "Ended" chip stands down when the title already says it.
-const ENDED_TITLE: &str = "Ended";
 
 /// One leading column per ancestor level. A column is drawn full height while
 /// that ancestor still has siblings below, and stops halfway on the last child
@@ -9134,7 +9191,11 @@ fn choice_menu_row(
         .debug_selector(move || id.into())
         .role(Role::MenuItem)
         .aria_label(label)
-        .aria_description(if selected { "Selected" } else { "Not selected" })
+        .aria_description(if selected {
+            t("sidebar.a11y.selected")
+        } else {
+            t("sidebar.a11y.not_selected")
+        })
         .aria_keyshortcuts(shortcut)
         .px(px(8.0))
         .h(px(30.0))
@@ -9260,7 +9321,7 @@ fn copy_session_id_row(
     cx: &mut Context<Sidebar>,
 ) -> AnyElement {
     menu_row(
-        "Copy Session ID",
+        t("sidebar.session_menu.copy_id"),
         colors,
         cx.listener(move |this, _, _, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(id.0.clone()));
@@ -9270,11 +9331,13 @@ fn copy_session_id_row(
     )
 }
 
-fn count_label(verb: &str, count: usize) -> String {
+/// A bulk action's label: `one` for a single session, `other` (with a
+/// `{count}` placeholder) for several.
+fn count_label(count: usize, one: &'static str, other: &'static str) -> String {
     if count == 1 {
-        format!("{verb} 1 Session")
+        t(one).to_owned()
     } else {
-        format!("{verb} {count} Sessions")
+        tf(other, &[("count", &count)])
     }
 }
 
@@ -9288,7 +9351,7 @@ fn local_account_label(preview: bool) -> String {
         .ok()
         .map(|label| label.trim().to_owned())
         .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| "Local agents".to_owned())
+        .unwrap_or_else(|| t("sidebar.account.local_agents").to_owned())
 }
 
 fn account_avatar(label: &str, size: f32, colors: SemanticColors) -> AnyElement {
@@ -9314,6 +9377,7 @@ fn account_avatar(label: &str, size: f32, colors: SemanticColors) -> AnyElement 
 }
 
 /// Height of the plain action rows at the bottom of the account menu.
+const PROJECT_MENU_WIDTH: f32 = 252.0;
 const ACCOUNT_MENU_ACTION_ROW_HEIGHT: f32 = 28.0;
 
 /// Height of the single-line stat rows in the account menu.
@@ -9334,14 +9398,14 @@ fn account_limits_menu(
         .flex_col()
         .py(px(3.0));
     if limits.is_empty() {
-        section = section.child(menu_note("Checking provider limits…", colors));
+        section = section.child(menu_note(t("sidebar.account.checking_limits"), colors));
     }
     for account in limits {
         for (index, limit) in account.windows.iter().enumerate() {
             let expired = limit.resets_at.is_some_and(|reset| reset <= now);
             let stale = expired || account.error.is_some() || now - account.checked_at > 360;
             let trailing = if stale {
-                "stale".to_owned()
+                t("sidebar.account.stale").to_owned()
             } else {
                 match limit.resets_at {
                     Some(reset) if reset > now => compact_reset(reset - now),
@@ -9589,7 +9653,7 @@ fn agent_picker_options(
         .collect();
     // Terminal is last on purpose: it is the escape hatch, not an agent.
     options.push(AgentPickerOption {
-        title: "Terminal".to_owned(),
+        title: t("sidebar.new_agent.terminal").to_owned(),
         kind: ProtoAgentKind::SHELL,
         shortcut: crate::commands::command(CommandId::NewTerminal)
             .shortcut_label()
@@ -9602,7 +9666,7 @@ fn agent_picker_options(
     // A note sits beside agents and terminals in the sidebar, so it starts
     // from the same menu.
     options.push(AgentPickerOption {
-        title: "Note".to_owned(),
+        title: t("sidebar.new_agent.note").to_owned(),
         kind: ProtoAgentKind::NOTE,
         shortcut: crate::commands::command(CommandId::NewNote)
             .shortcut_label()
@@ -9714,7 +9778,7 @@ fn panel_header(
                 .id("new-agent-back")
                 .debug_selector(|| "new-agent-back".into())
                 .role(Role::Button)
-                .aria_label("Back to agents")
+                .aria_label(t("sidebar.new_agent.back"))
                 .size(px(22.0))
                 .flex_none()
                 .flex()
@@ -12090,8 +12154,9 @@ mod tests {
     /// review without touching a running Diri instance. Set
     /// `DIRI_VISUAL_GROUPING=recency`, `DIRI_VISUAL_LIGHT=1`,
     /// `DIRI_VISUAL_THEME=<theme id>`, or
-    /// `DIRI_VISUAL_POPOVER=none|project|session` to select the state to
-    /// capture (the default opens the grouping menu), and
+    /// `DIRI_VISUAL_POPOVER=none|project|session|server|new-agent` to select
+    /// the state to capture (the default opens the grouping menu),
+    /// `DIRI_VISUAL_LANGUAGE=zh-Hans` to render in another catalog, and
     /// `DIRI_VISUAL_READ=seen|unseen` to finish that session's turn.
     /// `DIRI_VISUAL_BACKDROP=62616e` supplies a fixed RGB backdrop under glass;
     /// headless rendering cannot capture the native desktop blur.
@@ -12124,8 +12189,20 @@ mod tests {
                 id: SessionId::new("preview-shell"),
                 position: point(px(48.0), px(210.0)),
             }),
+            "new-agent" => Some(Popover::NewAgent {
+                directory: None,
+                host: None,
+            }),
             _ => Some(Popover::SidebarLayout),
         };
+        // DIRI_VISUAL_LANGUAGE=zh-Hans renders the sidebar in that catalog.
+        // Ignored fixture only: the language is process-wide.
+        if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            diri_i18n::set_language(language);
+        }
         // First row of a right-click menu, for `DIRI_VISUAL_MENU_HOVER`.
         let menu_hover = match &popover {
             Some(Popover::ProjectActions { .. }) => Some(point(px(140.0), px(168.0))),
@@ -13015,7 +13092,7 @@ mod tests {
             popover.top() > menu.bottom(),
             "project actions must open below their trigger"
         );
-        assert_eq!(popover.size.width, px(184.0));
+        assert_eq!(popover.size.width, px(PROJECT_MENU_WIDTH));
     }
 
     #[gpui::test]

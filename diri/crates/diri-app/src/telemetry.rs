@@ -1365,13 +1365,13 @@ pub(crate) fn upload_now_summary(
     result: &Result<diri_proto::TelemetryUploadNowResult, String>,
 ) -> &'static str {
     match result.as_ref().map(|result| result.status.as_str()) {
-        Ok("sent") => "Sent. Thanks, this helps.",
-        Ok("up_to_date") => "Already sent. Nothing new since the last upload.",
-        Ok("failed") => "Couldn't reach the server. diri will try again.",
-        Ok("timeout") => "Still sending in the background.",
-        Ok("unavailable") => "Uploading isn't set up in this build.",
-        Ok(_) => "Sent.",
-        Err(_) => "The diri engine isn't running. Try again in a moment.",
+        Ok("sent") => crate::i18n::t("settings.privacy.sent"),
+        Ok("up_to_date") => crate::i18n::t("settings.privacy.up_to_date"),
+        Ok("failed") => crate::i18n::t("settings.privacy.send_failed"),
+        Ok("timeout") => crate::i18n::t("settings.privacy.send_timeout"),
+        Ok("unavailable") => crate::i18n::t("settings.privacy.send_unavailable"),
+        Ok(_) => crate::i18n::t("settings.privacy.sent_short"),
+        Err(_) => crate::i18n::t("settings.privacy.engine_down"),
     }
 }
 

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::delegation::worktree_move_proposal;
+use crate::i18n::{t, tf};
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::query_label;
 use crate::query_editor::{self, ClipboardEdit, Edit, LocalEdit, QueryEditor};
@@ -108,18 +109,20 @@ impl Render for DraggedTransparency {
 const TRANSPARENCY_STEP: f32 = 0.05;
 
 /// Hibernate-after choices: minutes and their labels.
+/// Idle times before hibernating, with the catalog id of each label.
 const HIBERNATE_OPTIONS: [(u32, &str); 6] = [
-    (0, "Off"),
-    (15, "15 minutes"),
-    (30, "30 minutes"),
-    (60, "1 hour"),
-    (120, "2 hours"),
-    (240, "4 hours"),
+    (0, "settings.resources.hibernate_off"),
+    (15, "settings.resources.hibernate_15m"),
+    (30, "settings.resources.hibernate_30m"),
+    (60, "settings.resources.hibernate_1h"),
+    (120, "settings.resources.hibernate_2h"),
+    (240, "settings.resources.hibernate_4h"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)] // Remaining dropdowns are introduced incrementally.
 enum SettingsMenu {
+    Language,
     DefaultAgent,
     TerminalTheme,
     TerminalFont,
@@ -141,13 +144,38 @@ fn file_editor_label(choice: crate::store::FileEditor) -> String {
     use crate::store::FileEditor;
     match choice {
         FileEditor::Automatic => match crate::file_links::editor_for(FileEditor::Automatic) {
-            Some(editor) => format!("Automatic ({})", editor.name()),
-            None => "Automatic (default app)".to_owned(),
+            Some(editor) => crate::i18n::tf(
+                "settings.appearance.editor_automatic",
+                &[("editor", &editor.name())],
+            ),
+            None => crate::i18n::t("settings.appearance.editor_automatic_default").to_owned(),
         },
         FileEditor::Cursor => "Cursor".to_owned(),
         FileEditor::VsCode => "VS Code".to_owned(),
         FileEditor::Zed => "Zed".to_owned(),
-        FileEditor::DefaultApp => "Default app".to_owned(),
+        FileEditor::DefaultApp => {
+            crate::i18n::t("settings.appearance.editor_default_app").to_owned()
+        }
+    }
+}
+
+/// Interface language choices, in menu order.
+const UI_LANGUAGE_OPTIONS: [crate::store::UiLanguage; 4] = [
+    crate::store::UiLanguage::System,
+    crate::store::UiLanguage::Fixed(crate::i18n::Language::English),
+    crate::store::UiLanguage::Fixed(crate::i18n::Language::SimplifiedChinese),
+    crate::store::UiLanguage::Fixed(crate::i18n::Language::Spanish),
+];
+
+/// A language reads in its own name, so a reader can find theirs from any
+/// interface language; System names the language it currently resolves to.
+fn ui_language_label(choice: crate::store::UiLanguage) -> String {
+    match choice {
+        crate::store::UiLanguage::System => crate::i18n::tf(
+            "settings.general.language_system",
+            &[("language", &crate::i18n::resolve(choice).native_name())],
+        ),
+        crate::store::UiLanguage::Fixed(language) => language.native_name().to_owned(),
     }
 }
 
@@ -931,13 +959,13 @@ impl UtilitySurfaces {
         });
         if let Err(error) = result {
             drop(store);
-            self.activity = format!("Could not save settings: {error}");
+            self.activity = tf("settings.general.save_failed", &[("error", &error)]);
             false
         } else {
             self.prefs = store.preferences().clone();
             drop(store);
             self.store_runtime.publish_local_change();
-            self.activity = "Settings saved for diri".to_owned();
+            self.activity = t("settings.general.saved_activity").to_owned();
             true
         }
     }
@@ -960,7 +988,9 @@ impl UtilitySurfaces {
                     self.prefs.start_at_login = enabled;
                     self.store_runtime.publish_local_change();
                 }
-                Err(error) => self.activity = format!("Could not save settings: {error}"),
+                Err(error) => {
+                    self.activity = tf("settings.general.save_failed", &[("error", &error)]);
+                }
             }
         }
         if state.failed() {
@@ -1231,7 +1261,8 @@ impl UtilitySurfaces {
         } else {
             hosts.push(entry.clone());
         }
-        self.persist_hosts(hosts, format!("{} is ready", entry.display_name()), cx);
+        let activity = tf("settings.remote.ready", &[("name", &entry.display_name())]);
+        self.persist_hosts(hosts, activity, cx);
         if is_new && self.host_editor.is_none() {
             self.initialize_host(entry, cx);
         }
@@ -1264,9 +1295,11 @@ impl UtilitySurfaces {
             operation,
         });
         self.activity = match kind {
-            HostPreparationKind::Initialize => format!("Setting up {name} over SSH…"),
+            HostPreparationKind::Initialize => {
+                tf("settings.remote.setting_up_activity", &[("name", &name)])
+            }
             HostPreparationKind::Reinstall => {
-                format!("Reinstalling the remote environment on {name}…")
+                tf("settings.remote.reinstalling_activity", &[("name", &name)])
             }
         };
         cx.notify();
@@ -1308,11 +1341,12 @@ impl UtilitySurfaces {
                             .request_agent_catalog(Some(host.id.clone()), true);
                         this.activity = match kind {
                             HostPreparationKind::Initialize => {
-                                format!("{} is ready", host.display_name())
+                                tf("settings.remote.ready", &[("name", &host.display_name())])
                             }
-                            HostPreparationKind::Reinstall => {
-                                format!("Remote environment reinstalled on {}", host.display_name())
-                            }
+                            HostPreparationKind::Reinstall => tf(
+                                "settings.remote.reinstalled",
+                                &[("name", &host.display_name())],
+                            ),
                         };
                         this.host_initialization = Some(HostInitialization::Ready {
                             id: host.id.clone(),
@@ -1324,15 +1358,17 @@ impl UtilitySurfaces {
                     }
                     Err(HostPreparationFailure { message, connect }) => {
                         this.activity = match kind {
-                            HostPreparationKind::Initialize if connect => {
-                                format!("Could not connect to {}", host.display_name())
-                            }
-                            HostPreparationKind::Initialize => {
-                                format!("Could not initialize {}", host.display_name())
-                            }
-                            HostPreparationKind::Reinstall => format!(
-                                "Could not reinstall the remote environment on {}",
-                                host.display_name()
+                            HostPreparationKind::Initialize if connect => tf(
+                                "settings.remote.connect_failed",
+                                &[("name", &host.display_name())],
+                            ),
+                            HostPreparationKind::Initialize => tf(
+                                "settings.remote.init_failed",
+                                &[("name", &host.display_name())],
+                            ),
+                            HostPreparationKind::Reinstall => tf(
+                                "settings.remote.reinstall_failed",
+                                &[("name", &host.display_name())],
                             ),
                         };
                         this.host_initialization = Some(HostInitialization::Failed {
@@ -1398,8 +1434,7 @@ impl UtilitySurfaces {
             .any(|session| session.host.as_deref() == Some(id.as_str()));
         if in_use {
             editor.confirm_remove = false;
-            editor.error =
-                Some("Move or close every session on this host before removing it.".to_owned());
+            editor.error = Some(t("settings.remote.host_in_use").to_owned());
             cx.notify();
             return;
         }
@@ -1414,7 +1449,8 @@ impl UtilitySurfaces {
             .filter(|host| host.id != id)
             .cloned()
             .collect();
-        self.persist_hosts(hosts, format!("Removed {name}"), cx);
+        let activity = tf("settings.remote.removed", &[("name", &name)]);
+        self.persist_hosts(hosts, activity, cx);
     }
 
     fn persist_hosts(&mut self, hosts: Vec<HostEntry>, activity: String, cx: &mut Context<Self>) {
@@ -1441,7 +1477,7 @@ impl UtilitySurfaces {
             }
             Err(error) => {
                 if let Some(editor) = &mut self.host_editor {
-                    editor.error = Some(format!("Could not save hosts: {error}"));
+                    editor.error = Some(tf("settings.remote.save_failed", &[("error", &error)]));
                     editor.confirm_remove = false;
                 }
             }
@@ -1531,7 +1567,7 @@ impl UtilitySurfaces {
                 let path = editor.path.text().trim();
                 if path.is_empty() {
                     if let Some(editor) = &mut self.agent_path_editor {
-                        editor.error = Some("Enter an executable path.".into());
+                        editor.error = Some(t("settings.agents.path_required").into());
                     }
                 } else {
                     self.store
@@ -1941,7 +1977,10 @@ impl UtilitySurfaces {
 
         crate::commands::rebind_keys(cx, &self.prefs.shortcut_overrides);
         crate::refresh_app_menus(cx);
-        self.activity = format!("Updated {}", command.shortcut_metadata().title);
+        self.activity = tf(
+            "settings.shortcuts.updated",
+            &[("command", &command.shortcut_metadata().title)],
+        );
         true
     }
 
@@ -1950,9 +1989,9 @@ impl UtilitySurfaces {
             crate::commands::shortcut_conflict(command, &binding, &self.prefs.shortcut_overrides)
         {
             if let Some(editor) = &mut self.shortcut_editor {
-                editor.error = Some(format!(
-                    "Already used by {}.",
-                    conflict.id.shortcut_metadata().title
+                editor.error = Some(tf(
+                    "settings.shortcuts.conflict",
+                    &[("command", &conflict.id.shortcut_metadata().title)],
                 ));
             }
             cx.notify();
@@ -1961,7 +2000,7 @@ impl UtilitySurfaces {
         if self.save_shortcut_override(command, Some(Some(binding)), cx) {
             self.shortcut_editor = None;
         } else if let Some(editor) = &mut self.shortcut_editor {
-            editor.error = Some("Could not save this shortcut.".to_owned());
+            editor.error = Some(t("settings.shortcuts.save_failed").to_owned());
         }
         cx.notify();
     }
@@ -1988,7 +2027,7 @@ impl UtilitySurfaces {
             crate::commands::rebind_keys(cx, &self.prefs.shortcut_overrides);
             crate::refresh_app_menus(cx);
             self.shortcut_editor = None;
-            self.activity = "Restored every keyboard shortcut".to_owned();
+            self.activity = t("settings.shortcuts.restored_all").to_owned();
         }
         cx.notify();
     }
@@ -2023,7 +2062,7 @@ impl UtilitySurfaces {
             .is_some_and(|number| (1..=35).contains(&number));
         if !key.modifiers.modified() && !function_key {
             if let Some(editor) = &mut self.shortcut_editor {
-                editor.error = Some("Include Command, Control, Option, or a function key.".into());
+                editor.error = Some(t("settings.shortcuts.needs_modifier").into());
             }
             cx.notify();
             return true;
@@ -2802,87 +2841,196 @@ impl UtilitySurfaces {
     fn phone_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::phone_access::TailscaleSetup;
         let colors = self.settings_colors();
-        let content = div().flex().flex_col().gap(px(20.0))
-            .child(setting_section("Your Mac does the work. Your phone is the remote.",
-                div().flex().flex_col().gap(px(10.0))
-                    .child("A one-time setup, with no commands, router settings or addresses to type.")
-                    .child("Keep Diri running and your Mac plugged in with its lid open. The display can turn off; closing the lid or choosing Sleep disconnects your phone."), colors))
+        let content = div()
+            .flex()
+            .flex_col()
+            .gap(px(20.0))
+            .child(setting_section(
+                t("settings.phone.intro_title"),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(t("settings.phone.intro_setup"))
+                    .child(t("settings.phone.intro_awake")),
+                colors,
+            ))
             .when(self.phone_access.is_none(), |view| {
-                view.child(setting_section("1. Connect this Mac", div().flex().flex_col().gap(px(10.0))
-                    .child(self.phone_setup.map(TailscaleSetup::message).unwrap_or("We’ll check whether Tailscale is ready. It keeps the connection between your devices private."))
-                    .when(self.phone_setup.is_some() && !matches!(self.phone_setup, Some(TailscaleSetup::Ready(_))), |view| {
-                        view.child(surface_button("Get Tailscale for Mac", "phone-install-tailscale", colors, cx, |_, cx| {
-                            cx.open_url("https://tailscale.com/download/mac");
-                        }))
-                        .when(self.phone_setup != Some(TailscaleSetup::NotInstalled), |view| view.child(surface_button("Open Tailscale", "phone-open-tailscale", colors, cx, |_, cx| {
-                            cx.open_url("file:///Applications/Tailscale.app");
-                        })))
-                        .child("In Tailscale, follow the setup prompts and sign in. Diri never asks for your Tailscale password.")
-                    })
-                    .when(!self.phone_loading, |view| view.child(surface_button(
-                        if self.phone_setup.is_none() { "Check this Mac" } else { "Check again" }, "phone-check", colors, cx, |this, cx| {
-                            this.phone_loading = true;
-                            this.phone_error = None;
-                            let task = this.runtime.spawn(crate::phone_access::check_tailscale());
-                            cx.spawn(async move |this, cx| {
-                                let state = task.await.unwrap_or(TailscaleSetup::Unavailable);
-                                let _ = this.update(cx, |this, cx| {
-                                    this.phone_loading = false;
-                                    this.phone_setup = Some(state);
+                view.child(setting_section(
+                    t("settings.phone.step_mac"),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(
+                            self.phone_setup
+                                .map(TailscaleSetup::message)
+                                .unwrap_or_else(|| t("settings.phone.step_mac_detail")),
+                        )
+                        .when(
+                            self.phone_setup.is_some()
+                                && !matches!(self.phone_setup, Some(TailscaleSetup::Ready(_))),
+                            |view| {
+                                view.child(surface_button(
+                                    t("settings.phone.get_tailscale"),
+                                    "phone-install-tailscale",
+                                    colors,
+                                    cx,
+                                    |_, cx| {
+                                        cx.open_url("https://tailscale.com/download/mac");
+                                    },
+                                ))
+                                .when(
+                                    self.phone_setup != Some(TailscaleSetup::NotInstalled),
+                                    |view| {
+                                        view.child(surface_button(
+                                            t("settings.phone.open_tailscale"),
+                                            "phone-open-tailscale",
+                                            colors,
+                                            cx,
+                                            |_, cx| {
+                                                cx.open_url("file:///Applications/Tailscale.app");
+                                            },
+                                        ))
+                                    },
+                                )
+                                .child(t("settings.phone.tailscale_sign_in"))
+                            },
+                        )
+                        .when(!self.phone_loading, |view| {
+                            view.child(surface_button(
+                                if self.phone_setup.is_none() {
+                                    t("settings.phone.check_mac")
+                                } else {
+                                    t("settings.phone.check_again")
+                                },
+                                "phone-check",
+                                colors,
+                                cx,
+                                |this, cx| {
+                                    this.phone_loading = true;
+                                    this.phone_error = None;
+                                    let task =
+                                        this.runtime.spawn(crate::phone_access::check_tailscale());
+                                    cx.spawn(async move |this, cx| {
+                                        let state =
+                                            task.await.unwrap_or(TailscaleSetup::Unavailable);
+                                        let _ = this.update(cx, |this, cx| {
+                                            this.phone_loading = false;
+                                            this.phone_setup = Some(state);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
                                     cx.notify();
-                                });
-                            }).detach();
-                            cx.notify();
-                        }
-                    ))), colors))
+                                },
+                            ))
+                        }),
+                    colors,
+                ))
             })
             .when_some(self.phone_error.clone(), |view, error| view.child(error))
-            .when(self.phone_loading, |view| view.child("Checking your Mac…"))
-            .when(!self.phone_loading && self.phone_access.is_none() && matches!(self.phone_setup, Some(TailscaleSetup::Ready(_))), |view| {
-                view.child(setting_section("2. Connect your iPhone", div().flex().flex_col().gap(px(10.0))
-                    .child("Open Diri on your iPhone. Its setup guide links to Tailscale in the App Store. Sign in there with the same account as this Mac and allow the VPN connection.")
-                    .child("No exit node, Tailscale SSH, port forwarding or other advanced settings are needed.")
-                    .child(settings_primary_button("Enable phone access & show code", "phone-enable", Some("iphone"), cx, |this, _, cx| {
-                    this.phone_loading = true;
-                    this.phone_error = None;
-                    let client = Arc::clone(this.store_runtime.client());
-                    let task = this.runtime.spawn(crate::phone_access::PhoneAccess::start(client));
-                    cx.spawn(async move |this, cx| {
-                        let result = task.await.map_err(|error| error.to_string()).and_then(|result| result);
-                        let _ = this.update(cx, |this, cx| {
-                            this.phone_loading = false;
-                            match result {
-                                Ok(access) => this.phone_access = Some(access),
-                                Err(error) => this.phone_error = Some(error),
-                            }
-                            cx.notify();
-                        });
-                    }).detach();
-                    cx.notify();
-                })), colors))
+            .when(self.phone_loading, |view| {
+                view.child(t("settings.phone.checking"))
             })
+            .when(
+                !self.phone_loading
+                    && self.phone_access.is_none()
+                    && matches!(self.phone_setup, Some(TailscaleSetup::Ready(_))),
+                |view| {
+                    view.child(setting_section(
+                        t("settings.phone.step_iphone"),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.0))
+                            .child(t("settings.phone.step_iphone_detail"))
+                            .child(t("settings.phone.no_advanced"))
+                            .child(settings_primary_button(
+                                t("settings.phone.enable"),
+                                "phone-enable",
+                                Some("iphone"),
+                                cx,
+                                |this, _, cx| {
+                                    this.phone_loading = true;
+                                    this.phone_error = None;
+                                    let client = Arc::clone(this.store_runtime.client());
+                                    let task = this
+                                        .runtime
+                                        .spawn(crate::phone_access::PhoneAccess::start(client));
+                                    cx.spawn(async move |this, cx| {
+                                        let result = task
+                                            .await
+                                            .map_err(|error| error.to_string())
+                                            .and_then(|result| result);
+                                        let _ = this.update(cx, |this, cx| {
+                                            this.phone_loading = false;
+                                            match result {
+                                                Ok(access) => this.phone_access = Some(access),
+                                                Err(error) => this.phone_error = Some(error),
+                                            }
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                    cx.notify();
+                                },
+                            )),
+                        colors,
+                    ))
+                },
+            )
             .when_some(self.phone_access.as_ref(), |view, access| {
                 let size = access.qr.width();
                 let module = (240.0 / (size + 8) as f32).floor();
-                let qr = div().flex().flex_col().p(px(module * 4.0)).bg(gpui::white())
-                    .children((0..size).map(|y| div().flex().children((0..size).map(|x| {
-                        div().w(px(module)).h(px(module)).bg(if access.qr[(x,y)] == qrcode::Color::Dark { gpui::black() } else { gpui::white() })
-                    }))));
-                view.child(if access.is_running() { "Phone access is on" } else { "Phone access stopped. Disable it and enable again." })
-                    .child("In Diri on your iPhone, tap Scan pairing code. We’ll check the connection before saving it.")
-                    .child(div().flex().child(qr))
-                    .child("This code grants control of your sessions. Treat it like a password. Turning access off disconnects all phones; enabling again creates a new code.")
-                    .child(surface_button("Copy pairing link", "phone-copy", colors, cx, |this, cx| {
+                let qr = div()
+                    .flex()
+                    .flex_col()
+                    .p(px(module * 4.0))
+                    .bg(gpui::white())
+                    .children((0..size).map(|y| {
+                        div().flex().children((0..size).map(|x| {
+                            div().w(px(module)).h(px(module)).bg(
+                                if access.qr[(x, y)] == qrcode::Color::Dark {
+                                    gpui::black()
+                                } else {
+                                    gpui::white()
+                                },
+                            )
+                        }))
+                    }));
+                view.child(if access.is_running() {
+                    t("settings.phone.on")
+                } else {
+                    t("settings.phone.stopped")
+                })
+                .child(t("settings.phone.scan_hint"))
+                .child(div().flex().child(qr))
+                .child(t("settings.phone.code_warning"))
+                .child(surface_button(
+                    t("settings.phone.copy_link"),
+                    "phone-copy",
+                    colors,
+                    cx,
+                    |this, cx| {
                         if let Some(access) = &this.phone_access {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(access.url.clone()));
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                access.url.clone(),
+                            ));
                         }
-                    }))
-                    .child(settings_danger_button("Turn off phone access", "phone-disable", cx, |this, cx| {
+                    },
+                ))
+                .child(settings_danger_button(
+                    t("settings.phone.turn_off"),
+                    "phone-disable",
+                    cx,
+                    |this, cx| {
                         this.phone_access = None;
                         cx.notify();
-                    }))
+                    },
+                ))
             });
-        settings_page("Phone access", content, colors)
+        settings_page(t("settings.phone.title"), content, colors)
     }
 
     /// Decodes the thumbnails' stills once per appearance, off the main thread.
@@ -2970,10 +3118,13 @@ impl UtilitySurfaces {
                                 .text_size(px(Typo::TITLE.size))
                                 .font_weight(Typo::TITLE.weight)
                                 .text_color(colors.primary)
-                                .child(format!("New in diri {}", release.version)),
+                                .child(tf(
+                                    "settings.whats_new.new_in",
+                                    &[("version", &release.version)],
+                                )),
                         )
                         .child(surface_button(
-                            "Watch",
+                            t("settings.whats_new.watch"),
                             "whats-new-watch",
                             colors,
                             cx,
@@ -3002,7 +3153,7 @@ impl UtilitySurfaces {
                     14.0,
                     colors.tertiary,
                 ))
-                .child("Loading the latest release notes…")
+                .child(t("settings.whats_new.loading"))
                 .into_any_element(),
             ReleaseNotesState::Failed(error) => div()
                 .id("release-notes-error")
@@ -3023,7 +3174,7 @@ impl UtilitySurfaces {
                                 .text_size(px(Typo::ROW_EMPHASIZED.size))
                                 .font_weight(Typo::ROW_EMPHASIZED.weight)
                                 .text_color(colors.primary)
-                                .child("Release notes couldn't be loaded"),
+                                .child(t("settings.whats_new.load_failed")),
                         )
                         .child(
                             div()
@@ -3035,7 +3186,7 @@ impl UtilitySurfaces {
                         ),
                 )
                 .child(surface_button(
-                    "Try Again",
+                    t("settings.whats_new.try_again"),
                     "retry-release-notes",
                     colors,
                     cx,
@@ -3048,7 +3199,7 @@ impl UtilitySurfaces {
                     .published_at
                     .as_deref()
                     .and_then(|date| date.split('T').next())
-                    .unwrap_or("Publication date unavailable");
+                    .unwrap_or(t("settings.whats_new.date_unavailable"));
                 div()
                     .id("release-notes-content")
                     .debug_selector(|| "release-notes-content".into())
@@ -3079,7 +3230,10 @@ impl UtilitySurfaces {
                                     .flex_none()
                                     .text_size(px(Typo::META.size))
                                     .text_color(colors.tertiary)
-                                    .child(format!("Released {published}")),
+                                    .child(tf(
+                                        "settings.whats_new.released",
+                                        &[("date", &published)],
+                                    )),
                             ),
                     )
                     .child(HairlineDivider::horizontal(colors))
@@ -3089,15 +3243,23 @@ impl UtilitySurfaces {
         };
 
         settings_page(
-            "What's New",
+            t("settings.tab.whats_new"),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(SETTINGS_SECTION_GAP))
                 .when_some(highlights, |page, highlights| {
-                    page.child(setting_section("HIGHLIGHTS", highlights, colors))
+                    page.child(setting_section(
+                        t("settings.whats_new.highlights"),
+                        highlights,
+                        colors,
+                    ))
                 })
-                .child(setting_section("LATEST RELEASE", content, colors)),
+                .child(setting_section(
+                    t("settings.whats_new.latest_release"),
+                    content,
+                    colors,
+                )),
             colors,
         )
     }
@@ -3105,20 +3267,33 @@ impl UtilitySurfaces {
     fn general_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
         settings_page(
-            "General",
+            t("settings.general.title"),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(SETTINGS_SECTION_GAP))
                 .child(setting_section(
-                    "New sessions",
+                    t("settings.general.language"),
                     setting_row(
-                        "Default agent",
-                        format!(
-                            "Used by {} and Quick Open.",
-                            crate::commands::command(CommandId::NewDefaultSession)
-                                .shortcut_label()
-                                .unwrap_or_default()
+                        t("settings.general.interface_language"),
+                        t("settings.general.interface_language_detail"),
+                        self.language_dropdown(cx),
+                        colors,
+                    ),
+                    colors,
+                ))
+                .child(setting_section(
+                    t("settings.general.new_sessions"),
+                    setting_row(
+                        t("settings.general.default_agent"),
+                        tf(
+                            "settings.general.default_agent_detail",
+                            &[(
+                                "shortcut",
+                                &crate::commands::command(CommandId::NewDefaultSession)
+                                    .shortcut_label()
+                                    .unwrap_or_default(),
+                            )],
                         ),
                         self.default_agent_dropdown(cx),
                         colors,
@@ -3127,7 +3302,7 @@ impl UtilitySurfaces {
                 ))
                 .child(self.new_agent_start_settings(cx))
                 .child(setting_section(
-                    "Behavior",
+                    t("settings.general.behavior"),
                     div()
                         .flex()
                         .flex_col()
@@ -3137,8 +3312,8 @@ impl UtilitySurfaces {
                                 .child(setting_divider(colors))
                         })
                         .child(toggle_row(
-                            "Confirm before closing a session",
-                            "Ask before closing a session with a running process.",
+                            t("settings.general.confirm_close"),
+                            t("settings.general.confirm_close_detail"),
                             self.prefs.confirm_before_closing_session,
                             "toggle-close-confirm",
                             colors,
@@ -3153,8 +3328,8 @@ impl UtilitySurfaces {
                         ))
                         .child(setting_divider(colors))
                         .child(toggle_row(
-                            "Highlight parent and children",
-                            "Mark them while the pointer or keyboard cursor rests on a session.",
+                            t("settings.general.lineage"),
+                            t("settings.general.lineage_detail"),
                             self.prefs.sidebar_lineage_highlights,
                             "toggle-lineage-highlights",
                             colors,
@@ -3169,8 +3344,8 @@ impl UtilitySurfaces {
                         ))
                         .child(setting_divider(colors))
                         .child(toggle_row(
-                            "Gentle status chimes",
-                            "Quiet cues for input, completion, and memory pauses.",
+                            t("settings.general.chimes"),
+                            t("settings.general.chimes_detail"),
                             self.prefs.status_sounds,
                             "toggle-status-sounds",
                             colors,
@@ -3186,12 +3361,12 @@ impl UtilitySurfaces {
                 .child(self.import_settings(cx))
                 .child(self.update_settings(cx))
                 .child(setting_section(
-                    "Support",
+                    t("settings.general.support"),
                     setting_row(
-                        "Copy diagnostics",
-                        "Preview a privacy-safe report before copying it.",
+                        t("settings.general.copy_diagnostics"),
+                        t("settings.general.copy_diagnostics_detail"),
                         surface_button(
-                            "Preview…",
+                            t("settings.general.preview"),
                             "preview-diagnostics",
                             colors,
                             cx,
@@ -3202,7 +3377,7 @@ impl UtilitySurfaces {
                     colors,
                 ))
                 .child(setting_section(
-                    "Quick Open",
+                    t("settings.general.quick_open"),
                     div()
                         .p(px(12.0))
                         .flex()
@@ -3218,7 +3393,7 @@ impl UtilitySurfaces {
                                     div()
                                         .text_size(px(13.0))
                                         .font_weight(FontWeight::MEDIUM)
-                                        .child("Search roots"),
+                                        .child(t("settings.general.search_roots")),
                                 )
                                 .child(
                                     div()
@@ -3238,7 +3413,7 @@ impl UtilitySurfaces {
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.choose_quick_open_root(window, cx);
                                         }))
-                                        .child("Add root"),
+                                        .child(t("settings.general.add_root")),
                                 ),
                         )
                         .child(
@@ -3302,9 +3477,9 @@ impl UtilitySurfaces {
                                 .text_color(colors.tertiary)
                                 .child(wrappable_setting_copy(
                                     if self.roots_editor.is_empty() {
-                                        "Empty uses your home folder plus project parent folders. Add root opens the system picker."
+                                        t("settings.general.roots_empty_hint")
                                     } else {
-                                        "One folder per line, scanned four levels deep. Add root adds another."
+                                        t("settings.general.roots_hint")
                                     }
                                     .into(),
                                 )),
@@ -3333,7 +3508,7 @@ impl UtilitySurfaces {
                                                     div()
                                                         .text_size(px(11.0))
                                                         .text_color(colors.tertiary)
-                                                        .child("Unsaved"),
+                                                        .child(t("settings.general.unsaved")),
                                                 )
                                             },
                                         )
@@ -3346,7 +3521,7 @@ impl UtilitySurfaces {
                                                     div()
                                                         .text_size(px(11.0))
                                                         .text_color(colors.tertiary)
-                                                        .child("Saved"),
+                                                        .child(t("settings.general.saved")),
                                                 )
                                             },
                                         )
@@ -3373,7 +3548,7 @@ impl UtilitySurfaces {
                                                     this.persist_include();
                                                     cx.notify();
                                                 }))
-                                                .child("Save"),
+                                                .child(t("settings.general.save")),
                                         ),
                                 ),
                         )
@@ -3448,7 +3623,7 @@ impl UtilitySurfaces {
                                 .line_height(px(16.0))
                                 .text_color(colors.tertiary)
                                 .child(wrappable_setting_copy(
-                                    "One pattern per line, saved to ~/.diri-include. Hidden folders stay skipped unless they match. Wildcards follow gitignore rules, including nested folders.".into(),
+                                    t("settings.general.include_hint").into(),
                                 )),
                         ),
                     colors,
@@ -3465,13 +3640,13 @@ impl UtilitySurfaces {
     fn developer_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
         setting_section(
-            "Developer",
+            t("settings.general.developer"),
             div()
                 .flex()
                 .flex_col()
                 .child(toggle_row(
-                    "Performance overlay",
-                    "Frame rate, frame times, dropped frames and memory over the window.",
+                    t("settings.general.perf_overlay"),
+                    t("settings.general.perf_overlay_detail"),
                     crate::perf_overlay::overlay_enabled(),
                     "toggle-perf-overlay",
                     colors,
@@ -3483,8 +3658,8 @@ impl UtilitySurfaces {
                 ))
                 .child(setting_divider(colors))
                 .child(toggle_row(
-                    "Render counters",
-                    "Badge the main views with how often they render, and list them in the overlay.",
+                    t("settings.general.render_counters"),
+                    t("settings.general.render_counters_detail"),
                     crate::perf_overlay::render_counters_enabled(),
                     "toggle-render-counters",
                     colors,
@@ -3515,7 +3690,7 @@ impl UtilitySurfaces {
         } else if self.shortcut_search.is_empty() {
             div()
                 .text_color(colors.tertiary)
-                .child("Search shortcuts…")
+                .child(t("settings.shortcuts.search_placeholder"))
                 .into_any_element()
         } else {
             div()
@@ -3634,20 +3809,20 @@ impl UtilitySurfaces {
                         .text_size(px(Typo::ROW_EMPHASIZED.size))
                         .font_weight(Typo::ROW_EMPHASIZED.weight)
                         .text_color(colors.primary)
-                        .child("No shortcuts found"),
+                        .child(t("settings.shortcuts.empty_title")),
                 )
                 .child(
                     div()
                         .text_size(px(Typo::META.size))
                         .text_color(colors.tertiary)
-                        .child("Try an action name, description, or key."),
+                        .child(t("settings.shortcuts.empty_detail")),
                 )
                 .into_any_element()
         };
 
         let modified_count = self.prefs.shortcut_overrides.len();
         settings_page(
-            "Keyboard shortcuts",
+            t("settings.shortcuts.title"),
             div()
                 .flex()
                 .flex_col()
@@ -3657,9 +3832,7 @@ impl UtilitySurfaces {
                         .text_size(px(Typo::ROW.size))
                         .line_height(px(18.0))
                         .text_color(colors.secondary)
-                        .child(
-                            "Choose an action, then press a new key combination. Changes apply immediately.",
-                        ),
+                        .child(t("settings.shortcuts.intro")),
                 )
                 .child(
                     div()
@@ -3669,7 +3842,10 @@ impl UtilitySurfaces {
                         .child(search)
                         .when(modified_count > 0, |toolbar| {
                             toolbar.child(surface_button(
-                                format!("Reset all ({modified_count})"),
+                                tf(
+                                    "settings.shortcuts.reset_all",
+                                    &[("count", &modified_count)],
+                                ),
                                 "reset-all-shortcuts",
                                 colors,
                                 cx,
@@ -3750,12 +3926,11 @@ impl UtilitySurfaces {
                 }
             }
         } else if loading {
-            catalog_rows = catalog_rows.child(empty_label("Checking installed Agents…", colors));
+            catalog_rows =
+                catalog_rows.child(empty_label(t("settings.agents.checking_installed"), colors));
         } else {
-            catalog_rows = catalog_rows.child(empty_label(
-                "Agent detection has not run for this host.",
-                colors,
-            ));
+            catalog_rows =
+                catalog_rows.child(empty_label(t("settings.agents.not_detected"), colors));
         }
         if let Some(error) = error {
             catalog_rows = catalog_rows.child(
@@ -3774,23 +3949,33 @@ impl UtilitySurfaces {
 
         let refresh_host = host.clone();
         settings_page(
-            "Agents",
+            t("settings.tab.agents"),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(SETTINGS_SECTION_GAP))
-                .child(setting_section("Execution target", targets, colors))
+                .child(setting_section(
+                    t("settings.agents.execution_target"),
+                    targets,
+                    colors,
+                ))
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().text_size(px(10.0)).text_color(colors.tertiary).child(
-                            "Found through your shell's PATH. Use Add… for an agent \
-                                     installed somewhere else.",
-                        ))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(colors.tertiary)
+                                .child(t("settings.agents.path_hint")),
+                        )
                         .child(surface_button(
-                            if loading { "Checking…" } else { "Refresh" },
+                            if loading {
+                                t("settings.agents.checking")
+                            } else {
+                                t("settings.agents.refresh")
+                            },
                             "refresh-agent-catalog",
                             colors,
                             cx,
@@ -3803,7 +3988,11 @@ impl UtilitySurfaces {
                             },
                         )),
                 )
-                .child(setting_section("Supported Agents", catalog_rows, colors)),
+                .child(setting_section(
+                    t("settings.agents.supported"),
+                    catalog_rows,
+                    colors,
+                )),
             colors,
         )
     }
@@ -3835,13 +4024,18 @@ impl UtilitySurfaces {
                 == Some(&item.kind);
         let path = item.path.clone().unwrap_or_else(|| {
             if installing {
-                "Installing in its own tab. Diri notices when it finishes.".into()
+                t("settings.agents.installing_detail").into()
             } else if let Some(install) =
                 install.as_ref().and_then(|option| option.install.as_ref())
             {
                 install.requirement.as_ref().map_or_else(
                     || install.command.clone(),
-                    |requirement| format!("Needs {requirement} · {}", install.command),
+                    |requirement| {
+                        tf(
+                            "settings.agents.needs_command",
+                            &[("requirement", requirement), ("command", &install.command)],
+                        )
+                    },
                 )
             } else {
                 // The badge already says "Not found"; the line under the name
@@ -3852,14 +4046,14 @@ impl UtilitySurfaces {
                     .and_then(|setup| setup.install_hint.as_deref())
                     .map(str::trim)
                     .filter(|hint| !hint.is_empty())
-                    .map_or_else(|| "Not found".into(), str::to_owned)
+                    .map_or_else(|| t("settings.agents.not_found").into(), str::to_owned)
             }
         });
-        let status = match item.path_source {
-            Some(diri_proto::AgentPathSource::Manual) => "Manual",
-            Some(diri_proto::AgentPathSource::SystemPath) => "Installed",
-            None => "Not found",
-        };
+        let status = t(match item.path_source {
+            Some(diri_proto::AgentPathSource::Manual) => "settings.agents.status_manual",
+            Some(diri_proto::AgentPathSource::SystemPath) => "settings.agents.status_installed",
+            None => "settings.agents.not_found",
+        });
         let status_color = if item.available() {
             Ink::FRESH
         } else {
@@ -3911,7 +4105,7 @@ impl UtilitySurfaces {
                         div()
                             .text_size(px(10.0))
                             .text_color(colors.secondary)
-                            .child("Quick"),
+                            .child(t("settings.agents.quick")),
                     ),
             );
         }
@@ -3941,7 +4135,10 @@ impl UtilitySurfaces {
                 div()
                     .id(format!("agent-install-{index}"))
                     .role(gpui::Role::Button)
-                    .aria_label(format!("Install {}", option.display_name))
+                    .aria_label(tf(
+                        "settings.agents.install_named",
+                        &[("agent", &option.display_name)],
+                    ))
                     .h(px(24.0))
                     .px(px(8.0))
                     .rounded(px(Radius::CHIP))
@@ -3970,7 +4167,7 @@ impl UtilitySurfaces {
                             .text_size(px(10.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.background)
-                            .child("Install"),
+                            .child(t("settings.agents.install")),
                     ),
             );
         }
@@ -3993,7 +4190,7 @@ impl UtilitySurfaces {
                             files: true,
                             directories: false,
                             multiple: false,
-                            prompt: Some("Choose Agent Executable".into()),
+                            prompt: Some(t("settings.agents.choose_executable").into()),
                         });
                         let kind = edit_kind.clone();
                         cx.spawn_in(window, async move |this, cx| {
@@ -4034,7 +4231,11 @@ impl UtilitySurfaces {
                     div()
                         .text_size(px(10.0))
                         .text_color(colors.secondary)
-                        .child(if item.available() { "Change" } else { "Add…" }),
+                        .child(if item.available() {
+                            t("settings.agents.change")
+                        } else {
+                            t("settings.agents.add")
+                        }),
                 ),
         );
         if item.configured_path.is_some() {
@@ -4134,7 +4335,7 @@ impl UtilitySurfaces {
                 div()
                     .text_size(px(10.0))
                     .text_color(colors.secondary)
-                    .child("Remote executable path (absolute or ~/…)"),
+                    .child(t("settings.agents.remote_path_label")),
             )
             .child(
                 div()
@@ -4163,7 +4364,7 @@ impl UtilitySurfaces {
                 .justify_end()
                 .gap(px(7.0))
                 .child(surface_button(
-                    "Cancel",
+                    t("settings.agents.cancel"),
                     "cancel-agent-path",
                     colors,
                     cx,
@@ -4173,7 +4374,7 @@ impl UtilitySurfaces {
                     },
                 ))
                 .child(surface_button(
-                    "Save Path",
+                    t("settings.agents.save_path"),
                     "save-agent-path",
                     colors,
                     cx,
@@ -4184,7 +4385,7 @@ impl UtilitySurfaces {
                         let path = editor.path.text().trim();
                         if path.is_empty() {
                             if let Some(editor) = &mut this.agent_path_editor {
-                                editor.error = Some("Enter an executable path.".into());
+                                editor.error = Some(t("settings.agents.path_required").into());
                             }
                             cx.notify();
                             return;
@@ -4213,6 +4414,7 @@ impl UtilitySurfaces {
         cx: &mut Context<Self>,
     ) -> Option<(AnyElement, f32)> {
         Some(match self.settings_menu.as_ref()? {
+            SettingsMenu::Language => (self.language_options(colors, cx), 204.0),
             SettingsMenu::DefaultAgent => (self.default_agent_options(colors, cx), 204.0),
             SettingsMenu::TerminalTheme => (self.terminal_theme_options(colors, cx), 252.0),
             SettingsMenu::TerminalFont => (self.terminal_font_options(colors, cx), 252.0),
@@ -4331,7 +4533,10 @@ impl UtilitySurfaces {
                     .text_size(px(Typo::META.size - 1.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.tertiary)
-                    .child(appearance.label()),
+                    .child(t(match appearance {
+                        ThemeAppearance::Light => "settings.appearance.group_light",
+                        ThemeAppearance::Dark => "settings.appearance.group_dark",
+                    })),
             );
             for (index, candidate) in TermTheme::CATALOG
                 .into_iter()
@@ -4403,7 +4608,7 @@ impl UtilitySurfaces {
             let is_selected = value == self.prefs.hibernate_after_minutes;
             options = options.child(settings_choice_row(
                 format!("hibernate-option-{index}"),
-                label,
+                t(label),
                 is_selected,
                 colors,
                 cx,
@@ -4435,6 +4640,46 @@ impl UtilitySurfaces {
             ));
         }
         options.into_any_element()
+    }
+
+    fn language_options(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let mut options = div().p(px(4.0)).flex().flex_col();
+        for (index, choice) in UI_LANGUAGE_OPTIONS.into_iter().enumerate() {
+            options = options.child(settings_choice_row(
+                format!("language-option-{index}"),
+                ui_language_label(choice),
+                choice == self.prefs.ui_language,
+                colors,
+                cx,
+                move |this, cx| {
+                    this.settings_menu = None;
+                    this.update_prefs(move |prefs| prefs.ui_language = choice);
+                    crate::i18n::apply_live(choice, cx);
+                    cx.notify();
+                },
+            ));
+        }
+        options.into_any_element()
+    }
+
+    fn language_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = self.settings_colors();
+        let open = self.settings_menu == Some(SettingsMenu::Language);
+        let mut control = div()
+            .relative()
+            .min_w(px(154.0))
+            .child(settings_select_button(
+                ui_language_label(self.prefs.ui_language),
+                "language-dropdown",
+                open,
+                SettingsMenu::Language,
+                colors,
+                cx,
+            ));
+        if open {
+            control = control.child(self.settings_menu_host(cx));
+        }
+        control.into_any_element()
     }
 
     fn file_editor_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4531,14 +4776,16 @@ impl UtilitySurfaces {
         let state = self.updates.state();
         let unsupported = matches!(state.phase, UpdatePhase::Unsupported(_));
         let action = match &state.phase {
-            UpdatePhase::Available(_) => Some(("Download", UpdateCommand::Download)),
-            UpdatePhase::Ready(_) => Some(("Restart", UpdateCommand::Install)),
+            UpdatePhase::Available(_) => {
+                Some((t("settings.updates.download"), UpdateCommand::Download))
+            }
+            UpdatePhase::Ready(_) => Some((t("settings.updates.restart"), UpdateCommand::Install)),
             UpdatePhase::Checking | UpdatePhase::Downloading { .. } | UpdatePhase::Installing => {
                 None
             }
             _ if unsupported => None,
             _ => Some((
-                "Check Now",
+                t("settings.updates.check_now"),
                 UpdateCommand::Check {
                     user_initiated: true,
                 },
@@ -4580,14 +4827,20 @@ impl UtilitySurfaces {
         if let UpdatePhase::Available(release) = &state.phase {
             let version = release.version.clone();
             rows = rows.child(setting_divider(colors)).child(setting_row(
-                "Skip this version",
-                "Hide this release until a newer version is available.",
-                surface_button("Skip", "skip-update", colors, cx, move |this, cx| {
-                    let version = version.clone();
-                    this.update_prefs(move |prefs| prefs.skipped_update_version = version);
-                    this.updates.send(UpdateCommand::Skip);
-                    cx.notify();
-                }),
+                t("settings.updates.skip_version"),
+                t("settings.updates.skip_version_detail"),
+                surface_button(
+                    t("settings.updates.skip"),
+                    "skip-update",
+                    colors,
+                    cx,
+                    move |this, cx| {
+                        let version = version.clone();
+                        this.update_prefs(move |prefs| prefs.skipped_update_version = version);
+                        this.updates.send(UpdateCommand::Skip);
+                        cx.notify();
+                    },
+                ),
                 colors,
             ));
         }
@@ -4598,8 +4851,8 @@ impl UtilitySurfaces {
         }
         if !unsupported {
             rows = rows.child(setting_divider(colors)).child(toggle_row(
-                "Update automatically",
-                "Download verified GitHub releases and install when diri quits.",
+                t("settings.updates.automatic"),
+                t("settings.updates.automatic_detail"),
                 self.prefs.automatic_updates,
                 "toggle-automatic-updates",
                 colors,
@@ -4612,7 +4865,7 @@ impl UtilitySurfaces {
                 },
             ));
         }
-        setting_section("Software updates", rows, colors)
+        setting_section(t("settings.updates.title"), rows, colors)
     }
 
     fn toggle_version_picker(&mut self, cx: &mut Context<Self>) {
@@ -4643,12 +4896,11 @@ impl UtilitySurfaces {
             .flex()
             .flex_col();
         list = list.child(setting_row(
-            "Switch version",
+            t("settings.updates.switch_version"),
             if state.releases.is_empty() {
-                "Loading releases from GitHub…".to_owned()
+                t("settings.updates.loading_releases")
             } else {
-                "Install a specific signed release. Automatic updates turn off so it stays put."
-                    .to_owned()
+                t("settings.updates.switch_version_detail")
             },
             div(),
             colors,
@@ -4658,24 +4910,24 @@ impl UtilitySurfaces {
             let current = version == crate::updates::CURRENT_VERSION;
             let detail = match (&release.published, state.is_downgrade(&version)) {
                 (Some(published), true) => {
-                    format!("Released {published} · older than this build")
+                    tf("settings.updates.released_older", &[("date", published)])
                 }
-                (Some(published), false) => format!("Released {published}"),
-                (None, true) => "Older than this build".to_owned(),
+                (Some(published), false) => tf("settings.updates.released", &[("date", published)]),
+                (None, true) => t("settings.updates.older").to_owned(),
                 (None, false) => String::new(),
             };
             let control: gpui::AnyElement = if current {
                 div()
                     .text_size(px(11.0))
                     .text_color(colors.tertiary)
-                    .child("Current")
+                    .child(t("settings.updates.current"))
                     .into_any_element()
             } else if busy {
                 div().into_any_element()
             } else {
                 let target = version.clone();
                 surface_button(
-                    "Install",
+                    t("settings.updates.install"),
                     SharedString::from(format!("install-version-{version}")),
                     colors,
                     cx,
@@ -4726,17 +4978,21 @@ impl UtilitySurfaces {
         );
 
         let choices = div().w_full().flex().gap(px(12.0)).children(
-            [(0, "System"), (1, "Light"), (2, "Dark")]
-                .into_iter()
-                .map(|(index, label)| {
-                    let active = if index == 0 {
-                        self.prefs.follow_system_theme
-                    } else {
-                        !self.prefs.follow_system_theme
-                            && (selected.appearance == ThemeAppearance::Light) == (index == 1)
-                    };
-                    appearance_mode_card(index, label, active, colors, cx).into_any_element()
-                }),
+            [
+                (0, t("settings.appearance.mode_system")),
+                (1, t("settings.appearance.mode_light")),
+                (2, t("settings.appearance.mode_dark")),
+            ]
+            .into_iter()
+            .map(|(index, label)| {
+                let active = if index == 0 {
+                    self.prefs.follow_system_theme
+                } else {
+                    !self.prefs.follow_system_theme
+                        && (selected.appearance == ThemeAppearance::Light) == (index == 1)
+                };
+                appearance_mode_card(index, label, active, colors, cx).into_any_element()
+            }),
         );
         let hex = |color: gpui::Rgba| {
             format!(
@@ -4781,7 +5037,7 @@ impl UtilitySurfaces {
                     div()
                         .text_size(px(13.0))
                         .text_color(colors.primary)
-                        .child("Theme"),
+                        .child(t("settings.appearance.theme")),
                 )
                 .child(choices)
                 .child(appearance_diff_preview(
@@ -4800,13 +5056,13 @@ impl UtilitySurfaces {
                         .flex()
                         .flex_col()
                         .child(appearance_setting_row(
-                            "Color theme",
+                            t("settings.appearance.color_theme"),
                             self.terminal_theme_dropdown(cx),
                             colors,
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Glass window",
+                            t("settings.appearance.glass_window"),
                             window_material_switch(
                                 self.prefs.window_material == WindowMaterial::Glass,
                                 colors,
@@ -4816,7 +5072,7 @@ impl UtilitySurfaces {
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Transparency",
+                            t("settings.appearance.transparency"),
                             window_transparency_slider(
                                 self.prefs.window_transparency,
                                 self.prefs.window_material == WindowMaterial::Glass,
@@ -4827,65 +5083,120 @@ impl UtilitySurfaces {
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Background",
+                            t("settings.appearance.background"),
                             swatch(selected.background),
                             colors,
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Foreground",
+                            t("settings.appearance.foreground"),
                             swatch(selected.foreground),
                             colors,
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Terminal font",
+                            t("settings.appearance.terminal_font"),
                             self.terminal_font_dropdown(cx),
                             colors,
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Font size",
+                            t("settings.appearance.font_size"),
                             font_control,
                             colors,
                         ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Line height",
+                            t("settings.appearance.line_height"),
                             line_height_control,
                             colors,
                         ))
                         .child(appearance_divider(colors))
-                        .child(toggle_row("Copy on selection", "Copy selected text when you release the mouse.", self.prefs.terminal_copy_on_select, "terminal_copy_on_select", colors, cx, |this,cx| {
-                            let enabled = !this.prefs.terminal_copy_on_select;
-                            this.update_prefs(move |prefs| prefs.terminal_copy_on_select = enabled); cx.notify();
-                        }))
+                        .child(toggle_row(
+                            t("settings.appearance.copy_on_select"),
+                            t("settings.appearance.copy_on_select_detail"),
+                            self.prefs.terminal_copy_on_select,
+                            "terminal_copy_on_select",
+                            colors,
+                            cx,
+                            |this, cx| {
+                                let enabled = !this.prefs.terminal_copy_on_select;
+                                this.update_prefs(move |prefs| {
+                                    prefs.terminal_copy_on_select = enabled
+                                });
+                                cx.notify();
+                            },
+                        ))
                         .child(appearance_divider(colors))
-                        .child(toggle_row("Open links with a click", "Click a link to open it. When off, use ⌘-click.", self.prefs.terminal_open_links_on_click, "terminal_open_links_on_click", colors, cx, |this,cx| {
-                            let enabled = !this.prefs.terminal_open_links_on_click;
-                            this.update_prefs(move |prefs| prefs.terminal_open_links_on_click = enabled); cx.notify();
-                        }))
+                        .child(toggle_row(
+                            t("settings.appearance.click_links"),
+                            t("settings.appearance.click_links_detail"),
+                            self.prefs.terminal_open_links_on_click,
+                            "terminal_open_links_on_click",
+                            colors,
+                            cx,
+                            |this, cx| {
+                                let enabled = !this.prefs.terminal_open_links_on_click;
+                                this.update_prefs(move |prefs| {
+                                    prefs.terminal_open_links_on_click = enabled
+                                });
+                                cx.notify();
+                            },
+                        ))
                         .child(appearance_divider(colors))
                         .child(appearance_setting_row(
-                            "Open file links in",
+                            t("settings.appearance.file_links"),
                             self.file_editor_dropdown(cx),
                             colors,
                         ))
                         .child(appearance_divider(colors))
-                        .child(toggle_row("Hide pointer while typing", "Show it again when you use the mouse.", self.prefs.terminal_hide_pointer, "terminal_hide_pointer", colors, cx, |this,cx| {
-                            let enabled = !this.prefs.terminal_hide_pointer;
-                            this.update_prefs(move |prefs| prefs.terminal_hide_pointer = enabled); cx.notify();
-                        }))
+                        .child(toggle_row(
+                            t("settings.appearance.hide_pointer"),
+                            t("settings.appearance.hide_pointer_detail"),
+                            self.prefs.terminal_hide_pointer,
+                            "terminal_hide_pointer",
+                            colors,
+                            cx,
+                            |this, cx| {
+                                let enabled = !this.prefs.terminal_hide_pointer;
+                                this.update_prefs(move |prefs| {
+                                    prefs.terminal_hide_pointer = enabled
+                                });
+                                cx.notify();
+                            },
+                        ))
                         .child(appearance_divider(colors))
-                        .child(toggle_row("Review command pastes", "Ask before pasting multiple lines into a shell or text with control characters.", self.prefs.terminal_paste_protection, "terminal_paste_protection", colors, cx, |this,cx| {
-                            let enabled = !this.prefs.terminal_paste_protection;
-                            this.update_prefs(move |prefs| prefs.terminal_paste_protection = enabled); cx.notify();
-                        }))
+                        .child(toggle_row(
+                            t("settings.appearance.paste_protection"),
+                            t("settings.appearance.paste_protection_detail"),
+                            self.prefs.terminal_paste_protection,
+                            "terminal_paste_protection",
+                            colors,
+                            cx,
+                            |this, cx| {
+                                let enabled = !this.prefs.terminal_paste_protection;
+                                this.update_prefs(move |prefs| {
+                                    prefs.terminal_paste_protection = enabled
+                                });
+                                cx.notify();
+                            },
+                        ))
                         .child(appearance_divider(colors))
-                        .child(toggle_row("Open new terminals in the last folder", "Start where your last terminal was, instead of the project folder.", self.prefs.terminal_follows_last_directory, "terminal_follows_last_directory", colors, cx, |this,cx| {
-                            let enabled = !this.prefs.terminal_follows_last_directory;
-                            this.update_prefs(move |prefs| prefs.terminal_follows_last_directory = enabled); cx.notify();
-                        })),
+                        .child(toggle_row(
+                            t("settings.appearance.last_folder"),
+                            t("settings.appearance.last_folder_detail"),
+                            self.prefs.terminal_follows_last_directory,
+                            "terminal_follows_last_directory",
+                            colors,
+                            cx,
+                            |this, cx| {
+                                let enabled = !this.prefs.terminal_follows_last_directory;
+                                this.update_prefs(move |prefs| {
+                                    prefs.terminal_follows_last_directory = enabled
+                                });
+                                cx.notify();
+                            },
+                        )),
                 ),
             colors,
         )
@@ -4894,42 +5205,40 @@ impl UtilitySurfaces {
     fn resource_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
         settings_page(
-            "Resources",
+            t("settings.resources.title"),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(SETTINGS_SECTION_GAP))
                 .child(setting_section(
-                    "Session limits",
+                    t("settings.resources.session_limits"),
                     div()
                         .flex()
                         .flex_col()
                         .child(setting_row(
-                            "Hibernate idle sessions",
-                            "Freeze a session once it has sat idle, with no output or CPU activity, for this long.",
+                            t("settings.resources.hibernate"),
+                            t("settings.resources.hibernate_detail"),
                             self.hibernate_dropdown(cx),
                             colors,
                         ))
                         .child(setting_divider(colors))
                         .child(setting_row(
-                            "Memory limit",
-                            "Freeze an idle session when its process tree reaches this size.",
+                            t("settings.resources.memory_limit"),
+                            t("settings.resources.memory_limit_detail"),
                             self.memory_dropdown(cx),
                             colors,
                         )),
                     colors,
                 ))
-                .child(
-                    settings_note(
-                        "moon.fill",
-                        None,
-                        "Frozen sessions are never killed. Opening one wakes it immediately, exactly where you left it.",
-                        colors.tertiary,
-                        colors.primary.alpha(0.07),
-                        colors.primary.alpha(0.035),
-                        colors,
-                    ),
-                ),
+                .child(settings_note(
+                    "moon.fill",
+                    None,
+                    t("settings.resources.frozen_note"),
+                    colors.tertiary,
+                    colors.primary.alpha(0.07),
+                    colors.primary.alpha(0.035),
+                    colors,
+                )),
             colors,
         )
     }
@@ -4937,23 +5246,21 @@ impl UtilitySurfaces {
     fn remote_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
         settings_page(
-            "Remote",
+            t("settings.remote.title"),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(SETTINGS_SECTION_GAP))
                 .child(self.remote_hosts_section(cx))
-                .child(
-                    settings_note(
-                        "lock.shield",
-                        Some("OpenSSH transport"),
-                        "Diri uses your SSH configuration without changing the host. Private-network and Tailscale names work transparently when OpenSSH can resolve them.",
-                        colors.secondary,
-                        colors.primary.alpha(0.08),
-                        colors.primary.alpha(0.035),
-                        colors,
-                    ),
-                ),
+                .child(settings_note(
+                    "lock.shield",
+                    Some(t("settings.remote.transport_note_title")),
+                    t("settings.remote.transport_note"),
+                    colors.secondary,
+                    colors.primary.alpha(0.08),
+                    colors.primary.alpha(0.035),
+                    colors,
+                )),
             colors,
         )
     }
@@ -5001,13 +5308,13 @@ impl UtilitySurfaces {
                                 div()
                                     .text_size(px(13.0))
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child("No execution hosts yet"),
+                                    .child(t("settings.remote.empty_title")),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(colors.tertiary)
-                                    .child("Add any machine you can reach over SSH."),
+                                    .child(t("settings.remote.empty_detail")),
                             ),
                     ),
             );
@@ -5079,7 +5386,7 @@ impl UtilitySurfaces {
                                                     .text_size(px(9.0))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(Ink::FRESH)
-                                                    .child("NODE"),
+                                                    .child(t("settings.remote.badge_node")),
                                             )
                                         })
                                         .when(is_default, |row| {
@@ -5092,7 +5399,7 @@ impl UtilitySurfaces {
                                                     .text_size(px(9.0))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(Palette::CLAY)
-                                                    .child("DEFAULT"),
+                                                    .child(t("settings.remote.badge_default")),
                                             )
                                         }),
                                 )
@@ -5140,11 +5447,11 @@ impl UtilitySurfaces {
                             .text_size(px(Typo::SECTION_HEADER.size))
                             .font_weight(Typo::SECTION_HEADER.weight)
                             .text_color(colors.tertiary)
-                            .child("Execution hosts"),
+                            .child(t("settings.remote.execution_hosts")),
                     )
                     .when(self.host_editor.is_none(), |header| {
                         header.child(settings_primary_button(
-                            "Add Host",
+                            t("settings.remote.add_host"),
                             "add-remote-host",
                             Some("plus"),
                             cx,
@@ -5177,14 +5484,12 @@ impl UtilitySurfaces {
             HostInitialization::Running { id, name, kind, .. } => {
                 let (title, detail) = match kind {
                     HostPreparationKind::Initialize => (
-                        format!("Setting up {name}"),
-                        "Connecting with SSH, verifying diri-remote, loading the login environment, and testing session persistence."
-                            .to_owned(),
+                        tf("settings.remote.setting_up", &[("name", &name)]),
+                        t("settings.remote.setting_up_detail").to_owned(),
                     ),
                     HostPreparationKind::Reinstall => (
-                        format!("Reinstalling {name}"),
-                        "Uploading and verifying the packaged diri-remote build, then refreshing the remote environment checks. Running sessions are not interrupted."
-                            .to_owned(),
+                        tf("settings.remote.reinstalling", &[("name", &name)]),
+                        t("settings.remote.reinstalling_detail").to_owned(),
                     ),
                 };
                 HostInitializationCardModel {
@@ -5205,34 +5510,42 @@ impl UtilitySurfaces {
                 result,
                 ..
             } => {
-                let persistence = match result.persistence {
-                    diri_proto::remote_pty::PersistenceCapability::NativeDetach => "native detach",
+                let persistence = t(match result.persistence {
+                    diri_proto::remote_pty::PersistenceCapability::NativeDetach => {
+                        "settings.remote.persistence_native"
+                    }
                     diri_proto::remote_pty::PersistenceCapability::UserSupervisor => {
-                        "user supervisor"
+                        "settings.remote.persistence_supervisor"
                     }
                     diri_proto::remote_pty::PersistenceCapability::NonPersistent => {
-                        "non-persistent"
+                        "settings.remote.persistence_none"
                     }
-                };
+                });
                 let title = match kind {
-                    HostPreparationKind::Initialize => format!("{name} is ready"),
+                    HostPreparationKind::Initialize => {
+                        tf("settings.remote.ready", &[("name", &name)])
+                    }
                     HostPreparationKind::Reinstall => {
-                        format!("Remote environment reinstalled on {name}")
+                        tf("settings.remote.reinstalled", &[("name", &name)])
                     }
                 };
-                let action = (kind == HostPreparationKind::Initialize).then_some("Use by default");
+                let action = (kind == HostPreparationKind::Initialize)
+                    .then_some(t("settings.remote.use_by_default"));
                 HostInitializationCardModel {
                     id,
                     name: name.clone(),
                     symbol: Some("checkmark.circle.fill"),
                     title,
-                    detail: format!(
-                        "{} · {} · build {} · protocol {}.{} · {persistence}",
-                        result.cwd,
-                        result.shell,
-                        result.helper_build_id,
-                        result.protocol.major,
-                        result.protocol.minor
+                    detail: tf(
+                        "settings.remote.ready_detail",
+                        &[
+                            ("cwd", &result.cwd),
+                            ("shell", &result.shell),
+                            ("build", &result.helper_build_id),
+                            ("major", &result.protocol.major),
+                            ("minor", &result.protocol.minor),
+                            ("persistence", &persistence),
+                        ],
                     ),
                     tone: Ink::FRESH,
                     action,
@@ -5249,13 +5562,13 @@ impl UtilitySurfaces {
             } => {
                 let title = match kind {
                     HostPreparationKind::Initialize if connect => {
-                        format!("Could not connect to {name}")
+                        tf("settings.remote.connect_failed", &[("name", &name)])
                     }
                     HostPreparationKind::Initialize => {
-                        format!("Could not initialize {name}")
+                        tf("settings.remote.init_failed", &[("name", &name)])
                     }
                     HostPreparationKind::Reinstall => {
-                        format!("Could not reinstall the remote environment on {name}")
+                        tf("settings.remote.reinstall_failed", &[("name", &name)])
                     }
                 };
                 HostInitializationCardModel {
@@ -5265,7 +5578,7 @@ impl UtilitySurfaces {
                     title,
                     detail: message,
                     tone: Ink::DANGER,
-                    action: Some("Retry"),
+                    action: Some(t("settings.remote.retry")),
                     retry_kind: Some(kind),
                 }
             }
@@ -5331,7 +5644,7 @@ impl UtilitySurfaces {
                                         .expect("session store lock poisoned")
                                         .set_default_spawn_host(Some(action_id.clone()));
                                     this.activity =
-                                        format!("{name} is now the default execution host");
+                                        tf("settings.remote.now_default", &[("name", &name)]);
                                     cx.notify();
                                 }
                             },
@@ -5344,7 +5657,11 @@ impl UtilitySurfaces {
     fn host_editor_panel(&self, editor: &HostEditor, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
         let editing = editor.original_id.is_some();
-        let title = if editing { "Edit host" } else { "Add a host" };
+        let title = if editing {
+            t("settings.remote.edit_host")
+        } else {
+            t("settings.remote.add_a_host")
+        };
         let mut form = div()
             .p(px(14.0))
             .flex()
@@ -5373,7 +5690,7 @@ impl UtilitySurfaces {
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(colors.tertiary)
-                                    .child("SSH aliases from ~/.ssh/config work too."),
+                                    .child(t("settings.remote.ssh_alias_hint")),
                             ),
                     )
                     .child(
@@ -5402,28 +5719,24 @@ impl UtilitySurfaces {
                         div()
                             .flex()
                             .gap(px(10.0))
-                            .child(
-                                div().min_w(px(0.0)).flex_1().child(self.host_text_field(
-                                    "Name",
-                                    "Forge",
-                                    &editor.name,
-                                    HostFormField::Name,
-                                    cx,
-                                )),
-                            )
-                            .child(
-                                div().min_w(px(0.0)).flex_1().child(self.host_text_field(
-                                    "SSH destination",
-                                    "you@forge",
-                                    &editor.ssh,
-                                    HostFormField::Ssh,
-                                    cx,
-                                )),
-                            ),
+                            .child(div().min_w(px(0.0)).flex_1().child(self.host_text_field(
+                                t("settings.remote.field_name"),
+                                "Forge",
+                                &editor.name,
+                                HostFormField::Name,
+                                cx,
+                            )))
+                            .child(div().min_w(px(0.0)).flex_1().child(self.host_text_field(
+                                t("settings.remote.field_ssh"),
+                                "you@forge",
+                                &editor.ssh,
+                                HostFormField::Ssh,
+                                cx,
+                            ))),
                     )
                     .child(self.host_text_field(
-                        "Default folder",
-                        "~/code (optional)",
+                        t("settings.remote.field_folder"),
+                        t("settings.remote.field_folder_placeholder"),
                         &editor.default_cwd,
                         HostFormField::DefaultCwd,
                         cx,
@@ -5434,34 +5747,30 @@ impl UtilitySurfaces {
                             .text_size(px(10.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.secondary)
-                            .child("First-party node (optional)"),
+                            .child(t("settings.remote.node_heading")),
                     )
                     .child(
                         div()
                             .flex()
                             .gap(px(10.0))
-                            .child(
-                                div().min_w(px(0.0)).flex_1().child(self.host_text_field(
-                                    "Node endpoint",
-                                    "tcp://100.64.0.2:7337",
-                                    &editor.node_endpoint,
-                                    HostFormField::NodeEndpoint,
-                                    cx,
-                                )),
-                            )
-                            .child(
-                                div().min_w(px(0.0)).flex_1().child(self.host_text_field(
-                                    "Local token file",
-                                    "~/.config/dirijor/forge.token",
-                                    &editor.node_token_file,
-                                    HostFormField::NodeTokenFile,
-                                    cx,
-                                )),
-                            ),
+                            .child(div().min_w(px(0.0)).flex_1().child(self.host_text_field(
+                                t("settings.remote.field_endpoint"),
+                                "tcp://100.64.0.2:7337",
+                                &editor.node_endpoint,
+                                HostFormField::NodeEndpoint,
+                                cx,
+                            )))
+                            .child(div().min_w(px(0.0)).flex_1().child(self.host_text_field(
+                                t("settings.remote.field_token"),
+                                "~/.config/dirijor/forge.token",
+                                &editor.node_token_file,
+                                HostFormField::NodeTokenFile,
+                                cx,
+                            ))),
                     )
                     .child(self.host_text_field(
-                        "Pinned node ID",
-                        "node-a1b2c3d4 (recommended after first hello)",
+                        t("settings.remote.field_node_id"),
+                        t("settings.remote.field_node_id_placeholder"),
                         &editor.node_id,
                         HostFormField::NodeId,
                         cx,
@@ -5475,8 +5784,7 @@ impl UtilitySurfaces {
                             .line_height(px(15.0))
                             .text_color(colors.tertiary)
                             .child(wrappable_setting_copy(
-                                "The token stays in that owner-only file. SSH remains available for install and recovery."
-                                    .into(),
+                                t("settings.remote.token_hint").into(),
                             )),
                     ),
             );
@@ -5506,7 +5814,7 @@ impl UtilitySurfaces {
 
         if editor.confirm_remove {
             let name = if editor.name.is_empty() {
-                "this host".to_owned()
+                t("settings.remote.this_host").to_owned()
             } else {
                 editor.name.text().to_owned()
             };
@@ -5526,8 +5834,7 @@ impl UtilitySurfaces {
                             .text_size(px(11.0))
                             .text_color(colors.secondary)
                             .child(wrappable_setting_copy(
-                                format!("Remove {name}? Existing sessions must be moved first.")
-                                    .into(),
+                                tf("settings.remote.confirm_remove", &[("name", &name)]).into(),
                             )),
                     )
                     .child(
@@ -5536,7 +5843,7 @@ impl UtilitySurfaces {
                             .items_center()
                             .gap(px(7.0))
                             .child(surface_button(
-                                "Keep Host",
+                                t("settings.remote.keep_host"),
                                 "keep-host",
                                 colors,
                                 cx,
@@ -5548,7 +5855,7 @@ impl UtilitySurfaces {
                                 },
                             ))
                             .child(settings_danger_button(
-                                "Remove Host",
+                                t("settings.remote.remove_host"),
                                 "confirm-remove-host",
                                 cx,
                                 |this, cx| this.request_remove_host(cx),
@@ -5571,7 +5878,7 @@ impl UtilitySurfaces {
                             .items_center()
                             .gap(px(7.0))
                             .child(settings_danger_button(
-                                "Remove",
+                                t("settings.remote.remove"),
                                 "remove-host",
                                 cx,
                                 |this, cx| this.request_remove_host(cx),
@@ -5580,7 +5887,7 @@ impl UtilitySurfaces {
                                 div()
                                     .debug_selector(|| "REINSTALL_REMOTE_ENVIRONMENT".into())
                                     .child(surface_button(
-                                        "Reinstall Environment",
+                                        t("settings.remote.reinstall"),
                                         "reinstall-remote-environment",
                                         colors,
                                         cx,
@@ -5594,7 +5901,7 @@ impl UtilitySurfaces {
                             .items_center()
                             .gap(px(7.0))
                             .child(surface_button(
-                                "Cancel",
+                                t("settings.remote.cancel"),
                                 "cancel-host",
                                 colors,
                                 cx,
@@ -5604,7 +5911,11 @@ impl UtilitySurfaces {
                                 },
                             ))
                             .child(settings_primary_button(
-                                if editing { "Save Host" } else { "Add Host" },
+                                if editing {
+                                    t("settings.remote.save_host")
+                                } else {
+                                    t("settings.remote.add_host")
+                                },
                                 "save-host",
                                 None,
                                 cx,
@@ -5704,7 +6015,12 @@ impl UtilitySurfaces {
             let is_selected = family.map_or(configured.is_empty(), |family| *family == configured);
             let stored = family.cloned().unwrap_or_default();
             let label = family.map_or_else(
-                || format!("Default ({})", crate::fonts::mono_family()),
+                || {
+                    tf(
+                        "settings.appearance.font_default",
+                        &[("font", &crate::fonts::mono_family())],
+                    )
+                },
                 Clone::clone,
             );
             // Each family is named in its own face, so the list is the preview.
@@ -5748,11 +6064,17 @@ impl UtilitySurfaces {
         let colors = self.settings_colors();
         let configured = &self.prefs.terminal_font_family;
         let label = if configured.is_empty() {
-            format!("Default ({})", crate::fonts::mono_family())
+            tf(
+                "settings.appearance.font_default",
+                &[("font", &crate::fonts::mono_family())],
+            )
         } else if crate::fonts::terminal_family(configured) == configured {
             configured.clone()
         } else {
-            format!("{configured} (not installed)")
+            tf(
+                "settings.appearance.font_not_installed",
+                &[("font", configured)],
+            )
         };
         let open = self.settings_menu == Some(SettingsMenu::TerminalFont);
         let mut control = div()
@@ -5798,9 +6120,9 @@ impl UtilitySurfaces {
         let selected_label = HIBERNATE_OPTIONS
             .into_iter()
             .find_map(|(value, label)| {
-                (value == self.prefs.hibernate_after_minutes).then_some(label)
+                (value == self.prefs.hibernate_after_minutes).then_some(t(label))
             })
-            .unwrap_or("Off");
+            .unwrap_or_else(|| t("settings.resources.hibernate_off"));
         let open = self.settings_menu == Some(SettingsMenu::HibernateAfter);
         let mut control = div()
             .relative()
@@ -5841,9 +6163,10 @@ impl UtilitySurfaces {
 
     fn render_diagnostics(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
-        let report = self.diagnostics_report.clone().unwrap_or_else(|| {
-            "Diagnostics are not available yet. Close this preview and try again.".to_owned()
-        });
+        let report = self
+            .diagnostics_report
+            .clone()
+            .unwrap_or_else(|| t("settings.general.diagnostics_unavailable").to_owned());
         FloatingSurface::new(
             colors,
             div()
@@ -5874,13 +6197,13 @@ impl UtilitySurfaces {
                                     div()
                                         .text_size(px(Typo::TITLE.size))
                                         .font_weight(Typo::TITLE.weight)
-                                        .child("Copy Diagnostics"),
+                                        .child(t("settings.general.diagnostics_title")),
                                 )
                                 .child(
                                     div()
                                         .text_size(px(Typo::META.size))
                                         .text_color(colors.tertiary)
-                                        .child("This is the exact text that will be copied."),
+                                        .child(t("settings.general.diagnostics_subtitle")),
                                 ),
                         )
                         .child(
@@ -5940,7 +6263,7 @@ impl UtilitySurfaces {
                                 .max_w(px(390.0))
                                 .text_size(px(Typo::META.size))
                                 .text_color(colors.tertiary)
-                                .child("Diagnostics exclude terminal content and paths by design. Review them before posting anyway."),
+                                .child(t("settings.general.diagnostics_footer")),
                         )
                         .child(
                             div()
@@ -5957,7 +6280,7 @@ impl UtilitySurfaces {
                                 .text_size(px(Typo::ROW_EMPHASIZED.size))
                                 .font_weight(Typo::ROW_EMPHASIZED.weight)
                                 .child(sf_symbol("doc.on.doc", 12.0, colors.secondary))
-                                .child("Copy report")
+                                .child(t("settings.general.diagnostics_copy_report"))
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                                         report.clone(),
@@ -6474,7 +6797,7 @@ fn login_item_row(
                         } else {
                             colors.secondary
                         })
-                        .child("Start diri at login"),
+                        .child(t("settings.general.start_at_login")),
                 )
                 .child(
                     div()
@@ -6565,20 +6888,26 @@ fn shortcut_matches(
     query: &str,
     overrides: &crate::commands::ShortcutOverrides,
 ) -> bool {
-    let query = query.trim().to_ascii_lowercase();
+    let query = query.trim().to_lowercase();
     if query.is_empty() {
         return true;
     }
+    // English always matches too, so a search typed from muscle memory or
+    // the docs still finds its shortcut in another interface language.
     let metadata = command.id.shortcut_metadata();
+    let english = command.id.english_shortcut_metadata();
     let searchable = format!(
-        "{} {} {} {} {}",
+        "{} {} {} {} {} {} {} {}",
         metadata.title,
         metadata.description,
         metadata.category.label(),
+        english.title,
+        english.description,
+        english.category.english_label(),
         command.stable_id,
         command.shortcut_label_for(overrides).unwrap_or_default()
     )
-    .to_ascii_lowercase();
+    .to_lowercase();
     query
         .split_whitespace()
         .all(|word| searchable.contains(word))
@@ -6600,9 +6929,15 @@ fn shortcut_row(
     let modified = command.is_overridden(overrides);
     let command_id = command.id;
     let binding_label: SharedString = if editing {
-        "Press keys…".into()
+        t("settings.shortcuts.press_keys").into()
     } else {
-        spaced_shortcut_label(assignment.as_deref().unwrap_or("Unassigned")).into()
+        assignment
+            .as_deref()
+            .map_or_else(
+                || t("settings.shortcuts.unassigned").to_owned(),
+                spaced_shortcut_label,
+            )
+            .into()
     };
     let detail: SharedString = error.unwrap_or(metadata.description).to_owned().into();
 
@@ -6901,45 +7236,35 @@ fn settings_note(
 }
 
 fn settings_tab_matches(tab: SettingsTab, query: &str) -> bool {
-    let query = query.trim().to_ascii_lowercase();
+    let query = query.trim().to_lowercase();
     if query.is_empty() {
         return true;
     }
-    let searchable = match tab {
-        SettingsTab::General => {
-            "general default startup login sessions close confirmation sounds chimes support diagnostics privacy telemetry share report name support id quick open search roots choose folder finder picker updates diri-include include gitignore worktrees hidden folders import herdr migrate move tmux developer performance perf overlay fps frame rate render counters debug"
-        }
-        SettingsTab::WhatsNew => {
-            "what's new whats new release notes latest version changes features improvements"
-        }
-        SettingsTab::Agents => {
-            "agents codex claude cursor gemini executable installed command line quick create default"
-        }
-        SettingsTab::Skills => {
-            "skills catalogue catalog instructions personal project plugins search SKILL.md"
-        }
-        SettingsTab::Schedules => {
-            "schedules scheduled tasks cron timer daily weekdays every morning run later catch up missed sleep wake open at login keep awake"
-        }
-        SettingsTab::Accounts => {
-            "accounts profiles work personal login authentication codex claude default config home"
-        }
-        SettingsTab::Shortcuts => {
-            "shortcuts keyboard bindings hotkeys commands keys navigation sessions workspace terminal"
-        }
-        SettingsTab::Terminal => "terminal appearance color theme font text size zoom",
-        SettingsTab::Usage => "usage cost tokens spending cache savings model daily claude codex",
-        SettingsTab::Worktrees => {
-            "worktrees git branches pull requests merged old stale disk space cleanup"
-        }
-        SettingsTab::Resources => {
-            "resources idle sessions hibernate freeze memory limit performance"
-        }
-        SettingsTab::Remote => {
-            "remote ssh openssh hosts machines connections execution tailscale network"
-        }
-        SettingsTab::Phone => "phone iphone ios mobile pairing qr tailscale awake",
+    let keywords = match tab {
+        SettingsTab::General => "settings.keywords.general",
+        SettingsTab::WhatsNew => "settings.keywords.whats_new",
+        SettingsTab::Agents => "settings.keywords.agents",
+        SettingsTab::Skills => "settings.keywords.skills",
+        SettingsTab::Schedules => "settings.keywords.schedules",
+        SettingsTab::Accounts => "settings.keywords.accounts",
+        SettingsTab::Shortcuts => "settings.keywords.shortcuts",
+        SettingsTab::Terminal => "settings.keywords.appearance",
+        SettingsTab::Usage => "settings.keywords.usage",
+        SettingsTab::Worktrees => "settings.keywords.worktrees",
+        SettingsTab::Resources => "settings.keywords.resources",
+        SettingsTab::Remote => "settings.keywords.remote",
+        SettingsTab::Phone => "settings.keywords.phone",
     };
+    // English keywords always match, so a search typed from muscle memory
+    // or the docs still finds its page in another interface language.
+    let searchable = format!(
+        "{} {} {} {}",
+        crate::i18n::english(keywords),
+        t(keywords),
+        tab.label(),
+        tab.subtitle()
+    )
+    .to_lowercase();
     query
         .split_whitespace()
         .all(|word| searchable.contains(word))
@@ -7077,7 +7402,7 @@ fn appearance_settings_page(content: impl IntoElement, colors: SemanticColors) -
                 .text_size(px(24.0))
                 .font_weight(FontWeight::NORMAL)
                 .text_color(colors.primary)
-                .child("Appearance"),
+                .child(t("settings.appearance.title")),
         )
         .child(content)
 }
@@ -7150,9 +7475,9 @@ fn window_transparency_slider(
     let travel = TRACK_WIDTH - KNOB;
     let is_default = (value - 1.0).abs() < TRANSPARENCY_STEP / 2.0;
     let label = if is_default {
-        "Default".to_owned()
+        t("settings.appearance.transparency_default").to_owned()
     } else if value <= 0.0 {
-        "Solid".to_owned()
+        t("settings.appearance.transparency_solid").to_owned()
     } else {
         format!("{:.0}%", value * 100.0)
     };
@@ -7457,7 +7782,7 @@ fn appearance_mode_card(
         .flex_col()
         .gap(px(8.0))
         .role(gpui::Role::Button)
-        .aria_label(format!("Use {label} appearance"))
+        .aria_label(tf("settings.appearance.use_mode", &[("mode", &label)]))
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, window, cx| {
             let system_is_dark = matches!(
@@ -7772,25 +8097,35 @@ fn update_detail(state: &crate::updates::UpdateState, unsupported: bool) -> Stri
         // a Developer ID") so a dev build explains itself instead of looking
         // broken.
         return match &state.phase {
-            UpdatePhase::Unsupported(reason) => format!("Updates off — {reason}"),
-            _ => "Updates off for this build".to_owned(),
+            UpdatePhase::Unsupported(reason) => {
+                tf("settings.updates.off_reason", &[("reason", reason)])
+            }
+            _ => t("settings.updates.off").to_owned(),
         };
     }
     let Some(checked) = state.last_checked_unix else {
-        return "Not checked yet".to_owned();
+        return t("settings.updates.not_checked").to_owned();
     };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(checked);
     let seconds = now.saturating_sub(checked);
-    let ago = match seconds {
-        0..=59 => "just now".to_owned(),
-        60..=3599 => format!("{}m ago", seconds / 60),
-        3600..=86_399 => format!("{}h ago", seconds / 3600),
-        _ => format!("{}d ago", seconds / 86_400),
-    };
-    format!("Last checked {ago}")
+    match seconds {
+        0..=59 => t("settings.updates.checked_just_now").to_owned(),
+        60..=3599 => tf(
+            "settings.updates.checked_minutes",
+            &[("n", &(seconds / 60))],
+        ),
+        3600..=86_399 => tf(
+            "settings.updates.checked_hours",
+            &[("n", &(seconds / 3600))],
+        ),
+        _ => tf(
+            "settings.updates.checked_days",
+            &[("n", &(seconds / 86_400))],
+        ),
+    }
 }
 
 fn expire_completed_reinstall(
@@ -7927,8 +8262,17 @@ mod tests {
             Ok("terminal") => SettingsTab::Terminal,
             Ok("worktrees") => SettingsTab::Worktrees,
             Ok("resources") => SettingsTab::Resources,
+            Ok("usage") => SettingsTab::Usage,
+            Ok("phone") => SettingsTab::Phone,
             _ => SettingsTab::Remote,
         };
+        // DIRI_VISUAL_LANGUAGE=zh-Hans renders the page in that catalog.
+        if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            diri_i18n::set_language(language);
+        }
         let platform = gpui_platform::current_platform(true);
         let mut cx = HeadlessAppContext::with_platform(
             platform.text_system(),
@@ -7961,6 +8305,28 @@ mod tests {
         cx.update_window(window.into(), |_, window, _| window.refresh())
             .expect("refresh settings window");
         cx.run_until_parked();
+        // `DIRI_VISUAL_SWITCH_LANGUAGE=zh-Hans` picks that language the way the
+        // General › Language menu does, after the window has rendered once, so
+        // the capture shows whether every cached view followed the switch.
+        if let Some(language) = std::env::var("DIRI_VISUAL_SWITCH_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            cx.update_window(window.into(), |root, _, cx| {
+                let harness = root
+                    .downcast::<SettingsWorkbenchHarness>()
+                    .expect("harness");
+                let surfaces = harness.read(cx).surfaces.clone();
+                surfaces.update(cx, |surfaces, cx| {
+                    let choice = crate::store::UiLanguage::Fixed(language);
+                    surfaces.update_prefs(move |prefs| prefs.ui_language = choice);
+                    crate::i18n::apply_live(choice, cx);
+                    cx.notify();
+                });
+            })
+            .expect("switch language");
+            cx.run_until_parked();
+        }
         // `DIRI_VISUAL_PRIVACY=on|off` seeds Settings > General > Privacy
         // (a fixed Support ID and name, never the real files) and scrolls to
         // it at the bottom of the page.
@@ -8583,6 +8949,13 @@ mod tests {
         let output = std::env::var_os("DIRI_VISUAL_OUTPUT")
             .map(PathBuf::from)
             .expect("output PNG path");
+        // DIRI_VISUAL_LANGUAGE=zh-Hans renders the page in that catalog.
+        if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            diri_i18n::set_language(language);
+        }
         let platform = gpui_platform::current_platform(true);
         let mut cx = HeadlessAppContext::with_platform(
             platform.text_system(),

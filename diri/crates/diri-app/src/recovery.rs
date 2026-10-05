@@ -2,6 +2,7 @@
 //! actions. Rendering stays in `RootView`; this module owns the calm copy,
 //! priority, and safe-action policy as a pure decision.
 
+use crate::i18n::{t, tf};
 use crate::store::{ActionFailure, DaemonState};
 use crate::toast::{Toast, ToastCommand, ToastTone};
 
@@ -36,7 +37,7 @@ impl RecoveryNotice {
         if let Some(failure) = failure {
             let retry = failure
                 .can_retry()
-                .then_some((RecoveryAction::RetryAction, "Retry"));
+                .then_some((RecoveryAction::RetryAction, t("toast.action_retry")));
             return Some(Self {
                 kind: if failure.retrying {
                     RecoveryKind::RetryingAction
@@ -44,14 +45,17 @@ impl RecoveryNotice {
                     RecoveryKind::ActionFailed
                 },
                 title: if failure.retrying {
-                    format!("Retrying: {}", failure.title.trim_end_matches(" failed"))
+                    tf(
+                        "toast.retrying",
+                        &[("action", &failure.title.trim_end_matches(" failed"))],
+                    )
                 } else {
                     failure.title.clone()
                 },
                 body: if failure.retrying {
-                    "Waiting for confirmation.".to_owned()
+                    t("toast.retry_waiting").to_owned()
                 } else if failure.title == crate::store::PROMPT_DELIVERY_FAILURE_TITLE {
-                    "Check the session before sending again. Your draft is saved.".to_owned()
+                    t("toast.prompt_delivery_body").to_owned()
                 } else {
                     failure.detail.clone()
                 },
@@ -65,26 +69,32 @@ impl RecoveryNotice {
             DaemonState::Connected => None,
             DaemonState::Connecting => Some(Self {
                 kind: RecoveryKind::Connecting,
-                title: "Connecting…".to_owned(),
-                body: "Sessions stay visible meanwhile.".to_owned(),
+                title: t("toast.connecting").to_owned(),
+                body: t("toast.connecting_body").to_owned(),
                 detail: None,
                 primary_action: None,
                 dismissible: false,
             }),
             DaemonState::Unreachable(error) if needs_manual_attention(error) => Some(Self {
                 kind: RecoveryKind::ManualAttention,
-                title: "diri can’t reach its engine".to_owned(),
-                body: "Retry, or relaunch diri if it keeps failing.".to_owned(),
+                title: t("toast.engine_unreachable").to_owned(),
+                body: t("toast.engine_unreachable_body").to_owned(),
                 detail: None,
-                primary_action: Some((RecoveryAction::RetryConnection, "Retry now")),
+                primary_action: Some((
+                    RecoveryAction::RetryConnection,
+                    t("toast.action_retry_now"),
+                )),
                 dismissible: false,
             }),
             DaemonState::Unreachable(_) => Some(Self {
                 kind: RecoveryKind::Reconnecting,
-                title: "Reconnecting…".to_owned(),
-                body: "Retrying automatically. Sessions stay readable.".to_owned(),
+                title: t("toast.reconnecting").to_owned(),
+                body: t("toast.reconnecting_body").to_owned(),
                 detail: None,
-                primary_action: Some((RecoveryAction::RetryConnection, "Retry now")),
+                primary_action: Some((
+                    RecoveryAction::RetryConnection,
+                    t("toast.action_retry_now"),
+                )),
                 dismissible: false,
             }),
         }
@@ -116,7 +126,10 @@ impl RecoveryNotice {
             );
         }
         if let Some(detail) = &self.detail {
-            toast = toast.action("Copy details", ToastCommand::CopyDetails(detail.clone()));
+            toast = toast.action(
+                t("toast.action_copy_details"),
+                ToastCommand::CopyDetails(detail.clone()),
+            );
         }
         toast
     }

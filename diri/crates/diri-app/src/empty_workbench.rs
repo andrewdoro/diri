@@ -25,6 +25,7 @@ use gpui::{AnyElement, App, Div, IntoElement, Role, SharedString, Window, div, p
 use crate::agent_catalog::AgentOption;
 use crate::agent_setup::{ActionHandler, AgentSetupState, InstallHandler, quiet_link, setup_list};
 use crate::commands::{CommandId, NewDefaultSession, ShowAgentSettings, command};
+use crate::i18n::{t, tf};
 use crate::icons::sf_symbol;
 
 pub(crate) struct EmptyWorkbench {
@@ -133,7 +134,7 @@ fn welcome(state: &EmptyWorkbench, actions: &EmptyWorkbenchActions, colors: Sema
     // Not the sidebar's stack: on a first launch the two empty states sit
     // side by side, and twin symbols read as a rendering mistake.
     const SYMBOL: &str = "rectangle.split.2x1";
-    const TITLE: &str = "Run coding agents side by side";
+    let title = t("empty.welcome.title");
     match &state.agents {
         AgentSetupState::Missing(candidates) => missing(state, candidates, actions, colors),
         AgentSetupState::Ready(ready) => {
@@ -144,17 +145,23 @@ fn welcome(state: &EmptyWorkbench, actions: &EmptyWorkbenchActions, colors: Sema
             // screen first; saying so beats a button that promises a session.
             let signed_out = lead.filter(|option| option.signed_in == Some(false));
             let body: SharedString = match signed_out {
-                Some(option) => format!(
-                    "Sign in to {} once, then give each task its own session.",
-                    option.display_name
+                Some(option) => tf(
+                    "empty.welcome.sign_in_body",
+                    &[("agent", &option.display_name)],
                 )
                 .into(),
-                None => "Each task gets its own session. Diri tells you when one needs you.".into(),
+                None => t("empty.welcome.body").into(),
             };
             let label: SharedString = match (lead, signed_out) {
-                (_, Some(option)) => format!("Sign in to {}", option.display_name).into(),
-                (Some(option), None) => format!("Start {}", option.display_name).into(),
-                (None, None) => "Start a session".into(),
+                (_, Some(option)) => {
+                    tf("empty.welcome.sign_in", &[("agent", &option.display_name)]).into()
+                }
+                (Some(option), None) => tf(
+                    "empty.welcome.start_agent",
+                    &[("agent", &option.display_name)],
+                )
+                .into(),
+                (None, None) => t("empty.welcome.start_session").into(),
             };
             let others: Vec<&AgentOption> = ready
                 .iter()
@@ -163,7 +170,7 @@ fn welcome(state: &EmptyWorkbench, actions: &EmptyWorkbenchActions, colors: Sema
                 .collect();
             column()
                 .gap(px(18.0))
-                .child(heading(SYMBOL, TITLE, body, colors))
+                .child(heading(SYMBOL, title, body, colors))
                 .child(start_controls(
                     label,
                     lead.map(|option| &option.kind),
@@ -179,14 +186,9 @@ fn welcome(state: &EmptyWorkbench, actions: &EmptyWorkbenchActions, colors: Sema
         }
         AgentSetupState::Checking => column()
             .gap(px(18.0))
-            .child(heading(
-                SYMBOL,
-                TITLE,
-                "Each task gets its own session. Diri tells you when one needs you.",
-                colors,
-            ))
+            .child(heading(SYMBOL, title, t("empty.welcome.body"), colors))
             .child(start_controls(
-                "Start a session".into(),
+                t("empty.welcome.start_session").into(),
                 None,
                 actions,
                 colors,
@@ -214,7 +216,7 @@ fn other_agents(
             div()
                 .text_size(px(11.0))
                 .text_color(colors.tertiary)
-                .child("Or start"),
+                .child(t("empty.welcome.or_start")),
         );
     for option in others {
         let start = Rc::clone(&actions.start_agent);
@@ -225,7 +227,10 @@ fn other_agents(
                 .id(SharedString::from(id.clone()))
                 .debug_selector(move || id.clone())
                 .role(Role::Button)
-                .aria_label(SharedString::from(format!("Start {}", option.display_name)))
+                .aria_label(SharedString::from(tf(
+                    "empty.welcome.start_agent",
+                    &[("agent", &option.display_name)],
+                )))
                 .flex()
                 .items_center()
                 .gap(px(4.0))
@@ -251,14 +256,14 @@ fn missing(
     colors: SemanticColors,
 ) -> Div {
     const SYMBOL: &str = "rectangle.split.2x1";
-    const TITLE: &str = "Run coding agents side by side";
+    let title = t("empty.welcome.title");
     let check_again = Rc::clone(&actions.check_again);
     column()
         .gap(px(18.0))
         .child(heading(
             SYMBOL,
-            TITLE,
-            "Install a coding agent to get started.",
+            title,
+            t("empty.welcome.install_agent"),
             colors,
         ))
         // The sentence above may run wide; the list stays the width of a
@@ -279,9 +284,9 @@ fn missing(
                 .child(quiet_link(
                     "welcome-check-again",
                     if state.scanning {
-                        "Checking…"
+                        t("empty.welcome.checking")
                     } else {
-                        "Check again"
+                        t("empty.welcome.check_again")
                     },
                     Some("arrow.counterclockwise"),
                     colors,
@@ -289,7 +294,7 @@ fn missing(
                 ))
                 .child(quiet_link(
                     "welcome-agent-settings",
-                    "More agents…",
+                    t("empty.welcome.more_agents"),
                     None,
                     colors,
                     |window, cx| window.dispatch_action(Box::new(ShowAgentSettings), cx),
@@ -308,7 +313,7 @@ fn herdr_link(
     if state.importing_herdr {
         return Some(quiet_link(
             "empty-import-herdr",
-            "Importing from herdr…",
+            t("empty.welcome.importing_herdr"),
             Some("arrow.down"),
             colors,
             |_, _| {},
@@ -318,7 +323,7 @@ fn herdr_link(
     let import = Rc::clone(&actions.import_herdr);
     Some(quiet_link(
         "empty-import-herdr",
-        format!("Import {headline}…"),
+        tf("empty.welcome.import_herdr", &[("headline", headline)]),
         Some("arrow.down"),
         colors,
         move |window, cx| import(window, cx),
@@ -397,7 +402,7 @@ fn start_controls(
         .child(start_button(label, agent, colors))
         .child(quiet_link(
             "empty-start-in-folder",
-            "Choose a folder…",
+            t("empty.choose_folder"),
             Some("folder"),
             colors,
             move |window, cx| start_in_folder(window, cx),
@@ -420,8 +425,13 @@ fn resting(actions: &EmptyWorkbenchActions, colors: SemanticColors) -> Div {
                         .text_size(px(Typo::DISPLAY_TITLE.size))
                         .font_weight(Typo::DISPLAY_TITLE.weight)
                         .text_color(colors.primary)
-                        .child("No session open"),
+                        .child(t("empty.resting.title")),
                 ),
         )
-        .child(start_controls("New session".into(), None, actions, colors))
+        .child(start_controls(
+            t("empty.resting.new_session").into(),
+            None,
+            actions,
+            colors,
+        ))
 }

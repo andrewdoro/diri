@@ -321,7 +321,7 @@ fn file_actions(
         let handlers = props.handlers.clone();
         cluster = cluster.child(action_button(
             ("ask-diff-file", position),
-            "Ask",
+            crate::i18n::t("git.diff.ask"),
             palette.accent,
             palette.hover,
             move |_, window, cx| (handlers.file)(file_index, FileAction::Ask, window, cx),
@@ -333,7 +333,7 @@ fn file_actions(
                 let handlers = props.handlers.clone();
                 cluster = cluster.child(action_button(
                     ("stage-diff-file", position),
-                    "Stage",
+                    crate::i18n::t("git.diff.stage"),
                     palette.secondary,
                     palette.hover,
                     move |_, window, cx| (handlers.file)(file_index, FileAction::Stage, window, cx),
@@ -343,7 +343,7 @@ fn file_actions(
                 let handlers = props.handlers.clone();
                 cluster = cluster.child(action_button(
                     ("unstage-diff-file", position),
-                    "Unstage",
+                    crate::i18n::t("panel.review.unstage"),
                     palette.secondary,
                     palette.hover,
                     move |_, window, cx| {
@@ -357,7 +357,7 @@ fn file_actions(
     let handlers = props.handlers.clone();
     cluster.child(action_button(
         ("open-diff-file", position),
-        "Open",
+        crate::i18n::t("git.diff.open"),
         palette.secondary,
         palette.hover,
         move |_, window, cx| (handlers.file)(file_index, FileAction::Open, window, cx),
@@ -476,7 +476,7 @@ fn render_hunk_header(props: &DiffViewProps, position: usize, row: usize) -> Any
             let handlers = props.handlers.clone();
             actions = actions.child(action_button(
                 ("ask-diff-hunk", position),
-                "Ask",
+                crate::i18n::t("git.diff.ask"),
                 palette.accent,
                 palette.hover,
                 move |_, window, cx| (handlers.hunk)(file, hunk_at, HunkAction::Ask, window, cx),
@@ -488,7 +488,7 @@ fn render_hunk_header(props: &DiffViewProps, position: usize, row: usize) -> Any
                     let handlers = props.handlers.clone();
                     actions = actions.child(action_button(
                         ("stage-diff-hunk", position),
-                        "Stage",
+                        crate::i18n::t("git.diff.stage"),
                         palette.secondary,
                         palette.hover,
                         move |_, window, cx| {
@@ -499,7 +499,11 @@ fn render_hunk_header(props: &DiffViewProps, position: usize, row: usize) -> Any
                         let handlers = props.handlers.clone();
                         actions = actions.child(action_button(
                             ("discard-diff-hunk", position),
-                            if armed { "Confirm discard" } else { "Discard" },
+                            if armed {
+                                crate::i18n::t("git.diff.confirm_discard")
+                            } else {
+                                crate::i18n::t("panel.review.discard")
+                            },
                             palette.removed,
                             palette.removed_line,
                             move |_, window, cx| {
@@ -512,7 +516,7 @@ fn render_hunk_header(props: &DiffViewProps, position: usize, row: usize) -> Any
                     let handlers = props.handlers.clone();
                     actions = actions.child(action_button(
                         ("unstage-diff-hunk", position),
-                        "Unstage",
+                        crate::i18n::t("panel.review.unstage"),
                         palette.secondary,
                         palette.hover,
                         move |_, window, cx| {
@@ -934,7 +938,7 @@ fn render_omitted_path(props: &DiffViewProps, position: usize, ordinal: usize) -
         let stage = props.handlers.clone();
         actions = actions.child(action_button(
             ("stage-omitted-path", position),
-            "Stage",
+            crate::i18n::t("git.diff.stage"),
             palette.secondary,
             palette.hover,
             move |_, window, cx| (stage.omitted)(ordinal, OmittedAction::Stage, window, cx),

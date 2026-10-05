@@ -4,6 +4,7 @@
 
 use diri_proto::remote_pty::PersistenceCapability;
 
+use crate::i18n::{t, tf};
 use crate::toast::Toast;
 use diri_proto::{
     AgentDescriptor, AgentKind, HibernationReason, NeedsInputKind, SessionId, SessionRecord,
@@ -116,9 +117,9 @@ fn plain_banner(prefix: &str, title: String, body: String, toast: Toast) -> Stat
 
 /// Detection found an Agent the user asked Diri to install.
 pub fn agent_installed_transition(display_name: &str) -> StatusTransition {
-    let title = format!("{display_name} is ready");
-    let body = "Start a session to give it a task. It asks you to sign in the first time.";
-    let toast = Toast::success(title.clone()).detail("It asks you to sign in the first time.");
+    let title = tf("notify.agent_ready", &[("agent", &display_name)]);
+    let body = t("notify.agent_ready_body");
+    let toast = Toast::success(title.clone()).detail(t("toast.agent_ready_detail"));
     plain_banner("agent-install", title, body.to_owned(), toast)
 }
 
@@ -129,14 +130,17 @@ pub fn herdr_import_transition(
     total: usize,
     first_failure: Option<&str>,
 ) -> StatusTransition {
-    let sessions = |count: usize| if count == 1 { "session" } else { "sessions" };
-    let title = if opened == total {
-        format!("Moved {opened} {} from herdr", sessions(opened))
-    } else {
-        format!("Moved {opened} of {total} {} from herdr", sessions(total))
+    let args: &[(&str, &dyn std::fmt::Display)] = &[("opened", &opened), ("total", &total)];
+    let title = match (opened == total, total == 1) {
+        (true, true) => tf("toast.herdr_moved_one", args),
+        (true, false) => tf("toast.herdr_moved_other", args),
+        (false, true) => tf("toast.herdr_moved_partial_one", args),
+        (false, false) => tf("toast.herdr_moved_partial_other", args),
     };
     foreground_banner(match first_failure {
-        Some(reason) => Toast::warning(title).detail(format!("Some didn’t open: {reason}")),
+        Some(reason) => {
+            Toast::warning(title).detail(tf("toast.herdr_some_failed", &[("reason", &reason)]))
+        }
         None => Toast::success(title),
     })
 }
@@ -148,14 +152,17 @@ pub fn resume_all_transition(
     total: usize,
     first_failure: Option<&str>,
 ) -> StatusTransition {
-    let sessions = |count: usize| if count == 1 { "session" } else { "sessions" };
-    let title = if resumed == total {
-        format!("Resumed {resumed} {}", sessions(resumed))
-    } else {
-        format!("Resumed {resumed} of {total} {}", sessions(total))
+    let args: &[(&str, &dyn std::fmt::Display)] = &[("resumed", &resumed), ("total", &total)];
+    let title = match (resumed == total, total == 1) {
+        (true, true) => tf("toast.resumed_one", args),
+        (true, false) => tf("toast.resumed_other", args),
+        (false, true) => tf("toast.resumed_partial_one", args),
+        (false, false) => tf("toast.resumed_partial_other", args),
     };
     foreground_banner(match first_failure {
-        Some(reason) => Toast::warning(title).detail(format!("Some didn’t resume: {reason}")),
+        Some(reason) => {
+            Toast::warning(title).detail(tf("toast.resume_some_failed", &[("reason", &reason)]))
+        }
         None => Toast::success(title),
     })
 }
@@ -185,14 +192,17 @@ pub fn prefs_sync_transition(
                     .iter()
                     .map(|tool| {
                         if tool.synced.is_empty() {
-                            format!("{}: nothing to sync", tool.tool)
+                            tf("notify.prefs_sync_nothing", &[("tool", &tool.tool)])
                         } else {
-                            format!("{}: {} items", tool.tool, tool.synced.len())
+                            tf(
+                                "notify.prefs_sync_items",
+                                &[("tool", &tool.tool), ("count", &tool.synced.len())],
+                            )
                         }
                     })
                     .collect::<Vec<_>>()
                     .join(" · ");
-                let title = format!("Prefs synced to {host_name}");
+                let title = tf("notify.prefs_synced", &[("host", &host_name)]);
                 let toast = Toast::success(title.clone()).detail(summary.clone());
                 plain_banner("prefs-sync", title, summary, toast)
             } else {
@@ -202,7 +212,9 @@ pub fn prefs_sync_transition(
                         format!(
                             "{}: {}",
                             tool.tool,
-                            tool.error.as_deref().unwrap_or("failed")
+                            tool.error
+                                .as_deref()
+                                .unwrap_or(t("notify.prefs_sync_tool_failed"))
                         )
                     })
                     .collect::<Vec<_>>()
@@ -215,10 +227,11 @@ pub fn prefs_sync_transition(
 }
 
 fn prefs_sync_failed(host_name: &str, detail: String) -> StatusTransition {
-    let toast = Toast::error(format!("Couldn’t sync prefs to {host_name}")).detail(detail.clone());
+    let toast =
+        Toast::error(tf("toast.prefs_sync_failed", &[("host", &host_name)])).detail(detail.clone());
     plain_banner(
         "prefs-sync",
-        format!("Prefs sync to {host_name} failed"),
+        tf("notify.prefs_sync_failed", &[("host", &host_name)]),
         detail,
         toast,
     )
@@ -233,24 +246,31 @@ pub fn migration_transition(
     result: Result<Option<&str>, &str>,
 ) -> Option<StatusTransition> {
     match result {
-        Ok(None) => Some(foreground_banner(Toast::success(format!(
-            "Moved “{session_title}” to {destination}"
+        Ok(None) => Some(foreground_banner(Toast::success(tf(
+            "toast.migrate_moved",
+            &[("session", &session_title), ("destination", &destination)],
         )))),
         Ok(Some(warning)) => {
-            let title = format!("Moved to {destination} with warnings");
+            let title = tf("notify.migrate_warnings", &[("destination", &destination)]);
             let toast = Toast::warning(title.clone()).detail(warning);
             Some(plain_banner("migrate", title, warning.to_owned(), toast))
         }
         Err(error) => {
             let title = if session_title.is_empty() {
-                format!("Move to {destination} failed")
+                tf("notify.migrate_failed", &[("destination", &destination)])
             } else {
-                format!("Move “{session_title}” to {destination} failed")
+                tf(
+                    "notify.migrate_session_failed",
+                    &[("session", &session_title), ("destination", &destination)],
+                )
             };
             let toast = Toast::error(if session_title.is_empty() {
-                format!("Couldn’t move to {destination}")
+                tf("toast.migrate_failed", &[("destination", &destination)])
             } else {
-                format!("Couldn’t move “{session_title}” to {destination}")
+                tf(
+                    "toast.migrate_session_failed",
+                    &[("session", &session_title), ("destination", &destination)],
+                )
             })
             .detail(error);
             Some(plain_banner("migrate", title, error.to_owned(), toast))
@@ -272,8 +292,8 @@ pub fn reach_failure_transition() -> StatusTransition {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |duration| duration.as_nanos())
             ),
-            title: "Couldn't reach session".to_owned(),
-            body: "diri couldn't deliver your answer. Open the session to respond.".to_owned(),
+            title: t("notify.reach_failure_title").to_owned(),
+            body: t("notify.reach_failure_body").to_owned(),
             thread_identifier: None,
             action_data: None,
             use_system_sound: true,
@@ -387,15 +407,16 @@ pub fn immediate_transitions_for_update(
         != Some(PersistenceCapability::NonPersistent)
         && current.remote_persistence == Some(PersistenceCapability::NonPersistent);
     if became_non_persistent {
-        let host = current.host.as_deref().unwrap_or("the remote host");
+        let host = current
+            .host
+            .as_deref()
+            .unwrap_or(t("notify.the_remote_host"));
         transitions.push(plain_banner(
             "remote-non-persistent",
-            "Remote session cannot survive disconnects".to_owned(),
-            format!(
-                "{host} does not preserve detached user processes. Keep SSH connected or the Agent may exit."
-            ),
-            Toast::warning(format!("{host} ends sessions when SSH drops"))
-                .detail("Stay connected, or the agent may exit."),
+            t("notify.non_persistent_title").to_owned(),
+            tf("notify.non_persistent_body", &[("host", &host)]),
+            Toast::warning(tf("toast.non_persistent", &[("host", &host)]))
+                .detail(t("toast.non_persistent_detail")),
         ));
     }
 
@@ -426,17 +447,14 @@ fn memory_pressure_request(
     _status_sounds_enabled: bool,
 ) -> NotificationRequest {
     let body = session.memory_bytes.map_or_else(
-        || {
-            format!(
-                "{} was frozen to reclaim memory. Select it to wake.",
-                session.title
-            )
-        },
+        || tf("notify.memory_frozen_body", &[("session", &session.title)]),
         |bytes| {
-            format!(
-                "{} — {:.1} GB. Select it to wake.",
-                session.title,
-                bytes as f64 / 1_000_000_000.0
+            tf(
+                "notify.memory_frozen_body_size",
+                &[
+                    ("session", &session.title),
+                    ("gb", &format!("{:.1}", bytes as f64 / 1_000_000_000.0)),
+                ],
             )
         },
     );
@@ -444,7 +462,7 @@ fn memory_pressure_request(
         session_event: false,
         guard: None,
         identifier: format!("{}-memory-pressure", session.id.0),
-        title: "Session frozen — high memory".to_owned(),
+        title: t("notify.memory_frozen_title").to_owned(),
         body,
         thread_identifier: Some(session.id.0.clone()),
         action_data: None,
@@ -470,8 +488,8 @@ where
         AgentKind::CODEX_ID => "Codex",
         AgentKind::CURSOR_ID => "Cursor",
         AgentKind::GEMINI_ID => "Gemini",
-        AgentKind::SHELL_ID => "Terminal",
-        _ => "Agent",
+        AgentKind::SHELL_ID => t("notify.agent_terminal"),
+        _ => t("notify.agent_generic"),
     }
 }
 
@@ -543,18 +561,23 @@ pub fn reply_refused_transition(
     session_title: Option<&str>,
     refusal: ReplyRefusal,
 ) -> StatusTransition {
-    let subject = session_title
-        .filter(|title| !title.is_empty())
-        .map_or_else(|| "The session".to_owned(), |title| format!("“{title}”"));
+    let subject = session_title.filter(|title| !title.is_empty()).map_or_else(
+        || t("notify.reply_the_session").to_owned(),
+        |title| tf("notify.reply_quoted_session", &[("title", &title)]),
+    );
+    let args: &[(&str, &dyn std::fmt::Display)] = &[("subject", &subject)];
     let body = match refusal {
-        ReplyRefusal::Gone => format!("{subject} is no longer open."),
-        ReplyRefusal::Exited => format!("{subject} has exited."),
-        ReplyRefusal::MovedOn => {
-            format!("{subject} is no longer waiting for an answer. Open it to continue.")
-        }
+        ReplyRefusal::Gone => tf("notify.reply_gone", args),
+        ReplyRefusal::Exited => tf("notify.reply_exited", args),
+        ReplyRefusal::MovedOn => tf("notify.reply_moved_on", args),
     };
-    let toast = Toast::warning("Reply not sent").detail(body.clone());
-    plain_banner("reply-not-sent", "Reply not sent".to_owned(), body, toast)
+    let toast = Toast::warning(t("toast.reply_not_sent")).detail(body.clone());
+    plain_banner(
+        "reply-not-sent",
+        t("notify.reply_not_sent").to_owned(),
+        body,
+        toast,
+    )
 }
 
 #[cfg(test)]

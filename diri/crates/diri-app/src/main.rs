@@ -34,6 +34,7 @@ mod haptics;
 mod held_hints;
 mod herdr_import;
 pub mod history;
+mod i18n;
 mod icons;
 mod inspector;
 mod launch_recipe;
@@ -173,55 +174,56 @@ fn install_app_menus(cx: &mut App) {
 /// Rebuild native menu shortcut labels after the user edits the live keymap.
 /// Action handlers are installed only once by `install_app_menus`.
 pub(crate) fn refresh_app_menus(cx: &mut App) {
+    use crate::i18n::t;
     #[cfg(target_os = "macos")]
     cx.set_menus([
         Menu::new("diri").items([
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::os_submenu(t("menu.services"), SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide diri", HideApp),
+            MenuItem::action(t("menu.hide_diri"), HideApp),
             MenuItem::separator(),
-            MenuItem::action("Quit diri", Quit),
+            MenuItem::action(t("menu.quit_diri"), Quit),
         ]),
-        Menu::new("File").items([
-            MenuItem::action("New Session", OpenLauncher),
-            MenuItem::action("New Window", commands::NewWindow),
+        Menu::new(t("menu.file")).items([
+            MenuItem::action(t("menu.new_session"), OpenLauncher),
+            MenuItem::action(t("menu.new_window"), commands::NewWindow),
         ]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Copy", CopySelection, OsAction::Copy),
-            MenuItem::os_action("Paste", Paste, OsAction::Paste),
+        Menu::new(t("menu.edit")).items([
+            MenuItem::os_action(t("menu.copy"), CopySelection, OsAction::Copy),
+            MenuItem::os_action(t("menu.paste"), Paste, OsAction::Paste),
         ]),
-        Menu::new("Window").items([
-            MenuItem::action("Close Session", CloseSession),
-            MenuItem::action("Reopen Closed Session", ReopenSession),
-            MenuItem::action("Close Window", CloseWindow),
+        Menu::new(t("menu.window")).items([
+            MenuItem::action(t("menu.close_session"), CloseSession),
+            MenuItem::action(t("menu.reopen_closed_session"), ReopenSession),
+            MenuItem::action(t("menu.close_window"), CloseWindow),
         ]),
-        Menu::new("Help").items([
-            MenuItem::action("What's New", commands::ShowWhatsNew),
+        Menu::new(t("menu.help")).items([
+            MenuItem::action(t("menu.whats_new"), commands::ShowWhatsNew),
             MenuItem::separator(),
-            MenuItem::action("Report a Problem…", commands::ReportProblem),
+            MenuItem::action(t("menu.report_problem"), commands::ReportProblem),
         ]),
     ]);
     #[cfg(not(target_os = "macos"))]
     cx.set_menus([
-        Menu::new("File").items([
-            MenuItem::action("New Session", OpenLauncher),
-            MenuItem::action("New Window", commands::NewWindow),
+        Menu::new(t("menu.file")).items([
+            MenuItem::action(t("menu.new_session"), OpenLauncher),
+            MenuItem::action(t("menu.new_window"), commands::NewWindow),
             MenuItem::separator(),
-            MenuItem::action("Quit diri", Quit),
+            MenuItem::action(t("menu.quit_diri"), Quit),
         ]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Copy", CopySelection, OsAction::Copy),
-            MenuItem::os_action("Paste", Paste, OsAction::Paste),
+        Menu::new(t("menu.edit")).items([
+            MenuItem::os_action(t("menu.copy"), CopySelection, OsAction::Copy),
+            MenuItem::os_action(t("menu.paste"), Paste, OsAction::Paste),
         ]),
-        Menu::new("Window").items([
-            MenuItem::action("Close Session", CloseSession),
-            MenuItem::action("Reopen Closed Session", ReopenSession),
-            MenuItem::action("Close Window", CloseWindow),
+        Menu::new(t("menu.window")).items([
+            MenuItem::action(t("menu.close_session"), CloseSession),
+            MenuItem::action(t("menu.reopen_closed_session"), ReopenSession),
+            MenuItem::action(t("menu.close_window"), CloseWindow),
         ]),
-        Menu::new("Help").items([
-            MenuItem::action("What's New", commands::ShowWhatsNew),
+        Menu::new(t("menu.help")).items([
+            MenuItem::action(t("menu.whats_new"), commands::ShowWhatsNew),
             MenuItem::separator(),
-            MenuItem::action("Report a Problem…", commands::ReportProblem),
+            MenuItem::action(t("menu.report_problem"), commands::ReportProblem),
         ]),
     ]);
 }
@@ -400,13 +402,14 @@ fn main() {
             }
         });
     }
-    perf_overlay::apply_prefs(
-        store_runtime
+    {
+        let store = store_runtime
             .store
             .read()
-            .expect("session store lock poisoned")
-            .preferences(),
-    );
+            .expect("session store lock poisoned");
+        perf_overlay::apply_prefs(store.preferences());
+        i18n::apply_prefs(store.preferences());
+    }
     let updates = if preview {
         updates::inert()
     } else {

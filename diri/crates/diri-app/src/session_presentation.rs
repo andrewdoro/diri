@@ -64,7 +64,7 @@ pub(crate) fn activity_mark(state: StatusState, colors: SemanticColors) -> AnyEl
         StatusState::Hibernated => slot
             .id("sleeping-status")
             .role(Role::Image)
-            .aria_label("Sleeping")
+            .aria_label(crate::i18n::t("session.sleeping"))
             .child(Icon::new(IconName::Moon, 13.0, colors.tertiary))
             .into_any_element(),
         StatusState::IdleSeen | StatusState::None => slot.into_any_element(),

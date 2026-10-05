@@ -125,7 +125,7 @@ pub(crate) fn install(
         #[cfg(target_os = "macos")]
         notifier: notifier.clone(),
         #[cfg(target_os = "macos")]
-        health: "Use Test alert to check Mac notification delivery.".into(),
+        health: crate::i18n::t("notify.health_initial").into(),
     });
     #[cfg(target_os = "macos")]
     {

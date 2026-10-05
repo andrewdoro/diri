@@ -478,6 +478,35 @@ const SLASH_ITEMS: &[SlashItem] = &[
 
 /// The `/` menu's rows for `query` (what follows the `/`), in menu order:
 /// a label containing the query, or a keyword starting with it.
+/// The shown name of a block kind or block action, from the English label
+/// the menus keep for filtering and tests.
+pub(super) fn block_label(label: &'static str) -> &'static str {
+    let id = match label {
+        "Text" => "notes.block.text",
+        "Heading 1" => "notes.block.heading_1",
+        "Heading 2" => "notes.block.heading_2",
+        "Heading 3" => "notes.block.heading_3",
+        "To-do" => "notes.block.todo",
+        "Bulleted list" => "notes.block.bulleted_list",
+        "Numbered list" => "notes.block.numbered_list",
+        "Quote" => "notes.block.quote",
+        "Code" => "notes.block.code",
+        "Callout" => "notes.block.callout",
+        "Divider" => "notes.block.divider",
+        "Table" => "notes.block.table",
+        "Image" => "notes.block.image",
+        "Link to note" => "notes.block.link_to_note",
+        "Mention" => "notes.block.mention",
+        "Add block below" => "notes.block.add_below",
+        "Duplicate" => "notes.block.duplicate",
+        "Move up" => "notes.block.move_up",
+        "Move down" => "notes.block.move_down",
+        "Delete" => "notes.block.delete",
+        _ => return label,
+    };
+    crate::i18n::t(id)
+}
+
 fn slash_filter(query: &str) -> Vec<SlashItem> {
     let query = query.trim().to_lowercase();
     SLASH_ITEMS
@@ -485,6 +514,7 @@ fn slash_filter(query: &str) -> Vec<SlashItem> {
         .filter(|item| {
             query.is_empty()
                 || item.label.to_lowercase().contains(&query)
+                || block_label(item.label).to_lowercase().contains(&query)
                 || item.keywords.split(' ').any(|k| k.starts_with(&query))
         })
         .copied()
@@ -1083,7 +1113,7 @@ impl NoteEditorView {
             files: true,
             directories: false,
             multiple: true,
-            prompt: Some("Insert".into()),
+            prompt: Some(crate::i18n::t("notes.image.insert").into()),
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
@@ -2440,19 +2470,17 @@ fn callout_look(tone: Tone, colors: SemanticColors) -> (&'static str, gpui::Rgba
 
 fn placeholder(kind: BlockKind, only_block: bool) -> &'static str {
     match kind {
-        BlockKind::Title => "Untitled",
-        BlockKind::Heading(1) => "Heading 1",
-        BlockKind::Heading(2) => "Heading 2",
-        BlockKind::Heading(_) => "Heading 3",
-        BlockKind::Todo { .. } => "To-do",
-        BlockKind::Bullet | BlockKind::Numbered => "List",
-        BlockKind::Quote => "Quote",
-        BlockKind::Code => "Code",
+        BlockKind::Title => crate::i18n::t("notes.untitled"),
+        BlockKind::Heading(1) => crate::i18n::t("notes.block.heading_1"),
+        BlockKind::Heading(2) => crate::i18n::t("notes.block.heading_2"),
+        BlockKind::Heading(_) => crate::i18n::t("notes.block.heading_3"),
+        BlockKind::Todo { .. } => crate::i18n::t("notes.block.todo"),
+        BlockKind::Bullet | BlockKind::Numbered => crate::i18n::t("notes.placeholder.list"),
+        BlockKind::Quote => crate::i18n::t("notes.block.quote"),
+        BlockKind::Code => crate::i18n::t("notes.block.code"),
         BlockKind::Callout(tone) => tone.label(),
-        BlockKind::Paragraph if only_block => {
-            "Start writing. Type / for commands, @ to mention, [[ to link a note"
-        }
-        _ => "Type / for commands, @ to mention",
+        BlockKind::Paragraph if only_block => crate::i18n::t("notes.placeholder.first"),
+        _ => crate::i18n::t("notes.placeholder.paragraph"),
     }
 }
 
@@ -3317,7 +3345,7 @@ impl NoteEditorView {
         };
         let picture = match path {
             Some(path) => {
-                let missing = placeholder("This picture's file is missing".into());
+                let missing = placeholder(crate::i18n::t("notes.image.missing").into());
                 let missing = std::cell::RefCell::new(Some(missing));
                 let pixels = *self
                     .image_sizes
@@ -3340,9 +3368,9 @@ impl NoteEditorView {
             }
             None => {
                 let label = if block.src.contains("://") {
-                    format!("Picture on the web · {}", short_url(&block.src))
+                    crate::i18n::tf("notes.image.web", &[("url", &short_url(&block.src))])
                 } else {
-                    "This picture's file is missing".to_owned()
+                    crate::i18n::t("notes.image.missing").to_owned()
                 };
                 placeholder(label)
             }
@@ -3744,7 +3772,7 @@ impl NoteEditorView {
         let matches = self.slash_matches();
         let mut list = div().flex().flex_col().py(px(floating::MENU_PADDING_Y));
         if matches.is_empty() {
-            list = list.child(menu_empty("No matching blocks", colors));
+            list = list.child(menu_empty(crate::i18n::t("notes.menu.no_blocks"), colors));
         }
         let mut group = None;
         for (i, item) in matches.iter().enumerate() {
@@ -3770,7 +3798,7 @@ impl NoteEditorView {
                     this.apply_slash(i, cx);
                 }),
             )
-            .child(menu_label(item.label, colors))
+            .child(menu_label(block_label(item.label), colors))
             .when_some(item.keys, |row, keys| {
                 row.child(floating::menu_shortcut(
                     crate::commands::keystroke_label(keys),
@@ -3834,9 +3862,9 @@ impl NoteEditorView {
             let notes_only = self.mention.as_ref().is_some_and(|m| m.notes_only);
             list = list.child(menu_empty(
                 match (notes_only, self.mentions.entries.is_empty()) {
-                    (true, _) => "No matching notes",
-                    (false, true) => "No sessions or notes to mention",
-                    (false, false) => "No matching sessions or notes",
+                    (true, _) => crate::i18n::t("notes.menu.no_notes"),
+                    (false, true) => crate::i18n::t("notes.menu.nothing_to_mention"),
+                    (false, false) => crate::i18n::t("notes.menu.no_mentions"),
                 },
                 colors,
             ));
@@ -3933,7 +3961,11 @@ impl NoteEditorView {
                     .child(if editor.query.is_empty() {
                         div()
                             .text_color(colors.tertiary)
-                            .child(format!("{}Paste or type a link", crate::navigation::CARET))
+                            .child(format!(
+                                "{}{}",
+                                crate::navigation::CARET,
+                                crate::i18n::t("notes.link.placeholder")
+                            ))
                             .into_any_element()
                     } else {
                         crate::navigation::query_label(&field_view(&editor.query))
@@ -3964,20 +3996,26 @@ impl NoteEditorView {
                         },
                     );
                     let label = match (&found, self.editor.selection.is_collapsed()) {
-                        (Some(found), true) => format!("Insert {}", found.title),
-                        (Some(found), false) => format!("Link to {}", found.name),
-                        (None, _) => format!("Link to {}", short_url(url)),
+                        (Some(found), true) => {
+                            crate::i18n::tf("notes.link.insert", &[("target", &found.title)])
+                        }
+                        (Some(found), false) => {
+                            crate::i18n::tf("notes.link.link_to", &[("target", &found.name)])
+                        }
+                        (None, _) => {
+                            crate::i18n::tf("notes.link.link_to", &[("target", &short_url(url))])
+                        }
                     };
                     (icon, label.into(), "↩")
                 }
                 LinkRow::Open { url } => (
                     crate::icons::sf_symbol("square.and.arrow.up", MENU_ICON, colors.secondary),
-                    format!("Open {}", short_url(url)).into(),
+                    crate::i18n::tf("notes.link.open", &[("target", &short_url(url))]).into(),
                     "⌘↩",
                 ),
                 LinkRow::Remove => (
                     crate::icons::sf_symbol("xmark", MENU_ICON, colors.secondary),
-                    "Remove link".into(),
+                    crate::i18n::t("notes.link.remove").into(),
                     "",
                 ),
             };

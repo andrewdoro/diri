@@ -1,13 +1,12 @@
-//! Restarts an agent that exited only to be started again.
+//! Restarts a wrapped agent that exited only to be started again.
 //!
 //! Codex's startup update chooser runs `npm install -g @openai/codex` (or the
-//! Homebrew/bun equivalent), prints "Please restart Codex." and exits 0. A
-//! clean exit ends the session, so the tab would close; and a bare `codex`
-//! started by hand would run without the `-c` overrides Diri injects (the
-//! dirijor MCP server and its notify hook). The session pump spots the
-//! manifest's `relaunchNotice` as the agent exits and holds that exit back;
-//! this relaunches the tab through the same spec builders `session.resume`
-//! uses.
+//! Homebrew/bun equivalent), prints "Please restart Codex." and exits 0. The
+//! `returnToLoginShell` wrapper then leaves a bare login shell, and a `codex`
+//! typed there runs without the `-c` overrides Diri injects, so the tab loses
+//! the dirijor MCP server and its notify hook. The session pump spots the
+//! manifest's `relaunchNotice` as the wrapper reports the exit; this relaunches
+//! the tab through the same spec builders `session.resume` uses.
 use super::*;
 
 impl ControlServer {
@@ -41,7 +40,6 @@ impl ControlServer {
                         continue;
                     };
                     if let Err(error) = server.relaunch_agent(&id) {
-                        server.release_held_exit(&id);
                         diri_telemetry::warn_event!(
                             "session.agent_relaunch_failed",
                             session = diri_telemetry::id(&id),
@@ -60,19 +58,7 @@ impl ControlServer {
         }
     }
 
-    /// The relaunch did not happen: the agent's exit, held back for it, is
-    /// published after all. A tab whose session already ended (the respawn
-    /// failed after it) republishes its record, which carries the exit.
-    fn release_held_exit(&self, id: &str) {
-        let Ok(registry) = self.registry.lock() else {
-            return;
-        };
-        if !registry.release_held_exit(id) {
-            self.publish_updated(&registry, id);
-        }
-    }
-
-    /// Replaces the tab's exited agent with a fresh launch of it.
+    /// Replaces the tab's login shell with a fresh launch of its agent.
     ///
     /// The notice is printed before the agent has a conversation (Codex's
     /// update chooser runs ahead of its TUI), so a tab that knows no
@@ -114,14 +100,8 @@ impl ControlServer {
             }
             crate::accounts::bind_pty(&mut profile, &mut spec.pty)?;
         }
-        // The agent has already exited (that exit is what asked for this),
-        // so ending the session waits on nothing. Ending it under the same
-        // lock as the respawn keeps its exit from ever being published: the
-        // app would close a tab whose agent exited cleanly.
+        self.terminate_session_unlocked(id, Duration::from_millis(500))?;
         let mut registry = self.registry.lock().map_err(poisoned)?;
-        registry
-            .terminate(id, Duration::from_millis(500))
-            .map_err(io_control_error)?;
         registry.respawn(spec).map_err(io_control_error)?;
         registry.persist_now().map_err(io_control_error)?;
         self.publish_updated(&registry, id);

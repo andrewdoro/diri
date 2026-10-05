@@ -52,9 +52,22 @@ impl UtilitySurfaces {
     pub(super) fn usage_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.settings_colors();
         if self.usage.updated_at == 0 {
-            return settings_page("Usage", div().flex().flex_col().gap(px(8.0)).py(px(24.0))
-                .child(label("Reading local usage…", 14.0, colors.primary))
-                .child(label("Preparing costs and token history from local Claude Code and Codex transcripts, plus billed Cursor usage when signed in.", 12.0, colors.secondary)), colors).into_any_element();
+            return settings_page(
+                t("settings.usage.title"),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .py(px(24.0))
+                    .child(label(t("settings.usage.loading"), 14.0, colors.primary))
+                    .child(label(
+                        t("settings.usage.loading_detail"),
+                        12.0,
+                        colors.secondary,
+                    )),
+                colors,
+            )
+            .into_any_element();
         }
         let now = self
             .usage
@@ -95,7 +108,7 @@ impl UtilitySurfaces {
                     colors.secondary
                 },
             ))
-            .child("Share")
+            .child(t("settings.usage.share"))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.toggle_usage_share(cx);
             }));
@@ -176,16 +189,20 @@ impl UtilitySurfaces {
                     )
                     .child(label(
                         if tokens {
-                            format!(
-                                "{:.1}% of tokens · {}",
-                                share * 100.0,
-                                money(provider.tokens.c)
+                            tf(
+                                "settings.usage.provider_token_share",
+                                &[
+                                    ("percent", &format!("{:.1}", share * 100.0)),
+                                    ("cost", &money(provider.tokens.c)),
+                                ],
                             )
                         } else {
-                            format!(
-                                "{:.1}% of cost · {} tokens",
-                                share * 100.0,
-                                UsageFormat::tokens(provider_tokens)
+                            tf(
+                                "settings.usage.provider_cost_share",
+                                &[
+                                    ("percent", &format!("{:.1}", share * 100.0)),
+                                    ("tokens", &UsageFormat::tokens(provider_tokens)),
+                                ],
                             )
                         },
                         11.0,
@@ -244,7 +261,7 @@ impl UtilitySurfaces {
                                 colors,
                             ))
                             .child(label(
-                                "Claude and Codex at model rates. Cursor is billed usage.",
+                                t("settings.usage.hero_detail"),
                                 11.0,
                                 colors.tertiary,
                             )),
@@ -266,7 +283,7 @@ impl UtilitySurfaces {
             .child(metric(
                 &self.usage_numbers,
                 "delta-metric-processed",
-                "Processed tokens",
+                t("settings.usage.processed_tokens"),
                 self.usage_numbers.show(
                     "metric-processed",
                     total.total_tokens() as f64,
@@ -276,16 +293,21 @@ impl UtilitySurfaces {
                     FontWeight::NORMAL,
                 ),
                 compare.processed_tokens_change(),
-                format!(
-                    "{} per active day",
-                    UsageFormat::tokens(total.total_tokens() / report.active_days.max(1) as i64)
+                tf(
+                    "settings.usage.per_active_day",
+                    &[(
+                        "tokens",
+                        &UsageFormat::tokens(
+                            total.total_tokens() / report.active_days.max(1) as i64,
+                        ),
+                    )],
                 ),
                 colors,
             ))
             .child(metric(
                 &self.usage_numbers,
                 "delta-metric-cached",
-                "Cached input",
+                t("settings.usage.cached_input"),
                 self.usage_numbers.show(
                     "metric-cached",
                     total.cache_read_tokens as f64,
@@ -295,16 +317,22 @@ impl UtilitySurfaces {
                     FontWeight::NORMAL,
                 ),
                 compare.cached_input_change(),
-                format!(
-                    "{:.1}% of input",
-                    ratio(total.cache_read_tokens as f64, input as f64) * 100.0
+                tf(
+                    "settings.usage.percent_of_input",
+                    &[(
+                        "percent",
+                        &format!(
+                            "{:.1}",
+                            ratio(total.cache_read_tokens as f64, input as f64) * 100.0
+                        ),
+                    )],
                 ),
                 colors,
             ))
             .child(metric(
                 &self.usage_numbers,
                 "delta-metric-uncached",
-                "Uncached input",
+                t("settings.usage.uncached_input"),
                 self.usage_numbers.show(
                     "metric-uncached",
                     total.input_tokens as f64,
@@ -314,16 +342,16 @@ impl UtilitySurfaces {
                     FontWeight::NORMAL,
                 ),
                 compare.uncached_input_change(),
-                format!(
-                    "{} cache writes",
-                    UsageFormat::tokens(total.cache_write_tokens)
+                tf(
+                    "settings.usage.cache_writes",
+                    &[("tokens", &UsageFormat::tokens(total.cache_write_tokens))],
                 ),
                 colors,
             ))
             .child(metric(
                 &self.usage_numbers,
                 "delta-metric-output",
-                "Output",
+                t("settings.usage.output"),
                 self.usage_numbers.show(
                     "metric-output",
                     total.output_tokens as f64,
@@ -333,16 +361,16 @@ impl UtilitySurfaces {
                     FontWeight::NORMAL,
                 ),
                 compare.output_change(),
-                format!(
-                    "{} reasoning reported",
-                    UsageFormat::tokens(report.total.reasoning)
+                tf(
+                    "settings.usage.reasoning_reported",
+                    &[("tokens", &UsageFormat::tokens(report.total.reasoning))],
                 ),
                 colors,
             ))
             .child(metric(
                 &self.usage_numbers,
                 "delta-metric-savings",
-                "Cache read savings",
+                t("settings.usage.cache_read_savings"),
                 self.usage_numbers.show(
                     "metric-savings",
                     report.total.read_savings,
@@ -352,7 +380,7 @@ impl UtilitySurfaces {
                     FontWeight::NORMAL,
                 ),
                 compare.read_savings_change(),
-                "Estimated · excludes writes".into(),
+                t("settings.usage.savings_detail").into(),
                 colors,
             ));
         let mut content = div().flex().flex_col().gap(px(24.0)).child(
@@ -364,9 +392,9 @@ impl UtilitySurfaces {
                 .gap(px(12.0))
                 .child(label(
                     if tokens {
-                        "Processed tokens · compared with the previous period of the same length."
+                        t("settings.usage.subtitle_tokens")
                     } else {
-                        "Estimated API cost · compared with the previous period of the same length."
+                        t("settings.usage.subtitle_cost")
                     },
                     12.0,
                     colors.secondary,
@@ -381,7 +409,7 @@ impl UtilitySurfaces {
                 .child(
                     usage_control(
                         "usage-source-all",
-                        "All machines",
+                        t("settings.usage.all_machines"),
                         self.usage_host.is_none(),
                         colors,
                     )
@@ -393,7 +421,7 @@ impl UtilitySurfaces {
                 .child(
                     usage_control(
                         "usage-source-local",
-                        "This Mac",
+                        t("settings.usage.this_mac"),
                         self.usage_host.as_deref() == Some(""),
                         colors,
                     )
@@ -429,12 +457,25 @@ impl UtilitySurfaces {
                         )
                     });
                     let message = match (host.status, last) {
-                        (RemoteUsageStatus::Loading, Some(last)) => format!("Updating · cached through {last}"),
-                        (RemoteUsageStatus::Loading, None) => "Reading remote usage…".to_owned(),
-                        (RemoteUsageStatus::Unavailable, Some(last)) => format!("Unavailable · showing usage saved at {last}"),
-                        (RemoteUsageStatus::Unavailable, None) => "Usage unavailable · retries every 5 minutes; check the connection in Remote settings".to_owned(),
-                        (RemoteUsageStatus::Ready, Some(last)) => format!("Updated {last}"),
-                        (RemoteUsageStatus::Ready, None) => "No transcript history".to_owned(),
+                        (RemoteUsageStatus::Loading, Some(last)) => {
+                            tf("settings.usage.remote_updating", &[("time", &last)])
+                        }
+                        (RemoteUsageStatus::Loading, None) => {
+                            t("settings.usage.remote_loading").to_owned()
+                        }
+                        (RemoteUsageStatus::Unavailable, Some(last)) => tf(
+                            "settings.usage.remote_unavailable_saved",
+                            &[("time", &last)],
+                        ),
+                        (RemoteUsageStatus::Unavailable, None) => {
+                            t("settings.usage.remote_unavailable").to_owned()
+                        }
+                        (RemoteUsageStatus::Ready, Some(last)) => {
+                            tf("settings.usage.remote_updated", &[("time", &last)])
+                        }
+                        (RemoteUsageStatus::Ready, None) => {
+                            t("settings.usage.remote_no_history").to_owned()
+                        }
                     };
                     status = status.child(label(
                         format!("{} · {message}", host.name),
@@ -453,19 +494,79 @@ impl UtilitySurfaces {
             );
         }
         if loaded && self.usage_days != 1 && total.total_tokens() == 0 {
-            content = content.child(div().p(px(20.0)).rounded(px(8.0)).bg(colors.primary.alpha(0.035)).flex().flex_col().gap(px(6.0))
-                .child(label("Your usage starts with a conversation", 14.0, colors.primary))
-                .child(label("Available Claude Code and Codex transcripts appear automatically, alongside signed-in Cursor usage on this Mac.", 12.0, colors.secondary))
-                .child(label("Try a longer date range to see earlier activity.", 12.0, colors.secondary)));
+            content = content.child(
+                div()
+                    .p(px(20.0))
+                    .rounded(px(8.0))
+                    .bg(colors.primary.alpha(0.035))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(label(t("settings.usage.empty_title"), 14.0, colors.primary))
+                    .child(label(
+                        t("settings.usage.empty_detail"),
+                        12.0,
+                        colors.secondary,
+                    ))
+                    .child(label(
+                        t("settings.usage.empty_hint"),
+                        12.0,
+                        colors.secondary,
+                    )),
+            );
         }
-        content = content.child(hero).child(metrics).child(self.usage_activity(now, colors, cx)).child(self.usage_breakdown(report, colors))
-            .child(div().flex().flex_col().gap(px(7.0))
-                .child(label("About these estimates", 12.0, colors.primary).font_weight(FontWeight::MEDIUM))
-                .child(label(format!("{:.1}% of tokens priced · {} unpriced tokens", ratio(report.total.priced_tokens as f64, total.total_tokens() as f64) * 100.0, UsageFormat::tokens(total.total_tokens() - report.total.priced_tokens)), 11.0, colors.secondary))
-                .child(label("Uses Diri’s bundled model rates for Claude and Codex. Cursor costs come from billed dashboard events. Unpriced Claude/Codex usage is excluded from cost. Cache read savings compare cached reads with uncached input rates; cache write premiums are excluded.", 11.0, colors.tertiary))
-                .child(label("Includes local and remote Claude Code and Codex transcripts, including sessions outside Diri, plus billed Cursor usage on this Mac. Remote machines refresh every 5 minutes over SSH; unavailable machines keep their last saved totals.", 11.0, colors.tertiary)));
+        content = content
+            .child(hero)
+            .child(metrics)
+            .child(self.usage_activity(now, colors, cx))
+            .child(self.usage_breakdown(report, colors))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .child(
+                        label(t("settings.usage.about_title"), 12.0, colors.primary)
+                            .font_weight(FontWeight::MEDIUM),
+                    )
+                    .child(label(
+                        tf(
+                            "settings.usage.priced_summary",
+                            &[
+                                (
+                                    "percent",
+                                    &format!(
+                                        "{:.1}",
+                                        ratio(
+                                            report.total.priced_tokens as f64,
+                                            total.total_tokens() as f64
+                                        ) * 100.0
+                                    ),
+                                ),
+                                (
+                                    "tokens",
+                                    &UsageFormat::tokens(
+                                        total.total_tokens() - report.total.priced_tokens,
+                                    ),
+                                ),
+                            ],
+                        ),
+                        11.0,
+                        colors.secondary,
+                    ))
+                    .child(label(
+                        t("settings.usage.about_pricing"),
+                        11.0,
+                        colors.tertiary,
+                    ))
+                    .child(label(
+                        t("settings.usage.about_sources"),
+                        11.0,
+                        colors.tertiary,
+                    )),
+            );
         settings_page_with_trailing(
-            "Usage",
+            t("settings.usage.title"),
             usage_share::SUPPORTED.then_some(share),
             content,
             colors,
@@ -1046,7 +1147,7 @@ impl UtilitySurfaces {
             preview_frame.child(img(image).w(px(preview_w)).h(px(preview_h)).flex_none())
         } else {
             preview_frame.bg(colors.primary.alpha(0.04)).child(label(
-                "Preview unavailable",
+                t("settings.usage.share_preview_unavailable"),
                 11.0,
                 colors.tertiary,
             ))
@@ -1128,7 +1229,10 @@ impl UtilitySurfaces {
                     .text_size(px(Typo::META.size - 1.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.tertiary)
-                    .child(appearance.label()),
+                    .child(crate::i18n::t(match appearance {
+                        ThemeAppearance::Dark => "theme.appearance.dark",
+                        ThemeAppearance::Light => "theme.appearance.light",
+                    })),
             );
             for candidate in TermTheme::CATALOG
                 .into_iter()
@@ -1262,7 +1366,11 @@ impl UtilitySurfaces {
                         );
                     }),
                 )
-                .child(label("Top models", 11.0, colors.primary))
+                .child(label(
+                    t("settings.usage.share_top_models"),
+                    11.0,
+                    colors.primary,
+                ))
                 .child(
                     div()
                         .flex_none()
@@ -1343,7 +1451,7 @@ impl UtilitySurfaces {
                     .text_size(px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.primary)
-                    .child("Share usage"),
+                    .child(t("settings.usage.share_title")),
             )
             .child(
                 div()
@@ -1375,32 +1483,38 @@ impl UtilitySurfaces {
             .gap(px(14.0))
             .child(header)
             .child(section(
-                "Metric",
+                t("settings.usage.share_metric"),
                 segmented([
-                    segment("usage-share-cost", "Cost", !options.tokens, |options| {
-                        options.tokens = false
-                    })
+                    segment(
+                        "usage-share-cost",
+                        t("settings.usage.cost"),
+                        !options.tokens,
+                        |options| options.tokens = false,
+                    )
                     .into_any_element(),
-                    segment("usage-share-tokens", "Tokens", options.tokens, |options| {
-                        options.tokens = true
-                    })
+                    segment(
+                        "usage-share-tokens",
+                        t("settings.usage.tokens"),
+                        options.tokens,
+                        |options| options.tokens = true,
+                    )
                     .into_any_element(),
                 ])
                 .into_any_element(),
             ))
             .child(section(
-                "Graph",
+                t("settings.usage.share_graph"),
                 segmented([
                     segment(
                         "usage-share-graph-all",
-                        "Total",
+                        t("settings.usage.share_total"),
                         !options.individual,
                         |options| options.individual = false,
                     )
                     .into_any_element(),
                     segment(
                         "usage-share-graph-individual",
-                        "Per agent",
+                        t("settings.usage.share_per_agent"),
                         options.individual,
                         |options| options.individual = true,
                     )
@@ -1408,7 +1522,10 @@ impl UtilitySurfaces {
                 ])
                 .into_any_element(),
             ))
-            .child(section("Theme", theme_trigger.into_any_element()))
+            .child(section(
+                t("settings.usage.share_theme"),
+                theme_trigger.into_any_element(),
+            ))
             .child(models_row)
             .child(div().flex_1())
             .child(
@@ -1418,7 +1535,7 @@ impl UtilitySurfaces {
                     .gap(px(6.0))
                     .child(action(
                         "usage-share-copy-image",
-                        "Copy image",
+                        t("settings.usage.share_copy_image"),
                         ShareAction::CopyImage,
                         true,
                     ))
@@ -1426,10 +1543,15 @@ impl UtilitySurfaces {
                         div()
                             .flex()
                             .gap(px(6.0))
-                            .child(action("usage-share-save", "Save", ShareAction::Save, false))
+                            .child(action(
+                                "usage-share-save",
+                                t("settings.usage.share_save"),
+                                ShareAction::Save,
+                                false,
+                            ))
                             .child(action(
                                 "usage-share-x",
-                                "Post on X",
+                                t("settings.usage.share_post_x"),
                                 ShareAction::PostX,
                                 false,
                             )),
@@ -1654,11 +1776,15 @@ impl UtilitySurfaces {
             .flex()
             .gap(px(3.0))
             .child(
-                usage_control("usage-series-all", "All", split.is_none(), colors).on_click(
-                    cx.listener(|this, _, window, cx| {
-                        this.set_usage_chart_all(window, cx);
-                    }),
-                ),
+                usage_control(
+                    "usage-series-all",
+                    t("settings.usage.series_all"),
+                    split.is_none(),
+                    colors,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_usage_chart_all(window, cx);
+                })),
             )
             .child(
                 div()
@@ -1673,7 +1799,7 @@ impl UtilitySurfaces {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.set_usage_chart_individual(window, cx);
                             }))
-                            .child("Individual")
+                            .child(t("settings.usage.series_individual"))
                             .child(sf_symbol(
                                 if self.usage_series_menu_open() {
                                     "chevron.up"
@@ -1704,20 +1830,32 @@ impl UtilitySurfaces {
                             .flex()
                             .gap(px(3.0))
                             .child(
-                                usage_control("usage-cost", "Cost", !tokens, colors).on_click(
-                                    cx.listener(|this, _, _, cx| {
+                                usage_control(
+                                    "usage-cost",
+                                    t("settings.usage.cost"),
+                                    !tokens,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.usage_tokens = false;
                                         cx.notify();
-                                    }),
-                                ),
+                                    },
+                                )),
                             )
                             .child(
-                                usage_control("usage-tokens", "Tokens", tokens, colors).on_click(
-                                    cx.listener(|this, _, _, cx| {
+                                usage_control(
+                                    "usage-tokens",
+                                    t("settings.usage.tokens"),
+                                    tokens,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.usage_tokens = true;
                                         cx.notify();
-                                    }),
-                                ),
+                                    },
+                                )),
                             ),
                     ),
             )
@@ -1742,10 +1880,10 @@ impl UtilitySurfaces {
     fn usage_breakdown(&self, report: &UsageReport, colors: SemanticColors) -> impl IntoElement {
         let mut table = div().flex().flex_col().child(table_row(
             "",
-            "Model",
-            label("Cost", 12.0, colors.primary).into_any_element(),
-            label("Share", 12.0, colors.tertiary).into_any_element(),
-            label("Tokens", 12.0, colors.secondary).into_any_element(),
+            t("settings.usage.model"),
+            label(t("settings.usage.cost"), 12.0, colors.primary).into_any_element(),
+            label(t("settings.usage.share_column"), 12.0, colors.tertiary).into_any_element(),
+            label(t("settings.usage.tokens"), 12.0, colors.secondary).into_any_element(),
             colors,
         ));
         for row in &report.models {
@@ -1754,7 +1892,7 @@ impl UtilitySurfaces {
                 PROVIDERS[row.provider],
                 &row.model,
                 if row.detail.priced_tokens == 0 {
-                    label("Unpriced", 12.0, colors.primary).into_any_element()
+                    label(t("settings.usage.unpriced"), 12.0, colors.primary).into_any_element()
                 } else {
                     label(money(total.cost), 12.0, colors.primary).into_any_element()
                 },
@@ -1777,18 +1915,21 @@ impl UtilitySurfaces {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .child(label("Breakdown", 13.0, colors.primary).font_weight(FontWeight::MEDIUM))
+            .child(
+                label(t("settings.usage.breakdown"), 13.0, colors.primary)
+                    .font_weight(FontWeight::MEDIUM),
+            )
             .child(table)
     }
 }
 
 fn range_label(days: usize) -> SharedString {
     match days {
-        1 => "24h".into(),
-        7 => "7d".into(),
-        30 => "1M".into(),
-        90 => "3M".into(),
-        days => format!("{days}d").into(),
+        1 => t("settings.usage.range_24h").into(),
+        7 => t("settings.usage.range_7d").into(),
+        30 => t("settings.usage.range_1m").into(),
+        90 => t("settings.usage.range_3m").into(),
+        days => tf("settings.usage.range_days", &[("days", &days)]).into(),
     }
 }
 fn money(value: f64) -> String {
@@ -1809,7 +1950,7 @@ fn change_delta(
 ) -> gpui::Div {
     let pct = (change * 100.0).round() as i64;
     if pct == 0 {
-        return label("Same", 11.0, colors.secondary).line_height(px(11.0));
+        return label(t("settings.usage.same"), 11.0, colors.secondary).line_height(px(11.0));
     }
     let (mark, amount, color) = if pct > 0 {
         ("▲", pct, Ink::FRESH)

@@ -81,7 +81,11 @@ struct TickPanel {
     selected: usize,
 }
 
-const TICK_CHOICES: [&str; 3] = ["Tick and stop the agent", "Tick, keep it running", "Cancel"];
+const TICK_CHOICES: [&str; 3] = [
+    "notes.work.tick_stop",
+    "notes.work.tick_keep",
+    "notes.cancel",
+];
 
 enum Pending {
     Starting { ticket: u64, label: String },
@@ -468,7 +472,7 @@ impl NoteEditorView {
                             el.opacity(0.0).group_hover(group, |el| el.opacity(1.0))
                         })
                         .hover(|el| el.bg(colors.primary.alpha(0.06)).text_color(colors.primary))
-                        .child("Start")
+                        .child(crate::i18n::t("notes.work.start"))
                         .child(div().text_color(colors.tertiary).child(START_SHORTCUT))
                         .on_mouse_down(
                             MouseButton::Left,
@@ -500,7 +504,7 @@ impl NoteEditorView {
             if let Some(reason) = self.work.failure(id) {
                 (
                     Some(Ink::DANGER),
-                    "Couldn't start".to_owned(),
+                    crate::i18n::t("notes.work.failed").to_owned(),
                     Some(one_line(reason, 160)),
                 )
             } else {
@@ -508,17 +512,17 @@ impl NoteEditorView {
                     WorkState::Ready | WorkState::Done => return None,
                     WorkState::Starting => (
                         Some(colors.primary.alpha(0.3)),
-                        "Starting…".to_owned(),
+                        crate::i18n::t("notes.work.starting").to_owned(),
                         None,
                     ),
                     WorkState::Working => (
                         Some(colors.primary.alpha(0.54)),
-                        "Working on it".to_owned(),
+                        crate::i18n::t("notes.work.working").to_owned(),
                         None,
                     ),
                     WorkState::NeedsYou(question) => (
                         Some(Ink::ATTENTION),
-                        "Needs you".to_owned(),
+                        crate::i18n::t("notes.work.needs_you").to_owned(),
                         Some(one_line(
                             question.excerpt.as_deref().unwrap_or(&question.summary),
                             200,
@@ -527,8 +531,10 @@ impl NoteEditorView {
                     WorkState::Review(pr) => (
                         Some(Ink::FRESH),
                         match pr {
-                            Some(pr) => format!("Ready to review · PR #{} open", pr.number),
-                            None => "Ready to review".to_owned(),
+                            Some(pr) => {
+                                crate::i18n::tf("notes.work.review_pr", &[("number", &pr.number)])
+                            }
+                            None => crate::i18n::t("notes.work.review").to_owned(),
                         },
                         None,
                     ),
@@ -544,16 +550,22 @@ impl NoteEditorView {
             && self.work.failure(id).is_none()
         {
             let label = if matches!(state, WorkState::NeedsYou(_)) {
-                "Answer in session"
+                crate::i18n::t("notes.work.answer")
             } else {
-                "Open"
+                crate::i18n::t("notes.work.open")
             };
             actions.push((label, WorkRequest::Open { session }));
         }
         if self.work.failure(id).is_some() {
-            actions.push(("Try again", WorkRequest::Prepare { block: id }));
+            actions.push((
+                crate::i18n::t("notes.work.retry"),
+                WorkRequest::Prepare { block: id },
+            ));
         } else if block.kind == (BlockKind::Todo { checked: false }) && state.can_restart() {
-            actions.push(("Start again", WorkRequest::Prepare { block: id }));
+            actions.push((
+                crate::i18n::t("notes.work.restart"),
+                WorkRequest::Prepare { block: id },
+            ));
         }
 
         let mut line = div()
@@ -704,10 +716,14 @@ impl NoteEditorView {
             .flex()
             .flex_col()
             .py(px(floating::MENU_PADDING_Y))
-            .child(section_label("Start with".into(), None, colors));
+            .child(section_label(
+                crate::i18n::t("notes.work.start_with").into(),
+                None,
+                colors,
+            ));
         if panel.agents.is_empty() {
             list = list.child(super::editor_view::menu_empty(
-                "No agents installed. Add one in Settings.",
+                crate::i18n::t("notes.work.no_agents"),
                 colors,
             ));
         }
@@ -748,35 +764,59 @@ impl NoteEditorView {
                 row.child(floating::menu_shortcut("↩", colors))
             })
             .when(agent.session.is_some() && index != panel.selected, |row| {
-                row.child(floating::menu_shortcut("Mentioned", colors))
+                row.child(floating::menu_shortcut(
+                    crate::i18n::t("notes.work.mentioned"),
+                    colors,
+                ))
             })
             .when(
                 agent.is_default && agent.session.is_none() && index != panel.selected,
-                |row| row.child(floating::menu_shortcut("Default", colors)),
+                |row| {
+                    row.child(floating::menu_shortcut(
+                        crate::i18n::t("notes.work.default"),
+                        colors,
+                    ))
+                },
             );
             list = list.child(row);
         }
         let brief = &panel.brief;
         let mut summary = vec![format_bytes(brief.prompt.len())];
         if brief.context_lines > 0 {
-            summary.push(plural(brief.context_lines, "context line", "context lines"));
+            summary.push(plural(
+                brief.context_lines,
+                "notes.work.brief.context_lines_one",
+                "notes.work.brief.context_lines_other",
+            ));
         }
         if brief.links > 0 {
-            summary.push(plural(brief.links, "link", "links"));
+            summary.push(plural(
+                brief.links,
+                "notes.work.brief.links_one",
+                "notes.work.brief.links_other",
+            ));
         }
         if brief.notes > 0 {
-            summary.push(plural(brief.notes, "note", "notes"));
+            summary.push(plural(
+                brief.notes,
+                "notes.work.brief.notes_one",
+                "notes.work.brief.notes_other",
+            ));
         }
         if brief.sessions > 0 {
-            summary.push(plural(brief.sessions, "session", "sessions"));
+            summary.push(plural(
+                brief.sessions,
+                "notes.work.brief.sessions_one",
+                "notes.work.brief.sessions_other",
+            ));
         }
         if brief.truncated {
-            summary.push("shortened".to_owned());
+            summary.push(crate::i18n::t("notes.work.brief.shortened").to_owned());
         }
         list = list
             .child(floating::menu_separator(colors))
             .child(section_label(
-                "What the agent gets".into(),
+                crate::i18n::t("notes.work.brief.title").into(),
                 Some(summary.join(" · ").into()),
                 colors,
             ))
@@ -809,7 +849,7 @@ impl NoteEditorView {
             .flex_col()
             .py(px(floating::MENU_PADDING_Y))
             .child(section_label(
-                "The agent is still working".into(),
+                crate::i18n::t("notes.work.still_working").into(),
                 None,
                 colors,
             ));
@@ -844,7 +884,10 @@ impl NoteEditorView {
                     this.confirm_tick(index, cx);
                 }),
             )
-            .child(super::editor_view::menu_label(*label, colors))
+            .child(super::editor_view::menu_label(
+                crate::i18n::t(label),
+                colors,
+            ))
             .when(index == 2, |row| {
                 row.child(floating::menu_shortcut("esc", colors))
             });
@@ -916,13 +959,13 @@ fn one_line(text: &str, max_chars: usize) -> String {
     format!("{}…", cut.trim_end())
 }
 
-fn plural(count: usize, one: &str, many: &str) -> String {
-    format!("{count} {}", if count == 1 { one } else { many })
+fn plural(count: usize, one: &'static str, many: &'static str) -> String {
+    crate::i18n::tf(if count == 1 { one } else { many }, &[("count", &count)])
 }
 
 fn format_bytes(bytes: usize) -> String {
     if bytes < 1024 {
-        format!("{bytes} bytes")
+        crate::i18n::tf("notes.work.brief.bytes", &[("count", &bytes)])
     } else {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     }

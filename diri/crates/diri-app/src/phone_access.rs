@@ -38,7 +38,10 @@ impl PhoneAccess {
                 Ok(child) => Some(child),
                 Err(error) => {
                     server.abort();
-                    return Err(format!("Cannot keep this Mac awake: {error}"));
+                    return Err(crate::i18n::tf(
+                        "settings.phone.awake_failed",
+                        &[("error", &error)],
+                    ));
                 }
             }
         } else {
@@ -87,26 +90,14 @@ pub enum TailscaleSetup {
 
 impl TailscaleSetup {
     pub fn message(self) -> &'static str {
-        match self {
-            Self::NotInstalled => {
-                "Install Tailscale on this Mac. It creates a private connection to your iPhone, even away from home."
-            }
-            Self::NeedsLogin => {
-                "Tailscale is installed. Open it and sign in with the account you’ll use on your iPhone."
-            }
-            Self::NeedsApproval => {
-                "This Mac needs approval from your Tailscale administrator. Ask them to approve it, then check again."
-            }
-            Self::Stopped => {
-                "Tailscale is signed in but disconnected. Open its menu and turn it on, then check again."
-            }
-            Self::Unavailable => {
-                "Diri couldn’t confirm the Tailscale connection. Open Tailscale, finish its setup and check again."
-            }
-            Self::Ready(_) => {
-                "Tailscale is connected on this Mac. Next, connect your iPhone using the same account."
-            }
-        }
+        crate::i18n::t(match self {
+            Self::NotInstalled => "settings.phone.tailscale_not_installed",
+            Self::NeedsLogin => "settings.phone.tailscale_needs_login",
+            Self::NeedsApproval => "settings.phone.tailscale_needs_approval",
+            Self::Stopped => "settings.phone.tailscale_stopped",
+            Self::Unavailable => "settings.phone.tailscale_unavailable",
+            Self::Ready(_) => "settings.phone.tailscale_ready",
+        })
     }
 }
 

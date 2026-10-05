@@ -69,9 +69,9 @@ pub(crate) fn tab_hover_fill(colors: SemanticColors) -> Rgba {
 /// What the toggle says it will do.
 pub(crate) fn toggle_label(open: bool) -> &'static str {
     if open {
-        "Hide right sidebar"
+        crate::i18n::t("panel.hide_right_sidebar")
     } else {
-        "Show right sidebar"
+        crate::i18n::t("panel.show_right_sidebar")
     }
 }
 

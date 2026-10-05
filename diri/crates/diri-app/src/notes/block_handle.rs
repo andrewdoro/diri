@@ -151,9 +151,9 @@ impl NoteEditorView {
             let text = block.text.lines().next().unwrap_or_default().trim();
             let text = if text.is_empty() {
                 match block.kind {
-                    BlockKind::Divider => "Divider",
-                    BlockKind::Image => "Image",
-                    _ => "Empty block",
+                    BlockKind::Divider => crate::i18n::t("notes.block.divider"),
+                    BlockKind::Image => crate::i18n::t("notes.block.image"),
+                    _ => crate::i18n::t("notes.block.empty"),
                 }
             } else {
                 text
@@ -382,7 +382,7 @@ impl NoteEditorView {
                         if on { colors.primary } else { colors.secondary },
                     ))
                     .warm_tooltip(move |_, cx| {
-                        cx.new(|_| PaletteTooltip((*label).to_owned(), colors))
+                        cx.new(|_| PaletteTooltip(super::block_label(label).to_owned(), colors))
                             .into()
                     }),
             );
@@ -399,7 +399,7 @@ impl NoteEditorView {
                     .text_size(px(Typo::META.size))
                     .font_weight(Typo::META.weight)
                     .text_color(colors.tertiary)
-                    .child("Turn into"),
+                    .child(crate::i18n::t("notes.block.turn_into")),
             )
             .child(strip)
             .child(floating::menu_separator(colors));
@@ -439,9 +439,9 @@ impl NoteEditorView {
                 }),
             )
             .child(if danger {
-                menu_label(*label, colors).text_color(ink)
+                menu_label(super::block_label(label), colors).text_color(ink)
             } else {
-                menu_label(*label, colors)
+                menu_label(super::block_label(label), colors)
             });
             list = list.child(row);
         }
