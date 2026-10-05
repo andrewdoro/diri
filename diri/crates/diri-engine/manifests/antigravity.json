@@ -1,8 +1,8 @@
 {
-  "_notice": "Screen-detection predicates adapted from the herdr project (https://github.com/herdrdev/herdr, src/detect/manifests/*.toml), licensed Apache-2.0. Translated from herdr's TOML rule schema into Dirijor's JSON predicate schema and re-prioritised for this engine; the agent capability block is Dirijor's own.",
+  "_notice": "The working-spinner-verb and working-task-chip predicates are adapted from the herdr project (https://github.com/herdrdev/herdr, src/detect/manifests/*.toml), licensed Apache-2.0. Every other rule is Dirijor's own, built from screens the Antigravity CLI 1.2.17 draws (tests/fixtures/antigravity_screens, captured by tests/antigravity_real.rs); the agent capability block is Dirijor's own.",
   "schemaVersion": 2,
   "id": "antigravity",
-  "version": "2026.07.31.1",
+  "version": "2026.10.05.1",
   "statusModel": "full",
   "agent": {
     "id": "antigravity",
@@ -17,9 +17,9 @@
     "firstClass": true,
     "catalogOrder": 30,
     "setup": {
-      "url": "https://antigravity.google/docs/cli-install",
-      "installHint": "Install agy with Google's platform installer.",
-      "signInHint": "Run agy and complete the Google OAuth flow."
+      "url": "https://antigravity.google/docs/cli/install/",
+      "installHint": "Install agy with Google's installer.",
+      "signInHint": "Run agy and sign in with Google."
     },
     "statusAuthority": "screen",
     "binary": "agy",
@@ -27,42 +27,63 @@
       "style": "flag",
       "token": "--continue"
     },
+    "conversation": {
+      "resume": {
+        "latestArgs": [
+          "--continue"
+        ]
+      },
+      "stripArgs": [
+        {
+          "token": "--continue"
+        },
+        {
+          "token": "-c"
+        },
+        {
+          "token": "--conversation",
+          "value": "any"
+        }
+      ]
+    },
     "returnToLoginShell": true,
     "foregroundExecNames": [
       "agy"
     ],
-    "_resumeNotice": "Verified against Google's Antigravity CLI codelab: '--continue  Continue the most recent conversation'. https://codelabs.developers.google.com/sdd-agy-cli",
+    "_resumeNotice": "agy 1.2.17 --help: '--continue  Continue the most recent conversation' (scoped to the folder: another folder starts fresh) and '--conversation  Resume a previous conversation by ID'. agy takes no caller-minted id (it only prints `agy --conversation=<id>` on exit), so resume is the folder's latest conversation: no exactArgs, which would make every exited session NotResumable without an id.",
     "_resumeStyleNotice": "Rust's AgentDescriptor::resume_args implements only \"flag\" and \"sessionIDFlag\"; Swift's \"latest\" has no implementation there and would silently resume nothing. Declared as \"flag\": this agent has no sessionIDFlag, so it never carries a caller-minted id and resume_args emits the bare token \u2014 exactly the semantics the token was chosen for.",
     "envScrubPrefixes": [
       "DIRI_",
       "DIRIJOR_"
-    ]
+    ],
+    "approve": {
+      "text": "",
+      "submit": true
+    },
+    "deny": {
+      "text": "\u001b",
+      "submit": false
+    }
   },
   "rules": [
     {
       "id": "blocked-permission-request",
       "state": "blockedPermission",
       "priority": 300,
-      "region": "whole_recent",
+      "region": "bottom_non_empty_lines",
+      "regionLines": 14,
       "when": {
         "all": [
           {
-            "contains": "requesting permission for:"
+            "lineRegex": "^\\s*(>\\s*)?1\\. Yes, "
           },
           {
             "any": [
               {
-                "contains": "do you want to proceed?"
+                "contains": "tab amend"
               },
               {
-                "all": [
-                  {
-                    "contains": "tab amend"
-                  },
-                  {
-                    "contains": "edit command"
-                  }
-                ]
+                "contains": "requesting permission for:"
               }
             ]
           }
@@ -73,7 +94,114 @@
       ],
       "capture": {
         "region": "bottom_non_empty_lines",
-        "regionLines": 12,
+        "regionLines": 14,
+        "maxChars": 400
+      }
+    },
+    {
+      "id": "blocked-ask-question",
+      "state": "blockedQuestion",
+      "priority": 280,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 12,
+      "when": {
+        "all": [
+          {
+            "lineRegex": "^\\s*Question \\d+/\\d+: "
+          },
+          {
+            "contains": "esc skip"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 14,
+        "maxChars": 400
+      }
+    },
+    {
+      "id": "workspace-trust-dialog",
+      "state": "blockedQuestion",
+      "priority": 270,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 8,
+      "when": {
+        "all": [
+          {
+            "contains": "do you trust the contents of this project?"
+          },
+          {
+            "contains": "yes, i trust this folder"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 14,
+        "maxChars": 400
+      }
+    },
+    {
+      "id": "login-method-dialog",
+      "state": "blockedQuestion",
+      "priority": 260,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 10,
+      "when": {
+        "all": [
+          {
+            "contains": "select login method:"
+          },
+          {
+            "contains": "enter select"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 14,
+        "maxChars": 400
+      }
+    },
+    {
+      "id": "onboarding-dialog",
+      "state": "blockedQuestion",
+      "priority": 250,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 40,
+      "when": {
+        "any": [
+          {
+            "contains": "choose your color scheme:"
+          },
+          {
+            "all": [
+              {
+                "contains": "terms of service & data use"
+              },
+              {
+                "contains": "enter"
+              }
+            ]
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 14,
         "maxChars": 400
       }
     },
@@ -93,6 +221,23 @@
       "region": "whole_recent",
       "when": {
         "regex": "(?i)\u00b7\\s*[1-9][0-9]*\\s+task"
+      }
+    },
+    {
+      "id": "idle-composer",
+      "state": "idle",
+      "priority": 50,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 3,
+      "when": {
+        "all": [
+          {
+            "lineRegex": "^\\s*>"
+          },
+          {
+            "lineRegex": "^(\\? for shortcuts|press ctrl\\+c again to exit|press ctrl\\+d again to exit)\\b"
+          }
+        ]
       }
     }
   ]

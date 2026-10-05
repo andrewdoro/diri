@@ -1,0 +1,27 @@
+────────────────────────────────────────────────────────────
+> Reply with the word PINEAPPLE please.
+
+  PINEAPPLE
+
+────────────────────────────────────────────────────────────
+> SLOW stream something
+
+  slow part 0 slow part 1 slow part 2 slow part 3 slow part 4 slow part 5 slow part 6 slow part 7 slow part
+  8 slow part 9 SLOWDONE
+
+────────────────────────────────────────────────────────────
+> SLOW again
+
+  slow part 0 slow part 1 slow part 2 slow part 3 slow part 4 slow part 5 slow part 6 slow part 7 slow part
+  8 slow part 9 SLOWDONE
+
+────────────────────────────────────────────────────────────
+> RUNCMD and deny
+
+● Bash(touch diri-e2e-file) (ctrl+o to expand)
+
+  ⎿  Interrupted · What should Antigravity CLI do instead?
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                           Gemini 3.1 Pro · low

@@ -1,0 +1,36 @@
+
+────────────────────────────────────────────────────────────
+> SLOW again
+
+  slow part 0 slow part 1 slow part 2 slow part 3 slow part 4 slow part 5 slow part 6 slow part 7 slow part
+  8 slow part 9 SLOWDONE
+
+────────────────────────────────────────────────────────────
+> RUNCMD and deny
+
+● Bash(touch diri-e2e-file) (ctrl+o to expand)
+
+────────────────────────────────────────────────────────────
+> RUNCMD for me
+
+● Bash(touch diri-e2e-file) (ctrl+o to expand)
+
+  The tool ran. DONECMD
+
+────────────────────────────────────────────────────────────
+> WRITEFILE please
+
+● Create(/tmp/diri-e2e/project/diri-e2e-notes.txt) (ctrl+o to expand)
+
+Create file
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/tmp/diri-e2e/project/diri-e2e-notes.txt  +1
+   1 +  written by the fake model
+
+Allow creation of this file?
+> 1. Yes, allow creation
+  2. No, deny creation
+
+  ↑/↓ Navigate · tab Amend · f full diff
+esc to cancel                                                                             Gemini 3.1 Pro · low

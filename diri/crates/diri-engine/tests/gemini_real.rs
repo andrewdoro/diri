@@ -16,6 +16,9 @@
 //!   cargo test -p diri-engine --test gemini_real -- --ignored --nocapture --test-threads=1
 //! ```
 //!
+//! With `DIRI_GEMINI_SCREENS=<dir>` the named states' screens are written
+//! there; `fixtures/gemini_screens` came from such a run.
+//!
 //! The tests set process-wide environment the Engine hands to its children,
 //! so they must run with `--test-threads=1`.
 
@@ -78,6 +81,25 @@ impl Client {
         self.call("session.read_screen", json!({ "sessionID": id }))
             .map(|result| result["text"].as_str().unwrap_or_default().to_string())
             .unwrap_or_default()
+    }
+
+    /// Writes the current screen to `$DIRI_GEMINI_SCREENS/<name>.txt`.
+    fn capture(&mut self, id: &str, name: &str) {
+        let Some(dir) = std::env::var_os("DIRI_GEMINI_SCREENS") else {
+            return;
+        };
+        let screen = self.screen(id);
+        let trimmed = screen
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            Path::new(&dir).join(format!("{name}.txt")),
+            format!("{}\n", trimmed.trim_end()),
+        )
+        .unwrap();
     }
 
     fn send(&mut self, id: &str, text: &str) {
@@ -240,11 +262,20 @@ fn spawn(
     project: &Path,
     prompt: Option<&str>,
 ) -> (String, Result<(), String>) {
+    spawn_sized(client, project, prompt, (100, 30))
+}
+
+fn spawn_sized(
+    client: &mut Client,
+    project: &Path,
+    prompt: Option<&str>,
+    (cols, rows): (u16, u16),
+) -> (String, Result<(), String>) {
     let mut params = json!({
         "kind": { "gemini": {} },
         "cwd": project,
-        "initialCols": 100,
-        "initialRows": 30,
+        "initialCols": cols,
+        "initialRows": rows,
     });
     if let Some(prompt) = prompt {
         params["initialPrompt"] = json!(prompt);
@@ -405,4 +436,123 @@ fn prompts_stream_ask_permission_and_resume() {
         "failures:\n  {}",
         failures.join("\n  ")
     );
+}
+
+fn trust(fixture: &Fixture) {
+    std::fs::write(
+        fixture.home.join(".gemini/trustedFolders.json"),
+        json!({ fixture.project.canonicalize().unwrap().to_string_lossy(): "TRUST_FOLDER" })
+            .to_string(),
+    )
+    .unwrap();
+}
+
+/// Signed out, Gemini opens "How would you like to authenticate?" in place
+/// of its composer. That is the user's question: it reads as needing input,
+/// and an initial prompt is not typed into it, where its Enter would pick
+/// "Sign in with Google" and open a browser.
+#[test]
+#[ignore = "needs DIRI_GEMINI_BIN_DIR and a real Gemini CLI"]
+fn signed_out_auth_dialog_needs_input() {
+    let Some(fixture) = fixture(None, false) else {
+        return;
+    };
+    trust(&fixture);
+    let mut client = start(fixture.temp.path());
+    let (id, delivered) = spawn(&mut client, &fixture.project, Some("Say KIWI"));
+    let seen = client.watch(&id, "auth", Duration::from_secs(25), |status, screen| {
+        status.contains("needsInput") && screen.contains("How would you like to authenticate")
+    });
+    client.capture(&id, "auth");
+    let screen = client.screen(&id);
+    let _ = client.call("session.kill", json!({ "sessionID": id }));
+    assert!(
+        screen.contains("How would you like to authenticate"),
+        "Gemini did not show its auth dialog; the scenario is stale"
+    );
+    assert!(
+        seen.last()
+            .is_some_and(|status| status.contains("needsInput")),
+        "the auth dialog never read as needing input: {seen:?}"
+    );
+    assert!(
+        delivered.is_err(),
+        "a prompt typed into the auth dialog was reported delivered"
+    );
+    assert!(
+        !screen.contains("Waiting for authentication"),
+        "the injector's Enter started Google sign-in"
+    );
+}
+
+/// A long multi-line prompt (an orchestrator's brief) into an 80x24 tab, the
+/// size a spawned child starts at: it is submitted as one turn, not left in
+/// the composer.
+#[test]
+#[ignore = "needs DIRI_GEMINI_BIN_DIR and a real Gemini CLI"]
+fn a_long_initial_prompt_is_submitted_at_80_by_24() {
+    let Some(fixture) = fixture(Some(API_KEY_SETTINGS), true) else {
+        return;
+    };
+    trust(&fixture);
+    let mut client = start(fixture.temp.path());
+    let mut prompt = String::new();
+    for paragraph in 0..16 {
+        prompt.push_str(&format!(
+            "Paragraph {paragraph}: read the shared brief, keep the change small, \
+             match the surrounding style and report what you verified.\n\n"
+        ));
+        prompt.push_str("- one bullet\n- another bullet with `code`\n\n");
+    }
+    prompt.push_str("Finally reply with the word GUAVA.");
+    assert!(prompt.len() > 2000);
+    let (id, delivered) = spawn_sized(&mut client, &fixture.project, Some(&prompt), (80, 24));
+    let seen = client.watch(&id, "long", Duration::from_secs(30), |status, screen| {
+        status.contains("idle") && screen.contains("✦ GUAVA")
+    });
+    let screen = client.screen(&id);
+    let requests = std::fs::read_to_string(fixture.temp.path().join("api.log")).unwrap_or_default();
+    let _ = client.call("session.kill", json!({ "sessionID": id }));
+    assert!(delivered.is_ok(), "initial prompt: {delivered:?}");
+    assert!(
+        screen.contains("✦ GUAVA"),
+        "the long prompt was never answered: {seen:?}\n{screen}"
+    );
+    // The log keeps 80 characters of the prompt: one turn, not one per line.
+    assert_eq!(
+        requests.matches("last_user='Paragraph 0:").count(),
+        1,
+        "the long prompt was not sent as one turn:\n{requests}"
+    );
+}
+
+/// Quitting Gemini lands in the login shell in the same tab, which keeps
+/// taking input; the tab is not closed.
+#[test]
+#[ignore = "needs DIRI_GEMINI_BIN_DIR and a real Gemini CLI"]
+fn quitting_returns_to_the_login_shell() {
+    let Some(fixture) = fixture(Some(API_KEY_SETTINGS), true) else {
+        return;
+    };
+    trust(&fixture);
+    let mut client = start(fixture.temp.path());
+    let (id, _) = spawn(&mut client, &fixture.project, None);
+    client.watch(&id, "idle", Duration::from_secs(20), |status, _| {
+        status.contains("idle")
+    });
+    client.capture(&id, "idle_fresh");
+    client.send(&id, "/quit");
+    std::thread::sleep(Duration::from_secs(3));
+    client.send(&id, "echo DIRI_SHELL_$((40 + 2))");
+    let seen = client.watch(&id, "shell", Duration::from_secs(20), |_, screen| {
+        screen.contains("DIRI_SHELL_42")
+    });
+    let screen = client.screen(&id);
+    let status = client.status(&id);
+    let _ = client.call("session.kill", json!({ "sessionID": id }));
+    assert!(
+        screen.contains("DIRI_SHELL_42"),
+        "the tab did not take shell input after Gemini quit: {seen:?}\n{screen}"
+    );
+    assert!(!status.contains("exited"), "the session ended: {status}");
 }

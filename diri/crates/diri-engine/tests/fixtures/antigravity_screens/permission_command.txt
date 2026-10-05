@@ -1,0 +1,36 @@
+────────────────────────────────────────────────────────────
+> Reply with the word PINEAPPLE please.
+
+  PINEAPPLE
+
+────────────────────────────────────────────────────────────
+> SLOW stream something
+
+  slow part 0 slow part 1 slow part 2 slow part 3 slow part 4 slow part 5 slow part 6 slow part 7 slow part
+  8 slow part 9 SLOWDONE
+
+────────────────────────────────────────────────────────────
+> SLOW again
+
+  slow part 0 slow part 1 slow part 2 slow part 3 slow part 4 slow part 5 slow part 6 slow part 7 slow part
+  8 slow part 9 SLOWDONE
+
+────────────────────────────────────────────────────────────
+> RUNCMD and deny
+
+● Bash(touch diri-e2e-file) (ctrl+o to expand)
+
+Command
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Requesting permission for:
+   touch diri-e2e-file
+
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'touch'
+  3. Yes, and always allow for commands that start with 'touch' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel                                                                             Gemini 3.1 Pro · low

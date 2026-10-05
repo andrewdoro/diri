@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "id": "gemini",
-  "version": "2026.09.30.1",
+  "version": "2026.10.05.1",
   "statusModel": "full",
   "agent": {
     "id": "gemini",
@@ -39,6 +39,7 @@
         {"token": "--session-id", "value": "any"}
       ]
     },
+    "returnToLoginShell": true,
     "envScrubPrefixes": [
       "GEMINI_CLI",
       "DIRI_",
@@ -114,6 +115,34 @@
           },
           {
             "contains": "don't trust"
+          }
+        ]
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 12,
+        "maxChars": 400
+      }
+    },
+    {
+      "id": "auth-dialog",
+      "state": "blockedQuestion",
+      "priority": 970,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 20,
+      "when": {
+        "any": [
+          {
+            "contains": "how would you like to authenticate"
+          },
+          {
+            "contains": "opening authentication page in your browser"
+          },
+          {
+            "contains": "waiting for authentication"
           }
         ]
       },

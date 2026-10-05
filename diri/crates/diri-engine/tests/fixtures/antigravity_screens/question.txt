@@ -1,0 +1,36 @@
+
+────────────────────────────────────────────────────────────
+> RUNCMD and deny
+
+● Bash(touch diri-e2e-file) (ctrl+o to expand)
+
+────────────────────────────────────────────────────────────
+> RUNCMD for me
+
+● Bash(touch diri-e2e-file) (ctrl+o to expand)
+
+  The tool ran. DONECMD
+
+────────────────────────────────────────────────────────────
+> WRITEFILE please
+
+● Create(/tmp/diri-e2e/project/diri-e2e-notes.txt) (ctrl+o to expand)
+
+  The tool ran. DONECMD
+
+────────────────────────────────────────────────────────────
+> ASKQ something
+
+? Which flavour do you want?
+
+Question
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Question 1/1: Which flavour do you want?
+
+> 1. Vanilla
+  2. Chocolate
+  3. Write-in...
+
+  ↑/↓ Navigate · enter Select · esc Skip
+esc to cancel                                                                             Gemini 3.1 Pro · low

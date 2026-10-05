@@ -824,21 +824,23 @@ mod tests {
         // End to end through spawn_spec: a bare-launch agent is resolved on
         // the spec's PATH before it reaches the holder.
         let bin_dir = tempfile::tempdir().expect("temp dir");
-        let stub = bin_dir.path().join("gemini");
+        let stub = bin_dir.path().join("cursor-agent");
         std::fs::write(&stub, "#!/bin/sh\n").expect("stub");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
-        let gemini = descriptor("gemini");
+        // Cursor is the one shipped agent launched bare, without the
+        // login-shell wrapper.
+        let cursor = descriptor("cursor");
         let inherited = [(
             "PATH".to_string(),
             bin_dir.path().to_string_lossy().into_owned(),
         )];
-        let spec = gemini
+        let spec = cursor
             .spawn_spec(Path::new("/tmp"), inherited, &[])
-            .expect("gemini has a binary");
+            .expect("cursor has a binary");
         assert_eq!(
             spec.argv[0],
             stub.to_string_lossy(),
@@ -887,8 +889,8 @@ mod tests {
         );
     }
 
-    /// Nineteen of the twenty-three shipped manifests declare `returnToLoginShell`;
-    /// only `cursor`, `gemini` and the two command-less manifests do not. The
+    /// Twenty of the twenty-three shipped manifests declare `returnToLoginShell`;
+    /// only `cursor` and the two command-less manifests do not. The
     /// flag has been lost wholesale once already, so assert the whole set
     /// rather than a sample: a port that drops it fails here.
     #[test]
@@ -920,6 +922,7 @@ mod tests {
                 "copilot",
                 "devin",
                 "droid",
+                "gemini",
                 "grok",
                 "hermes",
                 "kilo",

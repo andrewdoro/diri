@@ -404,7 +404,7 @@ mod tests {
             .into_iter()
             .map(|id| engine.manifest(id).expect("manifest").rules.len())
             .sum();
-        assert_eq!(rules, 129, "the shipped ruleset lost rules");
+        assert_eq!(rules, 135, "the shipped ruleset lost rules");
 
         for id in engine.ids() {
             let expected_empty = matches!(id, "shell" | "generic");
@@ -663,6 +663,109 @@ mod tests {
             assert_eq!(
                 (observation.state, observation.matched_rule_id.as_str()),
                 (state, rule)
+            );
+        }
+    }
+
+    /// Gemini CLI 0.62 signed out, captured by `tests/gemini_real.rs`: the
+    /// auth picker replaces the composer, and the browser confirmation it
+    /// leads to carries "Esc to cancel", which the working rule read as a
+    /// turn in progress.
+    #[test]
+    fn gemini_sign_in_screens_need_input() {
+        let engine = engine();
+        for text in [
+            include_str!("../../tests/fixtures/gemini_screens/auth.txt"),
+            include_str!("../../tests/fixtures/gemini_screens/auth_browser.txt"),
+        ] {
+            let observation = engine
+                .evaluate(
+                    &ScreenSnapshot::from_lines(text.lines().map(str::to_owned)),
+                    "gemini",
+                )
+                .expect("Gemini sign-in screen should match");
+            assert_eq!(
+                (observation.state, observation.matched_rule_id.as_str()),
+                (ManifestState::BlockedQuestion, "auth-dialog"),
+                "{text}"
+            );
+        }
+    }
+
+    /// Visible grids captured from Antigravity CLI (agy) 1.2.17 via
+    /// `tests/antigravity_real.rs`; the onboarding pages from a PTY run of
+    /// the same build. Only the temporary project path is normalized. Before
+    /// these rules agy had no idle rule, so its "Signing in..." spinner left
+    /// every session working until it went stale; login, trust, onboarding
+    /// and `ask_question` matched nothing; and the permission rule wanted
+    /// "edit command" and "do you want to proceed?", which 1.2 no longer
+    /// draws, so no approval ever read as blocked.
+    #[test]
+    fn antigravity_rules_match_the_screens_agy_draws() {
+        let engine = engine();
+        let cases = [
+            (
+                "login",
+                Some((ManifestState::BlockedQuestion, "login-method-dialog")),
+            ),
+            (
+                "onboarding_color",
+                Some((ManifestState::BlockedQuestion, "onboarding-dialog")),
+            ),
+            (
+                "onboarding_terms",
+                Some((ManifestState::BlockedQuestion, "onboarding-dialog")),
+            ),
+            (
+                "trust",
+                Some((ManifestState::BlockedQuestion, "workspace-trust-dialog")),
+            ),
+            ("fresh", Some((ManifestState::Idle, "idle-composer"))),
+            ("done", Some((ManifestState::Idle, "idle-composer"))),
+            ("idle", Some((ManifestState::Idle, "idle-composer"))),
+            ("denied", Some((ManifestState::Idle, "idle-composer"))),
+            ("ctrl_c_once", Some((ManifestState::Idle, "idle-composer"))),
+            (
+                "working",
+                Some((ManifestState::Working, "working-spinner-verb")),
+            ),
+            (
+                "permission_command",
+                Some((
+                    ManifestState::BlockedPermission,
+                    "blocked-permission-request",
+                )),
+            ),
+            (
+                "permission_file",
+                Some((
+                    ManifestState::BlockedPermission,
+                    "blocked-permission-request",
+                )),
+            ),
+            (
+                "question",
+                Some((ManifestState::BlockedQuestion, "blocked-ask-question")),
+            ),
+            // Typing a slash command swaps the footer for "esc to cancel":
+            // neither work nor a finished turn, so the status stays put.
+            ("slash_menu", None),
+        ];
+        for (name, expected) in cases {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/antigravity_screens")
+                .join(format!("{name}.txt"));
+            let text = std::fs::read_to_string(&path).expect("fixture screen");
+            let actual = engine
+                .evaluate(
+                    &ScreenSnapshot::from_lines(text.lines().map(str::to_owned)),
+                    "antigravity",
+                )
+                .map(|observation| (observation.state, observation.matched_rule_id));
+            assert_eq!(
+                actual.as_ref().map(|(state, rule)| (*state, rule.as_str())),
+                expected,
+                "{name}:\n{text}"
             );
         }
     }

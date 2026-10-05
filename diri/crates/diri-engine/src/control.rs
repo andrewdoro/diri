@@ -5237,7 +5237,7 @@ fn prepare_agent_input(
         })
         .unwrap_or(false);
         if gemini {
-            accept_gemini_folder_trust(registry, session_id);
+            accept_gemini_folder_trust(registry, session_id)?;
         }
         let pi = with_session(registry, session_id, |session| {
             session.manifest_id() == "pi"
@@ -5266,6 +5266,13 @@ fn prepare_agent_input(
         .unwrap_or(false);
         if droid {
             accept_droid_folder_trust(registry, session_id);
+        }
+        let antigravity = with_session(registry, session_id, |session| {
+            session.manifest_id() == "antigravity"
+        })
+        .unwrap_or(false);
+        if antigravity {
+            prepare_antigravity_input(registry, session_id)?;
         }
         let copilot = with_session(registry, session_id, |session| {
             session.manifest_id() == "copilot"
@@ -5643,17 +5650,26 @@ fn wait_for_claude_screen_change(
 /// A trusted folder costs about a second: the composer has to stand alone
 /// long enough to rule out the dialog Gemini opens just after it. Capped at
 /// 20s either way.
-fn accept_gemini_folder_trust(registry: &Arc<Mutex<Registry>>, session_id: &str) {
+fn accept_gemini_folder_trust(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+) -> Result<(), InitialPromptFailure> {
     let mut accepted_at: Option<Instant> = None;
     let mut composer_since: Option<Instant> = None;
     for _ in 0..200 {
         let Some((exited, screen)) = with_session(registry, session_id, |session| {
             (session.view().exited, session.screen_lines())
         }) else {
-            return;
+            return Err(InitialPromptFailure::SessionEnded);
         };
         if exited {
-            return;
+            return Err(InitialPromptFailure::SessionEnded);
+        }
+        if is_gemini_auth_screen(&screen) {
+            // Signed out: the paste is dropped and the injector's Enter picks
+            // "Sign in with Google", then confirms opening a browser. Sign-in
+            // is the user's to start.
+            return Err(InitialPromptFailure::SubmissionUnconfirmed);
         }
         if is_gemini_folder_trust_screen(&screen) {
             composer_since = None;
@@ -5686,13 +5702,14 @@ fn accept_gemini_folder_trust(registry: &Arc<Mutex<Registry>>, session_id: &str)
                 }
             };
             if ready {
-                return;
+                return Ok(());
             }
         } else {
             composer_since = None;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    Ok(())
 }
 
 /// How long Gemini's composer must stand with no trust dialog before a
@@ -5719,6 +5736,17 @@ fn is_gemini_folder_trust_screen(lines: &[String]) -> bool {
         .join("\n")
         .to_lowercase();
     bottom.contains("1. trust folder") && bottom.contains("don't trust")
+}
+
+/// Gemini signed out: "How would you like to authenticate?" in place of the
+/// composer, or the browser sign-in it leads to.
+fn is_gemini_auth_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 20)
+        .join("\n")
+        .to_lowercase();
+    bottom.contains("how would you like to authenticate")
+        || bottom.contains("opening authentication page in your browser")
+        || bottom.contains("waiting for authentication")
 }
 
 fn is_gemini_composer_screen(lines: &[String]) -> bool {
@@ -5901,6 +5929,80 @@ fn is_droid_composer_screen(lines: &[String]) -> bool {
         .iter()
         .any(|line| line.trim_start().starts_with("│ >"))
         && bottom.iter().any(|line| line.contains("? for help"))
+}
+
+/// agy asks "Do you trust the contents of this project?" in every folder it
+/// has not seen, and a signed-out agy stops at its login method picker. A
+/// paste into either is dropped; the injector's Enter then trusts the folder
+/// (prompt lost) or starts Google OAuth. Answer the trust dialog first, only
+/// when a prompt was requested, with the workspace-trust tradeoff
+/// [`accept_claude_workspace_trust`] documents. Never answer login or the
+/// first-run colour/terms pages for the user: report the prompt undelivered.
+///
+/// The composer only ever follows those screens, so it ends the wait as soon
+/// as it shows. Capped at 20s; past that the injector's own confirmation
+/// decides.
+fn prepare_antigravity_input(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+) -> Result<(), InitialPromptFailure> {
+    let mut accepted = false;
+    for _ in 0..200 {
+        let (exited, screen) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines())
+        })
+        .ok_or(InitialPromptFailure::SessionEnded)?;
+        if exited {
+            return Err(InitialPromptFailure::SessionEnded);
+        }
+        if is_antigravity_trust_screen(&screen) {
+            if !accepted {
+                diri_telemetry::event!(
+                    "prompt.workspace_trust_accepted",
+                    session = diri_telemetry::id(session_id),
+                );
+                // Enter on the preselected "> Yes, I trust this folder".
+                let _ = with_session(registry, session_id, |session| session.submit_input());
+                accepted = true;
+            }
+        } else if is_antigravity_setup_screen(&screen) {
+            return Err(InitialPromptFailure::SubmissionUnconfirmed);
+        } else if is_antigravity_composer_screen(&screen) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+fn is_antigravity_trust_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 8);
+    bottom
+        .iter()
+        .any(|line| line.contains("Do you trust the contents of this project?"))
+        && bottom
+            .iter()
+            .any(|line| line.trim_start().starts_with("> Yes, I trust this folder"))
+}
+
+/// The signed-out login picker and the first run's colour-scheme and terms
+/// pages: questions only the user can answer.
+fn is_antigravity_setup_screen(lines: &[String]) -> bool {
+    lines.iter().any(|line| {
+        let line = line.trim();
+        line == "Select login method:"
+            || line.starts_with("Choose your color scheme:")
+            || line == "Terms of Service & Data Use"
+    })
+}
+
+/// The composer between two rules, over the idle `? for shortcuts` footer.
+fn is_antigravity_composer_screen(lines: &[String]) -> bool {
+    let bottom = crate::detect::bottom_non_empty(lines, 3);
+    bottom.iter().any(|line| line.trim_start().starts_with('>'))
+        && bottom
+            .last()
+            .is_some_and(|line| line.starts_with("? for shortcuts"))
 }
 
 /// Copilot's folder selector drops pasted text; a blind Enter then accepts
@@ -6385,6 +6487,52 @@ mod tests {
     mod find_capture_tests;
     mod reconnect_tests;
     mod send_key_tests;
+
+    #[test]
+    fn antigravity_trust_setup_and_composer_screens_are_told_apart() {
+        let screen = |name: &str| {
+            std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/antigravity_screens")
+                    .join(format!("{name}.txt")),
+            )
+            .expect("fixture screen")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        };
+        let trust = screen("trust");
+        assert!(is_antigravity_trust_screen(&trust));
+        assert!(!is_antigravity_setup_screen(&trust));
+        assert!(!is_antigravity_composer_screen(&trust));
+        for setup in ["login", "onboarding_color", "onboarding_terms"] {
+            let setup = screen(setup);
+            assert!(is_antigravity_setup_screen(&setup));
+            assert!(!is_antigravity_trust_screen(&setup));
+            assert!(!is_antigravity_composer_screen(&setup));
+        }
+        for idle in ["fresh", "done"] {
+            let idle = screen(idle);
+            assert!(is_antigravity_composer_screen(&idle));
+            assert!(!is_antigravity_trust_screen(&idle));
+            assert!(!is_antigravity_setup_screen(&idle));
+        }
+        assert!(!is_antigravity_composer_screen(&screen("working")));
+    }
+
+    #[test]
+    fn gemini_sign_in_screens_stop_the_initial_prompt() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        assert!(is_gemini_auth_screen(&lines(include_str!(
+            "../tests/fixtures/gemini_screens/auth.txt"
+        ))));
+        assert!(is_gemini_auth_screen(&lines(include_str!(
+            "../tests/fixtures/gemini_screens/auth_browser.txt"
+        ))));
+        assert!(!is_gemini_auth_screen(&lines(
+            "  >   Type your message or @path/to/file\n  ~/project   no sandbox   gemini-2.5-flash"
+        )));
+    }
 
     #[test]
     fn droid_trust_and_composer_screens_are_told_apart() {

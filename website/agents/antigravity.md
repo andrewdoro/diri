@@ -15,14 +15,14 @@ diri runs `agy` exactly as you would in a terminal, with your own install and si
 | Survives restarts | Yes. Each session is owned by its own process, so quitting diri never stops it. |
 | Resume after exit | Yes, through the agent's own continue flag. |
 | Fork a conversation | Not supported. |
-| Approve from a notification | No. Answer permission prompts in the terminal. |
+| Approve from a notification | Yes. Permission prompts get an Approve button on the notification. |
 | Starts other agents | No built-in connection. Claude Code, Codex and Cursor can start Antigravity sessions for you. |
 
 ## Set up
 
-1. Install agy with Google's platform installer. See the [Antigravity install guide](https://antigravity.google/docs/cli-install).
+1. Install agy with Google's installer. See the [Antigravity install guide](https://antigravity.google/docs/cli/install/).
 
-2. Run agy and complete the Google OAuth flow.
+2. Run agy and sign in with Google.
 3. Install diri with `brew install --cask cristicretu/diri/diri`, or [download it](https://github.com/cristicretu/diri/releases/latest).
 4. Open **New Agent** in the sidebar and choose **Antigravity**. If you installed Antigravity while diri was open, click **Refresh** in **Settings → Agents** first.
 
