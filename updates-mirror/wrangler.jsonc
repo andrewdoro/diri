@@ -1,0 +1,13 @@
+// diri update mirror. See README.md for the one-time setup before
+// `wrangler deploy`. No bindings, secrets or storage: it proxies and caches
+// the public GitHub release assets and nothing else.
+{
+  "name": "diri-updates-mirror",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  // workers.dev is unreachable from the networks this exists for; the custom
+  // domain on the diri.sh zone (Cloudflare-proxied) is the only route.
+  "workers_dev": false,
+  "routes": [{ "pattern": "updates.diri.sh", "custom_domain": true }],
+  "observability": { "enabled": true }
+}

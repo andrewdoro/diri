@@ -21,7 +21,7 @@ use diri_updater::Release;
 #[cfg(target_os = "macos")]
 use diri_updater::UpdaterConfig;
 #[cfg(any(target_os = "macos", test))]
-use diri_updater::{Result as UpdateResult, StagedUpdate, UpdateError, Updater};
+use diri_updater::{Result as UpdateResult, SourceReport, StagedUpdate, UpdateError, Updater};
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, watch};
 
@@ -50,6 +50,10 @@ trait UpdateBackend: Send + Sync {
         on_progress: &mut dyn FnMut(f32),
     ) -> UpdateResult<StagedUpdate>;
     fn install(&self, staged: &StagedUpdate, relaunch: bool) -> UpdateResult<()>;
+    /// Which route (GitHub or the mirror) served the last network step.
+    fn take_source(&self) -> Option<SourceReport> {
+        None
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -81,6 +85,10 @@ impl UpdateBackend for Updater {
 
     fn install(&self, staged: &StagedUpdate, relaunch: bool) -> UpdateResult<()> {
         Updater::install(self, staged, relaunch)
+    }
+
+    fn take_source(&self) -> Option<SourceReport> {
+        Updater::take_source(self)
     }
 }
 
@@ -276,6 +284,7 @@ impl UpdateHandle {
             },
             Some(ready.staged.release.version.as_str()),
             installed.as_ref().err(),
+            None,
             started,
             false,
         );
@@ -292,26 +301,18 @@ impl UpdateHandle {
 #[cfg(any(target_os = "macos", test))]
 /// One updater step for the flight recorder. A failure carries the error's
 /// class and its scrubbed text (release URLs are public; home paths and user
-/// names are scrubbed).
+/// names are scrubbed). `source` says which route answered — GitHub or the
+/// update mirror — as closed labels only.
 fn record_update(
     kind: &'static str,
     outcome: &'static str,
     version: Option<&str>,
     error: Option<&UpdateError>,
+    source: Option<SourceReport>,
     started: std::time::Instant,
     user_initiated: bool,
 ) {
-    let error_kind = error.map(|error| match error {
-        UpdateError::NotUpdatable(_) => "not_updatable",
-        UpdateError::Network { failure, .. } => failure.kind(),
-        UpdateError::Feed(_) => "feed",
-        UpdateError::UntrustedUrl(_) => "untrusted_url",
-        UpdateError::Integrity(_) => "integrity",
-        UpdateError::Signature(_) => "signature",
-        UpdateError::NotWritable(_) => "not_writable",
-        UpdateError::Io(_) => "io",
-        UpdateError::Tool { .. } => "tool",
-    });
+    let error_kind = error.map(UpdateError::kind);
     let fields = vec![
         ("outcome", diri_telemetry::Value::from(outcome)),
         ("from", diri_telemetry::Value::from(CURRENT_VERSION)),
@@ -331,6 +332,18 @@ fn record_update(
                 UpdateError::Network { failure, .. } => failure.http_status(),
                 _ => None,
             })),
+        ),
+        (
+            "source",
+            diri_telemetry::Value::from(source.map(|source| source.source.label())),
+        ),
+        (
+            "github_error",
+            diri_telemetry::Value::from(source.and_then(|source| source.github_error)),
+        ),
+        (
+            "mirror_error",
+            diri_telemetry::Value::from(source.and_then(|source| source.mirror_error)),
         ),
     ];
     // An unsupported build (a `cargo run`) failing to update is expected.
@@ -639,6 +652,7 @@ impl Service {
                 .and_then(Option::as_ref)
                 .map(|release| release.version.as_str()),
             found.as_ref().ok().and_then(|found| found.as_ref().err()),
+            self.updater.take_source(),
             started,
             user_initiated,
         );
@@ -728,6 +742,7 @@ impl Service {
                 .as_ref()
                 .ok()
                 .and_then(|staged| staged.as_ref().err()),
+            self.updater.take_source(),
             started,
             user_initiated,
         );
@@ -765,6 +780,7 @@ impl Service {
             },
             Some(ready.staged.release.version.as_str()),
             installed.as_ref().err(),
+            None,
             started,
             true,
         );

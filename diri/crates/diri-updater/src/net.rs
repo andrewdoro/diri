@@ -17,6 +17,15 @@ use crate::error::{NetworkFailure, Result, UpdateError};
 const CURL: &str = "/usr/bin/curl";
 const FEED_TIMEOUT_SECONDS: u32 = 20;
 const DOWNLOAD_TIMEOUT_SECONDS: u32 = 900;
+/// Where GitHub is blocked the TCP handshake usually just hangs; ten seconds
+/// is several round trips even on a bad link, and the caller has a mirror to
+/// move on to.
+const CONNECT_TIMEOUT_SECONDS: u32 = 10;
+/// A download slower than this for [`LOW_SPEED_SECONDS`] is abandoned as a
+/// timeout rather than left to crawl toward the 15-minute cap: a throttled
+/// route to GitHub's CDN delivers a few KB/s indefinitely.
+const LOW_SPEED_BYTES_PER_SECOND: u32 = 4 * 1024;
+const LOW_SPEED_SECONDS: u32 = 30;
 const PROGRESS_POLL: Duration = Duration::from_millis(150);
 pub(crate) const MAX_FEED_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
@@ -30,12 +39,34 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 const STATUS_MARKER: &str = "diri-http-status:";
 
 /// Downloads over `curl`, with the hardening the installer depends on.
-#[derive(Clone, Debug, Default)]
-pub struct Http;
+#[derive(Clone, Debug)]
+pub struct Http {
+    pub(crate) connect_timeout_seconds: u32,
+    pub(crate) feed_timeout_seconds: u32,
+    pub(crate) download_timeout_seconds: u32,
+    pub(crate) low_speed_seconds: u32,
+    /// Extra CA bundle, so tests can stand up an HTTPS server of their own.
+    /// Production trusts only the system roots.
+    #[cfg(test)]
+    pub(crate) cacert: Option<std::path::PathBuf>,
+}
+
+impl Default for Http {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Http {
     pub fn new() -> Self {
-        Self
+        Self {
+            connect_timeout_seconds: CONNECT_TIMEOUT_SECONDS,
+            feed_timeout_seconds: FEED_TIMEOUT_SECONDS,
+            download_timeout_seconds: DOWNLOAD_TIMEOUT_SECONDS,
+            low_speed_seconds: LOW_SPEED_SECONDS,
+            #[cfg(test)]
+            cacert: None,
+        }
     }
 
     pub fn fetch_text(&self, url: &str) -> Result<String> {
@@ -51,7 +82,8 @@ impl Http {
         }
     }
 
-    fn fetch_text_once(&self, url: &str) -> Result<String> {
+    /// One attempt, no retry: for callers with another route to try instead.
+    pub(crate) fn fetch_text_once(&self, url: &str) -> Result<String> {
         let output = self
             .curl()
             .stdin(Stdio::piped())
@@ -59,7 +91,7 @@ impl Http {
             .stderr(Stdio::piped())
             .spawn()
             .and_then(|mut child| {
-                let config = self.config(url, None, FEED_TIMEOUT_SECONDS, MAX_FEED_BYTES);
+                let config = self.config(url, None, self.feed_timeout_seconds, MAX_FEED_BYTES);
                 child
                     .stdin
                     .take()
@@ -111,7 +143,7 @@ impl Http {
         let config = self.config(
             url,
             Some(destination),
-            DOWNLOAD_TIMEOUT_SECONDS,
+            self.download_timeout_seconds,
             expected_size,
         );
         child
@@ -194,7 +226,16 @@ impl Http {
         config.push_str("proto = \"=https\"\nproto-redir = \"=https\"\n");
         config.push_str(&format!("max-time = {timeout_seconds}\n"));
         config.push_str(&format!("max-filesize = {max_bytes}\n"));
-        config.push_str("connect-timeout = 15\n");
+        config.push_str(&format!(
+            "connect-timeout = {}\n",
+            self.connect_timeout_seconds
+        ));
+        if output.is_some() {
+            config.push_str(&format!(
+                "speed-limit = {LOW_SPEED_BYTES_PER_SECOND}\nspeed-time = {}\n",
+                self.low_speed_seconds
+            ));
+        }
         config.push_str("max-redirs = 5\n");
         config.push_str(&format!("user-agent = \"diri-updater/{}\"\n", crate::AGENT));
         config.push_str(&format!(
@@ -202,6 +243,10 @@ impl Http {
         ));
         if let Some(path) = output {
             config.push_str(&format!("output = \"{}\"\n", path.display()));
+        }
+        #[cfg(test)]
+        if let Some(path) = &self.cacert {
+            config.push_str(&format!("cacert = \"{}\"\n", path.display()));
         }
         config
     }

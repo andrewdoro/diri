@@ -11,6 +11,10 @@
 //!
 //! 1. [`Updater::check`] — fetch the feed, pick the newest eligible release.
 //! 2. [`Updater::download`] — fetch the zip, match its size and sha256.
+//!
+//! Both fetches go to GitHub, and to the update [`mirror`] when GitHub's route
+//! fails or (for the feed) is slow to answer. The mirror is held to the same
+//! checks; see that module for why it cannot serve a different build.
 //! 3. [`Updater::stage`] — unpack it, verify the signature against our own.
 //! 4. [`Updater::install`] — hand off to the swap helper, then quit.
 //!
@@ -21,13 +25,18 @@ pub mod codesign;
 pub mod error;
 pub mod feed;
 pub mod install;
+pub mod mirror;
 pub mod net;
 pub mod version;
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 pub use error::{NetworkFailure, Result, UpdateError};
 pub use feed::{Eligibility, Feed, Release};
+pub use mirror::{Mirror, Source, SourceReport};
 pub use version::Version;
 
 use codesign::SignatureInfo;
@@ -55,8 +64,11 @@ const MAX_RELEASE_METADATA_BYTES: usize = 512 * 1024;
 /// for exercising the updater against a test feed; the signature check still
 /// runs, so the download must still be a real notarized bundle.
 pub const ALLOW_UNSIGNED_ENV: &str = "DIRI_UPDATER_ALLOW_UNSIGNED";
-/// Overrides the feed URL, for staging a release before it goes live.
+/// Overrides the feed URL, for staging a release before it goes live. A
+/// staging feed is not mirrored, so setting it also turns the mirror off.
 pub const FEED_URL_ENV: &str = "DIRI_UPDATE_FEED";
+/// Overrides the mirror host (`host[:port]`), or `off` to use GitHub only.
+pub const MIRROR_ENV: &str = "DIRI_UPDATE_MIRROR";
 
 #[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq)]
 pub struct ReleaseNotes {
@@ -95,6 +107,11 @@ fn parse_release_notes(body: &str) -> Result<ReleaseNotes> {
 #[derive(Clone, Debug)]
 pub struct UpdaterConfig {
     pub feed_url: String,
+    /// Host every archive URL in the feed must name; [`RELEASES_HOST`] outside
+    /// tests.
+    pub releases_host: String,
+    /// Second route to the feed and archives when GitHub is unreachable.
+    pub mirror: Option<Mirror>,
     pub current_version: Version,
     /// The `.app` that will be replaced.
     pub bundle: PathBuf,
@@ -130,8 +147,19 @@ impl UpdaterConfig {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| UpdateError::NotUpdatable("HOME is unset".to_owned()))?;
+        let feed_override = std::env::var(FEED_URL_ENV).ok();
+        let mirror = match std::env::var(MIRROR_ENV) {
+            _ if feed_override.is_some() => None,
+            Ok(value) if value == "off" => None,
+            Ok(host) => Some(Mirror::new(&host).ok_or_else(|| {
+                UpdateError::NotUpdatable(format!("{MIRROR_ENV} is not a host: {host:?}"))
+            })?),
+            Err(_) => Some(Mirror::default()),
+        };
         Ok(Self {
-            feed_url: std::env::var(FEED_URL_ENV).unwrap_or_else(|_| DEFAULT_FEED_URL.to_owned()),
+            feed_url: feed_override.unwrap_or_else(|| DEFAULT_FEED_URL.to_owned()),
+            releases_host: RELEASES_HOST.to_owned(),
+            mirror,
             current_version: current,
             bundle,
             cache_dir: home.join("Library/Caches/diri/updates"),
@@ -152,22 +180,83 @@ pub struct StagedUpdate {
 pub struct Updater {
     config: UpdaterConfig,
     http: Http,
+    hedge_after: Duration,
+    /// How the last network step was served, until telemetry takes it.
+    last_source: Mutex<Option<SourceReport>>,
+    /// The last feed came from the mirror, so GitHub was just unreachable:
+    /// try the mirror first for the archive too.
+    prefer_mirror: AtomicBool,
 }
 
 impl Updater {
     pub fn new(config: UpdaterConfig) -> Self {
-        let http = Http::new();
-        Self { config, http }
+        Self::with_http(config, Http::new(), mirror::HEDGE_AFTER)
+    }
+
+    fn with_http(config: UpdaterConfig, http: Http, hedge_after: Duration) -> Self {
+        Self {
+            config,
+            http,
+            hedge_after,
+            last_source: Mutex::new(None),
+            prefer_mirror: AtomicBool::new(false),
+        }
     }
 
     pub fn config(&self) -> &UpdaterConfig {
         &self.config
     }
 
+    /// Which route served the most recent feed fetch or download, and why
+    /// the other was skipped. Taken, so a step that never reached the network
+    /// is not credited with an earlier step's route.
+    pub fn take_source(&self) -> Option<SourceReport> {
+        self.last_source
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+
+    fn note_source(&self, report: SourceReport) {
+        *self
+            .last_source
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(report);
+    }
+
+    /// Reads the feed from GitHub, or from the mirror when GitHub's route
+    /// fails or has not answered within the hedge delay.
+    fn fetch_feed(&self) -> Result<Feed> {
+        let github = {
+            let http = self.http.clone();
+            let url = self.config.feed_url.clone();
+            // With a mirror to fall back to, the mirror is the retry: a
+            // second try at a blocked GitHub would only delay it.
+            let retry = self.config.mirror.is_none();
+            move || {
+                if retry {
+                    http.fetch_text(&url)
+                } else {
+                    http.fetch_text_once(&url)
+                }
+            }
+        };
+        let mirror = self.config.mirror.as_ref().map(|mirror| {
+            let http = self.http.clone();
+            let url = mirror.feed_url();
+            move || http.fetch_text(&url)
+        });
+        let (body, report) = mirror::race(github, mirror, self.hedge_after);
+        self.note_source(report);
+        let body = body?;
+        self.prefer_mirror
+            .store(report.source == Source::Mirror, Ordering::Relaxed);
+        Feed::parse(&body).map_err(|error| UpdateError::Feed(error.to_string()))
+    }
+
     /// Fetches the feed and returns the release worth offering, if any.
     pub fn check(&self, skipped: Option<&str>) -> Result<Option<Release>> {
-        let body = self.http.fetch_text(&self.config.feed_url)?;
-        let feed = Feed::parse(&body).map_err(|error| UpdateError::Feed(error.to_string()))?;
+        let feed = self.fetch_feed()?;
         Ok(feed
             .newest_eligible(Eligibility {
                 current: self.config.current_version,
@@ -181,8 +270,7 @@ impl Updater {
     /// first, including the running version and older ones. Powers the
     /// explicit version picker; [`Updater::check`] stays newer-only.
     pub fn available_releases(&self) -> Result<Vec<Release>> {
-        let body = self.http.fetch_text(&self.config.feed_url)?;
-        let feed = Feed::parse(&body).map_err(|error| UpdateError::Feed(error.to_string()))?;
+        let feed = self.fetch_feed()?;
         Ok(feed
             .installable(bundle::system_version())
             .into_iter()
@@ -197,8 +285,7 @@ impl Updater {
         let Some(wanted) = Version::parse(version) else {
             return Ok(None);
         };
-        let body = self.http.fetch_text(&self.config.feed_url)?;
-        let feed = Feed::parse(&body).map_err(|error| UpdateError::Feed(error.to_string()))?;
+        let feed = self.fetch_feed()?;
         Ok(feed.find(wanted, bundle::system_version()).cloned())
     }
 
@@ -207,19 +294,76 @@ impl Updater {
     /// Checks the install location *first*: discovering that `/Applications`
     /// is read-only after pulling 50 MB wastes the user's bandwidth and their
     /// attention.
-    pub fn download(&self, release: &Release, on_progress: impl FnMut(f32)) -> Result<PathBuf> {
+    ///
+    /// GitHub goes first unless the feed just came from the mirror; a route
+    /// failure on one tries the other. Whichever serves the bytes, they must
+    /// match the feed's size and SHA-256 — a mismatch is final, not a reason
+    /// to shop for other bytes.
+    pub fn download(&self, release: &Release, mut on_progress: impl FnMut(f32)) -> Result<PathBuf> {
         bundle::ensure_writable(&self.config.bundle)?;
-        net::validated_download_url(&release.url, RELEASES_HOST)?;
+        net::validated_download_url(&release.url, &self.config.releases_host)?;
+        let expected = release.sha256.as_deref().ok_or_else(|| {
+            UpdateError::Feed("release is missing its SHA-256 checksum".to_owned())
+        })?;
+
+        let mut routes = vec![(Source::GitHub, release.url.clone())];
+        if let Some(mirror) = &self.config.mirror
+            && let Some(url) = mirror.archive_url(&release.url, &self.config.releases_host)
+        {
+            net::validated_download_url(&url, &mirror.host)?;
+            if self.prefer_mirror.load(Ordering::Relaxed) {
+                routes.insert(0, (Source::Mirror, url));
+            } else {
+                routes.push((Source::Mirror, url));
+            }
+        }
 
         let directory = self.release_dir(release);
         std::fs::create_dir_all(&directory)?;
         let archive = directory.join("diri.zip");
-        self.http
-            .download(&release.url, &archive, release.size, on_progress)?;
-        let expected = release.sha256.as_deref().ok_or_else(|| {
-            UpdateError::Feed("release is missing its SHA-256 checksum".to_owned())
-        })?;
-        net::verify_sha256(&archive, expected)?;
+        let mut report = SourceReport::github();
+        let mut github_error = None;
+        let mut served = None;
+        for (index, (source, url)) in routes.iter().enumerate() {
+            match self
+                .http
+                .download(url, &archive, release.size, &mut on_progress)
+            {
+                Ok(()) => {
+                    served = Some(*source);
+                    break;
+                }
+                Err(error) => {
+                    report.note_failure(*source, &error);
+                    let last = index + 1 == routes.len();
+                    if last || !error.is_route_failure() {
+                        // Surface GitHub's error when it had one: it is the
+                        // canonical host, and a route failure on both says
+                        // GitHub is unreachable.
+                        let (source, error) = match github_error {
+                            Some(github) if error.is_route_failure() => (Source::GitHub, github),
+                            _ => (*source, error),
+                        };
+                        report.source = source;
+                        self.note_source(report);
+                        return Err(error);
+                    }
+                    if *source == Source::GitHub {
+                        github_error = Some(error);
+                    }
+                }
+            }
+        }
+        let source = served.unwrap_or(Source::GitHub);
+        report.source = source;
+        if source == Source::Mirror && report.github_error.is_none() {
+            report.github_error = Some("skipped");
+        }
+        self.note_source(report);
+        if let Err(error) = net::verify_sha256(&archive, expected) {
+            let _ = std::fs::remove_file(&archive);
+            return Err(error);
+        }
         Ok(archive)
     }
 
@@ -310,6 +454,10 @@ fn verify_staged_version(app: &Path, release: &Release) -> Result<()> {
     Ok(())
 }
 
+// Real curl against local HTTPS servers via the system `openssl`.
+#[cfg(all(test, target_os = "macos"))]
+mod fallback_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +465,8 @@ mod tests {
     fn config() -> UpdaterConfig {
         UpdaterConfig {
             feed_url: DEFAULT_FEED_URL.to_owned(),
+            releases_host: RELEASES_HOST.to_owned(),
+            mirror: Some(Mirror::default()),
             current_version: Version::new(0, 4, 2),
             bundle: PathBuf::from("/Applications/diri.app"),
             cache_dir: PathBuf::from("/tmp/diri-updates"),
