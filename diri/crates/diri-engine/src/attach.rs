@@ -2222,7 +2222,14 @@ mod tests {
             }
             grids
         };
-        assert_eq!(next_grids(&mut reader, 1), [true], "the attach seed");
+        // One read can carry more than one frame on a loaded machine (CI has
+        // delivered the seed and a second snapshot together), so only the
+        // first frame is the seed's to answer for.
+        assert_eq!(
+            next_grids(&mut reader, 1).first(),
+            Some(&true),
+            "the attach seed"
+        );
         next_grids(&mut reader, 3);
         // The consumer is descheduled while the session keeps printing.
         std::thread::sleep(STALLED_SINK_TIMEOUT + Duration::from_millis(500));
