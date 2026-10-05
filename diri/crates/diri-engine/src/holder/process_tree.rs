@@ -228,6 +228,33 @@ pub fn kill_stragglers(leader: i32, frozen: &[HolderProcessSample]) -> Vec<Holde
     killed
 }
 
+/// Stopped processes parented to launchd (or init): what a killed Holder
+/// leaves behind of a hibernated tree.
+pub fn stopped_orphans() -> Vec<HolderProcessSample> {
+    ProcessTable::capture()
+        .0
+        .iter()
+        .filter(|process| process.ppid == 1 && process.stopped)
+        .map(|process| HolderProcessSample {
+            pid: process.pid,
+            start_sec: process.start_sec,
+        })
+        .collect()
+}
+
+/// SIGKILL, then SIGCONT, `sample` if it is still the same process.
+pub fn kill_verified(sample: &HolderProcessSample) -> bool {
+    if sample.pid <= 1 || start_time(sample.pid) != Some(sample.start_sec) {
+        return false;
+    }
+    // SAFETY: identity just re-verified; plain kill(2).
+    unsafe {
+        libc::kill(sample.pid, libc::SIGKILL);
+        libc::kill(sample.pid, libc::SIGCONT);
+    }
+    true
+}
+
 /// Hang up and SIGTERM the tree (waking stopped members with SIGCONT so both
 /// are deliverable), give it half a second, then SIGKILL whatever survived.
 ///

@@ -79,6 +79,9 @@ gpui_platform = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The Agent helper diri.app's executable runs as (`--exec-agent`): each Agent
+# a launchd job of its own. diri-pty is libc + diri-proto only.
+diri-pty.workspace = true
 # Existing pinned platform crate: read callback-scoped physical keypad identity.
 gpui_macos.workspace = true
 

@@ -128,6 +128,39 @@ fn swift_associated_value_shapes_match_real_data() {
 }
 
 #[test]
+fn an_interrupted_exit_is_additive_and_resumable() {
+    let killed = SessionStatus::Exited(ExitInfo {
+        reason: ExitReason::Signaled,
+        code: None,
+        signal: Some(15),
+        system_restart: false,
+        interrupted: true,
+    });
+    let wire = serde_json::to_value(&killed).unwrap();
+    assert_eq!(
+        wire,
+        json!({"exited": {"_0": {"reason": "signaled", "signal": 15, "interrupted": true}}})
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionStatus>(wire).unwrap(),
+        killed
+    );
+    let SessionStatus::Exited(info) = killed else {
+        unreachable!()
+    };
+    assert!(info.ended_by_interruption());
+    assert!(!info.ended_by_restart());
+
+    // A plain exit stays a plain exit on the wire and is not brought back.
+    let plain: SessionStatus =
+        serde_json::from_value(json!({"exited": {"_0": {"reason": "exited", "code": 0}}})).unwrap();
+    let SessionStatus::Exited(info) = plain else {
+        unreachable!()
+    };
+    assert!(!info.interrupted && !info.ended_by_interruption());
+}
+
+#[test]
 fn additive_unknown_variants_fall_back_and_unknown_fields_are_ignored() {
     // An unrecognized case key is read as a manifest id rather than discarded:
     // a newer daemon's agent stays identifiable even to a client that has never

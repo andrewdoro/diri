@@ -41,6 +41,7 @@ impl LifecyclePlan {
                         code: None,
                         signal: None,
                         system_restart: false,
+                        interrupted: false,
                     });
                 }
                 replacement.needs_input = None;
@@ -163,6 +164,7 @@ mod tests {
             code: None,
             signal: Some(9),
             system_restart: false,
+            interrupted: false,
         });
 
         let archived =

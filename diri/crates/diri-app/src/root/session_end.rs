@@ -478,6 +478,7 @@ mod tests {
                 code,
                 signal,
                 system_restart: false,
+                interrupted: false,
             })
         };
         session.status = exit(ExitReason::Exited, Some(0), None);

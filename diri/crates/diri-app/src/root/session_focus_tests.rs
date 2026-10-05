@@ -72,6 +72,7 @@ fn exited(code: i32) -> SessionStatus {
         code: Some(code),
         signal: None,
         system_restart: false,
+        interrupted: false,
     })
 }
 

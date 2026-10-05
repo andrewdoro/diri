@@ -17,6 +17,12 @@
 //! shared because a local manager hosts many sessions and each guard process
 //! costs about 1.3 MB.
 //!
+//! On macOS a bundled Engine has the manager start each Agent as a launchd
+//! job of its own through diri.app's executable (see
+//! [`agent_launcher`] and `diri_pty::detached`): the manager keeps the PTY,
+//! but no two sessions share a process coalition, so force-quitting an app
+//! one Agent launched cannot take the others with it.
+//!
 //! All holder processes and protocols in the active architecture are
 //! Rust-owned. The socket paths, NDJSON request/response shapes, pid-file
 //! contents and in-band OSC 777 exit marker are versioned internal contracts.
@@ -26,7 +32,11 @@
 //! additive acknowledged binary stream; older live Holders remain valid and
 //! receive the original one-request form.
 
+#[cfg(unix)]
+pub mod agent_launcher;
 pub mod client;
+#[cfg(unix)]
+pub mod frozen_orphans;
 #[cfg(unix)]
 pub mod guard;
 pub mod launcher;
@@ -56,6 +66,8 @@ pub(crate) fn readiness_delays() -> impl Iterator<Item = std::time::Duration> {
         Some((*delay * 2).min(Duration::from_millis(20)))
     })
 }
+#[cfg(unix)]
+pub use agent_launcher::{AGENT_LAUNCHER_FLAG, agent_launcher};
 pub use launcher::HolderLauncher;
 pub use paths::{HolderManagerPaths, HolderPaths};
 pub use protocol::{

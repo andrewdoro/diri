@@ -136,6 +136,7 @@ recorded by the Engine, not the Holder.
 | `engine.exit` | info | `reason: shutdown\|idle` | deliberate Engine exits (vs. crashes: no `engine.exit` before the next `process.start`) |
 | `crash.report` | incident | `process, app_version, incident_id, crashed_at, timestamp, exception, signal, subtype, termination, namespace, code, thread, thread_name, signature, frames[]` | native crashes (SIGSEGV/abort in GPUI/objc) of `diri`, `dirijord-rs`, `diri-holder`, `dirijor`, `dirijor-mcp`, `diri-ssh-askpass` from `~/Library/Logs/DiagnosticReports/*.ips`, scanned at start and every 10 min past a watermark in `telemetry/crash_watermark.json` (first scan looks back 7 days). Frames are `image!symbol+offset`; no paths, registers or application-specific messages |
 | `holder.manager_died` | incident | `pid, code, signal` | the Holder manager exiting abnormally (every local session with it) |
+| `holder.manager_launchd_unavailable` | incident | `io` | macOS: the manager could not start as its own launchd job and was spawned by the Engine, inside the app's coalition |
 
 ### Control RPC and clients
 
@@ -229,6 +230,8 @@ recorded by the Engine, not the Holder.
 | `holder.session_failed` | error | `session, kind` | a session Holder that failed to run |
 | `holder.spawn` | info | `session, cols, rows, ms` | the PTY child the Holder started |
 | `holder.spawn_failed` | incident | `session, io` | PTY spawn/exec failures with errno |
+| `holder.detached_spawn` | info | `session, ms` | macOS: an Agent started as a launchd job of its own (its own process coalition) and how long the handoff took |
+| `holder.detached_unavailable` | incident | `session, io` | macOS: the launchd handoff provably started nothing, so the Agent became the manager's child (and shares its coalition) |
 | `holder.exit` | info | `session, code, signal, runtime_s` | the child's exit as the Holder reaped it |
 | `holder.subscriber_dropped` | warn | `session, offset` | an Engine output subscriber too slow to keep up (it falls back to the log) |
 

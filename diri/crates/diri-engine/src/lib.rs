@@ -42,6 +42,7 @@ pub mod cli_version;
 pub mod completed_terminal;
 pub mod control;
 pub mod detect;
+pub mod dev_build;
 pub mod directories;
 pub mod events;
 pub mod git;

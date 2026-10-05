@@ -852,6 +852,7 @@ mod tests {
             code: Some(code),
             signal: None,
             system_restart: false,
+            interrupted: false,
         }
     }
 
@@ -1161,6 +1162,7 @@ mod tests {
             code: None,
             signal: None,
             system_restart: false,
+            interrupted: false,
         };
         assert!(
             matches!(
@@ -1179,6 +1181,7 @@ mod tests {
             code: Some(0),
             signal: Some(9),
             system_restart: false,
+            interrupted: false,
         };
         assert!(matches!(
             store.publish(
@@ -1214,6 +1217,7 @@ mod tests {
             code: None,
             signal: Some(15),
             system_restart: false,
+            interrupted: false,
         };
         store
             .publish(

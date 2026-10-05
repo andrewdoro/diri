@@ -2914,3 +2914,39 @@ DIRI_BENCH_SESSIONS=1000 DIRI_BENCH_PROJECTS=20 DIRI_BENCH_ITERATIONS=150 \
 cargo test --release -p diri-app --bin diri -- --ignored --exact \
   root::tests::windowed_sidebar_rows_paint_like_every_row_built
 ```
+
+## One process coalition per Agent, at no memory cost (2026-10-04)
+
+Force-quitting a Chrome that an Agent's browser MCP server had launched
+SIGTERMed 184 processes, every session included: LaunchServices force-quits
+an app's whole process coalition, and every Agent descended from the one
+Holder manager, so all of them, and that Chrome, shared one.
+
+On macOS a bundled Engine now has the manager start each Agent as a launchd
+job of its own (a fresh coalition) through diri.app's own executable, which
+forks, takes the PTY as its controlling terminal and execs the Agent. The
+job's process exits at once; TCC keeps crediting diri.app through the fork
+and the exec. The manager keeps the PTY and is itself a launchd job, outside
+any app launch's coalition.
+
+**Memory and idle cost: none.** The process tree per session is unchanged
+(the Agent and what it starts); no trampoline, Holder or guard is added. A
+per-session-process design measured 6.2 MB a session (trampoline 3.3, holder
+1.6, guard 1.3) against the shared manager's 4.2 MB for a whole fleet, and was
+dropped for this one.
+
+**Launch cost** (15 launches each, release, `/bin/sleep` Agent):
+
+| Spawn | p50 | p90 | first (cold) |
+| --- | ---: | ---: | ---: |
+| detached (launchd job) | 31.1 ms | 33.9 ms | 752 ms |
+| direct (Holder's child) | 1.0 ms | 1.3 ms | 1.6 ms |
+
+Paid once per Agent start, which itself takes seconds.
+
+```sh
+cargo build -p diri-app --bin diri
+DIRI_AGENT_LAUNCHER=$PWD/target/debug/diri \
+  cargo test -p diri-engine --test detached_agent -- --ignored
+```
+

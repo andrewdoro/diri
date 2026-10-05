@@ -2603,7 +2603,7 @@ impl SessionStore {
                 && session.can_resume()
                 && matches!(
                     &session.status,
-                    SessionStatus::Exited(info) if info.reason == ExitReason::DaemonRestart
+                    SessionStatus::Exited(info) if info.ended_by_interruption()
                 )
         });
         if !eligible || !self.auto_resume_attempted.insert(id.clone()) {

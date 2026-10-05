@@ -2238,6 +2238,7 @@ impl ControlServer {
                     code: Some(0),
                     signal: None,
                     system_restart: false,
+                    interrupted: false,
                 });
                 record.needs_input = None;
                 record.hibernation = None;
@@ -4452,7 +4453,14 @@ impl ControlServer {
     /// The test is the one the request applies, held continuously for `grace`:
     /// a live session or any connection resets it, so nothing that could be
     /// stranded or interrupted ever sees the exit.
-    pub fn spawn_orphan_watch(self: &Arc<Self>, grace: Duration, tick: Duration) {
+    /// `sessions_keep_alive`: whether live sessions and enabled schedules
+    /// count as being needed. A development build passes `false`.
+    pub fn spawn_orphan_watch(
+        self: &Arc<Self>,
+        grace: Duration,
+        tick: Duration,
+        sessions_keep_alive: bool,
+    ) {
         let server = Arc::clone(self);
         let _ = std::thread::Builder::new()
             .name("dirijord-orphan-watch".into())
@@ -4465,7 +4473,11 @@ impl ControlServer {
                         return;
                     };
                     // An enabled schedule is work the Engine must stay up for.
-                    let live_sessions = registry.live_count() + server.scheduler.enabled_count();
+                    let live_sessions = if sessions_keep_alive {
+                        registry.live_count() + server.scheduler.enabled_count()
+                    } else {
+                        0
+                    };
                     if !watch.observe(live_sessions, connections, Instant::now(), grace) {
                         continue;
                     }
@@ -6684,6 +6696,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         record.resumability = diri_proto::Resumability::Resumable;
         record
@@ -6780,6 +6793,7 @@ mod tests {
                 code: None,
                 signal: None,
                 system_restart: false,
+                interrupted: false,
             });
             registry.insert_record(broken);
         }
@@ -7157,6 +7171,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         };
         record.status = diri_proto::SessionStatus::Exited(exit.clone());
         let child = ProcessIdentity::new(
@@ -7280,6 +7295,7 @@ mod tests {
                 code: None,
                 signal: None,
                 system_restart: false,
+                interrupted: false,
             });
             registry.insert_record(other);
         }

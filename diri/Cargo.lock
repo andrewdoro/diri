@@ -1548,6 +1548,7 @@ dependencies = [
  "diri-i18n",
  "diri-notes",
  "diri-proto",
+ "diri-pty",
  "diri-telemetry",
  "diri-term",
  "diri-terminal-state",

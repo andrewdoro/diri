@@ -844,6 +844,7 @@ mod tests {
             code: None,
             signal: Some(9),
             system_restart: false,
+            interrupted: false,
         });
         assert_eq!(
             SessionFacts::from_record(&record).activity,

@@ -229,6 +229,7 @@ fn a_process_only_agent_reports_working_then_its_exit_code() {
                 diri_engine::Exit::Signal(signal) => Some(signal),
                 diri_engine::Exit::Code(_) => None,
             },
+            interrupted: false,
         },
         SystemTime::now(),
     );

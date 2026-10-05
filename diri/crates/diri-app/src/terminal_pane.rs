@@ -5068,7 +5068,7 @@ impl TerminalPane {
         let SessionStatus::Exited(info) = &session.status else {
             return None;
         };
-        if !info.ended_by_restart() || !session.can_resume() {
+        if !info.ended_by_interruption() || !session.can_resume() {
             return None;
         }
         self.runtime
@@ -6028,6 +6028,11 @@ fn exit_description(session: &SessionRecord) -> String {
     let SessionStatus::Exited(info) = &session.status else {
         return t("terminal.exit.session_ended").to_owned();
     };
+    if info.interrupted {
+        // Killed from outside (a force-quit, memory pressure), not finished:
+        // the session comes back on its own, so don't blame the Agent.
+        return "Agent was interrupted".to_owned();
+    }
     match info.reason {
         ExitReason::DaemonRestart if info.system_restart => {
             if cfg!(target_os = "macos") {
@@ -9130,6 +9135,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         store_runtime.store.write().unwrap().upsert_session(exited);
         shown.lock().unwrap().clear();
@@ -10627,6 +10633,7 @@ mod tests {
             code: None,
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         assert_eq!(
             exit_description(&session),

@@ -118,6 +118,9 @@ pub enum StatusSignal {
     ProcessExit {
         code: Option<i32>,
         signal: Option<i32>,
+        /// Diri did not ask for this exit and an outside kill caused it; see
+        /// [`diri_proto::ExitInfo::interrupted`].
+        interrupted: bool,
     },
     /// Transport failed without evidence that the Agent process exited.
     TransportUnavailable,
@@ -467,7 +470,12 @@ impl StatusReducer {
         }
 
         // Process exit is authoritative under every authority mode.
-        if let StatusSignal::ProcessExit { code, signal } = &signal {
+        if let StatusSignal::ProcessExit {
+            code,
+            signal,
+            interrupted,
+        } = &signal
+        {
             let reason = if signal.is_some() {
                 ExitReason::Signaled
             } else {
@@ -479,6 +487,7 @@ impl StatusReducer {
                     code: *code,
                     signal: *signal,
                     system_restart: false,
+                    interrupted: *interrupted,
                 }),
                 &mut outcome,
             );

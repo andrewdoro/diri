@@ -315,6 +315,11 @@ pub struct HolderManagerRequest {
     pub op: HolderManagerOperation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<HolderLaunchSpec>,
+    /// The sending Engine's pid: its check-in with a manager that retires
+    /// abandoned sessions (development builds). Additive; older managers
+    /// ignore it.
+    #[serde(rename = "enginePID", default, skip_serializing_if = "Option::is_none")]
+    pub engine_pid: Option<i32>,
 }
 
 impl HolderManagerRequest {
@@ -323,6 +328,7 @@ impl HolderManagerRequest {
             version: MANAGER_PROTOCOL_VERSION,
             op: HolderManagerOperation::Ping,
             spec: None,
+            engine_pid: Some(std::process::id() as i32),
         }
     }
 
@@ -331,6 +337,7 @@ impl HolderManagerRequest {
             version: MANAGER_PROTOCOL_VERSION,
             op: HolderManagerOperation::Launch,
             spec: Some(spec),
+            engine_pid: Some(std::process::id() as i32),
         }
     }
 
@@ -339,6 +346,7 @@ impl HolderManagerRequest {
             version: MANAGER_PROTOCOL_VERSION,
             op: HolderManagerOperation::ShutdownIfIdle,
             spec: None,
+            engine_pid: Some(std::process::id() as i32),
         }
     }
 }
@@ -707,11 +715,23 @@ mod tests {
 
     #[test]
     fn manager_messages_round_trip_with_swift_keys() {
+        // The sender's pid rides along as an additive key (an older manager
+        // ignores it), and a request without it still decodes.
+        let pid = std::process::id();
         let ping = serde_json::to_string(&HolderManagerRequest::ping()).expect("encode");
-        assert_eq!(ping, r#"{"version":1,"op":"ping"}"#);
+        assert_eq!(
+            ping,
+            format!(r#"{{"version":2,"op":"ping","enginePID":{pid}}}"#)
+        );
         let shutdown =
             serde_json::to_string(&HolderManagerRequest::shutdown_if_idle()).expect("encode");
-        assert_eq!(shutdown, r#"{"version":1,"op":"shutdown-if-idle"}"#);
+        assert_eq!(
+            shutdown,
+            format!(r#"{{"version":2,"op":"shutdown-if-idle","enginePID":{pid}}}"#)
+        );
+        let older: HolderManagerRequest =
+            serde_json::from_str(r#"{"version":1,"op":"ping"}"#).expect("decode");
+        assert_eq!(older.engine_pid, None);
 
         let response: HolderManagerResponse =
             serde_json::from_str(r#"{"ok":true,"managerPID":4242}"#).expect("decode");

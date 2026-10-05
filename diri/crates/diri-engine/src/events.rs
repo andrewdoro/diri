@@ -587,6 +587,14 @@ pub fn spawn_registry_watcher(
                     changed.extend(registry.apply_cursor_refreshes(cursor_refreshes));
                     changed.extend(registry.apply_native_title_refreshes(native_title_refreshes));
                 }
+                // A session something outside ended may have left stopped
+                // orphans behind; sweep for them, off this thread.
+                #[cfg(unix)]
+                if changed.iter().any(|(_, record)| {
+                    matches!(&record.status, diri_proto::SessionStatus::Exited(info) if info.interrupted)
+                }) {
+                    crate::holder::frozen_orphans::request_sweep(Arc::clone(&registry));
+                }
                 for (id, record) in changed {
                     events.publish_encoded(
                         diri_proto::EventName::SESSION_UPDATED,
@@ -868,6 +876,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         assert!(satisfies_wait_target(&exited, "exited"));
         assert!(satisfies_wait_target(&exited, "dead"));

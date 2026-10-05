@@ -10314,7 +10314,24 @@ mod tests {
             crate::fonts::init(cx);
             cx.set_reduce_motion(true);
         });
-        for (name, light) in [("restart-ended-dark", false), ("restart-ended-light", true)] {
+        // The 2026-10-04 force-quit as main recorded it (a Holder gone
+        // without an exit marker), and the same exit flagged interrupted.
+        let killed = |interrupted| {
+            diri_proto::SessionStatus::Exited(diri_proto::ExitInfo {
+                reason: diri_proto::ExitReason::Exited,
+                code: None,
+                signal: None,
+                system_restart: false,
+                interrupted,
+            })
+        };
+        let restart = diri_proto::SessionStatus::Exited(diri_proto::ExitInfo::restart(true));
+        for (name, light, status) in [
+            ("restart-ended-dark", false, restart.clone()),
+            ("restart-ended-light", true, restart),
+            ("force-quit-plain-dark", false, killed(false)),
+            ("force-quit-interrupted-dark", false, killed(true)),
+        ] {
             let services = test_services();
             let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
             let selected = fixture.selected_session_id.clone().unwrap();
@@ -10324,8 +10341,7 @@ mod tests {
                 for session in list.sessions.iter_mut().filter(|session| {
                     !session.is_archived() && session.kind != diri_proto::AgentKind::SHELL
                 }) {
-                    session.status =
-                        diri_proto::SessionStatus::Exited(diri_proto::ExitInfo::restart(true));
+                    session.status = status.clone();
                     session.resumability = diri_proto::Resumability::Resumable;
                     session.capabilities = None;
                     session.needs_input = None;
@@ -12151,6 +12167,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         assert!(!is_quote_target(&exited));
     }

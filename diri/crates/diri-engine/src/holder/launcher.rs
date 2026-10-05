@@ -14,6 +14,18 @@ use super::paths::{HolderManagerPaths, HolderPaths};
 use super::protocol::HolderLaunchSpec;
 use super::{HolderError, HolderResult};
 
+/// Holder manager launchd jobs (macOS): `<prefix><hex millis>`.
+#[cfg(target_os = "macos")]
+const MANAGER_LABEL_PREFIX: &str = "com.dirijor.diri.holders.";
+/// What a launchd-started manager would otherwise lose from the Engine's
+/// environment: the test idle window and the telemetry switches.
+#[cfg(target_os = "macos")]
+const MANAGER_ENVIRONMENT: [&str; 3] = [
+    "DIRI_HOLDER_IDLE_SECONDS",
+    "DIRI_TELEMETRY",
+    "DIRI_TELEMETRY_ENDPOINT",
+];
+
 /// How long to wait for a freshly spawned manager: 250 × 20ms = 5s.
 const READINESS_ATTEMPTS: u32 = 250;
 
@@ -158,15 +170,67 @@ fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let mut command = Command::new(executable_path);
-    command.arg("--manager").arg(directory);
+    let mut arguments: Vec<std::ffi::OsString> = vec!["--manager".into(), directory.into()];
     // Only an Engine that records hands its Holders a spool; tests and
     // embedders that never start the recorder launch quiet ones.
     if let Some(state_dir) = crate::telemetry::holder_state_dir() {
-        command
-            .arg(crate::telemetry::HOLDER_TELEMETRY_FLAG)
-            .arg(state_dir);
+        arguments.push(crate::telemetry::HOLDER_TELEMETRY_FLAG.into());
+        arguments.push(state_dir.into());
     }
+    // A development Engine's manager ends its sessions once no Engine comes
+    // back for them; an installed one's outlive every Engine crash.
+    if crate::dev_build::is_development_build() {
+        arguments.push(super::manager::ENGINE_PID_FLAG.into());
+        arguments.push(std::process::id().to_string().into());
+    }
+    let agent_launcher = super::agent_launcher();
+    if let Some(launcher) = &agent_launcher {
+        arguments.push(super::AGENT_LAUNCHER_FLAG.into());
+        arguments.push(launcher.into());
+    }
+
+    // macOS, bundled: the manager as a launchd job too, so it is in no app
+    // launch's process coalition. Force-quitting diri.app, or macOS ending
+    // the app's coalition at an update, would otherwise take the manager and
+    // with it every PTY. One process either way; launchd reaps it.
+    #[cfg(target_os = "macos")]
+    if agent_launcher.is_some() {
+        let label = format!(
+            "{MANAGER_LABEL_PREFIX}{}",
+            diri_pty::detached::label_suffix()
+        );
+        let mut program: Vec<&std::ffi::OsStr> = vec![executable_path.as_os_str()];
+        program.extend(arguments.iter().map(std::ffi::OsString::as_os_str));
+        // A job starts with launchd's environment; carry over only the few
+        // settings the manager reads.
+        let environment: Vec<(&str, String)> = MANAGER_ENVIRONMENT
+            .iter()
+            .filter_map(|&name| std::env::var(name).ok().map(|value| (name, value)))
+            .collect();
+        match diri_pty::detached::bootstrap_job(&label, &program, &environment, directory) {
+            Ok(()) => {
+                let _ = std::thread::Builder::new()
+                    .name("holder-job-sweep".into())
+                    .spawn(|| {
+                        diri_pty::detached::sweep_finished_jobs(
+                            MANAGER_LABEL_PREFIX,
+                            std::time::Duration::from_secs(120),
+                        );
+                    });
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("diri-engine: launchd holder manager unavailable, spawning it: {error}");
+                diri_telemetry::incident!(
+                    "holder.manager_launchd_unavailable",
+                    io = diri_telemetry::io_error(&error),
+                );
+            }
+        }
+    }
+
+    let mut command = Command::new(executable_path);
+    command.args(&arguments);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())

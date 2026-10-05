@@ -739,6 +739,7 @@ mod tests {
                 code: Some(0),
                 signal: None,
                 system_restart: false,
+                interrupted: false,
             }),
         );
         let mut asleep = session("asleep", SessionStatus::Working);
@@ -822,6 +823,7 @@ mod tests {
                     code: Some(0),
                     signal: None,
                     system_restart: false,
+                    interrupted: false,
                 }),
             ),
         ];

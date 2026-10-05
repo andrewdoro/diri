@@ -17,71 +17,23 @@ const MAX_SIGNAL: libc::c_int = 65;
 /// A child process whose controlling terminal is a private pseudo-terminal.
 pub struct Pty {
     master: OwnedFd,
-    child: Child,
+    leader: Leader,
     child_identity: Option<diri_proto::process::ProcessIdentity>,
+}
+
+/// The session leader: this process's child, or (macOS) an Agent started as
+/// a launchd job of its own (see [`crate::detached`]).
+enum Leader {
+    Child(Child),
+    #[cfg(target_os = "macos")]
+    Detached(std::sync::Arc<crate::detached::DetachedLeader>),
 }
 
 impl Pty {
     /// Spawn an exact structured command on a new controlling PTY.
     pub fn spawn(spec: &PtySpec) -> io::Result<Self> {
-        let program = spec
-            .argv
-            .first()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"))?;
-        if spec.cols == 0 || spec.rows == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "PTY dimensions must be non-zero",
-            ));
-        }
-
-        #[cfg(target_os = "linux")]
-        let winsize = libc::winsize {
-            ws_row: spec.rows,
-            ws_col: spec.cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // Apple's libc declares `openpty` with a mutable winsize pointer even
-        // though the structure is an input. Keep that ABI detail at this seam;
-        // Linux correctly accepts a shared pointer and clippy enforces it.
-        #[cfg(not(target_os = "linux"))]
-        let mut winsize = libc::winsize {
-            ws_row: spec.rows,
-            ws_col: spec.cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        #[cfg(target_os = "linux")]
-        let winsize_ptr = &winsize;
-        #[cfg(not(target_os = "linux"))]
-        let winsize_ptr = &mut winsize;
-        let mut master: RawFd = -1;
-        let mut slave: RawFd = -1;
-        retry_transient_open(|| {
-            // SAFETY: both output pointers refer to initialized local storage
-            // and `winsize` is fully initialized. On success both returned fds
-            // are new owned descriptors, transferred immediately into
-            // `OwnedFd`; on failure `openpty` has closed anything it opened.
-            let result = unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    winsize_ptr,
-                )
-            };
-            if result == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
-        })?;
-        // SAFETY: `openpty` succeeded and returned two fresh descriptors.
-        let master = unsafe { OwnedFd::from_raw_fd(master) };
-        // SAFETY: same ownership argument as `master`; each fd is wrapped once.
-        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        let (master, slave) = open_pair(spec)?;
+        let program = &spec.argv[0];
 
         let mut command = Command::new(OsStr::new(program));
         command.args(&spec.argv[1..]);
@@ -127,9 +79,33 @@ impl Pty {
         let child_identity = crate::process_identity::observe(child.id()).ok();
         Ok(Self {
             master,
-            child,
+            leader: Leader::Child(child),
             child_identity,
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn detached(
+        master: OwnedFd,
+        leader: crate::detached::DetachedLeader,
+        child_identity: Option<diri_proto::process::ProcessIdentity>,
+    ) -> Self {
+        Self {
+            master,
+            leader: Leader::Detached(std::sync::Arc::new(leader)),
+            child_identity,
+        }
+    }
+
+    /// The launchd-started leader, whose exit only `EVFILT_PROC` reports: it
+    /// is not this process's child, so `waitpid` cannot reap it.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn detached_leader(&self) -> Option<std::sync::Arc<crate::detached::DetachedLeader>> {
+        match &self.leader {
+            Leader::Detached(leader) => Some(leader.clone()),
+            Leader::Child(_) => None,
+        }
     }
 
     #[must_use]
@@ -141,7 +117,11 @@ impl Pty {
     }
 
     pub fn pid(&self) -> u32 {
-        self.child.id()
+        match &self.leader {
+            Leader::Child(child) => child.id(),
+            #[cfg(target_os = "macos")]
+            Leader::Detached(leader) => leader.pid(),
+        }
     }
 
     /// The process group currently in the foreground on this PTY, if any.
@@ -152,7 +132,7 @@ impl Pty {
     /// before the call yields EBADF and looks like no job.
     #[must_use]
     pub fn foreground_pgid(&self) -> Option<i32> {
-        foreground_pgid(self.master.as_raw_fd()).or_else(|| proc_tpgid(self.child.id()))
+        foreground_pgid(self.master.as_raw_fd()).or_else(|| proc_tpgid(self.pid()))
     }
 
     /// Whether a job the shell started, not the shell itself, is stopped at
@@ -177,7 +157,7 @@ impl Pty {
         }
         let Some(job) = self
             .foreground_pgid()
-            .filter(|pgid| u32::try_from(*pgid).ok() != Some(self.child.id()))
+            .filter(|pgid| u32::try_from(*pgid).ok() != Some(self.pid()))
         else {
             return false;
         };
@@ -259,15 +239,23 @@ impl Pty {
     }
 
     pub fn wait(&mut self) -> io::Result<Exit> {
-        self.child.wait().map(exit_from)
+        match &mut self.leader {
+            Leader::Child(child) => child.wait().map(exit_from),
+            #[cfg(target_os = "macos")]
+            Leader::Detached(leader) => leader.wait(),
+        }
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<Exit>> {
-        Ok(self.child.try_wait()?.map(exit_from))
+        match &mut self.leader {
+            Leader::Child(child) => Ok(child.try_wait()?.map(exit_from)),
+            #[cfg(target_os = "macos")]
+            Leader::Detached(leader) => leader.try_wait(),
+        }
     }
 
     pub fn kill_group(&self, signal: i32) -> io::Result<()> {
-        let pid = i32::try_from(self.child.id()).map_err(|_| {
+        let pid = i32::try_from(self.pid()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "child pid does not fit in i32")
         })?;
         // SAFETY: the child called `setsid`, therefore `-pid` names the
@@ -347,6 +335,68 @@ impl Pty {
             }
         }
     }
+}
+
+/// A fresh PTY sized for `spec`: `(master, slave)`.
+pub(crate) fn open_pair(spec: &PtySpec) -> io::Result<(OwnedFd, OwnedFd)> {
+    if spec.argv.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
+    }
+    if spec.cols == 0 || spec.rows == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PTY dimensions must be non-zero",
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    let winsize = libc::winsize {
+        ws_row: spec.rows,
+        ws_col: spec.cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // Apple's libc declares `openpty` with a mutable winsize pointer even
+    // though the structure is an input. Keep that ABI detail at this seam;
+    // Linux correctly accepts a shared pointer and clippy enforces it.
+    #[cfg(not(target_os = "linux"))]
+    let mut winsize = libc::winsize {
+        ws_row: spec.rows,
+        ws_col: spec.cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    #[cfg(target_os = "linux")]
+    let winsize_ptr = &winsize;
+    #[cfg(not(target_os = "linux"))]
+    let winsize_ptr = &mut winsize;
+    let mut master: RawFd = -1;
+    let mut slave: RawFd = -1;
+    retry_transient_open(|| {
+        // SAFETY: both output pointers refer to initialized local storage
+        // and `winsize` is fully initialized. On success both returned fds
+        // are new owned descriptors, transferred immediately into
+        // `OwnedFd`; on failure `openpty` has closed anything it opened.
+        let result = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                winsize_ptr,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    })?;
+    // SAFETY: `openpty` succeeded and returned two fresh descriptors.
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    // SAFETY: same ownership argument as `master`; each fd is wrapped once.
+    let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+    Ok((master, slave))
 }
 
 /// How long a SIGKILLed child may take to become reapable.

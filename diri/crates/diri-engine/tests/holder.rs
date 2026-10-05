@@ -577,3 +577,164 @@ fn a_paste_larger_than_one_input_frame_arrives_whole() {
     let _ = server.join();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Opt-in upgrade rehearsal: a manager from the previous release (protocol
+/// v1) still hosting a session when this build's Engine launches a new one.
+/// The new session must get a manager of this version beside the old one,
+/// not be launched through it; the old session stays where it is, and the
+/// old manager retires once its own sessions end.
+///
+/// ```sh
+/// git worktree add --detach /tmp/diri-prev origin/main
+/// (cd /tmp/diri-prev/diri && cargo build -p diri-engine --bin diri-holder)
+/// DIRI_PREVIOUS_HOLDER=<that target>/debug/diri-holder \
+///   cargo test -p diri-engine --test holder an_upgrade -- --ignored
+/// ```
+#[test]
+#[ignore = "needs a previous release's diri-holder; set DIRI_PREVIOUS_HOLDER"]
+fn an_upgrade_starts_a_new_manager_beside_a_running_older_one() {
+    use diri_engine::holder::protocol::HolderManagerRequest;
+    let previous =
+        PathBuf::from(std::env::var_os("DIRI_PREVIOUS_HOLDER").expect("DIRI_PREVIOUS_HOLDER"));
+    let root = holders_dir("upgrade");
+    let logs = root.join("logs");
+    // SAFETY: set before any launch; the managers inherit it.
+    unsafe { std::env::set_var("DIRI_HOLDER_IDLE_SECONDS", "1") };
+
+    // The existing user's manager and session, from before the update.
+    let mut old_manager = std::process::Command::new(&previous)
+        .arg("--manager")
+        .arg(&root)
+        .spawn()
+        .expect("previous manager");
+    let old_socket = HolderPaths::new(&root, "unused")
+        .directory
+        .join("manager-v1.sock");
+    wait_until("previous manager", Duration::from_secs(5), || {
+        UnixStream::connect(&old_socket).is_ok()
+    });
+    let old_paths = HolderPaths::new(&root, "s_before");
+    let mut launch = HolderManagerRequest::launch(spec(&old_paths, &logs, &["/bin/cat"]));
+    launch.version = 1;
+    {
+        let mut stream = UnixStream::connect(&old_socket).expect("connect");
+        serde_json::to_writer(&mut stream, &launch).expect("encode");
+        stream.write_all(b"\n").expect("send");
+        let mut byte = [0_u8; 1];
+        while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
+    }
+    let before = HolderClient::new(old_paths.socket());
+    wait_until("session from before", Duration::from_secs(5), || {
+        before.is_alive()
+    });
+
+    // After the update: this build launches a new session.
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_diri-holder"));
+    let new_paths = HolderPaths::new(&root, "s_after");
+    let new_manager =
+        HolderLauncher::launch(&binary, &new_paths, &spec(&new_paths, &logs, &["/bin/cat"]))
+            .expect("launch after the update");
+    assert_ne!(
+        new_manager as u32,
+        old_manager.id(),
+        "not through the old manager"
+    );
+    assert!(
+        HolderManagerPaths::new(&root)
+            .socket()
+            .ends_with("manager-v2.sock")
+    );
+    let after = HolderClient::new(new_paths.socket());
+    wait_until("session after", Duration::from_secs(5), || after.is_alive());
+    assert!(before.is_alive(), "the session from before keeps running");
+
+    // The old session still works, then ends; its manager retires on its own.
+    before.write(b"still here\n").expect("write");
+    wait_until("echo", Duration::from_secs(5), || {
+        String::from_utf8_lossy(&log_bytes(&logs, "s_before")).contains("still here")
+    });
+    before.kill_tree().expect("end old session");
+    wait_until("previous manager retires", Duration::from_secs(10), || {
+        old_manager.try_wait().unwrap().is_some()
+    });
+    assert!(after.is_alive(), "the new session is untouched");
+    after.kill_tree().expect("end new session");
+}
+
+/// One raw manager request carrying `engine_pid` as its sender, the way an
+/// Engine with that pid would send it.
+fn manager_request(socket: &Path, request: &diri_engine::holder::protocol::HolderManagerRequest) {
+    let mut stream = UnixStream::connect(socket).expect("manager connect");
+    serde_json::to_writer(&mut stream, request).expect("encode");
+    stream.write_all(b"\n").expect("send");
+    let mut response = Vec::new();
+    let mut byte = [0_u8; 1];
+    while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {
+        response.push(byte[0]);
+    }
+}
+
+/// Development builds: a manager whose Engine is gone, with no other Engine
+/// checking in, ends its sessions instead of hosting them until reboot.
+#[test]
+fn a_development_manager_ends_sessions_no_engine_returns_for() {
+    use diri_engine::holder::protocol::HolderManagerRequest;
+    let root = holders_dir("abandon");
+    let logs = root.join("logs");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_diri-holder"));
+    let manager_paths = HolderManagerPaths::new(&root);
+    // Two stand-in Engines: only their pids and lifetimes matter.
+    let mut first = std::process::Command::new("/bin/sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    let mut second = std::process::Command::new("/bin/sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    let mut manager = std::process::Command::new(&binary)
+        .arg("--manager")
+        .arg(&root)
+        .arg(diri_engine::holder::manager::ENGINE_PID_FLAG)
+        .arg(first.id().to_string())
+        .env("DIRI_HOLDER_ABANDON_SECONDS", "1")
+        .env("DIRI_HOLDER_IDLE_SECONDS", "1")
+        .spawn()
+        .expect("manager");
+    let manager_client = HolderManagerClient::new(manager_paths.socket());
+    wait_until("manager", Duration::from_secs(5), || {
+        manager_client.is_alive()
+    });
+
+    let paths = HolderPaths::new(&root, "s_abandon");
+    let mut launch = HolderManagerRequest::launch(spec(&paths, &logs, &["/bin/cat"]));
+    launch.engine_pid = Some(first.id() as i32);
+    manager_request(&manager_paths.socket(), &launch);
+    let session = HolderClient::new(paths.socket());
+    wait_until("session", Duration::from_secs(5), || session.is_alive());
+
+    // Another Engine checks in, then the first goes: the session stays.
+    let mut ping = HolderManagerRequest::ping();
+    ping.engine_pid = Some(second.id() as i32);
+    manager_request(&manager_paths.socket(), &ping);
+    first.kill().unwrap();
+    first.wait().unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(session.is_alive(), "a returning Engine keeps its sessions");
+
+    // The last Engine goes and none returns: the session is ended, and the
+    // manager, now idle, retires.
+    second.kill().unwrap();
+    second.wait().unwrap();
+    wait_until("abandoned session ended", Duration::from_secs(10), || {
+        !session.is_alive()
+    });
+    let mut buffer = log_bytes(&logs, "s_abandon");
+    assert!(
+        HolderExitMarker::drain(&mut buffer).1.is_some(),
+        "it ended cleanly"
+    );
+    wait_until("manager retired", Duration::from_secs(10), || {
+        manager.try_wait().unwrap().is_some()
+    });
+}

@@ -763,6 +763,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         assert_eq!(
             preview_caption(&session, Some(PreviewState::Disconnected)),

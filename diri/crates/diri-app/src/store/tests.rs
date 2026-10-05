@@ -256,6 +256,7 @@ fn overview_store_integration_filters_selects_and_bulk_closes() {
         code: Some(0),
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     let (mut store, mut effects) =
         hydrated(vec![live, ended], vec![project("a", "A")], Prefs::default());
@@ -1048,6 +1049,7 @@ fn auto_resume_is_attempted_once_per_run() {
         code: None,
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     record.resumability = Resumability::Resumable;
     let (mut store, mut effects) = hydrated(
@@ -1074,6 +1076,57 @@ fn auto_resume_is_attempted_once_per_run() {
     assert!(drain(&mut effects).is_empty());
 }
 
+/// 2026-10-04: force-quitting a Chrome an Agent had launched killed every
+/// session; each read as an ordinary exit and needed its own Resume click.
+/// An interrupted exit comes back like a restart-ended one, and joins Resume
+/// all; the Agent's own exit does neither.
+#[test]
+fn an_interrupted_session_auto_resumes_and_joins_resume_all() {
+    let ended = |value: &str, created: f64, interrupted: bool| {
+        let mut record = session(value, "p", created);
+        record.status = SessionStatus::Exited(ExitInfo {
+            reason: ExitReason::Signaled,
+            code: None,
+            signal: Some(15),
+            system_restart: false,
+            interrupted,
+        });
+        record.resumability = Resumability::Resumable;
+        record
+    };
+    // Rows arrive at the bottom, so the cold-boot selection is the oldest.
+    let (mut store, mut effects) = hydrated(
+        vec![
+            ended("killed", 1.0, true),
+            ended("other", 2.0, true),
+            ended("finished", 3.0, false),
+        ],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    let automatic = |effects: &mut _| -> Vec<SessionId> {
+        drain(effects)
+            .into_iter()
+            .filter_map(|effect| match effect {
+                StoreEffect::Resume {
+                    id,
+                    automatic: true,
+                } => Some(id),
+                _ => None,
+            })
+            .collect()
+    };
+
+    assert_eq!(store.selected_session_id(), Some(&id("killed")));
+    assert_eq!(automatic(&mut effects), vec![id("killed")]);
+    assert_eq!(store.restart_ended_resumable(), vec![id("other")]);
+
+    store.select(id("finished"));
+    assert!(automatic(&mut effects).is_empty());
+    store.select(id("other"));
+    assert_eq!(automatic(&mut effects), vec![id("other")]);
+}
+
 #[test]
 fn cold_boot_only_auto_resumes_the_selected_session() {
     let restart_session = |value: &str, created: f64| {
@@ -1083,6 +1136,7 @@ fn cold_boot_only_auto_resumes_the_selected_session() {
             code: None,
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         record.resumability = Resumability::Resumable;
         record
@@ -1143,6 +1197,7 @@ fn close_confirmation_only_gates_running_sessions() {
         code: Some(0),
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     let (mut store, mut effects) = hydrated(
         vec![running, exited],
@@ -1171,6 +1226,7 @@ fn exited_parent_with_terminal(terminal_running: bool) -> Vec<SessionRecord> {
         code: Some(1),
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     let mut parent = session("parent", "p", 2.0);
     parent.status = exit.clone();
@@ -1287,6 +1343,7 @@ fn a_real_process_exit_immediately_detaches_and_removes_the_agent() {
         code: Some(0),
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     store.upsert_session(exited);
 
@@ -1314,6 +1371,7 @@ fn a_clean_exit_with_a_conversation_keeps_its_row() {
         code: Some(0),
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     exited.agent_session_id = Some("conversation".into());
     exited.resumability = Resumability::NotResumable;
@@ -1342,6 +1400,7 @@ fn a_signalled_agent_keeps_its_row_and_its_scrollback() {
         code: None,
         signal: Some(15),
         system_restart: false,
+        interrupted: false,
     });
     store.upsert_session(killed);
 
@@ -1371,6 +1430,7 @@ fn quitting_a_resumable_agent_closes_its_tab() {
         code: Some(0),
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     exited.agent_session_id = Some("conversation".into());
     exited.resumability = Resumability::Resumable;
@@ -1401,6 +1461,7 @@ fn quitting_an_agent_keeps_its_tab_while_a_terminal_under_it_runs() {
         code: Some(0),
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     exited.agent_session_id = Some("conversation".into());
     exited.resumability = Resumability::Resumable;
@@ -1428,6 +1489,7 @@ fn a_resumable_agent_that_exits_while_starting_stays_listed_for_resume() {
         code: Some(0),
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     exited.resumability = Resumability::Resumable;
     store.upsert_session(exited);
@@ -1457,6 +1519,7 @@ fn a_nonzero_exit_keeps_its_row() {
         code: Some(1),
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     store.upsert_session(crashed);
 
@@ -1483,6 +1546,7 @@ fn daemon_restart_exit_remains_available_for_automatic_resume() {
         code: None,
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     restart.resumability = Resumability::Resumable;
     store.upsert_session(restart);
@@ -3814,6 +3878,7 @@ fn a_note_outlives_the_agent_that_wrote_it() {
         code: None,
         signal: Some(9),
         system_restart: false,
+        interrupted: false,
     });
     let (mut store, _) = hydrated(
         vec![exited, note],
@@ -3845,6 +3910,7 @@ fn resume_all_batches_every_restart_ended_session_once() {
         code: Some(1),
         signal: None,
         system_restart: false,
+        interrupted: false,
     });
     let mut no_conversation = restart_ended("no-conversation", 4.0, true);
     no_conversation.resumability = Resumability::NotResumable;

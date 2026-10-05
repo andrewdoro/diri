@@ -60,6 +60,21 @@ static RUNNING: Mutex<Vec<Weak<Shared>>> = Mutex::new(Vec::new());
 
 pub struct HolderServer;
 
+/// How a hosted Agent is started on macOS; nothing elsewhere.
+#[cfg(target_os = "macos")]
+pub use diri_pty::detached::{DetachedLeader, Launcher as AgentLauncher};
+/// Placeholders off macOS, where every Agent is the Holder's child.
+#[cfg(not(target_os = "macos"))]
+pub enum AgentLauncher {}
+#[cfg(not(target_os = "macos"))]
+pub enum DetachedLeader {}
+#[cfg(not(target_os = "macos"))]
+impl DetachedLeader {
+    fn wait(&self) -> std::io::Result<diri_pty::Exit> {
+        match *self {}
+    }
+}
+
 struct Shared {
     spec: HolderLaunchSpec,
     child_pid: i32,
@@ -139,6 +154,17 @@ impl HolderServer {
     /// [`Self::run`], registering the session's process group with the
     /// manager's [`GroupGuard`] for as long as its leader is unreaped.
     pub fn run_guarded(spec: HolderLaunchSpec, guard: Option<Arc<GroupGuard>>) -> HolderResult<()> {
+        Self::run_hosted(spec, guard, None)
+    }
+
+    /// [`Self::run_guarded`], starting the Agent through `launcher` when one
+    /// is given: on macOS that makes it a launchd job of its own, so no other
+    /// session shares its process coalition (see [`diri_pty::detached`]).
+    pub fn run_hosted(
+        spec: HolderLaunchSpec,
+        guard: Option<Arc<GroupGuard>>,
+        launcher: Option<&AgentLauncher>,
+    ) -> HolderResult<()> {
         // Never double-run: a second holder for the same session would
         // interleave two writers into one output log and stack a second child.
         // If a live holder already serves this socket, defer to it — bail
@@ -175,7 +201,7 @@ impl HolderServer {
             rows: spec.rows.max(2),
         };
         let spawned_at = std::time::Instant::now();
-        let pty = Pty::spawn(&pty_spec).map_err(|error| {
+        let pty = spawn_agent(&pty_spec, launcher, &spec.session_id).map_err(|error| {
             diri_telemetry::incident!(
                 "holder.spawn_failed",
                 session = diri_telemetry::id(&spec.session_id),
@@ -194,6 +220,10 @@ impl HolderServer {
         // Armed at once: registering after the child has exited fails on
         // macOS, which the exit path treats as "already exited".
         let exit_watcher = diri_pty::ExitWatcher::new(child_pid as u32).ok();
+        #[cfg(target_os = "macos")]
+        let detached = pty.detached_leader();
+        #[cfg(not(target_os = "macos"))]
+        let detached: Option<Arc<DetachedLeader>> = None;
         // Recorded before the socket exists, so anyone who can reach this
         // Holder, or finds only its log, can also learn which child it forked.
         // Failure is not fatal: the run is then bindable only by a live stat.
@@ -277,7 +307,7 @@ impl HolderServer {
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name(format!("holder-exit-{}", shared.spec.session_id))
-                .spawn(move || watch_exit(&shared, pump, exit_watcher))
+                .spawn(move || watch_exit(&shared, pump, exit_watcher, detached))
                 .map_err(|error| {
                     if let Some(guard) = &guard {
                         guard.release(child_pid);
@@ -685,11 +715,20 @@ fn watch_exit(
     shared: &Shared,
     pump: std::thread::JoinHandle<()>,
     exit_watcher: Option<diri_pty::ExitWatcher>,
+    detached: Option<Arc<DetachedLeader>>,
 ) {
     // The leader stays an unreaped zombie until the sweep is done: that is
     // what keeps its pid, and so the group id the sweep and the guard both
-    // name, from being handed to anyone else.
-    wait_for_exit_unreaped(shared.child_pid, exit_watcher);
+    // name, from being handed to anyone else. A detached leader is launchd's
+    // child and reaped by it, but a group id is never reissued while any
+    // member is alive, and the sweep only signals live members.
+    let detached_exit = match &detached {
+        Some(leader) => Some(wait_for_detached_exit(leader, shared.child_pid)),
+        None => {
+            wait_for_exit_unreaped(shared.child_pid, exit_watcher);
+            None
+        }
+    };
     let mut frozen = shared.frozen.lock().expect("frozen");
     process_tree::kill_stragglers(shared.child_pid, &frozen);
     if let Some(guard) = &shared.guard {
@@ -700,10 +739,17 @@ fn watch_exit(
     drop(frozen);
 
     let mut status: libc::c_int = 0;
-    // SAFETY: waitpid on our own child; EINTR retried.
-    while unsafe { libc::waitpid(shared.child_pid, &mut status, 0) } < 0 {
-        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            break;
+    match detached_exit {
+        // Re-encoded so the one decode below feeds the marker either way.
+        Some(diri_pty::Exit::Code(code)) => status = (code & 0xFF) << 8,
+        Some(diri_pty::Exit::Signal(signal)) => status = signal & 0x7F,
+        // SAFETY: waitpid on our own child; EINTR retried.
+        None => {
+            while unsafe { libc::waitpid(shared.child_pid, &mut status, 0) } < 0 {
+                if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                    break;
+                }
+            }
         }
     }
     // The same decode Swift used, bit for bit, because it feeds the marker.
@@ -1093,6 +1139,57 @@ fn wait_for_exit_unreaped(pid: i32, watcher: Option<diri_pty::ExitWatcher>) {
             }
         }
     }
+}
+
+/// The exit of a launchd-started leader. Its watch was armed before it could
+/// run, so it reports the real status; should the watch itself fail, the pid
+/// is polled until it is gone and the status is unknown (a code of 255).
+fn wait_for_detached_exit(leader: &DetachedLeader, pid: i32) -> diri_pty::Exit {
+    if let Ok(exit) = leader.wait() {
+        return exit;
+    }
+    // SAFETY: signal 0 only probes.
+    while unsafe { libc::kill(pid, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    diri_pty::Exit::Code(255)
+}
+
+/// Starts the Agent through `launcher` when there is one, else (and whenever
+/// the launcher provably started nothing) as this process's child.
+fn spawn_agent(
+    spec: &diri_pty::PtySpec,
+    launcher: Option<&AgentLauncher>,
+    session_id: &str,
+) -> std::io::Result<Pty> {
+    #[cfg(target_os = "macos")]
+    if let Some(launcher) = launcher {
+        let started = std::time::Instant::now();
+        match diri_pty::detached::spawn(spec, launcher) {
+            Ok(pty) => {
+                diri_telemetry::event!(
+                    "holder.detached_spawn",
+                    session = diri_telemetry::id(session_id),
+                    ms = started.elapsed(),
+                );
+                return Ok(pty);
+            }
+            Err(diri_pty::detached::DetachedError::Spawn(error)) => return Err(error),
+            Err(diri_pty::detached::DetachedError::Unavailable(error)) => {
+                eprintln!("diri-holder: detached launch unavailable, spawning directly: {error}");
+                diri_telemetry::incident!(
+                    "holder.detached_unavailable",
+                    session = diri_telemetry::id(session_id),
+                    io = diri_telemetry::io_error(&error),
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (launcher, session_id);
+    Pty::spawn(spec)
 }
 
 /// Whether `pid`, our child, has exited (it stays unreaped). Stops and

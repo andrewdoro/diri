@@ -755,6 +755,7 @@ impl Registry {
                     _ => None,
                 },
                 system_restart: false,
+                interrupted: false,
             });
         }
     }
@@ -1494,6 +1495,7 @@ impl Registry {
                     code: None,
                     signal: None,
                     system_restart: false,
+                    interrupted: false,
                 });
                 record.needs_input = None;
             }
@@ -2123,6 +2125,11 @@ impl Registry {
 
     pub fn live_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Whether `id` has a live session (running, or hibernated).
+    pub fn is_live(&self, id: &str) -> bool {
+        self.sessions.contains_key(id)
     }
 
     pub fn record_count(&self) -> usize {
@@ -3558,6 +3565,7 @@ mod tests {
             code: Some(255),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         registry.records.insert("s_dead".into(), dead);
 
@@ -3643,6 +3651,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         registry.records.insert("s_dead".into(), dead);
 
@@ -5333,6 +5342,7 @@ mod tests {
             code: Some(0),
             signal: None,
             system_restart: false,
+            interrupted: false,
         });
         for record in [before, resumed, turned, done] {
             registry.records.insert(record.id.0.clone(), record);
@@ -5427,6 +5437,7 @@ mod tests {
                 code,
                 signal: None,
                 system_restart: false,
+                interrupted: false,
             });
             shell
         };

@@ -243,6 +243,10 @@ pub(crate) struct AppServices {
 }
 
 fn main() {
+    // An Agent's launchd helper: before anything else, so it never touches
+    // the window server, telemetry or a single-instance check.
+    #[cfg(target_os = "macos")]
+    diri_pty::detached::run_helper_if_requested();
     if cfg!(test) {
         #[cfg(all(test, target_os = "macos"))]
         if std::env::var_os("DIRI_TEST_NATIVE_FIND").is_some() {
