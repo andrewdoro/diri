@@ -15,6 +15,7 @@ use crate::agent_catalog::{
 };
 use crate::commands::{self, CommandId};
 use crate::fuzzy::{FuzzyMatcher, FuzzyQuery, PreparedText, Score};
+use crate::i18n::{t, tf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaletteCommand {
@@ -112,8 +113,8 @@ pub fn actions_for_catalogs(
         ));
     }
     let terminal_title = default_host.map_or_else(
-        || "New Terminal".to_owned(),
-        |host| format!("New Terminal on {}", host.display_name()),
+        || t("palette.new_terminal").to_owned(),
+        |host| tf("palette.new_terminal_on", &[("host", &host.display_name())]),
     );
     // ⌘T needs exactly one row, and it must describe what ⌘T will actually do.
     // The quick-create loop above carries the badge whenever it lists the
@@ -144,8 +145,13 @@ pub fn actions_for_catalogs(
             );
             result.push(default_action(
                 default_host.map_or_else(
-                    || format!("New {name} Session"),
-                    |host| format!("New {name} on {}", host.display_name()),
+                    || tf("palette.new_agent_session", &[("agent", &name)]),
+                    |host| {
+                        tf(
+                            "palette.new_agent_on",
+                            &[("agent", &name), ("host", &host.display_name())],
+                        )
+                    },
                 ),
                 system_image(&kind),
                 &format!("{} agent spawn start create default", kind.id()),
@@ -209,13 +215,23 @@ pub fn actions_for_catalogs(
                 Some(PathBuf::from(&target.project.root)),
             );
             action.title = target_host.map_or_else(
-                || format!("New {} in {}", agent.display_name, target.project.name),
+                || {
+                    tf(
+                        "palette.new_agent_in",
+                        &[
+                            ("agent", &agent.display_name),
+                            ("project", &target.project.name),
+                        ],
+                    )
+                },
                 |host| {
-                    format!(
-                        "New {} in {} on {}",
-                        agent.display_name,
-                        target.project.name,
-                        host.display_name()
+                    tf(
+                        "palette.new_agent_in_on",
+                        &[
+                            ("agent", &agent.display_name),
+                            ("project", &target.project.name),
+                            ("host", &host.display_name()),
+                        ],
                     )
                 },
             );
@@ -263,8 +279,13 @@ fn new_dynamic_agent_action(
     PaletteAction {
         id,
         title: host.map_or_else(
-            || format!("New {label} Session"),
-            |host| format!("New {label} on {}", host.display_name()),
+            || tf("palette.new_agent_session", &[("agent", &label)]),
+            |host| {
+                tf(
+                    "palette.new_agent_on",
+                    &[("agent", &label), ("host", &host.display_name())],
+                )
+            },
         ),
         system_image: system_image_for_kind(&kind),
         shortcut: shortcut
@@ -379,7 +400,7 @@ pub fn actions_for_default_host(
     let mut result = Vec::new();
     if default_agent == AgentKind::SHELL {
         result.push(default_action(
-            "New Terminal".into(),
+            t("palette.new_terminal").into(),
             "terminal",
             "shell console zsh bash tty default",
         ));
@@ -391,8 +412,13 @@ pub fn actions_for_default_host(
         let name = display_name(&default_agent, catalog);
         result.push(default_action(
             default_host.map_or_else(
-                || format!("New {name} Session"),
-                |host| format!("New {name} on {}", host.display_name()),
+                || tf("palette.new_agent_session", &[("agent", &name)]),
+                |host| {
+                    tf(
+                        "palette.new_agent_on",
+                        &[("agent", &name), ("host", &host.display_name())],
+                    )
+                },
             ),
             system_image(&default_agent),
             &format!("{} agent spawn start create default", default_agent.id()),
@@ -405,8 +431,8 @@ pub fn actions_for_default_host(
             .map(|option| new_agent_action(option, false, default_host)),
     );
     let terminal_title = default_host.map_or_else(
-        || "New Terminal".to_owned(),
-        |host| format!("New Terminal on {}", host.display_name()),
+        || t("palette.new_terminal").to_owned(),
+        |host| tf("palette.new_terminal_on", &[("host", &host.display_name())]),
     );
     // A Terminal default already heads the list as the ⌘T row; a second
     // ⌥⌘T "New Terminal" beside it would read as a duplicate.
@@ -449,7 +475,10 @@ pub fn actions_for_default_host(
     for project in projects {
         result.push(PaletteAction {
             id: format!("new-default-in-{}", project.root),
-            title: format!("New {default_name} in {}", project.name),
+            title: tf(
+                "palette.new_agent_in",
+                &[("agent", &default_name), ("project", &project.name)],
+            ),
             system_image: "folder",
             shortcut: None,
             detail: None,
@@ -470,7 +499,13 @@ pub fn actions_for_default_host(
         for option in &options {
             result.push(PaletteAction {
                 id: format!("new-{}-on-{}", option.kind.id(), host.id),
-                title: format!("New {} on {}", option.display_name, host.display_name()),
+                title: tf(
+                    "palette.new_agent_on",
+                    &[
+                        ("agent", &option.display_name),
+                        ("host", &host.display_name()),
+                    ],
+                ),
                 system_image: "network",
                 shortcut: None,
                 detail: None,
@@ -505,7 +540,7 @@ pub fn actions_for_default_host(
             if hosts.iter().any(|host| &host.id == current) {
                 result.push(PaletteAction {
                     id: "migrate-to-local".into(),
-                    title: "Move Session to Local".into(),
+                    title: t("palette.move_session_local").into(),
                     system_image: "arrow.left.arrow.right",
                     shortcut: None,
                     detail: None,
@@ -519,7 +554,7 @@ pub fn actions_for_default_host(
             for host in hosts {
                 result.push(PaletteAction {
                     id: format!("migrate-to-{}", host.id),
-                    title: format!("Move Session to {}", host.display_name()),
+                    title: tf("palette.move_session_to", &[("host", &host.display_name())]),
                     system_image: "arrow.left.arrow.right",
                     shortcut: None,
                     detail: None,
@@ -538,7 +573,7 @@ pub fn actions_for_default_host(
     for host in hosts {
         result.push(PaletteAction {
             id: format!("sync-prefs-{}", host.id),
-            title: format!("Sync Prefs to {}", host.display_name()),
+            title: tf("palette.sync_prefs_to", &[("host", &host.display_name())]),
             system_image: "arrow.triangle.2.circlepath",
             shortcut: None,
             detail: None,
@@ -564,7 +599,7 @@ pub fn actions_for_default_host(
         registered_action(CommandId::ToggleNotifications),
         PaletteAction {
             id: "color-theme".into(),
-            title: "Color theme".into(),
+            title: t("palette.color_theme").into(),
             system_image: "moon.fill",
             shortcut: None,
             detail: None,
@@ -586,7 +621,7 @@ fn registered_action(id: CommandId) -> PaletteAction {
     let title = command
         .palette
         .expect("palette commands must carry palette metadata")
-        .title
+        .title()
         .to_owned();
     registered_action_with_title(id, title)
 }
@@ -640,8 +675,21 @@ fn new_agent_action(
             format!("new-{}", option.kind.id())
         },
         title: host.map_or_else(
-            || format!("New {} Session", option.display_name),
-            |host| format!("New {} on {}", option.display_name, host.display_name()),
+            || {
+                tf(
+                    "palette.new_agent_session",
+                    &[("agent", &option.display_name)],
+                )
+            },
+            |host| {
+                tf(
+                    "palette.new_agent_on",
+                    &[
+                        ("agent", &option.display_name),
+                        ("host", &host.display_name()),
+                    ],
+                )
+            },
         ),
         system_image: system_image(&option.kind),
         shortcut: registered

@@ -62,22 +62,20 @@ impl RootView {
             .collect();
         drop(store);
         let label = if receipts.is_empty() {
-            "No pending launches".to_owned()
+            t("window.launches.none").to_owned()
         } else if pending == receipts.len() {
-            format!(
-                "Creating {pending} {}…",
-                if pending == 1 { "session" } else { "sessions" }
-            )
+            if pending == 1 {
+                t("window.launches.creating_one").to_owned()
+            } else {
+                tf("window.launches.creating_other", &[("count", &pending)])
+            }
         } else {
-            format!(
-                "Review {} {}",
-                receipts.len() - pending,
-                if receipts.len() - pending == 1 {
-                    "launch"
-                } else {
-                    "launches"
-                }
-            )
+            let done = receipts.len() - pending;
+            if done == 1 {
+                t("window.launches.review_one").to_owned()
+            } else {
+                tf("window.launches.review_other", &[("count", &done)])
+            }
         };
         let selected = self
             .launch_cursor
@@ -142,9 +140,11 @@ impl RootView {
             for receipt in receipts.iter().rev() {
                 let id = receipt.id;
                 let (detail, session, retry) = match &receipt.state {
-                    WorkspaceSpawnState::Creating => ("Creating session…".to_owned(), None, false),
+                    WorkspaceSpawnState::Creating => {
+                        (t("window.launches.creating").to_owned(), None, false)
+                    }
                     WorkspaceSpawnState::Placing(session) => (
-                        "Adding session to workspace…".to_owned(),
+                        t("window.launches.placing").to_owned(),
                         Some(session.clone()),
                         false,
                     ),
@@ -166,7 +166,7 @@ impl RootView {
                             .rounded(px(Radius::CHIP))
                             .hover(move |button| button.bg(colors.primary.alpha(0.07)))
                             .cursor_pointer()
-                            .child("Open session")
+                            .child(t("window.launches.open"))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_workspace_launch_session(session.clone(), window, cx);
                                 cx.stop_propagation();
@@ -182,7 +182,7 @@ impl RootView {
                             .rounded(px(Radius::CHIP))
                             .hover(move |button| button.bg(colors.primary.alpha(0.07)))
                             .cursor_pointer()
-                            .child("Retry placement")
+                            .child(t("window.launches.retry"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.window_store
                                     .write()
@@ -202,7 +202,7 @@ impl RootView {
                             .rounded(px(Radius::CHIP))
                             .hover(move |button| button.bg(colors.primary.alpha(0.07)))
                             .cursor_pointer()
-                            .child("Dismiss")
+                            .child(t("window.launches.dismiss"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.window_store
                                     .write()
@@ -236,12 +236,11 @@ impl RootView {
                         .gap(px(7.0))
                         .child(div().font_weight(FontWeight::MEDIUM).child(
                             receipt.target.workspace().map_or_else(
-                                || "All sessions".into(),
+                                || t("window.launches.all_sessions").into(),
                                 |id| {
-                                    names
-                                        .get(id)
-                                        .cloned()
-                                        .unwrap_or_else(|| "Removed workspace".into())
+                                    names.get(id).cloned().unwrap_or_else(|| {
+                                        t("window.launches.removed_workspace").into()
+                                    })
                                 },
                             ),
                         ))
@@ -257,7 +256,7 @@ impl RootView {
                 div()
                     .p(px(10.0))
                     .text_color(colors.secondary)
-                    .child("↑↓ choose · Return open · R retry · Delete dismiss · Esc close"),
+                    .child(t("window.launches.keys")),
             );
         }
         Some(panel.into_any_element())

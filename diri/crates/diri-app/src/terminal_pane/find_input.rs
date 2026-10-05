@@ -327,7 +327,7 @@ pub(super) fn render(
             let geometry = Geometry { bounds, colors };
             window.with_content_mask(Some(ContentMask { bounds }), |window| {
                 let text = if query.is_empty() {
-                    "Find"
+                    crate::i18n::t("terminal.find.placeholder")
                 } else {
                     query.text()
                 };

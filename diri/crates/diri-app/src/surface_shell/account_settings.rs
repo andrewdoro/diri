@@ -211,27 +211,57 @@ impl UtilitySurfaces {
                         let switched = result.switched.len();
                         let unchanged = result.unchanged.len();
                         {
-                            let mut store = this.store.write().expect("session store lock poisoned");
-                            for record in result.switched { store.upsert_session(record); }
+                            let mut store =
+                                this.store.write().expect("session store lock poisoned");
+                            for record in result.switched {
+                                store.upsert_session(record);
+                            }
                         }
                         this.store_runtime.publish_local_change();
                         if result.failures.is_empty() && result.default_changed {
                             this.accounts.error = None;
-                            let mut notice = format!("Switched {switched} conversations; {unchanged} separate-home tabs unchanged. This account is now the default. Local MCP configuration is unchanged. Hosted connectors such as Slack require a connection on the selected account.");
+                            let mut notice = tf(
+                                "settings.accounts.switched_notice",
+                                &[("switched", &switched), ("unchanged", &unchanged)],
+                            );
                             if !result.deferred.is_empty() {
-                                notice.push_str(&format!(" {} open tab(s) could not be identified and keep the previous login until restarted.", result.deferred.len()));
+                                notice.push_str(&tf(
+                                    "settings.accounts.switched_deferred",
+                                    &[("count", &result.deferred.len())],
+                                ));
                             }
                             this.accounts.notice = Some(notice);
                             this.accounts.continue_session = None;
                             this.account_action(AccountAction::Refresh, cx);
                         } else {
                             let store = this.store.read().expect("session store lock poisoned");
-                            let mut details = result.failures.iter().map(|failure| {
-                                let label = store.sessions().get(&failure.session_id).map(|s| s.title.as_str()).unwrap_or(&failure.session_id.0);
-                                format!("{label}: {}", failure.message)
-                            }).collect::<Vec<_>>().join("\n");
-                            if let Some(error) = result.default_error { details.push_str(&format!("\nCould not save the default account: {error}")); }
-                            this.accounts.error = Some(format!("{switched} conversations switched.\n{details}"));
+                            let mut details = result
+                                .failures
+                                .iter()
+                                .map(|failure| {
+                                    let label = store
+                                        .sessions()
+                                        .get(&failure.session_id)
+                                        .map(|s| s.title.as_str())
+                                        .unwrap_or(&failure.session_id.0);
+                                    format!("{label}: {}", failure.message)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if let Some(error) = result.default_error {
+                                details.push('\n');
+                                details.push_str(&tf(
+                                    "settings.accounts.default_save_failed",
+                                    &[("error", &error)],
+                                ));
+                            }
+                            this.accounts.error = Some(format!(
+                                "{}\n{details}",
+                                tf(
+                                    "settings.accounts.switched_partial",
+                                    &[("switched", &switched)]
+                                )
+                            ));
                         }
                     }
                     Err(error) => this.accounts.error = Some(error),
@@ -247,7 +277,7 @@ impl UtilitySurfaces {
         let colors = self.settings_colors();
         let source = self.continuation_source();
         let heading = source.as_ref().map_or_else(
-            || "Session unavailable".to_owned(),
+            || t("settings.accounts.session_unavailable").to_owned(),
             |source| {
                 let count = self
                     .store
@@ -275,27 +305,47 @@ impl UtilitySurfaces {
                 } else {
                     "Claude"
                 };
-                format!(
-                    "{count} {agent} conversation{}",
-                    if count == 1 { "" } else { "s" }
+                tf(
+                    if count == 1 {
+                        "settings.accounts.conversations_one"
+                    } else {
+                        "settings.accounts.conversations_other"
+                    },
+                    &[("count", &count), ("agent", &agent)],
                 )
             },
         );
-        let mut content = div().flex().flex_col().gap(px(16.0))
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
             .child(div().text_size(px(14.0)).child(heading))
-            .child(div().text_size(px(12.0)).text_color(colors.secondary).child("Local Codex switches the login for open tabs sharing ~/.codex. Running Agents restart and sleeping tabs return to sleep. Claude continues only the selected conversation using its existing handoff flow."))
-            .child(div().text_size(px(11.0)).text_color(colors.tertiary).child("Running tools are interrupted. Hosted connectors such as Slack need a connection on the selected account."));
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(colors.secondary)
+                    .child(t("settings.accounts.continue_detail")),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(colors.tertiary)
+                    .child(t("settings.accounts.continue_warning")),
+            );
         if let Some(source) = &source {
             content = content.child(
                 div()
                     .text_size(px(11.0))
                     .text_color(colors.secondary)
-                    .child(format!(
-                        "Current account: {}",
-                        source
-                            .account_profile
-                            .as_ref()
-                            .map_or("CLI account", |p| p.label.as_str())
+                    .child(tf(
+                        "settings.accounts.current_account",
+                        &[(
+                            "account",
+                            &source
+                                .account_profile
+                                .as_ref()
+                                .map_or(t("settings.accounts.cli_account"), |p| p.label.as_str()),
+                        )],
                     )),
             );
         }
@@ -314,15 +364,19 @@ impl UtilitySurfaces {
                     .text_size(px(12.0))
                     .text_color(colors.secondary)
                     .child(if self.accounts.continuing {
-                        "Switching login and resuming conversations…"
+                        t("settings.accounts.switching")
                     } else {
-                        "Loading accounts…"
+                        t("settings.accounts.loading")
                     }),
             );
         }
         let choices = self.continuation_choices();
         if choices.is_empty() && self.accounts.loaded && !self.accounts.busy {
-            content = content.child(div().text_size(px(12.0)).child("No other account is set up for this Agent on this machine. Add a profile and sign in, then return here."));
+            content = content.child(
+                div()
+                    .text_size(px(12.0))
+                    .child(t("settings.accounts.no_other_account")),
+            );
         }
         for (index, profile) in choices.into_iter().enumerate() {
             let id = profile.id.clone();
@@ -360,7 +414,10 @@ impl UtilitySurfaces {
                     )
                     .child(self.account_button(
                         format!("continue-account-{id}"),
-                        format!("Switch open conversations to {}", profile.label),
+                        tf(
+                            "settings.accounts.switch_to",
+                            &[("account", &profile.label)],
+                        ),
                         cx,
                         move |this, _, cx| this.continue_account(id.clone(), cx),
                     )),
@@ -372,7 +429,7 @@ impl UtilitySurfaces {
                 .gap(px(8.0))
                 .child(self.account_button(
                     "manage-continuation-accounts",
-                    "Manage accounts",
+                    t("settings.accounts.manage"),
                     cx,
                     |this, _, cx| {
                         this.clear_account_continuation();
@@ -383,12 +440,12 @@ impl UtilitySurfaces {
                 ))
                 .child(self.account_button(
                     "cancel-account-continuation",
-                    "Back to session",
+                    t("settings.accounts.back_to_session"),
                     cx,
                     |this, _, cx| this.close_surface(cx),
                 )),
         );
-        settings_page("Switch open conversations", content, colors).into_any_element()
+        settings_page(t("settings.accounts.switch_title"), content, colors).into_any_element()
     }
 
     #[cfg(test)]
@@ -666,22 +723,50 @@ impl UtilitySurfaces {
             return self.continue_account_settings(cx);
         }
         let colors = self.settings_colors();
-        let mut content = div().flex().flex_col().gap(px(16.0))
-            .child(div().text_size(px(12.0)).text_color(colors.secondary).child("Sign in to each Claude or Codex account once, or save the login already active on this Mac. Choosing an account from the bottom-left menu switches every open conversation of that Agent in place; conversations, MCP setup and settings stay in the shared home. Running tools are interrupted, and hosted connections may need authorization on the selected account."))
-            .child(div().flex().items_center().justify_between()
-                .child(div().text_size(px(12.0)).text_color(colors.secondary).child(if self.accounts.busy { "Updating accounts…" } else { "Saved profiles" }))
-                .child(self.account_button("add-account", "Add profile", cx, |this, window, cx| this.edit_account(None, window, cx))));
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(colors.secondary)
+                    .child(t("settings.accounts.intro")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(colors.secondary)
+                            .child(if self.accounts.busy {
+                                t("settings.accounts.updating")
+                            } else {
+                                t("settings.accounts.saved_profiles")
+                            }),
+                    )
+                    .child(self.account_button(
+                        "add-account",
+                        t("settings.accounts.add_profile"),
+                        cx,
+                        |this, window, cx| this.edit_account(None, window, cx),
+                    )),
+            );
         if let Some(error) = &self.accounts.error {
             content = content.child(
                 div()
                     .text_size(px(12.0))
                     .text_color(Ink::DANGER)
                     .child(error.clone())
-                    .child(
-                        self.account_button("retry-accounts", "Retry", cx, |this, _, cx| {
-                            this.refresh_accounts(cx)
-                        }),
-                    ),
+                    .child(self.account_button(
+                        "retry-accounts",
+                        t("settings.accounts.retry"),
+                        cx,
+                        |this, _, cx| this.refresh_accounts(cx),
+                    )),
             );
         }
         if let Some(editor) = &self.accounts.editor {
@@ -697,7 +782,7 @@ impl UtilitySurfaces {
                     div()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .child("Account profile"),
+                        .child(t("settings.accounts.account_profile")),
                 );
             form = form.child(
                 div()
@@ -745,8 +830,8 @@ impl UtilitySurfaces {
                     )),
             );
             for (path, label, input) in [
-                (false, "Name", &editor.name),
-                (true, "Account directory", &editor.path),
+                (false, t("settings.accounts.name"), &editor.name),
+                (true, t("settings.accounts.directory"), &editor.path),
             ] {
                 let active = path == editor.path_active;
                 form = form.child(
@@ -804,26 +889,29 @@ impl UtilitySurfaces {
                         .find(|h| h.id == id)
                         .map_or(id, |h| h.display_name())
                 })
-                .unwrap_or("This Mac")
+                .unwrap_or(t("settings.accounts.this_mac"))
                 .to_owned();
             form = form.child(
                 div()
                     .text_size(px(11.0))
                     .text_color(colors.secondary)
-                    .child("Run on"),
+                    .child(t("settings.accounts.run_on")),
             );
             let mut hosts = div()
                 .flex()
                 .flex_wrap()
                 .gap(px(6.0))
-                .child(
-                    self.account_button("account-local", "This Mac", cx, |this, _, cx| {
+                .child(self.account_button(
+                    "account-local",
+                    t("settings.accounts.this_mac"),
+                    cx,
+                    |this, _, cx| {
                         if let Some(editor) = &mut this.accounts.editor {
                             editor.profile.host = None;
                         }
                         cx.notify();
-                    }),
-                );
+                    },
+                ));
             for host in &self.hosts {
                 let id = host.id.clone();
                 hosts = hosts.child(self.account_button(
@@ -838,23 +926,86 @@ impl UtilitySurfaces {
                     },
                 ));
             }
-            form = form.child(hosts).child(div().text_size(px(11.0)).text_color(colors.secondary).child(format!("Selected: {host_label}. The directory is on this machine.")))
-                .when(!shares_login(&editor.profile), |form| form.child(self.account_button("account-default", if editor.profile.is_default { "✓ Default for this Agent on this host" } else { "Use by default for this Agent on this host" }, cx, |this, _, cx| {
-                    if let Some(editor) = &mut this.accounts.editor { editor.profile.is_default = !editor.profile.is_default; } cx.notify();
-                })))
-                .child(div().text_size(px(11.0)).text_color(colors.tertiary).child("Local Codex profiles share ~/.codex. Save the current login, or Sign in to save another account. Hosted connectors such as Slack must be connected on each account. Claude and remote profiles use their own directories."))
-                .child(div().flex().gap(px(8.0))
-                    .child(self.account_button("save-account", "Save profile", cx, |this, _, cx| this.save_account(cx)))
-                    .child(self.account_button("cancel-account", "Cancel", cx, |this, _, cx| { this.accounts.editor = None; cx.notify(); })));
+            form = form
+                .child(hosts)
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(colors.secondary)
+                        .child(tf(
+                            "settings.accounts.selected_host",
+                            &[("host", &host_label)],
+                        )),
+                )
+                .when(!shares_login(&editor.profile), |form| {
+                    form.child(self.account_button(
+                        "account-default",
+                        if editor.profile.is_default {
+                            t("settings.accounts.is_default")
+                        } else {
+                            t("settings.accounts.use_default")
+                        },
+                        cx,
+                        |this, _, cx| {
+                            if let Some(editor) = &mut this.accounts.editor {
+                                editor.profile.is_default = !editor.profile.is_default;
+                            }
+                            cx.notify();
+                        },
+                    ))
+                })
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(colors.tertiary)
+                        .child(t("settings.accounts.editor_hint")),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(self.account_button(
+                            "save-account",
+                            t("settings.accounts.save_profile"),
+                            cx,
+                            |this, _, cx| this.save_account(cx),
+                        ))
+                        .child(self.account_button(
+                            "cancel-account",
+                            t("settings.accounts.cancel"),
+                            cx,
+                            |this, _, cx| {
+                                this.accounts.editor = None;
+                                cx.notify();
+                            },
+                        )),
+                );
             content = content.child(form);
         }
         if self.accounts.loaded
             && self.accounts.catalog.profiles.is_empty()
             && self.accounts.editor.is_none()
         {
-            content = content.child(div().p(px(20.0)).rounded(px(Radius::PANEL)).bg(colors.primary.alpha(0.025)).flex().flex_col().gap(px(8.0))
-                .child(div().text_size(px(14.0)).child("Work and personal, side by side"))
-                .child(div().text_size(px(12.0)).text_color(colors.secondary).child("Add a named profile to select an account in the launcher. Without a profile, Diri uses your CLI’s current environment.")));
+            content = content.child(
+                div()
+                    .p(px(20.0))
+                    .rounded(px(Radius::PANEL))
+                    .bg(colors.primary.alpha(0.025))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .child(t("settings.accounts.empty_title")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(colors.secondary)
+                            .child(t("settings.accounts.empty_detail")),
+                    ),
+            );
         }
         if let Some(notice) = &self.accounts.notice {
             content = content.child(
@@ -880,7 +1031,7 @@ impl UtilitySurfaces {
                         .find(|h| h.id == id)
                         .map_or(id, |h| h.display_name())
                 })
-                .unwrap_or("This Mac");
+                .unwrap_or(t("settings.accounts.this_mac"));
             content = content.child(
                 div()
                     .p(px(14.0))
@@ -894,15 +1045,14 @@ impl UtilitySurfaces {
                         div()
                             .text_size(px(13.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .child(format!(
-                                "{}{}",
-                                profile.label,
-                                if profile.is_default {
-                                    " · Default"
-                                } else {
-                                    ""
-                                }
-                            )),
+                            .child(if profile.is_default {
+                                tf(
+                                    "settings.accounts.profile_default",
+                                    &[("profile", &profile.label)],
+                                )
+                            } else {
+                                profile.label.clone()
+                            }),
                     )
                     .child(
                         div()
@@ -932,7 +1082,11 @@ impl UtilitySurfaces {
                             .gap(px(8.0))
                             .child(self.account_button(
                                 format!("open-{}", profile.id),
-                                if local_codex { "Sign in" } else { "Open Agent" },
+                                if local_codex {
+                                    t("settings.accounts.sign_in")
+                                } else {
+                                    t("settings.accounts.open_agent")
+                                },
                                 cx,
                                 move |this, _, cx| {
                                     if local_codex {
@@ -962,7 +1116,7 @@ impl UtilitySurfaces {
                             .when(local_codex, |row| {
                                 row.child(self.account_button(
                                     format!("capture-{}", profile.id),
-                                    "Save current login",
+                                    t("settings.accounts.save_current_login"),
                                     cx,
                                     move |this, _, cx| {
                                         this.account_action(
@@ -975,7 +1129,7 @@ impl UtilitySurfaces {
                             .when(local_codex, |row| {
                                 row.child(self.account_button(
                                     format!("switch-{}", profile.id),
-                                    "Switch open conversations",
+                                    t("settings.accounts.switch_title"),
                                     cx,
                                     move |this, _, cx| {
                                         this.continue_account(switch.id.clone(), cx);
@@ -984,7 +1138,7 @@ impl UtilitySurfaces {
                             })
                             .child(self.account_button(
                                 format!("edit-{}", profile.id),
-                                "Edit",
+                                t("settings.accounts.edit"),
                                 cx,
                                 move |this, window, cx| {
                                     this.edit_account(Some(edit.clone()), window, cx)
@@ -992,7 +1146,7 @@ impl UtilitySurfaces {
                             ))
                             .child(self.account_button(
                                 format!("remove-{}", profile.id),
-                                "Remove profile",
+                                t("settings.accounts.remove_profile"),
                                 cx,
                                 move |this, _, cx| {
                                     this.account_action(AccountAction::Remove(remove.clone()), cx)
@@ -1001,8 +1155,13 @@ impl UtilitySurfaces {
                     ),
             );
         }
-        content = content.child(div().text_size(px(11.0)).text_color(colors.tertiary).child("Editing or removing a profile affects future launches. Existing sessions retain their account. Removing a profile leaves the provider’s files and credentials intact."));
-        settings_page("Accounts", content, colors).into_any_element()
+        content = content.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.tertiary)
+                .child(t("settings.accounts.footer")),
+        );
+        settings_page(t("settings.accounts.title"), content, colors).into_any_element()
     }
 
     fn account_button(

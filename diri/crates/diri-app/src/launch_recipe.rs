@@ -13,6 +13,7 @@ use diri_proto::{AgentKind, HostEntry, Project, ProjectId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::agent_catalog;
+use crate::i18n::{t, tf};
 use crate::store::{SpawnOptions, WorktreeSpawn};
 
 const CURRENT_VERSION: u32 = 1;
@@ -111,13 +112,11 @@ pub enum RecipeBookError {
 
 impl std::fmt::Display for RecipeBookError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Full => "Recipe library is full (64 maximum)",
-            Self::Missing => "This recipe no longer exists",
-            Self::UnsupportedVersion => {
-                "Recipes were created by a newer Diri and cannot be edited here"
-            }
-        })
+        formatter.write_str(t(match self {
+            Self::Full => "recipe.error.full",
+            Self::Missing => "recipe.error.missing",
+            Self::UnsupportedVersion => "recipe.error.unsupported_version",
+        }))
     }
 }
 
@@ -522,36 +521,23 @@ pub enum RecipeIssue {
 impl RecipeIssue {
     pub fn message(&self) -> String {
         match self {
-            Self::AccountsLoading => "Checking account profiles…".to_owned(),
-            Self::AccountUnavailable => {
-                "Account profile is unavailable on this Agent or host — choose an account"
-                    .to_owned()
-            }
-            Self::EmptyPrompt => "Add an initial prompt to repair this recipe".to_owned(),
-            Self::PromptTooLong => {
-                "Prompt exceeds 32,768 characters — shorten it before saving or running".to_owned()
-            }
-            Self::MissingHost(host) => format!("Host ‘{host}’ is missing — choose a new host"),
-            Self::MissingProject(_) => "Project is missing — choose a new project".to_owned(),
-            Self::MissingPath(path) => {
-                format!("Folder ‘{path}’ is missing — choose a new folder")
-            }
-            Self::NotRepository(path) => {
-                format!("Folder ‘{path}’ is not a repository root — choose a repository")
-            }
+            Self::AccountsLoading => t("recipe.issue.accounts_loading").to_owned(),
+            Self::AccountUnavailable => t("recipe.issue.account_unavailable").to_owned(),
+            Self::EmptyPrompt => t("recipe.issue.empty_prompt").to_owned(),
+            Self::PromptTooLong => t("recipe.issue.prompt_too_long").to_owned(),
+            Self::MissingHost(host) => tf("recipe.issue.missing_host", &[("host", host)]),
+            Self::MissingProject(_) => t("recipe.issue.missing_project").to_owned(),
+            Self::MissingPath(path) => tf("recipe.issue.missing_path", &[("path", path)]),
+            Self::NotRepository(path) => tf("recipe.issue.not_repository", &[("path", path)]),
             Self::WorktreeCollision(path) => {
-                format!("Worktree destination ‘{path}’ already exists — change the branch prefix")
+                tf("recipe.issue.worktree_collision", &[("path", path)])
             }
-            Self::ProjectMoved { .. } => {
-                "Project moved to a different host — review the destination".to_owned()
-            }
-            Self::AgentsLoading => "Checking which Agents are available…".to_owned(),
+            Self::ProjectMoved { .. } => t("recipe.issue.project_moved").to_owned(),
+            Self::AgentsLoading => t("recipe.issue.agents_loading").to_owned(),
             Self::AgentUnavailable(kind) => {
-                format!("{} is unavailable — choose another Agent", kind.id())
+                tf("recipe.issue.agent_unavailable", &[("agent", &kind.id())])
             }
-            Self::RemoteWorktreeUnsupported => {
-                "Remote recipes cannot create local worktrees".to_owned()
-            }
+            Self::RemoteWorktreeUnsupported => t("recipe.issue.remote_worktree").to_owned(),
         }
     }
 }
@@ -573,7 +559,7 @@ pub fn suggested_recipe_name(prompt: &str) -> String {
         .unwrap_or("");
     let compact = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.is_empty() {
-        return "New recipe".to_owned();
+        return t("recipe.default_name").to_owned();
     }
     let mut name = compact.chars().take(42).collect::<String>();
     if compact.chars().count() > 42 {
@@ -585,9 +571,9 @@ pub fn suggested_recipe_name(prompt: &str) -> String {
 fn unique_copy_name(name: &str, existing: &[LaunchRecipe]) -> String {
     for copy in 1..=existing.len().saturating_add(1) {
         let suffix = if copy == 1 {
-            " copy".to_owned()
+            t("recipe.copy_suffix").to_owned()
         } else {
-            format!(" copy {copy}")
+            tf("recipe.copy_suffix_numbered", &[("number", &copy)])
         };
         let base_budget = MAX_RECIPE_NAME_CHARS.saturating_sub(suffix.chars().count());
         let base = name.trim().chars().take(base_budget).collect::<String>();

@@ -102,7 +102,7 @@ impl TerminalPane {
         let full_screen = resident.element.alt_screen();
         if full_screen && resident.attachment_state != AttachmentState::Live {
             // Only a running Agent can move its own view.
-            self.show_terminal_feedback("Reconnecting to the session…", window, cx);
+            self.show_terminal_feedback(t("terminal.messages.reconnecting"), window, cx);
             return;
         }
         // A jump moves the live view; a retained search view would hide it.
@@ -182,11 +182,7 @@ impl TerminalPane {
     ) {
         let resident = &self.residents[&id];
         if !resident.element.mouse_modes().is_reporting() {
-            self.show_terminal_feedback(
-                "This agent isn’t accepting scrolling right now",
-                window,
-                cx,
-            );
+            self.show_terminal_feedback(t("terminal.messages.no_scroll"), window, cx);
             return;
         }
         let buffer = resident.element.buffer();
@@ -370,15 +366,15 @@ impl TerminalPane {
                 });
                 self.show_terminal_feedback(
                     match (next, moved) {
-                        (true, true) => "Back to the latest output",
-                        (true, false) => "No later messages",
-                        (false, _) => "No earlier messages",
+                        (true, true) => t("terminal.back_to_latest"),
+                        (true, false) => t("terminal.messages.no_later"),
+                        (false, _) => t("terminal.messages.no_earlier"),
                     },
                     window,
                     cx,
                 );
             }
-            _ => self.show_terminal_feedback("Couldn’t find a message on screen", window, cx),
+            _ => self.show_terminal_feedback(t("terminal.messages.none_on_screen"), window, cx),
         }
         cx.notify();
     }
@@ -408,9 +404,9 @@ impl TerminalPane {
             let head = client
                 .read_scrollback_cells(&request_id, 0, 0)
                 .await
-                .map_err(|_| "Couldn’t read the terminal history")?;
+                .map_err(|_| t("terminal.history.read_failed"))?;
             if !(1..=4096).contains(&head.cols) || head.live_start_row < 0 {
-                return Err("Invalid history response");
+                return Err(t("terminal.history.invalid"));
             }
             let live_start = head.live_start_row;
             let reading = from.or(top).unwrap_or(live_start);
@@ -422,14 +418,14 @@ impl TerminalPane {
                     let page = client
                         .read_scrollback_cells(&id, first, last - first)
                         .await
-                        .map_err(|_| "Couldn’t read the terminal history")?;
-                    let count =
-                        usize::try_from(page.row_count).map_err(|_| "Invalid history response")?;
+                        .map_err(|_| t("terminal.history.read_failed"))?;
+                    let count = usize::try_from(page.row_count)
+                        .map_err(|_| t("terminal.history.invalid"))?;
                     if page.first_row != first || page.row_count > last - first {
-                        return Err("Invalid history response");
+                        return Err(t("terminal.history.invalid"));
                     }
                     GridRowCodec::decode_rows(&page.payload, count)
-                        .map_err(|_| "Invalid history response")
+                        .map_err(|_| t("terminal.history.invalid"))
                 }
             };
             // Messages on the live grid, which the app already holds.
@@ -521,7 +517,7 @@ impl TerminalPane {
                     Ok(Ok((None, ..))) if next && offset == 0 => {
                         // Nothing later than the live output.
                         this.qol.message_mark = origin;
-                        this.show_terminal_feedback("No later messages", window, cx);
+                        this.show_terminal_feedback(t("terminal.messages.no_later"), window, cx);
                     }
                     Ok(Ok((None, ..))) => {
                         // No message that way, but the session may be a
@@ -532,7 +528,7 @@ impl TerminalPane {
                         let miss = if next {
                             PromptMiss::Live
                         } else {
-                            PromptMiss::Say("No earlier messages")
+                            PromptMiss::Say(t("terminal.messages.no_earlier"))
                         };
                         this.read_history(Some(next), miss, window, cx);
                     }
@@ -548,11 +544,9 @@ impl TerminalPane {
                         cx,
                     ),
                     Ok(Err(message)) => this.show_terminal_feedback(message, window, cx),
-                    Err(_) => this.show_terminal_feedback(
-                        "Couldn’t read the terminal history",
-                        window,
-                        cx,
-                    ),
+                    Err(_) => {
+                        this.show_terminal_feedback(t("terminal.history.read_failed"), window, cx)
+                    }
                 }
                 cx.notify();
             });
@@ -579,13 +573,13 @@ impl TerminalPane {
         let Some((row, len)) = found else {
             if next && resident.element.view_offset() > 0 {
                 resident.element.scroll_to_live(visible_rows);
-                self.show_terminal_feedback("Back to the latest output", window, cx);
+                self.show_terminal_feedback(t("terminal.back_to_latest"), window, cx);
             } else {
                 self.show_terminal_feedback(
                     if next {
-                        "No later messages"
+                        t("terminal.messages.no_later")
                     } else {
-                        "No earlier messages"
+                        t("terminal.messages.no_earlier")
                     },
                     window,
                     cx,

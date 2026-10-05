@@ -58,7 +58,7 @@ impl NotePane {
         let mut panel = VersionPanel {
             note_id: open.id.clone(),
             title: if title.is_empty() {
-                "Untitled".into()
+                crate::i18n::t("notes.untitled").into()
             } else {
                 title
             },
@@ -105,11 +105,14 @@ impl NotePane {
         };
         let answer = window.prompt(
             gpui::PromptLevel::Info,
-            &format!("Restore the version from {}?", when(version.id)),
-            Some("The note's current text is kept in its version history, so you can go back."),
+            &crate::i18n::tf(
+                "notes.versions.restore_prompt",
+                &[("when", &when(version.id))],
+            ),
+            Some(crate::i18n::t("notes.versions.restore_detail")),
             &[
-                gpui::PromptButton::ok("Restore"),
-                gpui::PromptButton::cancel("Cancel"),
+                gpui::PromptButton::ok(crate::i18n::t("notes.versions.restore")),
+                gpui::PromptButton::cancel(crate::i18n::t("notes.cancel")),
             ],
             cx,
         );
@@ -137,7 +140,9 @@ impl NotePane {
                 self.error = None;
             }
             Err(err) => {
-                self.error = Some(format!("Couldn't restore that version: {err}").into());
+                self.error = Some(
+                    crate::i18n::tf("notes.versions.restore_failed", &[("error", &err)]).into(),
+                );
             }
         }
         cx.notify();
@@ -231,7 +236,7 @@ impl NotePane {
                     .text_size(px(diri_ui::Typo::ROW.size))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(colors.primary)
-                    .child("Version History"),
+                    .child(crate::i18n::t("notes.versions.title")),
             )
             .child(
                 div()
@@ -246,7 +251,7 @@ impl NotePane {
                         .px(px(floating::MENU_ROW_MARGIN + floating::MENU_ROW_INSET))
                         .text_size(px(diri_ui::Typo::ROW.size))
                         .text_color(colors.secondary)
-                        .child("No earlier versions yet. Diri keeps one as you write, and before anyone else changes this note."),
+                        .child(crate::i18n::t("notes.versions.empty")),
                 ),
             );
         }
@@ -319,7 +324,7 @@ impl NotePane {
             div()
                 .text_size(px(diri_ui::Typo::ROW.size))
                 .text_color(colors.primary)
-                .child("Restore This Version…"),
+                .child(crate::i18n::t("notes.versions.restore_this")),
         )
         .on_mouse_down(
             MouseButton::Left,
@@ -352,7 +357,7 @@ fn preview(store: &diri_notes::store::NoteStore, panel: &VersionPanel) -> Docume
     };
     match store.history().read(&panel.note_id, version.id) {
         Ok(source) => diri_notes::markdown::parse(&source).1,
-        Err(_) => Document::new("This version can't be read.", Vec::new()),
+        Err(_) => Document::new(crate::i18n::t("notes.versions.unreadable"), Vec::new()),
     }
 }
 
@@ -408,12 +413,26 @@ fn preview_element(doc: &Document, colors: diri_ui::SemanticColors) -> gpui::Div
 pub(super) fn when(ms: u64) -> String {
     let now = history::now_ms();
     let seconds = now.saturating_sub(ms) / 1000;
-    let plural = |n: u64, unit: &str| format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" });
+    let plural = |n: u64, one: &'static str, many: &'static str| {
+        crate::i18n::tf(if n == 1 { one } else { many }, &[("count", &n)])
+    };
     match seconds {
-        0..=59 => "Just now".into(),
-        60..=3_599 => plural(seconds / 60, "minute"),
-        3_600..=86_399 => plural(seconds / 3_600, "hour"),
-        86_400..=604_799 => plural(seconds / 86_400, "day"),
+        0..=59 => crate::i18n::t("notes.when.now").into(),
+        60..=3_599 => plural(
+            seconds / 60,
+            "notes.when.minutes_one",
+            "notes.when.minutes_other",
+        ),
+        3_600..=86_399 => plural(
+            seconds / 3_600,
+            "notes.when.hours_one",
+            "notes.when.hours_other",
+        ),
+        86_400..=604_799 => plural(
+            seconds / 86_400,
+            "notes.when.days_one",
+            "notes.when.days_other",
+        ),
         _ => history::describe_time(ms)[..10].to_owned(),
     }
 }
@@ -421,10 +440,12 @@ pub(super) fn when(ms: u64) -> String {
 /// "You", "Command line", or the agent's name as the sidebar shows it.
 fn who(author: &Author, agent_title: impl Fn(&str) -> Option<String>) -> String {
     match author {
-        Author::User => "You".into(),
-        Author::Cli => "Command line".into(),
-        Author::File => "Edited file".into(),
-        Author::Session(id) => agent_title(id).unwrap_or_else(|| "An agent".into()),
+        Author::User => crate::i18n::t("notes.author.you").into(),
+        Author::Cli => crate::i18n::t("notes.author.cli").into(),
+        Author::File => crate::i18n::t("notes.author.file").into(),
+        Author::Session(id) => {
+            agent_title(id).unwrap_or_else(|| crate::i18n::t("notes.author.agent").into())
+        }
     }
 }
 

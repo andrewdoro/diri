@@ -20,6 +20,7 @@ use diri_proto::{AgentKind, HistoryEntry};
 use serde::Deserialize;
 
 use crate::history::HistoryRoots;
+use crate::i18n::{t, tf};
 
 /// Largest `session.json` read. herdr's own files are a few kilobytes; the
 /// cap only keeps a corrupt or hostile file from being slurped.
@@ -119,20 +120,29 @@ impl HerdrPlan {
     /// "5 sessions from herdr" — the label on the import controls.
     pub fn headline(&self) -> String {
         let count = self.items.len();
-        format!(
-            "{count} {} from herdr",
-            if count == 1 { "session" } else { "sessions" }
-        )
+        let key = if count == 1 {
+            "herdr.headline_one"
+        } else {
+            "herdr.headline_other"
+        };
+        tf(key, &[("count", &count)])
     }
 
     /// "2 conversations, 1 agent and 3 terminals in 2 workspaces": what the
     /// import holds, in the words the Settings row uses.
     pub fn summary(&self) -> String {
-        format!(
-            "{} in {} {}.",
-            join_list(&self.parts(false)),
-            self.workspaces(),
-            plural(self.workspaces(), "workspace", "workspaces")
+        let workspaces = self.workspaces();
+        let key = if workspaces == 1 {
+            "herdr.summary_one"
+        } else {
+            "herdr.summary_other"
+        };
+        tf(
+            key,
+            &[
+                ("parts", &join_list(&self.parts(false))),
+                ("count", &workspaces),
+            ],
         )
     }
 
@@ -140,15 +150,21 @@ impl HerdrPlan {
     /// caveat that matters.
     pub fn confirmation_detail(&self) -> String {
         let workspaces = self.workspaces();
-        let mut detail = format!(
-            "From {workspaces} herdr {}: {}.",
-            plural(workspaces, "workspace", "workspaces"),
-            join_list(&self.parts(true))
+        let key = if workspaces == 1 {
+            "herdr.detail_one"
+        } else {
+            "herdr.detail_other"
+        };
+        let mut detail = tf(
+            key,
+            &[
+                ("count", &workspaces),
+                ("parts", &join_list(&self.parts(true))),
+            ],
         );
         if self.herdr_running {
-            detail.push_str(
-                "\n\nherdr is still running. Quit it first so no conversation is open in both apps.",
-            );
+            detail.push_str("\n\n");
+            detail.push_str(t("herdr.still_running"));
         }
         detail
     }
@@ -165,31 +181,32 @@ impl HerdrPlan {
         let mut parts = Vec::new();
         let resumed = self.resumed();
         if resumed > 0 {
-            let noun = plural(resumed, "conversation", "conversations");
-            parts.push(if explain {
-                format!(
-                    "{resumed} {noun} resumed where {} left off",
-                    if resumed == 1 { "it" } else { "they" }
-                )
-            } else {
-                format!("{resumed} {noun}")
-            });
+            let key = match (explain, resumed == 1) {
+                (true, true) => "herdr.part.resumed_one",
+                (true, false) => "herdr.part.resumed_other",
+                (false, true) => "herdr.part.conversations_one",
+                (false, false) => "herdr.part.conversations_other",
+            };
+            parts.push(tf(key, &[("count", &resumed)]));
         }
         let started = self.started();
         if started > 0 {
-            let noun = plural(started, "agent", "agents");
-            parts.push(if explain {
-                format!("{started} {noun} started fresh")
-            } else {
-                format!("{started} {noun}")
-            });
+            let key = match (explain, started == 1) {
+                (true, true) => "herdr.part.started_one",
+                (true, false) => "herdr.part.started_other",
+                (false, true) => "herdr.part.agents_one",
+                (false, false) => "herdr.part.agents_other",
+            };
+            parts.push(tf(key, &[("count", &started)]));
         }
         let terminals = self.terminals();
         if terminals > 0 {
-            parts.push(format!(
-                "{terminals} {}",
-                plural(terminals, "terminal", "terminals")
-            ));
+            let key = if terminals == 1 {
+                "herdr.part.terminals_one"
+            } else {
+                "herdr.part.terminals_other"
+            };
+            parts.push(tf(key, &[("count", &terminals)]));
         }
         parts
     }
@@ -206,11 +223,11 @@ pub(crate) fn confirm(
 ) {
     let answer = window.prompt(
         gpui::PromptLevel::Info,
-        &format!("Import {}?", plan.headline()),
+        &tf("herdr.confirm.title", &[("headline", &plan.headline())]),
         Some(&plan.confirmation_detail()),
         &[
-            gpui::PromptButton::ok("Import"),
-            gpui::PromptButton::cancel("Cancel"),
+            gpui::PromptButton::ok(t("herdr.confirm.import")),
+            gpui::PromptButton::cancel(t("herdr.confirm.cancel")),
         ],
         cx,
     );
@@ -222,15 +239,17 @@ pub(crate) fn confirm(
     .detach();
 }
 
-fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
-    if count == 1 { one } else { many }
-}
-
 fn join_list(parts: &[String]) -> String {
     match parts {
         [] => String::new(),
         [only] => only.clone(),
-        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+        [init @ .., last] => tf(
+            "herdr.list.and",
+            &[
+                ("init", &init.join(t("herdr.list.separator"))),
+                ("last", last),
+            ],
+        ),
     }
 }
 

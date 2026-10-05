@@ -16,6 +16,8 @@ use diri_proto::{
 };
 use serde_json::Value;
 
+use crate::i18n::t;
+
 const TRANSCRIPT_HEAD_BYTES: u64 = 512 * 1024;
 const TRANSCRIPT_TAIL_BYTES: u64 = 256 * 1024;
 const RESULT_CHAR_LIMIT: usize = 1_200;
@@ -67,10 +69,10 @@ pub fn handoff_proposal(
     validate_handoff(sessions, source_id, target_id)?;
     let source = sessions
         .get(source_id)
-        .ok_or_else(|| DelegationRefusal("The dragged session no longer exists.".to_owned()))?;
+        .ok_or_else(|| DelegationRefusal(t("delegation.refusal.source_gone").to_owned()))?;
     let target = sessions
         .get(target_id)
-        .ok_or_else(|| DelegationRefusal("The target session no longer exists.".to_owned()))?;
+        .ok_or_else(|| DelegationRefusal(t("delegation.refusal.target_gone").to_owned()))?;
     Ok(HandoffProposal {
         source_id: source.id.clone(),
         target_id: target.id.clone(),
@@ -87,23 +89,21 @@ pub fn validate_handoff(
 ) -> Result<(), DelegationRefusal> {
     let _source = sessions
         .get(source_id)
-        .ok_or_else(|| DelegationRefusal("The dragged session no longer exists.".to_owned()))?;
+        .ok_or_else(|| DelegationRefusal(t("delegation.refusal.source_gone").to_owned()))?;
     let target = sessions
         .get(target_id)
-        .ok_or_else(|| DelegationRefusal("The target session no longer exists.".to_owned()))?;
+        .ok_or_else(|| DelegationRefusal(t("delegation.refusal.target_gone").to_owned()))?;
     if source_id == target_id {
-        return Err(DelegationRefusal(
-            "A session cannot delegate work to itself.".to_owned(),
-        ));
+        return Err(DelegationRefusal(t("delegation.refusal.self").to_owned()));
     }
     if is_descendant(sessions, source_id, target_id) {
         return Err(DelegationRefusal(
-            "A session cannot delegate work to one of its descendants.".to_owned(),
+            t("delegation.refusal.descendant").to_owned(),
         ));
     }
     if target.is_archived() || matches!(target.status, SessionStatus::Exited(_)) {
         return Err(DelegationRefusal(
-            "The target session has ended and cannot receive a handoff.".to_owned(),
+            t("delegation.refusal.target_ended").to_owned(),
         ));
     }
 
@@ -116,14 +116,11 @@ pub fn sibling_proposal(
 ) -> Result<SiblingProposal, DelegationRefusal> {
     if source.is_archived() {
         return Err(DelegationRefusal(
-            "Archived sessions cannot be fanned out.".to_owned(),
+            t("delegation.refusal.archived_fan_out").to_owned(),
         ));
     }
-    let prompt = originating_prompt(source).ok_or_else(|| {
-        DelegationRefusal(
-            "The originating prompt is unavailable for this older session.".to_owned(),
-        )
-    })?;
+    let prompt = originating_prompt(source)
+        .ok_or_else(|| DelegationRefusal(t("delegation.refusal.no_prompt").to_owned()))?;
     Ok(SiblingProposal {
         source_id: source.id.clone(),
         source_title: display_title(source),
@@ -143,27 +140,27 @@ pub fn worktree_move_proposal(
 ) -> Result<WorktreeMoveProposal, DelegationRefusal> {
     if source.host.is_some() {
         return Err(DelegationRefusal(
-            "Remote sessions cannot move into a local worktree.".to_owned(),
+            t("delegation.refusal.remote_move").to_owned(),
         ));
     }
     if !matches!(source.status, SessionStatus::Exited(_)) {
         return Err(DelegationRefusal(
-            "Stop or archive the session before moving it to another worktree.".to_owned(),
+            t("delegation.refusal.still_running").to_owned(),
         ));
     }
     if !source.can_resume() {
         return Err(DelegationRefusal(
-            "This session cannot resume after moving to another worktree.".to_owned(),
+            t("delegation.refusal.cannot_resume").to_owned(),
         ));
     }
     if source.cwd == target.path || source.worktree_path.as_deref() == Some(&target.path) {
         return Err(DelegationRefusal(
-            "The session is already attached to this worktree.".to_owned(),
+            t("delegation.refusal.same_worktree").to_owned(),
         ));
     }
     if source_project.is_none_or(|project| project.root != target.project_root) {
         return Err(DelegationRefusal(
-            "Choose a worktree from the session's current project.".to_owned(),
+            t("delegation.refusal.other_project").to_owned(),
         ));
     }
     if target
@@ -176,7 +173,7 @@ pub fn worktree_move_proposal(
             .is_some_and(|status| !matches!(status, SessionStatus::Exited(_)))
     {
         return Err(DelegationRefusal(
-            "Another live session already owns this worktree.".to_owned(),
+            t("delegation.refusal.worktree_taken").to_owned(),
         ));
     }
 

@@ -240,14 +240,22 @@ impl ShortcutCategory {
         Self::Application,
     ];
 
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Sessions => "Sessions",
-            Self::Navigation => "Navigation",
-            Self::Workspace => "Workspace",
-            Self::Terminal => "Terminal",
-            Self::Application => "Application",
-        }
+    pub fn label(self) -> &'static str {
+        self.label_in(crate::i18n::t)
+    }
+
+    pub fn english_label(self) -> &'static str {
+        self.label_in(crate::i18n::english)
+    }
+
+    fn label_in(self, t: fn(&'static str) -> &'static str) -> &'static str {
+        t(match self {
+            Self::Sessions => "command.category.sessions",
+            Self::Navigation => "command.category.navigation",
+            Self::Workspace => "command.category.workspace",
+            Self::Terminal => "command.category.terminal",
+            Self::Application => "command.category.application",
+        })
     }
 }
 
@@ -260,9 +268,17 @@ pub struct ShortcutMetadata {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaletteMetadata {
-    pub title: &'static str,
+    /// Catalog id of the palette title; `title()` shows it.
+    pub title_id: &'static str,
     pub system_image: &'static str,
     pub keywords: &'static str,
+}
+
+impl PaletteMetadata {
+    /// The palette title in the interface language.
+    pub fn title(&self) -> &'static str {
+        crate::i18n::t(self.title_id)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,7 +313,7 @@ macro_rules! spec {
             shortcut: $shortcut,
             context: $context,
             palette: Some(PaletteMetadata {
-                title: $title,
+                title_id: $title,
                 system_image: $image,
                 keywords: $keywords,
             }),
@@ -328,7 +344,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-n"),
         Some("⇧⌘N"),
         None,
-        "New Window",
+        "command.new_window.palette_title",
         "macwindow.badge.plus",
         "window open independent view"
     ),
@@ -338,7 +354,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-w"),
         Some("⇧⌘W"),
         None,
-        "Close Window",
+        "command.close_window.palette_title",
         "macwindow",
         "window close keep sessions running"
     ),
@@ -376,7 +392,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-t"),
         Some("⌥⌘T"),
         Some(APP_CONTEXT),
-        "New Terminal",
+        "command.new_terminal.palette_title",
         "terminal",
         "shell console zsh bash tty"
     ),
@@ -400,7 +416,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-p"),
         Some("⌘P"),
         Some(APP_CONTEXT),
-        "Open project…",
+        "command.toggle_quick_open.palette_title",
         "folder",
         "folder project directory jump goto find"
     ),
@@ -410,7 +426,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-h"),
         Some("⇧⌘H"),
         Some(APP_CONTEXT),
-        "Search chats",
+        "command.toggle_history.palette_title",
         "clock.fill",
         "history conversations past resume"
     ),
@@ -420,7 +436,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-o"),
         Some("⇧⌘O"),
         Some(APP_CONTEXT),
-        "Session Overview",
+        "command.toggle_overview.palette_title",
         "square.grid.2x2",
         "board grid switcher all sessions pinch zoom"
     ),
@@ -430,7 +446,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("ctrl-shift-space"),
         Some("⌃⇧Space"),
         Some(APP_CONTEXT),
-        "Peek Tabs",
+        "command.toggle_tab_peek.palette_title",
         "rectangle.stack",
         "preview strip tabs glance"
     ),
@@ -440,7 +456,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Review session launches",
+        "command.review_launches.palette_title",
         "tray",
         "workspace create pending retry placement receipts"
     ),
@@ -450,7 +466,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("ctrl-alt-left"),
         Some("⌃⌥←"),
         Some(APP_CONTEXT),
-        "Focus pane left",
+        "command.focus_pane_left.palette_title",
         "rectangle.split.2x1",
         "workspace focus pane left"
     ),
@@ -460,7 +476,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("ctrl-alt-right"),
         Some("⌃⌥→"),
         Some(APP_CONTEXT),
-        "Focus pane right",
+        "command.focus_pane_right.palette_title",
         "rectangle.split.2x1",
         "workspace focus pane right"
     ),
@@ -470,7 +486,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("ctrl-alt-up"),
         Some("⌃⌥↑"),
         Some(APP_CONTEXT),
-        "Focus pane up",
+        "command.focus_pane_up.palette_title",
         "rectangle.split.2x1",
         "workspace focus pane up"
     ),
@@ -480,7 +496,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("ctrl-alt-down"),
         Some("⌃⌥↓"),
         Some(APP_CONTEXT),
-        "Focus pane down",
+        "command.focus_pane_down.palette_title",
         "rectangle.split.2x1",
         "workspace focus pane down"
     ),
@@ -490,7 +506,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-d"),
         Some("⌘D"),
         Some(APP_CONTEXT),
-        "Split pane right…",
+        "command.split_pane_right.palette_title",
         "rectangle.split.2x1",
         "workspace split pane right add layout"
     ),
@@ -500,7 +516,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-shift-d"),
         Some("⇧⌥⌘D"),
         Some(APP_CONTEXT),
-        "Split pane below…",
+        "command.split_pane_below.palette_title",
         "rectangle.split.2x1",
         "workspace split pane below add layout"
     ),
@@ -510,7 +526,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-enter"),
         Some("⇧⌘Return"),
         Some(APP_CONTEXT),
-        "Toggle pane zoom",
+        "command.toggle_pane_zoom.palette_title",
         "rectangle.split.2x1",
         "workspace toggle pane zoom maximize restore"
     ),
@@ -520,7 +536,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Remove focused pane",
+        "command.remove_focused_pane.palette_title",
         "rectangle.split.2x1",
         "workspace remove focused pane close"
     ),
@@ -530,7 +546,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-shift-right"),
         Some("⌥⇧⌘→"),
         Some(APP_CONTEXT),
-        "Grow pane width",
+        "command.pane_grow_width.palette_title",
         "rectangle.split.2x1",
         "workspace pane grow width resize divider"
     ),
@@ -540,7 +556,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-shift-left"),
         Some("⌥⇧⌘←"),
         Some(APP_CONTEXT),
-        "Shrink pane width",
+        "command.pane_shrink_width.palette_title",
         "rectangle.split.2x1",
         "workspace pane shrink width resize divider"
     ),
@@ -550,7 +566,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-shift-down"),
         Some("⌥⇧⌘↓"),
         Some(APP_CONTEXT),
-        "Grow pane height",
+        "command.pane_grow_height.palette_title",
         "rectangle.split.2x1",
         "workspace pane grow height resize divider"
     ),
@@ -560,7 +576,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-shift-up"),
         Some("⌥⇧⌘↑"),
         Some(APP_CONTEXT),
-        "Shrink pane height",
+        "command.pane_shrink_height.palette_title",
         "rectangle.split.2x1",
         "workspace pane shrink height resize divider"
     ),
@@ -570,7 +586,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Swap pane left",
+        "command.swap_pane_left.palette_title",
         "rectangle.split.2x1",
         "workspace swap pane left exchange"
     ),
@@ -580,7 +596,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Swap pane right",
+        "command.swap_pane_right.palette_title",
         "rectangle.split.2x1",
         "workspace swap pane right exchange"
     ),
@@ -590,7 +606,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Swap pane up",
+        "command.swap_pane_up.palette_title",
         "rectangle.split.2x1",
         "workspace swap pane up exchange"
     ),
@@ -600,7 +616,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Swap pane down",
+        "command.swap_pane_down.palette_title",
         "rectangle.split.2x1",
         "workspace swap pane down exchange"
     ),
@@ -610,7 +626,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Move pane left",
+        "command.move_pane_left.palette_title",
         "rectangle.split.2x1",
         "workspace move pane left dock"
     ),
@@ -620,7 +636,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Move pane right",
+        "command.move_pane_right.palette_title",
         "rectangle.split.2x1",
         "workspace move pane right dock"
     ),
@@ -630,7 +646,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Move pane up",
+        "command.move_pane_up.palette_title",
         "rectangle.split.2x1",
         "workspace move pane up dock"
     ),
@@ -640,7 +656,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Move pane down",
+        "command.move_pane_down.palette_title",
         "rectangle.split.2x1",
         "workspace move pane down dock"
     ),
@@ -650,7 +666,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-n"),
         Some("⌥⌘N"),
         Some(APP_CONTEXT),
-        "New Note",
+        "command.new_note.palette_title",
         "doc.text",
         "note notes markdown todo todos write memo prd plan doc"
     ),
@@ -660,7 +676,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-ctrl-t"),
         Some("⌃⌘T"),
         Some(APP_CONTEXT),
-        "To-dos",
+        "command.show_todos.palette_title",
         "checklist",
         "todos to-dos tasks checklist open review notes"
     ),
@@ -670,7 +686,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-f"),
         Some("⇧⌘F"),
         Some(APP_CONTEXT),
-        "Search notes",
+        "command.search_notes.palette_title",
         "magnifyingglass",
         "notes find search open archived memo doc"
     ),
@@ -680,7 +696,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Version History…",
+        "command.note_version_history.palette_title",
         "arrow.counterclockwise",
         "note history versions earlier restore undo changes"
     ),
@@ -690,7 +706,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Graph View",
+        "command.note_graph.palette_title",
         "point.3.filled.connected.trianglepath.dotted",
         "note graph links backlinks connections map related notes"
     ),
@@ -700,7 +716,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-w"),
         Some("⌥⌘W"),
         Some(APP_CONTEXT),
-        "Worktrees Overview",
+        "command.open_worktrees.palette_title",
         "square.stack.3d.up",
         "git branch checkout"
     ),
@@ -710,7 +726,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-,"),
         Some("⌘,"),
         Some(APP_CONTEXT),
-        "Settings…",
+        "command.open_settings.palette_title",
         "gearshape",
         "preferences config options"
     ),
@@ -720,7 +736,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-b"),
         Some("⌘B"),
         Some(APP_CONTEXT),
-        "Toggle Navigation Bar",
+        "command.toggle_sidebar.palette_title",
         "sidebar.left",
         "hide show panel sidebar horizontal vertical tabs top bar"
     ),
@@ -730,7 +746,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-s"),
         Some("⇧⌘S"),
         Some(APP_CONTEXT),
-        "Switch Tab Orientation",
+        "command.toggle_tab_orientation.palette_title",
         "rectangle.split.2x1",
         "horizontal vertical tabs sidebar layout"
     ),
@@ -740,7 +756,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Switch to Horizontal Tabs",
+        "command.horizontal_tabs.palette_title",
         "rectangle.topthird.inset.filled",
         "tab placement orientation top"
     ),
@@ -750,7 +766,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Switch to Vertical Tabs",
+        "command.vertical_tabs.palette_title",
         "sidebar.left",
         "tab placement orientation side"
     ),
@@ -760,7 +776,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-b"),
         Some("⇧⌘B"),
         Some(APP_CONTEXT),
-        "Focus Sidebar",
+        "command.focus_sidebar.palette_title",
         "sidebar.left",
         "keyboard sessions navigation focus"
     ),
@@ -784,7 +800,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-c"),
         Some("⇧⌘C"),
         Some(APP_CONTEXT),
-        "Quote Selection",
+        "command.quote_selection.palette_title",
         "text.quote",
         "append cite composer draft context"
     ),
@@ -794,7 +810,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-shift-c"),
         Some("⌥⇧⌘C"),
         Some(APP_CONTEXT),
-        "Quote Selection to Session…",
+        "command.quote_selection_to_session.palette_title",
         "sidebar.left",
         "append cite composer draft target another agent"
     ),
@@ -818,7 +834,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-ctrl-d"),
         Some("⌃⌘D"),
         Some(APP_CONTEXT),
-        "Delegate Selected Session",
+        "command.delegate_selected_session.palette_title",
         "arrowshape.turn.up.right",
         "handoff delegate context agent session"
     ),
@@ -835,7 +851,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-i"),
         Some("⇧⌘I"),
         Some(APP_CONTEXT),
-        "Notifications",
+        "command.toggle_notifications.palette_title",
         "bell",
         "inbox unread alerts attention"
     ),
@@ -845,7 +861,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "Check for Updates…",
+        "command.check_for_updates.palette_title",
         "arrow.triangle.2.circlepath",
         "upgrade version release"
     ),
@@ -855,7 +871,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         None,
         Some(APP_CONTEXT),
-        "What's New",
+        "command.show_whats_new.palette_title",
         "sparkles",
         "whats new release highlights features changelog demo video tour"
     ),
@@ -865,7 +881,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-p"),
         Some("⌥⌘P"),
         Some(APP_CONTEXT),
-        "Toggle Performance Overlay",
+        "command.toggle_perf_overlay.palette_title",
         "chart.bar",
         "developer fps frame meter perf performance overlay jank dropped frames memory debug"
     ),
@@ -875,7 +891,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-r"),
         Some("⌥⌘R"),
         Some(APP_CONTEXT),
-        "Toggle Render Counters",
+        "command.toggle_render_counters.palette_title",
         "square.stack.3d.up",
         "developer renders render count redraw views perf performance debug"
     ),
@@ -1035,7 +1051,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-c"),
         Some("⌘⌥C"),
         Some(TERMINAL_CONTEXT),
-        "Keyboard copy mode",
+        "command.enter_copy_mode.palette_title",
         "doc.on.clipboard",
         "copy keyboard terminal selection"
     ),
@@ -1045,7 +1061,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-alt-f"),
         Some("⌘⌥F"),
         Some(TERMINAL_CONTEXT),
-        "Find selection",
+        "command.find_selection.palette_title",
         "magnifyingglass",
         "find selection terminal"
     ),
@@ -1055,7 +1071,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-e"),
         Some("⌘E"),
         Some(TERMINAL_CONTEXT),
-        "Insert path",
+        "command.insert_path.palette_title",
         "magnifyingglass",
         "insert path file picker fuzzy terminal"
     ),
@@ -1065,7 +1081,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-e"),
         Some("⌘⇧E"),
         Some(TERMINAL_CONTEXT),
-        "Open scrollback in editor",
+        "command.export_scrollback.palette_title",
         "doc.text",
         "terminal log export scrollback"
     ),
@@ -1075,7 +1091,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-up"),
         Some("⌘⇧↑"),
         Some(TERMINAL_CONTEXT),
-        "Previous message or shell prompt",
+        "command.previous_prompt.palette_title",
         "arrow.up",
         "terminal message prompt previous conversation"
     ),
@@ -1085,7 +1101,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("cmd-shift-down"),
         Some("⌘⇧↓"),
         Some(TERMINAL_CONTEXT),
-        "Next message or shell prompt",
+        "command.next_prompt.palette_title",
         "arrow.down",
         "terminal message prompt next conversation"
     ),
@@ -1538,428 +1554,449 @@ pub fn shortcut_conflict(
 }
 
 impl CommandId {
-    pub const fn shortcut_metadata(self) -> ShortcutMetadata {
+    /// The title, description and group Settings › Shortcuts shows, in the
+    /// interface language.
+    pub fn shortcut_metadata(self) -> ShortcutMetadata {
+        self.shortcut_metadata_in(crate::i18n::t)
+    }
+
+    /// The English metadata, so a search typed in English still finds a
+    /// shortcut whatever language is shown.
+    pub fn english_shortcut_metadata(self) -> ShortcutMetadata {
+        self.shortcut_metadata_in(crate::i18n::english)
+    }
+
+    fn shortcut_metadata_in(self, t: fn(&'static str) -> &'static str) -> ShortcutMetadata {
         use ShortcutCategory::{Application, Navigation, Sessions, Terminal, Workspace};
         match self {
             Self::CloseSession => ShortcutMetadata {
-                title: "Close session",
-                description: "Close the selected session",
+                title: t("command.close_session.title"),
+                description: t("command.close_session.description"),
                 category: Sessions,
             },
             Self::ReopenSession => ShortcutMetadata {
-                title: "Reopen closed session",
-                description: "Restore the most recently closed session",
+                title: t("command.reopen_session.title"),
+                description: t("command.reopen_session.description"),
                 category: Sessions,
             },
             Self::OpenLauncher => ShortcutMetadata {
-                title: "New session",
-                description: "Open the new session picker",
+                title: t("command.open_launcher.title"),
+                description: t("command.open_launcher.description"),
                 category: Sessions,
             },
             Self::NewDefaultSession => ShortcutMetadata {
-                title: "New default session",
-                description: "Start a session with the default agent",
+                title: t("command.new_default_session.title"),
+                description: t("command.new_default_session.description"),
                 category: Sessions,
             },
             Self::NewTerminal => ShortcutMetadata {
-                title: "New terminal",
-                description: "Start a standalone shell session",
+                title: t("command.new_terminal.title"),
+                description: t("command.new_terminal.description"),
                 category: Sessions,
             },
             Self::NewCodexSession => ShortcutMetadata {
-                title: "New Codex session",
-                description: "Start a new Codex session",
+                title: t("command.new_codex_session.title"),
+                description: t("command.new_codex_session.description"),
                 category: Sessions,
             },
             Self::ArchiveSelectedSession => ShortcutMetadata {
-                title: "Archive session",
-                description: "Archive the selected session",
+                title: t("command.archive_selected_session.title"),
+                description: t("command.archive_selected_session.description"),
                 category: Sessions,
             },
             Self::RenameSelectedSession => ShortcutMetadata {
-                title: "Rename session",
-                description: "Rename the selected session",
+                title: t("command.rename_selected_session.title"),
+                description: t("command.rename_selected_session.description"),
                 category: Sessions,
             },
             Self::DelegateSelectedSession => ShortcutMetadata {
-                title: "Delegate session",
-                description: "Hand off work from the selected session",
+                title: t("command.delegate_selected_session.title"),
+                description: t("command.delegate_selected_session.description"),
                 category: Sessions,
             },
             Self::ToggleNotifications => ShortcutMetadata {
-                title: "Notifications",
-                description: "Open the unread notification inbox",
+                title: t("command.toggle_notifications.title"),
+                description: t("command.toggle_notifications.description"),
                 category: Navigation,
             },
             Self::SelectNextAttentionSession => ShortcutMetadata {
-                title: "Next session needing attention",
-                description: "Jump to the next session waiting for you",
+                title: t("command.select_next_attention_session.title"),
+                description: t("command.select_next_attention_session.description"),
                 category: Sessions,
             },
             Self::QuoteSelection => ShortcutMetadata {
-                title: "Quote selection",
-                description: "Add the terminal selection to this session's composer",
+                title: t("command.quote_selection.title"),
+                description: t("command.quote_selection.description"),
                 category: Sessions,
             },
             Self::QuoteSelectionToSession => ShortcutMetadata {
-                title: "Quote selection to session",
-                description: "Send the terminal selection to another session",
+                title: t("command.quote_selection_to_session.title"),
+                description: t("command.quote_selection_to_session.description"),
                 category: Sessions,
             },
             Self::ToggleHistory => ShortcutMetadata {
-                title: "Conversation history",
-                description: "Open or close conversation history",
+                title: t("command.toggle_history.title"),
+                description: t("command.toggle_history.description"),
                 category: Navigation,
             },
             Self::ToggleOverview => ShortcutMetadata {
-                title: "Session overview",
-                description: "Open or close the session overview",
+                title: t("command.toggle_overview.title"),
+                description: t("command.toggle_overview.description"),
                 category: Navigation,
             },
             Self::ReviewLaunches => ShortcutMetadata {
-                title: "Review session launches",
-                description: "Review pending creation and retry workspace placement",
+                title: t("command.review_launches.title"),
+                description: t("command.review_launches.description"),
                 category: Workspace,
             },
             Self::FocusPaneLeft => ShortcutMetadata {
-                title: "Focus pane left",
-                description: "Move focus to the nearest pane in this direction",
+                title: t("command.focus_pane_left.title"),
+                description: t("command.focus_pane_left.description"),
                 category: Workspace,
             },
             Self::FocusPaneRight => ShortcutMetadata {
-                title: "Focus pane right",
-                description: "Move focus to the nearest pane in this direction",
+                title: t("command.focus_pane_right.title"),
+                description: t("command.focus_pane_right.description"),
                 category: Workspace,
             },
             Self::FocusPaneUp => ShortcutMetadata {
-                title: "Focus pane up",
-                description: "Move focus to the nearest pane in this direction",
+                title: t("command.focus_pane_up.title"),
+                description: t("command.focus_pane_up.description"),
                 category: Workspace,
             },
             Self::FocusPaneDown => ShortcutMetadata {
-                title: "Focus pane down",
-                description: "Move focus to the nearest pane in this direction",
+                title: t("command.focus_pane_down.title"),
+                description: t("command.focus_pane_down.description"),
                 category: Workspace,
             },
             Self::SplitPaneRight => ShortcutMetadata {
-                title: "Split pane right…",
-                description: "Choose a session for the new split",
+                title: t("command.split_pane_right.title"),
+                description: t("command.split_pane_right.description"),
                 category: Workspace,
             },
             Self::SplitPaneBelow => ShortcutMetadata {
-                title: "Split pane below…",
-                description: "Choose a session for the new split",
+                title: t("command.split_pane_below.title"),
+                description: t("command.split_pane_below.description"),
                 category: Workspace,
             },
             Self::TogglePaneZoom => ShortcutMetadata {
-                title: "Toggle pane zoom",
-                description: "Expand the focused pane or restore its saved layout",
+                title: t("command.toggle_pane_zoom.title"),
+                description: t("command.toggle_pane_zoom.description"),
                 category: Workspace,
             },
             Self::RemoveFocusedPane => ShortcutMetadata {
-                title: "Remove focused pane",
-                description: "Remove the pane reference while keeping its session running",
+                title: t("command.remove_focused_pane.title"),
+                description: t("command.remove_focused_pane.description"),
                 category: Workspace,
             },
             Self::PaneGrowWidth => ShortcutMetadata {
-                title: "Grow pane width",
-                description: "Resize the nearest matching split divider by five percent",
+                title: t("command.pane_grow_width.title"),
+                description: t("command.pane_grow_width.description"),
                 category: Workspace,
             },
             Self::PaneShrinkWidth => ShortcutMetadata {
-                title: "Shrink pane width",
-                description: "Resize the nearest matching split divider by five percent",
+                title: t("command.pane_shrink_width.title"),
+                description: t("command.pane_shrink_width.description"),
                 category: Workspace,
             },
             Self::PaneGrowHeight => ShortcutMetadata {
-                title: "Grow pane height",
-                description: "Resize the nearest matching split divider by five percent",
+                title: t("command.pane_grow_height.title"),
+                description: t("command.pane_grow_height.description"),
                 category: Workspace,
             },
             Self::PaneShrinkHeight => ShortcutMetadata {
-                title: "Shrink pane height",
-                description: "Resize the nearest matching split divider by five percent",
+                title: t("command.pane_shrink_height.title"),
+                description: t("command.pane_shrink_height.description"),
                 category: Workspace,
             },
             Self::SwapPaneLeft => ShortcutMetadata {
-                title: "Swap pane left",
-                description: "Swap the focused pane with its nearest neighbor",
+                title: t("command.swap_pane_left.title"),
+                description: t("command.swap_pane_left.description"),
                 category: Workspace,
             },
             Self::SwapPaneRight => ShortcutMetadata {
-                title: "Swap pane right",
-                description: "Swap the focused pane with its nearest neighbor",
+                title: t("command.swap_pane_right.title"),
+                description: t("command.swap_pane_right.description"),
                 category: Workspace,
             },
             Self::SwapPaneUp => ShortcutMetadata {
-                title: "Swap pane up",
-                description: "Swap the focused pane with its nearest neighbor",
+                title: t("command.swap_pane_up.title"),
+                description: t("command.swap_pane_up.description"),
                 category: Workspace,
             },
             Self::SwapPaneDown => ShortcutMetadata {
-                title: "Swap pane down",
-                description: "Swap the focused pane with its nearest neighbor",
+                title: t("command.swap_pane_down.title"),
+                description: t("command.swap_pane_down.description"),
                 category: Workspace,
             },
             Self::MovePaneLeft => ShortcutMetadata {
-                title: "Move pane left",
-                description: "Move the focused pane with its nearest neighbor",
+                title: t("command.move_pane_left.title"),
+                description: t("command.move_pane_left.description"),
                 category: Workspace,
             },
             Self::MovePaneRight => ShortcutMetadata {
-                title: "Move pane right",
-                description: "Move the focused pane with its nearest neighbor",
+                title: t("command.move_pane_right.title"),
+                description: t("command.move_pane_right.description"),
                 category: Workspace,
             },
             Self::MovePaneUp => ShortcutMetadata {
-                title: "Move pane up",
-                description: "Move the focused pane with its nearest neighbor",
+                title: t("command.move_pane_up.title"),
+                description: t("command.move_pane_up.description"),
                 category: Workspace,
             },
             Self::MovePaneDown => ShortcutMetadata {
-                title: "Move pane down",
-                description: "Move the focused pane with its nearest neighbor",
+                title: t("command.move_pane_down.title"),
+                description: t("command.move_pane_down.description"),
                 category: Workspace,
             },
             Self::ToggleTabPeek => ShortcutMetadata {
-                title: "Peek tabs",
-                description: "Preview sessions across projects without changing work",
+                title: t("command.toggle_tab_peek.title"),
+                description: t("command.toggle_tab_peek.description"),
                 category: Navigation,
             },
             Self::ShowTodos => ShortcutMetadata {
-                title: "To-dos",
-                description: "Every open to-do across your notes",
+                title: t("command.show_todos.title"),
+                description: t("command.show_todos.description"),
                 category: Navigation,
             },
             Self::SearchNotes => ShortcutMetadata {
-                title: "Search notes",
-                description: "Find any note, live or archived",
+                title: t("command.search_notes.title"),
+                description: t("command.search_notes.description"),
                 category: Navigation,
             },
             Self::NewNote => ShortcutMetadata {
-                title: "New note",
-                description: "Start a note in the current project, beside its agents",
+                title: t("command.new_note.title"),
+                description: t("command.new_note.description"),
                 category: Navigation,
             },
             Self::NoteVersionHistory => ShortcutMetadata {
-                title: "Version history",
-                description: "See and restore earlier versions of the open note",
+                title: t("command.note_version_history.title"),
+                description: t("command.note_version_history.description"),
                 category: Navigation,
             },
             Self::NoteGraph => ShortcutMetadata {
-                title: "Graph view",
-                description: "See how the open note links to your other notes",
+                title: t("command.note_graph.title"),
+                description: t("command.note_graph.description"),
                 category: Navigation,
             },
             Self::OpenWorktrees => ShortcutMetadata {
-                title: "Worktrees overview",
-                description: "Open the Git worktrees overview",
+                title: t("command.open_worktrees.title"),
+                description: t("command.open_worktrees.description"),
                 category: Navigation,
             },
             Self::ToggleCommandPalette => ShortcutMetadata {
-                title: "Command palette",
-                description: "Search all available commands",
+                title: t("command.toggle_command_palette.title"),
+                description: t("command.toggle_command_palette.description"),
                 category: Navigation,
             },
             Self::ToggleQuickOpen => ShortcutMetadata {
-                title: "Quick Open",
-                description: "Find and open a project folder",
+                title: t("command.toggle_quick_open.title"),
+                description: t("command.toggle_quick_open.description"),
                 category: Navigation,
             },
             Self::SelectPreviousSession => ShortcutMetadata {
-                title: "Previous session",
-                description: "Select the previous session in the sidebar",
+                title: t("command.select_previous_session.title"),
+                description: t("command.select_previous_session.description"),
                 category: Navigation,
             },
             Self::SelectNextSession => ShortcutMetadata {
-                title: "Next session",
-                description: "Select the next session in the sidebar",
+                title: t("command.select_next_session.title"),
+                description: t("command.select_next_session.description"),
                 category: Navigation,
             },
             Self::MoveSelectedSessionUp => ShortcutMetadata {
-                title: "Move session up",
-                description: "Move the selected session up in the sidebar",
+                title: t("command.move_selected_session_up.title"),
+                description: t("command.move_selected_session_up.description"),
                 category: Navigation,
             },
             Self::MoveSelectedSessionDown => ShortcutMetadata {
-                title: "Move session down",
-                description: "Move the selected session down in the sidebar",
+                title: t("command.move_selected_session_down.title"),
+                description: t("command.move_selected_session_down.description"),
                 category: Navigation,
             },
-            Self::SelectSession1 => {
-                session_slot_metadata("Select session 1", "Select the first session")
-            }
-            Self::SelectSession2 => {
-                session_slot_metadata("Select session 2", "Select the second session")
-            }
-            Self::SelectSession3 => {
-                session_slot_metadata("Select session 3", "Select the third session")
-            }
-            Self::SelectSession4 => {
-                session_slot_metadata("Select session 4", "Select the fourth session")
-            }
-            Self::SelectSession5 => {
-                session_slot_metadata("Select session 5", "Select the fifth session")
-            }
-            Self::SelectSession6 => {
-                session_slot_metadata("Select session 6", "Select the sixth session")
-            }
-            Self::SelectSession7 => {
-                session_slot_metadata("Select session 7", "Select the seventh session")
-            }
-            Self::SelectSession8 => {
-                session_slot_metadata("Select session 8", "Select the eighth session")
-            }
-            Self::SelectLastSession => {
-                session_slot_metadata("Select last session", "Select the last session")
-            }
+            Self::SelectSession1 => session_slot_metadata(
+                t("command.select_session_1.title"),
+                t("command.select_session_1.description"),
+            ),
+            Self::SelectSession2 => session_slot_metadata(
+                t("command.select_session_2.title"),
+                t("command.select_session_2.description"),
+            ),
+            Self::SelectSession3 => session_slot_metadata(
+                t("command.select_session_3.title"),
+                t("command.select_session_3.description"),
+            ),
+            Self::SelectSession4 => session_slot_metadata(
+                t("command.select_session_4.title"),
+                t("command.select_session_4.description"),
+            ),
+            Self::SelectSession5 => session_slot_metadata(
+                t("command.select_session_5.title"),
+                t("command.select_session_5.description"),
+            ),
+            Self::SelectSession6 => session_slot_metadata(
+                t("command.select_session_6.title"),
+                t("command.select_session_6.description"),
+            ),
+            Self::SelectSession7 => session_slot_metadata(
+                t("command.select_session_7.title"),
+                t("command.select_session_7.description"),
+            ),
+            Self::SelectSession8 => session_slot_metadata(
+                t("command.select_session_8.title"),
+                t("command.select_session_8.description"),
+            ),
+            Self::SelectLastSession => session_slot_metadata(
+                t("command.select_last_session.title"),
+                t("command.select_last_session.description"),
+            ),
             Self::ToggleTabOrientation | Self::HorizontalTabs | Self::VerticalTabs => {
                 ShortcutMetadata {
-                    title: "Tab orientation",
-                    description: "Place session tabs across the top or in the sidebar",
+                    title: t("command.tab_orientation.title"),
+                    description: t("command.tab_orientation.description"),
                     category: Workspace,
                 }
             }
             Self::ToggleSidebar => ShortcutMetadata {
-                title: "Toggle navigation bar",
-                description: "Show or hide the sidebar with vertical tabs, or the top bar with horizontal tabs",
+                title: t("command.toggle_sidebar.title"),
+                description: t("command.toggle_sidebar.description"),
                 category: Workspace,
             },
             Self::FocusSidebar => ShortcutMetadata {
-                title: "Focus sidebar",
-                description: "Move keyboard focus to the sessions sidebar",
+                title: t("command.focus_sidebar.title"),
+                description: t("command.focus_sidebar.description"),
                 category: Workspace,
             },
             Self::ToggleInspector => ShortcutMetadata {
-                title: "Toggle inspector",
-                description: "Show or hide the session inspector",
+                title: t("command.toggle_inspector.title"),
+                description: t("command.toggle_inspector.description"),
                 category: Workspace,
             },
             Self::ToggleAuxiliaryTerminal => ShortcutMetadata {
-                title: "Toggle auxiliary terminal",
-                description: "Show or hide the lower terminal pane",
+                title: t("command.toggle_auxiliary_terminal.title"),
+                description: t("command.toggle_auxiliary_terminal.description"),
                 category: Workspace,
             },
             Self::OpenFind => ShortcutMetadata {
-                title: "Find in terminal",
-                description: "Search the active terminal output",
+                title: t("command.open_find.title"),
+                description: t("command.open_find.description"),
                 category: Terminal,
             },
             Self::FindNext => ShortcutMetadata {
-                title: "Find next",
-                description: "Move to the next terminal search result",
+                title: t("command.find_next.title"),
+                description: t("command.find_next.description"),
                 category: Terminal,
             },
             Self::FindPrevious => ShortcutMetadata {
-                title: "Find previous",
-                description: "Move to the previous terminal search result",
+                title: t("command.find_previous.title"),
+                description: t("command.find_previous.description"),
                 category: Terminal,
             },
             Self::ZoomIn => ShortcutMetadata {
-                title: "Increase text size",
-                description: "Make terminal text larger",
+                title: t("command.zoom_in.title"),
+                description: t("command.zoom_in.description"),
                 category: Terminal,
             },
             Self::ZoomOut => ShortcutMetadata {
-                title: "Decrease text size",
-                description: "Make terminal text smaller",
+                title: t("command.zoom_out.title"),
+                description: t("command.zoom_out.description"),
                 category: Terminal,
             },
             Self::ResetZoom => ShortcutMetadata {
-                title: "Reset text size",
-                description: "Restore the default terminal text size",
+                title: t("command.reset_zoom.title"),
+                description: t("command.reset_zoom.description"),
                 category: Terminal,
             },
             Self::Paste => ShortcutMetadata {
-                title: "Paste",
-                description: "Paste clipboard contents into the terminal",
+                title: t("command.paste.title"),
+                description: t("command.paste.description"),
                 category: Terminal,
             },
             Self::EnterCopyMode => ShortcutMetadata {
-                title: "Keyboard copy mode",
-                description: "Select terminal output with the keyboard",
+                title: t("command.enter_copy_mode.title"),
+                description: t("command.enter_copy_mode.description"),
                 category: ShortcutCategory::Terminal,
             },
             Self::FindSelection => ShortcutMetadata {
-                title: "Find selection",
-                description: "Search for the selected terminal text",
+                title: t("command.find_selection.title"),
+                description: t("command.find_selection.description"),
                 category: ShortcutCategory::Terminal,
             },
             Self::InsertPath => ShortcutMetadata {
-                title: "Insert path",
-                description: "Pick a file under the session's directory and type its path",
+                title: t("command.insert_path.title"),
+                description: t("command.insert_path.description"),
                 category: ShortcutCategory::Terminal,
             },
             Self::ExportScrollback => ShortcutMetadata {
-                title: "Open scrollback in editor",
-                description: "Open retained terminal output in your text editor",
+                title: t("command.export_scrollback.title"),
+                description: t("command.export_scrollback.description"),
                 category: ShortcutCategory::Terminal,
             },
             Self::PreviousPrompt => ShortcutMetadata {
-                title: "Previous message or shell prompt",
-                description: "Jump to the preceding sent Agent message or marked shell prompt",
+                title: t("command.previous_prompt.title"),
+                description: t("command.previous_prompt.description"),
                 category: ShortcutCategory::Terminal,
             },
             Self::NextPrompt => ShortcutMetadata {
-                title: "Next message or shell prompt",
-                description: "Jump to the following sent Agent message or marked shell prompt",
+                title: t("command.next_prompt.title"),
+                description: t("command.next_prompt.description"),
                 category: ShortcutCategory::Terminal,
             },
             Self::CopySelection => ShortcutMetadata {
-                title: "Copy selection",
-                description: "Copy the terminal selection",
+                title: t("command.copy_selection.title"),
+                description: t("command.copy_selection.description"),
                 category: Terminal,
             },
             Self::OpenSettings => ShortcutMetadata {
-                title: "Open settings",
-                description: "Open or close Diri settings",
+                title: t("command.open_settings.title"),
+                description: t("command.open_settings.description"),
                 category: Application,
             },
             Self::CheckForUpdates => ShortcutMetadata {
-                title: "Check for updates",
-                description: "Look for a newer version of Diri",
+                title: t("command.check_for_updates.title"),
+                description: t("command.check_for_updates.description"),
                 category: Application,
             },
             Self::ShowWhatsNew => ShortcutMetadata {
-                title: "What's New",
-                description: "Replay the highlights of recent releases",
+                title: t("command.show_whats_new.title"),
+                description: t("command.show_whats_new.description"),
                 category: Application,
             },
             Self::TogglePerfOverlay => ShortcutMetadata {
-                title: "Performance overlay",
-                description: "Show frame rate, frame times and memory over the window",
+                title: t("command.toggle_perf_overlay.title"),
+                description: t("command.toggle_perf_overlay.description"),
                 category: Application,
             },
             Self::ToggleRenderCounters => ShortcutMetadata {
-                title: "Render counters",
-                description: "Count how often each view renders",
+                title: t("command.toggle_render_counters.title"),
+                description: t("command.toggle_render_counters.description"),
                 category: Application,
             },
             Self::NewWindow => ShortcutMetadata {
-                title: "New window",
-                description: "Open another window for the current workspace",
+                title: t("command.new_window.title"),
+                description: t("command.new_window.description"),
                 category: Application,
             },
             Self::CloseWindow => ShortcutMetadata {
-                title: "Close window",
-                description: "Close the current Diri window",
+                title: t("command.close_window.title"),
+                description: t("command.close_window.description"),
                 category: Application,
             },
             Self::HideApp => ShortcutMetadata {
-                title: "Hide Diri",
-                description: "Hide all Diri windows",
+                title: t("command.hide_app.title"),
+                description: t("command.hide_app.description"),
                 category: Application,
             },
             Self::Quit => ShortcutMetadata {
-                title: "Quit Diri",
-                description: "Close Diri and leave no windows open",
+                title: t("command.quit.title"),
+                description: t("command.quit.description"),
                 category: Application,
             },
         }
     }
 }
 
-const fn session_slot_metadata(title: &'static str, description: &'static str) -> ShortcutMetadata {
+fn session_slot_metadata(title: &'static str, description: &'static str) -> ShortcutMetadata {
     ShortcutMetadata {
         title,
         description,
@@ -2277,7 +2314,7 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert_eq!(quote.shortcut_label().as_deref(), Some("Ctrl+Shift+C"));
         assert_eq!(
-            quote.palette.map(|metadata| metadata.title),
+            quote.palette.map(|metadata| metadata.title()),
             Some("Quote Selection")
         );
 
@@ -2372,6 +2409,15 @@ mod tests {
             let metadata = command.id.shortcut_metadata();
             assert!(!metadata.title.is_empty());
             assert!(!metadata.description.is_empty());
+            // Palette titles are catalog ids the source scan cannot check.
+            if let Some(palette) = command.palette {
+                assert_ne!(
+                    crate::i18n::english(palette.title_id),
+                    palette.title_id,
+                    "{} palette title id is missing from the catalog",
+                    command.stable_id
+                );
+            }
         }
     }
 

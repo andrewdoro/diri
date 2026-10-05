@@ -803,7 +803,7 @@ Source: https://diri.sh/docs/scheduled-tasks/
 A schedule starts an agent at a set time and sends it a prompt. A recipe is a saved launch you run by hand. Both start a brand new session each time.
 
 ## Schedules
-Open **Settings → Schedules**. Schedules belong to the Engine, not to a window or an agent, so they keep working after the session that created them closes.
+Open **Settings → Schedules**. Schedules belong to the Engine, not to a window or an agent, so they keep working after the session that created them closes. For a beginner walkthrough, see [Run agents on a schedule](/guides/scheduled-tasks/).
 
 ### Create a schedule
 1. Click **New schedule**.
@@ -834,7 +834,9 @@ Each schedule shows when it runs, the agent, the folder, and whether it wakes th
 Each row has **Open** to jump to the session the last run started, **Run now**, **Delete**, and a switch to pause or resume the schedule. A **Once** schedule whose time has passed cannot be resumed; create a new one.
 
 ### What a run does
-At the due time diri opens a new tab with the chosen agent in the chosen folder and sends the prompt. The run does not see any earlier run or the conversation that created the schedule, so write a prompt that stands on its own.
+The first run opens a new tab with the chosen agent in the chosen folder and sends the prompt. Later runs send the prompt into that same tab, so a repeating schedule is one ongoing conversation: diri resumes the agent if it exited and waits up to 30 minutes for a turn still in progress. If you closed the tab, the next run opens a new one. A schedule that uses a fresh worktree opens a new tab for every run.
+
+The first run cannot see the conversation that created the schedule, so write a prompt that stands on its own.
 
 ### Missed runs
 If the Mac was asleep or diri was not running at the due time, diri catches up when it is back:

@@ -22,6 +22,7 @@ use gpui::{
 use tokio::runtime::Runtime;
 
 use crate::agent_catalog::AgentOption;
+use crate::i18n::{t, tf};
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
 use crate::store::{SessionStore, StoreRuntime};
 
@@ -47,12 +48,12 @@ impl Repeat {
     const ALL: [Self; 4] = [Self::Once, Self::Daily, Self::Weekdays, Self::Hourly];
 
     fn label(self) -> &'static str {
-        match self {
-            Self::Once => "Once",
-            Self::Daily => "Every day",
-            Self::Weekdays => "Weekdays",
-            Self::Hourly => "Every hour",
-        }
+        t(match self {
+            Self::Once => "settings.schedules.repeat_once",
+            Self::Daily => "settings.schedules.repeat_daily",
+            Self::Weekdays => "settings.schedules.repeat_weekdays",
+            Self::Hourly => "settings.schedules.repeat_hourly",
+        })
     }
 }
 
@@ -268,7 +269,7 @@ impl SchedulesPage {
             && enabled
             && at.0 < now_ms()
         {
-            self.error = Some("That one-time run has passed. Create a new schedule.".into());
+            self.error = Some(t("settings.schedules.once_passed").into());
             cx.notify();
             return;
         }
@@ -339,7 +340,7 @@ impl SchedulesPage {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Choose".into()),
+            prompt: Some(t("settings.schedules.choose_prompt").into()),
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
@@ -510,14 +511,14 @@ impl SchedulesPage {
 /// Hover text for the mark on a session a schedule opened.
 pub(crate) fn scheduled_run_summary(run: &diri_proto::schedules::ScheduledRunInfo) -> String {
     let due = local::describe(run.due_at.0, Some(now_ms()));
-    let wake = if run.woke_mac {
-        ". diri woke the Mac for this run and lets it sleep again when the agent finishes"
+    let key = if run.woke_mac {
+        "settings.schedules.run_summary_woke"
     } else if run.wake_mac {
-        ". The Mac was already awake"
+        "settings.schedules.run_summary_awake"
     } else {
-        ""
+        "settings.schedules.run_summary"
     };
-    format!("Started by the schedule “{}”, due {due}{wake}.", run.title)
+    tf(key, &[("title", &run.title), ("due", &due)])
 }
 
 /// `~/code/app` for paths under the home folder.
@@ -568,15 +569,16 @@ pub(crate) mod plan {
     ) -> Result<ScheduleSpec, String> {
         let prompt = prompt.trim();
         if prompt.is_empty() {
-            return Err("Write what the agent should do.".into());
+            return Err(t("settings.schedules.error_prompt").into());
         }
-        let folder = folder.ok_or("Choose a folder for the agent to work in.")?;
-        let agent = agent.ok_or("No agent is installed yet.")?;
-        let (hour, minute) = parse_time(time).ok_or("Enter a time like 9:00 or 17:30.")?;
+        let folder = folder.ok_or(t("settings.schedules.error_folder"))?;
+        let agent = agent.ok_or(t("settings.schedules.error_agent"))?;
+        let (hour, minute) = parse_time(time).ok_or(t("settings.schedules.error_time"))?;
         let when = match repeat {
             Repeat::Once => ScheduleWhen::Once {
                 at: DateMillis(
-                    local::next_at(hour, minute, now_ms).ok_or("That time isn't valid here.")?,
+                    local::next_at(hour, minute, now_ms)
+                        .ok_or(t("settings.schedules.error_time_invalid"))?,
                 ),
             },
             Repeat::Daily => ScheduleWhen::Cron {
@@ -631,39 +633,51 @@ pub(crate) mod plan {
     /// "Weekdays at 09:00", "Every hour at :15", or the cron itself.
     pub(crate) fn describe_when(when: &ScheduleWhen) -> String {
         match when {
-            ScheduleWhen::Once { at } => format!("Once, {}", local::describe(at.0, None)),
+            ScheduleWhen::Once { at } => tf(
+                "settings.schedules.when_once",
+                &[("time", &local::describe(at.0, None))],
+            ),
             ScheduleWhen::Cron { expr } => {
                 let fields: Vec<&str> = expr.split_whitespace().collect();
                 match fields.as_slice() {
-                    [minute, hour, "*", "*", "*"] if clock(hour, minute).is_some() => {
-                        format!("Every day at {}", clock(hour, minute).unwrap())
-                    }
+                    [minute, hour, "*", "*", "*"] if clock(hour, minute).is_some() => tf(
+                        "settings.schedules.when_daily",
+                        &[("time", &clock(hour, minute).unwrap())],
+                    ),
                     [minute, hour, "*", "*", "1-5" | "mon-fri"]
                         if clock(hour, minute).is_some() =>
                     {
-                        format!("Weekdays at {}", clock(hour, minute).unwrap())
+                        tf(
+                            "settings.schedules.when_weekdays",
+                            &[("time", &clock(hour, minute).unwrap())],
+                        )
                     }
                     [minute, hour, "*", "*", day]
                         if clock(hour, minute).is_some()
                             && day.parse::<usize>().is_ok_and(|day| day <= 7) =>
                     {
-                        const DAYS: [&str; 8] = [
-                            "Sundays",
-                            "Mondays",
-                            "Tuesdays",
-                            "Wednesdays",
-                            "Thursdays",
-                            "Fridays",
-                            "Saturdays",
-                            "Sundays",
-                        ];
                         let day: usize = day.parse().unwrap();
-                        format!("{} at {}", DAYS[day], clock(hour, minute).unwrap())
+                        let days = t(match day {
+                            1 => "settings.schedules.weekly_mon",
+                            2 => "settings.schedules.weekly_tue",
+                            3 => "settings.schedules.weekly_wed",
+                            4 => "settings.schedules.weekly_thu",
+                            5 => "settings.schedules.weekly_fri",
+                            6 => "settings.schedules.weekly_sat",
+                            _ => "settings.schedules.weekly_sun",
+                        });
+                        tf(
+                            "settings.schedules.when_weekly",
+                            &[("days", &days), ("time", &clock(hour, minute).unwrap())],
+                        )
                     }
                     [minute, "*", "*", "*", "*"] if minute.parse::<u32>().is_ok_and(|m| m < 60) => {
-                        format!("Every hour at :{:02}", minute.parse::<u32>().unwrap())
+                        tf(
+                            "settings.schedules.when_hourly",
+                            &[("minute", &format!("{:02}", minute.parse::<u32>().unwrap()))],
+                        )
                     }
-                    _ => format!("Cron {expr}"),
+                    _ => tf("settings.schedules.when_cron", &[("expr", expr)]),
                 }
             }
         }
@@ -674,32 +688,50 @@ pub(crate) mod plan {
         let due = local::describe(run.due_at.0, Some(now_ms));
         let fired = local::describe(run.fired_at.0, Some(now_ms));
         let reason = match run.late_reason {
-            Some(LateReason::Asleep) => " because the Mac was asleep",
-            Some(LateReason::NotRunning) => " because diri wasn't running",
+            Some(LateReason::Asleep) => t("settings.schedules.reason_asleep"),
+            Some(LateReason::NotRunning) => t("settings.schedules.reason_not_running"),
             None => "",
         };
         let folded = match run.collapsed {
             0 => String::new(),
-            1 => ", covering 1 earlier missed run".into(),
-            n => format!(", covering {n} earlier missed runs"),
+            1 => t("settings.schedules.folded_one").into(),
+            n => tf("settings.schedules.folded_other", &[("count", &n)]),
         };
+        let args: [(&str, &dyn std::fmt::Display); 4] = [
+            ("fired", &fired),
+            ("due", &due),
+            ("reason", &reason),
+            ("folded", &folded),
+        ];
         match run.outcome {
-            ScheduleOutcome::OnTime => (format!("Last ran {fired}{folded}"), RunTone::Quiet),
-            ScheduleOutcome::Manual => {
-                (format!("Last run started by hand {fired}"), RunTone::Quiet)
-            }
-            ScheduleOutcome::Late => (
-                format!("Ran late {fired} (due {due}){reason}{folded}"),
-                RunTone::Attention,
+            ScheduleOutcome::OnTime => (
+                tf("settings.schedules.run_on_time", &[args[0], args[3]]),
+                RunTone::Quiet,
             ),
+            ScheduleOutcome::Manual => (
+                tf("settings.schedules.run_manual", &[args[0]]),
+                RunTone::Quiet,
+            ),
+            ScheduleOutcome::Late => (tf("settings.schedules.run_late", &args), RunTone::Attention),
             ScheduleOutcome::Missed => (
-                format!("Skipped the run due {due}{reason}: too late to catch up{folded}"),
+                tf(
+                    "settings.schedules.run_missed",
+                    &[args[1], args[2], args[3]],
+                ),
                 RunTone::Danger,
             ),
             ScheduleOutcome::Failed => (
-                format!(
-                    "Couldn't start the run due {due}: {}",
-                    run.error.as_deref().unwrap_or("unknown error")
+                tf(
+                    "settings.schedules.run_failed",
+                    &[
+                        args[1],
+                        (
+                            "error",
+                            &run.error
+                                .as_deref()
+                                .unwrap_or(t("settings.schedules.unknown_error")),
+                        ),
+                    ],
                 ),
                 RunTone::Danger,
             ),
@@ -779,34 +811,65 @@ mod local {
         compose(now.year, now.month, now.day + 1, hour as i32, minute as i32)
     }
 
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    use crate::i18n::{t, tf};
+
+    fn month(month: i32) -> &'static str {
+        t(match month {
+            1 => "settings.schedules.month_jan",
+            2 => "settings.schedules.month_feb",
+            3 => "settings.schedules.month_mar",
+            4 => "settings.schedules.month_apr",
+            5 => "settings.schedules.month_may",
+            6 => "settings.schedules.month_jun",
+            7 => "settings.schedules.month_jul",
+            8 => "settings.schedules.month_aug",
+            9 => "settings.schedules.month_sep",
+            10 => "settings.schedules.month_oct",
+            11 => "settings.schedules.month_nov",
+            _ => "settings.schedules.month_dec",
+        })
+    }
+
+    fn weekday(wday: i32) -> &'static str {
+        t(match wday {
+            1 => "settings.schedules.day_mon",
+            2 => "settings.schedules.day_tue",
+            3 => "settings.schedules.day_wed",
+            4 => "settings.schedules.day_thu",
+            5 => "settings.schedules.day_fri",
+            6 => "settings.schedules.day_sat",
+            _ => "settings.schedules.day_sun",
+        })
+    }
 
     /// "today at 09:00", "tomorrow at 09:00", "Mon at 09:00" within a week,
     /// else "Oct 5 at 09:00". With no `now`, always the date form.
     pub(crate) fn describe(ms: f64, now_ms: Option<f64>) -> String {
         let Some(tm) = break_down(ms) else {
-            return "at an unknown time".into();
+            return t("settings.schedules.unknown_time").into();
         };
         let clock = format!("{:02}:{:02}", tm.hour, tm.minute);
-        let date = format!(
-            "{} {}",
-            MONTHS[(tm.month - 1).clamp(0, 11) as usize],
-            tm.day
+        let date = tf(
+            "settings.schedules.date",
+            &[("month", &month(tm.month)), ("day", &tm.day)],
         );
+        let at = |day: &str| {
+            tf(
+                "settings.schedules.day_at",
+                &[("day", &day), ("time", &clock)],
+            )
+        };
         let Some(now) = now_ms.and_then(break_down) else {
-            return format!("{date} at {clock}");
+            return at(&date);
         };
         let day_of = |tm: &Tm| compose(tm.year, tm.month, tm.day, 12, 0).unwrap_or(0.0);
         let days = ((day_of(&tm) - day_of(&now)) / 86_400_000.0).round() as i64;
         match days {
-            0 => format!("today at {clock}"),
-            1 => format!("tomorrow at {clock}"),
-            -1 => format!("yesterday at {clock}"),
-            2..=6 => format!("{} at {clock}", DAYS[tm.wday.clamp(0, 6) as usize]),
-            _ => format!("{date} at {clock}"),
+            0 => tf("settings.schedules.today_at", &[("time", &clock)]),
+            1 => tf("settings.schedules.tomorrow_at", &[("time", &clock)]),
+            -1 => tf("settings.schedules.yesterday_at", &[("time", &clock)]),
+            2..=6 => at(weekday(tm.wday)),
+            _ => at(&date),
         }
     }
 }
@@ -838,7 +901,7 @@ mod login {
 
     #[cfg(not(target_os = "macos"))]
     pub(super) fn set_enabled(_: bool) -> Result<Status, String> {
-        Err("Login items aren't available on this platform.".into())
+        Err(crate::i18n::t("settings.schedules.login_unavailable_platform").into())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -857,7 +920,7 @@ mod login {
 
     #[cfg(not(target_os = "macos"))]
     pub(super) fn set_enabled_of(_: Service, _: bool) -> Result<Status, String> {
-        Err("Waking the Mac is only available on macOS.".into())
+        Err(crate::i18n::t("settings.schedules.wake_macos_only").into())
     }
 }
 
@@ -1095,13 +1158,18 @@ impl SchedulesPage {
             plan::describe_when(&record.spec.when)
         );
         if record.spec.wake_mac {
-            detail.push_str(" · wakes the Mac");
+            detail.push_str(" · ");
+            detail.push_str(t("settings.schedules.wakes_mac"));
         } else if record.spec.keep_awake {
-            detail.push_str(" · keeps Mac awake");
+            detail.push_str(" · ");
+            detail.push_str(t("settings.schedules.keeps_awake"));
         }
         let next = match (&record.next_due, record.spec.enabled) {
-            (Some(next), true) => Some(format!("Next {}", local::describe(next.0, Some(now)))),
-            (_, false) => Some("Paused".to_owned()),
+            (Some(next), true) => Some(tf(
+                "settings.schedules.next",
+                &[("time", &local::describe(next.0, Some(now)))],
+            )),
+            (_, false) => Some(t("settings.schedules.paused").to_owned()),
             (None, true) => None,
         };
         let last = record.runs.last().map(|run| plan::describe_run(run, now));
@@ -1141,8 +1209,12 @@ impl SchedulesPage {
         let mut actions = div().flex().items_center().gap(px(6.0));
         if let Some(session) = session {
             actions = actions.child(
-                button(("schedule-open", record.revision as usize), "Open", colors)
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_session(&session, cx))),
+                button(
+                    ("schedule-open", record.revision as usize),
+                    t("settings.schedules.open"),
+                    colors,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.open_session(&session, cx))),
             );
         }
         let run_id = id.clone();
@@ -1151,7 +1223,7 @@ impl SchedulesPage {
             .child(
                 button(
                     SharedString::from(format!("schedule-run-{id}")),
-                    "Run now",
+                    t("settings.schedules.run_now"),
                     colors,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.run_now(run_id.clone(), cx))),
@@ -1159,7 +1231,7 @@ impl SchedulesPage {
             .child(
                 button(
                     SharedString::from(format!("schedule-delete-{id}")),
-                    "Delete",
+                    t("settings.schedules.delete"),
                     colors,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.delete(delete_id.clone(), cx))),
@@ -1169,9 +1241,9 @@ impl SchedulesPage {
                     .id(SharedString::from(format!("schedule-toggle-{id}")))
                     .role(gpui::Role::Switch)
                     .aria_label(if enabled {
-                        "Pause schedule"
+                        t("settings.schedules.pause")
                     } else {
-                        "Resume schedule"
+                        t("settings.schedules.resume")
                     })
                     .cursor_pointer()
                     .child(switch(enabled, colors))
@@ -1305,7 +1377,7 @@ impl SchedulesPage {
                 div()
                     .text_size(px(12.0))
                     .text_color(colors.tertiary)
-                    .child("Looking for installed agents…"),
+                    .child(t("settings.schedules.looking_agents")),
             );
         }
         for (index, option) in options.into_iter().enumerate() {
@@ -1343,7 +1415,7 @@ impl SchedulesPage {
             .folder
             .as_ref()
             .map(|folder| home_relative(&folder.to_string_lossy()))
-            .unwrap_or_else(|| "No folder chosen".into());
+            .unwrap_or_else(|| t("settings.schedules.no_folder").into());
         let catch_up = draft.catch_up;
         let keep_awake = draft.keep_awake;
         let wake_mac = draft.wake_mac;
@@ -1378,21 +1450,27 @@ impl SchedulesPage {
             .flex()
             .flex_col()
             .child(
-                row().child(label("Prompt")).child(self.field(
-                    "schedule-prompt",
-                    Field::Prompt,
-                    &draft.prompt,
-                    "What should the agent do?",
-                    None,
-                    cx,
-                )),
+                row()
+                    .child(label(t("settings.schedules.prompt")))
+                    .child(self.field(
+                        "schedule-prompt",
+                        Field::Prompt,
+                        &draft.prompt,
+                        t("settings.schedules.prompt_placeholder"),
+                        None,
+                        cx,
+                    )),
             )
-            .child(divider(colors))
-            .child(row().child(label("Agent")).child(agents))
             .child(divider(colors))
             .child(
                 row()
-                    .child(label("Folder"))
+                    .child(label(t("settings.schedules.agent")))
+                    .child(agents),
+            )
+            .child(divider(colors))
+            .child(
+                row()
+                    .child(label(t("settings.schedules.folder")))
                     .child(
                         div()
                             .flex_1()
@@ -1407,21 +1485,25 @@ impl SchedulesPage {
                             .child(folder),
                     )
                     .child(
-                        button("schedule-folder", "Choose…", colors)
+                        button("schedule-folder", t("settings.schedules.choose"), colors)
                             .on_click(cx.listener(|this, _, _, cx| this.choose_folder(cx))),
                     ),
             )
             .child(divider(colors))
             .child(
                 row()
-                    .child(label("When"))
+                    .child(label(t("settings.schedules.when")))
                     .child(repeats)
                     .child(div().flex_1())
                     .child(
                         div()
                             .text_size(px(12.0))
                             .text_color(colors.secondary)
-                            .child(if draft.repeat == Repeat::Hourly { "minute" } else { "at" }),
+                            .child(if draft.repeat == Repeat::Hourly {
+                                t("settings.schedules.minute")
+                            } else {
+                                t("settings.schedules.at")
+                            }),
                     )
                     .child(self.field(
                         "schedule-time",
@@ -1435,8 +1517,8 @@ impl SchedulesPage {
             .child(divider(colors))
             .child(toggle(
                 "schedule-catch-up",
-                "Catch up if missed",
-                "If the Mac is asleep or diri isn't open at that time, run once when it's back, up to 12 hours late.",
+                t("settings.schedules.catch_up"),
+                t("settings.schedules.catch_up_detail"),
                 catch_up,
                 cx,
                 |draft| draft.catch_up = !draft.catch_up,
@@ -1444,8 +1526,8 @@ impl SchedulesPage {
             .child(divider(colors))
             .child(toggle(
                 "schedule-keep-awake",
-                "Keep the Mac awake",
-                "Prevent idle sleep from 10 minutes before each run until it finishes. Closing the lid still sleeps.",
+                t("settings.schedules.keep_awake"),
+                t("settings.schedules.keep_awake_detail"),
                 keep_awake,
                 cx,
                 |draft| draft.keep_awake = !draft.keep_awake,
@@ -1453,8 +1535,8 @@ impl SchedulesPage {
             .child(divider(colors))
             .child(toggle(
                 "schedule-wake-mac",
-                "Wake the Mac",
-                "Wake a sleeping Mac 2 minutes before, keep it awake while the agent works, then let it sleep again. The lid must be open.",
+                t("settings.schedules.wake_mac"),
+                t("settings.schedules.wake_mac_detail"),
                 wake_mac,
                 cx,
                 |draft| draft.wake_mac = !draft.wake_mac,
@@ -1466,7 +1548,7 @@ impl SchedulesPage {
                     .pb(px(8.0))
                     .text_size(px(12.0))
                     .text_color(Ink::ATTENTION)
-                    .child("Turn on “Allow diri to wake the Mac” below first, or this schedule can't wake it."),
+                    .child(t("settings.schedules.wake_needs_helper")),
             );
         }
         if let Some(error) = &draft.error {
@@ -1487,20 +1569,20 @@ impl SchedulesPage {
                 .justify_end()
                 .gap(px(8.0))
                 .child(
-                    button("schedule-cancel", "Cancel", colors).on_click(cx.listener(
-                        |this, _, _, cx| {
+                    button("schedule-cancel", t("settings.schedules.cancel"), colors).on_click(
+                        cx.listener(|this, _, _, cx| {
                             this.draft = None;
                             cx.notify();
-                        },
-                    )),
+                        }),
+                    ),
                 )
                 .child(
                     button(
                         "schedule-create",
                         if draft.saving {
-                            "Creating…"
+                            t("settings.schedules.creating")
                         } else {
-                            "Create schedule"
+                            t("settings.schedules.create")
                         },
                         colors,
                     )
@@ -1508,59 +1590,26 @@ impl SchedulesPage {
                     .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                 ),
         );
-        section("New schedule", form, colors).into_any_element()
+        section(t("settings.schedules.new_schedule"), form, colors).into_any_element()
     }
 
     fn login_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = self.colors();
         let status = self.login.status;
         let detail = match (status, &self.login.error) {
-            (_, Some(error)) => format!("Couldn't change this: {error}"),
+            (_, Some(error)) => tf("settings.schedules.change_failed", &[("error", error)]),
             (login::Status::RequiresApproval, None) => {
-                "Allow diri in System Settings > General > Login Items.".to_owned()
+                t("settings.schedules.login_requires_approval").to_owned()
             }
             (login::Status::Unavailable, None) => {
-                "Only available when diri is installed in Applications.".to_owned()
+                t("settings.schedules.only_in_applications").to_owned()
             }
-            _ => "Schedules run only while diri is open. Opening at login lets a run missed during a restart catch up.".to_owned(),
+            _ => t("settings.schedules.login_detail").to_owned(),
         };
         let row = div()
             .id("schedule-open-at-login")
             .role(gpui::Role::Switch)
-            .aria_label("Open diri at login")
-            .min_h(px(ROW_MIN_HEIGHT))
-            .px(px(12.0))
-            .py(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .cursor_pointer()
-            .hover(move |style| style.bg(colors.primary.alpha(0.025)))
-            .child(text_stack("Open diri at login", detail, colors))
-            .child(switch(status == login::Status::Enabled, colors))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_login(cx)));
-        let helper = self.wake_helper.status;
-        let wanted = self
-            .schedules
-            .iter()
-            .any(|record| record.spec.wake_mac && record.spec.enabled);
-        let helper_detail = match (helper, &self.wake_helper.error, &self.wake_helper_error) {
-            (_, Some(error), _) => format!("Couldn't change this: {error}"),
-            (login::Status::RequiresApproval, None, _) => {
-                "Waiting for approval: switch on diri in System Settings > General > Login Items. macOS asks for an administrator password once.".to_owned()
-            }
-            (login::Status::Unavailable, None, _) => {
-                "Only available when diri is installed in Applications.".to_owned()
-            }
-            (login::Status::Enabled, None, Some(error)) if wanted => {
-                format!("Approved, but diri couldn't reach it: {error}")
-            }
-            _ => "A small helper that can only schedule wakes for your runs and put the Mac back to sleep after them. Needs a one-time administrator approval.".to_owned(),
-        };
-        let helper_row = div()
-            .id("schedule-wake-helper")
-            .role(gpui::Role::Switch)
-            .aria_label("Allow diri to wake the Mac")
+            .aria_label(t("settings.schedules.open_at_login"))
             .min_h(px(ROW_MIN_HEIGHT))
             .px(px(12.0))
             .py(px(8.0))
@@ -1570,14 +1619,51 @@ impl SchedulesPage {
             .cursor_pointer()
             .hover(move |style| style.bg(colors.primary.alpha(0.025)))
             .child(text_stack(
-                "Allow diri to wake the Mac",
+                t("settings.schedules.open_at_login"),
+                detail,
+                colors,
+            ))
+            .child(switch(status == login::Status::Enabled, colors))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_login(cx)));
+        let helper = self.wake_helper.status;
+        let wanted = self
+            .schedules
+            .iter()
+            .any(|record| record.spec.wake_mac && record.spec.enabled);
+        let helper_detail = match (helper, &self.wake_helper.error, &self.wake_helper_error) {
+            (_, Some(error), _) => tf("settings.schedules.change_failed", &[("error", error)]),
+            (login::Status::RequiresApproval, None, _) => {
+                t("settings.schedules.helper_requires_approval").to_owned()
+            }
+            (login::Status::Unavailable, None, _) => {
+                t("settings.schedules.only_in_applications").to_owned()
+            }
+            (login::Status::Enabled, None, Some(error)) if wanted => {
+                tf("settings.schedules.helper_unreachable", &[("error", error)])
+            }
+            _ => t("settings.schedules.helper_detail").to_owned(),
+        };
+        let helper_row = div()
+            .id("schedule-wake-helper")
+            .role(gpui::Role::Switch)
+            .aria_label(t("settings.schedules.allow_wake"))
+            .min_h(px(ROW_MIN_HEIGHT))
+            .px(px(12.0))
+            .py(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .cursor_pointer()
+            .hover(move |style| style.bg(colors.primary.alpha(0.025)))
+            .child(text_stack(
+                t("settings.schedules.allow_wake"),
                 helper_detail,
                 colors,
             ))
             .child(switch(helper == login::Status::Enabled, colors))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_wake_helper(cx)));
         section(
-            "When the Mac is asleep or restarts",
+            t("settings.schedules.asleep_section"),
             div()
                 .flex()
                 .flex_col()
@@ -1616,13 +1702,14 @@ impl Render for SchedulesPage {
                         div()
                             .text_size(px(20.0))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Schedules"),
+                            .child(t("settings.tab.schedules")),
                     )
                     .when(self.draft.is_none(), |header| {
                         header.child(
-                            button("schedule-new", "New schedule", colors).on_click(
-                                cx.listener(|this, _, window, cx| this.start_draft(window, cx)),
-                            ),
+                            button("schedule-new", t("settings.schedules.new_schedule"), colors)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.start_draft(window, cx)),
+                                ),
                         )
                     }),
             )
@@ -1630,7 +1717,7 @@ impl Render for SchedulesPage {
                 div()
                     .text_size(px(13.0))
                     .text_color(colors.secondary)
-                    .child("Start an agent at a set time. Later runs continue in the same tab until you close it. You can also ask any agent in diri, for example “every weekday at 9, triage new issues”."),
+                    .child(t("settings.schedules.intro")),
             );
         if self.draft.is_some() {
             page = page.child(self.draft_form(cx));
@@ -1654,9 +1741,9 @@ impl Render for SchedulesPage {
                     .text_size(px(12.0))
                     .text_color(colors.tertiary)
                     .child(if self.loaded {
-                        "No schedules yet."
+                        t("settings.schedules.empty")
                     } else {
-                        "Loading schedules…"
+                        t("settings.schedules.loading")
                     }),
             );
         }
@@ -1667,7 +1754,7 @@ impl Render for SchedulesPage {
             }
             list = list.child(self.schedule_row(record, cx));
         }
-        page.child(section("Scheduled", list, colors))
+        page.child(section(t("settings.schedules.scheduled"), list, colors))
             .child(self.login_section(cx))
     }
 }

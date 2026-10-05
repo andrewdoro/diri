@@ -20,6 +20,7 @@ use crate::AppServices;
 use crate::agent_catalog::{AgentOption, quick_agent_options, title_case_id};
 use crate::composer::PromptComposer;
 use crate::delegation::HandoffProposal;
+use crate::i18n::{t, tf};
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::launch_recipe::{
     LaunchRecipe, RecipeBookError, RecipeIssue, RecipeProject, WorktreePolicy,
@@ -439,10 +440,7 @@ impl LauncherOverlay {
             ) => Ok(None),
             Some(crate::store::WorkspaceSpawnState::Unconfirmed(error)) => Err(error),
             // A placed receipt can be evicted only after 32 newer requests.
-            None => Err(
-                "Launch receipt is no longer available. Check All sessions before sending again."
-                    .into(),
-            ),
+            None => Err(t("launcher.receipt_gone").into()),
             _ => return,
         };
         self.workspace_submission = None;
@@ -772,9 +770,12 @@ impl LauncherOverlay {
         };
         let unavailable = title_case_id(self.selected_harness.id());
         self.selected_harness = first.kind.clone();
-        self.fallback_notice = Some(format!(
-            "{unavailable} is unavailable here; using {}",
-            first.display_name
+        self.fallback_notice = Some(tf(
+            "launcher.agent_fallback",
+            &[
+                ("unavailable", &unavailable),
+                ("agent", &first.display_name),
+            ],
         ));
     }
 
@@ -864,7 +865,7 @@ impl LauncherOverlay {
 
     fn host_label(&self, host: Option<&str>) -> String {
         match host {
-            None => "This Mac".to_owned(),
+            None => t("launcher.this_mac").to_owned(),
             Some(host) => self
                 .services
                 .store
@@ -902,7 +903,7 @@ impl LauncherOverlay {
                     )
                     .err();
                 let destination = recipe.host.as_deref().map_or_else(
-                    || "This Mac".to_owned(),
+                    || t("launcher.this_mac").to_owned(),
                     |host| store.host_display_name(host),
                 );
                 (issue, destination)
@@ -994,7 +995,7 @@ impl LauncherOverlay {
         // waiting for readiness. There must never be two delayed launches.
         self.pending_recipe_activation = None;
         let Some(recipe) = self.recipes().into_iter().find(|recipe| recipe.id == id) else {
-            self.fallback_notice = Some("This recipe no longer exists".to_owned());
+            self.fallback_notice = Some(t("launcher.recipe.gone").to_owned());
             return;
         };
         match self.resolve_recipe(&recipe) {
@@ -1042,10 +1043,10 @@ impl LauncherOverlay {
             }
             result => {
                 self.preview_recipe(&recipe);
-                self.fallback_notice = result.err().map(|issue| issue.message()).or_else(|| {
-                    self.preview
-                        .then(|| "Preview mode — no Agent will be launched".to_owned())
-                });
+                self.fallback_notice = result
+                    .err()
+                    .map(|issue| issue.message())
+                    .or_else(|| self.preview.then(|| t("launcher.preview_mode").to_owned()));
                 self.services
                     .store
                     .store
@@ -1085,15 +1086,12 @@ impl LauncherOverlay {
         };
         let Some(recipe) = self.recipes().into_iter().find(|recipe| recipe.id == id) else {
             self.pending_recipe_activation = None;
-            self.fallback_notice = Some("This recipe no longer exists".to_owned());
+            self.fallback_notice = Some(t("launcher.recipe.gone").to_owned());
             return;
         };
         if self.active_recipe.as_ref() != Some(&recipe) {
             self.pending_recipe_activation = None;
-            self.fallback_notice = Some(
-                "Recipe changed while checking Agents. Run it again to use the updated task."
-                    .to_owned(),
-            );
+            self.fallback_notice = Some(t("launcher.recipe.changed").to_owned());
             return;
         }
         match self.resolve_recipe(&recipe) {
@@ -1118,8 +1116,9 @@ impl LauncherOverlay {
                     && !still_loading
                 {
                     self.pending_recipe_activation = None;
-                    self.fallback_notice = Some(format!(
-                        "Could not check Agents on this host: {error}. Choose the recipe again to retry."
+                    self.fallback_notice = Some(tf(
+                        "launcher.recipe.agents_check_failed",
+                        &[("error", &error)],
                     ));
                 }
             }
@@ -1201,7 +1200,7 @@ impl LauncherOverlay {
     fn save_current_recipe(&mut self, cx: &mut Context<Self>) {
         self.pending_recipe_activation = None;
         if self.prompt.text().trim().is_empty() || self.selected_root.is_empty() {
-            self.fallback_notice = Some("Add a task and project before saving a recipe".to_owned());
+            self.fallback_notice = Some(t("launcher.recipe.needs_task").to_owned());
             cx.notify();
             return;
         }
@@ -1229,8 +1228,8 @@ impl LauncherOverlay {
             self.recipe_project_edited = false;
         }
         self.fallback_notice = Some(match result {
-            Ok(()) => format!("Saved “{name}” — it is now a one-click recipe"),
-            Err(error) => format!("Could not save recipe: {error}"),
+            Ok(()) => tf("launcher.recipe.saved", &[("name", &name)]),
+            Err(error) => tf("launcher.recipe.save_failed", &[("error", &error)]),
         });
         self.picker = None;
         cx.notify();
@@ -1257,8 +1256,8 @@ impl LauncherOverlay {
             self.recipe_project_edited = false;
         }
         self.fallback_notice = Some(match result {
-            Ok(persisted) => format!("Updated “{}”", persisted.name),
-            Err(error) => format!("Could not update recipe: {error}"),
+            Ok(persisted) => tf("launcher.recipe.updated", &[("name", &persisted.name)]),
+            Err(error) => tf("launcher.recipe.update_failed", &[("error", &error)]),
         });
         cx.notify();
     }
@@ -1270,8 +1269,8 @@ impl LauncherOverlay {
             self.recipe_project_edited = false;
         }
         self.fallback_notice = Some(match result {
-            Ok(()) => "Recipe deleted".to_owned(),
-            Err(error) => format!("Could not delete recipe: {error}"),
+            Ok(()) => t("launcher.recipe.deleted").to_owned(),
+            Err(error) => tf("launcher.recipe.delete_failed", &[("error", &error)]),
         });
         let count = self.recipes().len().saturating_add(1);
         self.highlight = self.highlight.min(count.saturating_sub(1));
@@ -1281,7 +1280,8 @@ impl LauncherOverlay {
     fn duplicate_recipe(&mut self, id: &str, cx: &mut Context<Self>) {
         let result = self.update_recipe_book(|book| book.duplicate(id).map(|_| ()));
         if let Err(error) = result {
-            self.fallback_notice = Some(format!("Could not duplicate recipe: {error}"));
+            self.fallback_notice =
+                Some(tf("launcher.recipe.duplicate_failed", &[("error", &error)]));
         }
         cx.notify();
     }
@@ -1289,7 +1289,7 @@ impl LauncherOverlay {
     fn move_recipe(&mut self, id: &str, delta: isize, cx: &mut Context<Self>) {
         let result = self.update_recipe_book(|book| book.move_by(id, delta).map(|_| ()));
         if let Err(error) = result {
-            self.fallback_notice = Some(format!("Could not reorder recipe: {error}"));
+            self.fallback_notice = Some(tf("launcher.recipe.reorder_failed", &[("error", &error)]));
         }
         cx.notify();
     }
@@ -1297,7 +1297,7 @@ impl LauncherOverlay {
     fn edit_recipe(&mut self, id: &str, cx: &mut Context<Self>) {
         self.pending_recipe_activation = None;
         let Some(recipe) = self.recipes().into_iter().find(|recipe| recipe.id == id) else {
-            self.fallback_notice = Some("This recipe no longer exists".to_owned());
+            self.fallback_notice = Some(t("launcher.recipe.gone").to_owned());
             cx.notify();
             return;
         };
@@ -1329,7 +1329,7 @@ impl LauncherOverlay {
         let name = editor.name.text().trim();
         if name.is_empty() {
             if let Some(editor) = &mut self.recipe_editor {
-                editor.error = Some("Give the recipe a name".to_owned());
+                editor.error = Some(t("launcher.recipe.needs_name").to_owned());
             }
             cx.notify();
             return;
@@ -1337,7 +1337,7 @@ impl LauncherOverlay {
         if editor.id.is_none() {
             if self.selected_host.is_some() && !editor.branch.is_empty() {
                 if let Some(editor) = &mut self.recipe_editor {
-                    editor.error = Some("Remote launches cannot create local worktrees".to_owned());
+                    editor.error = Some(t("launcher.remote_no_worktree").to_owned());
                 }
                 cx.notify();
                 return;
@@ -1355,9 +1355,9 @@ impl LauncherOverlay {
             self.recipe_editor = None;
             self.picker = None;
             self.fallback_notice = Some(if self.active_recipe.is_some() {
-                "Launch details changed for this run — the saved recipe is untouched".to_owned()
+                t("launcher.details.changed_for_run").to_owned()
             } else {
-                "Launch details updated".to_owned()
+                t("launcher.details.updated").to_owned()
             });
             cx.notify();
             return;
@@ -1365,7 +1365,7 @@ impl LauncherOverlay {
         let id = editor.id.expect("saved recipe editor has an id");
         let Some(mut recipe) = self.recipes().into_iter().find(|recipe| recipe.id == id) else {
             self.recipe_editor = None;
-            self.fallback_notice = Some("This recipe no longer exists".to_owned());
+            self.fallback_notice = Some(t("launcher.recipe.gone").to_owned());
             cx.notify();
             return;
         };
@@ -1386,7 +1386,7 @@ impl LauncherOverlay {
         }
         if recipe.host.is_some() && matches!(recipe.worktree, WorktreePolicy::Fresh { .. }) {
             if let Some(editor) = &mut self.recipe_editor {
-                editor.error = Some("Remote recipes cannot create local worktrees".to_owned());
+                editor.error = Some(t("launcher.recipe.remote_no_worktree").to_owned());
             }
             cx.notify();
             return;
@@ -1407,7 +1407,8 @@ impl LauncherOverlay {
                     self.active_recipe = Some(persisted.clone());
                 }
                 self.recipe_editor = None;
-                self.fallback_notice = Some(format!("Updated “{}”", persisted.name));
+                self.fallback_notice =
+                    Some(tf("launcher.recipe.updated", &[("name", &persisted.name)]));
             }
             Err(error) => {
                 if let Some(editor) = &mut self.recipe_editor {
@@ -1425,7 +1426,7 @@ impl LauncherOverlay {
             return;
         }
         self.pending_recipe_delete = Some(id.to_owned());
-        self.fallback_notice = Some("Press Delete again to remove this recipe".to_owned());
+        self.fallback_notice = Some(t("launcher.recipe.confirm_delete").to_owned());
         cx.notify();
     }
 
@@ -1496,7 +1497,7 @@ impl LauncherOverlay {
                     .map(str::to_owned)
             })
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "Choose project".to_owned());
+            .unwrap_or_else(|| t("launcher.choose_project").to_owned());
         format!(
             "{project} · {}",
             self.host_label(self.selected_host.as_deref())
@@ -1510,11 +1511,11 @@ impl LauncherOverlay {
         if self.delivery.is_sending() {
             return Some(
                 if matches!(self.mode, LauncherMode::Handoff(_)) {
-                    "Sending handoff…"
+                    t("launcher.sending_handoff")
                 } else if matches!(self.target, LauncherTarget::NewSession) {
-                    "Starting session… Open it from the sidebar if setup needs attention."
+                    t("launcher.starting_session")
                 } else {
-                    "Sending prompt…"
+                    t("launcher.sending_prompt")
                 }
                 .to_owned(),
             );
@@ -1527,11 +1528,11 @@ impl LauncherOverlay {
                 .read()
                 .expect("session store lock poisoned");
             let Some(target) = store.sessions().get(&proposal.target_id) else {
-                return Some("The target session is no longer available".to_owned());
+                return Some(t("launcher.target_gone").to_owned());
             };
             if target.is_archived() || matches!(target.status, diri_proto::SessionStatus::Exited(_))
             {
-                return Some("The target session has ended".to_owned());
+                return Some(t("launcher.target_ended").to_owned());
             }
             return None;
         }
@@ -1543,10 +1544,10 @@ impl LauncherOverlay {
                 .read()
                 .expect("session store lock poisoned");
             let Some(session) = store.sessions().get(id) else {
-                return Some("This session is no longer available".to_owned());
+                return Some(t("launcher.session_gone").to_owned());
             };
             return (session.host.is_some() && self.session_drafts_with_local_paths.contains(id))
-                .then(|| "Local paths cannot be used on a remote session".to_owned());
+                .then(|| t("launcher.local_paths_remote").to_owned());
         }
         let recipe = self.current_recipe("New Agent".to_owned());
         match self.validate_recipe(&recipe) {
@@ -1562,19 +1563,19 @@ impl LauncherOverlay {
                     .map(str::to_owned);
                 Some(scan_error.map_or_else(
                     || {
-                        format!(
-                            "Checking whether {} is available here…",
-                            self.selected_harness_label()
+                        tf(
+                            "launcher.checking_agent",
+                            &[("agent", &self.selected_harness_label())],
                         )
                     },
-                    |error| format!("Could not check Agents on this host: {error}"),
+                    |error| tf("launcher.agents_check_failed", &[("error", &error)]),
                 ))
             }
             Err(RecipeIssue::EmptyPrompt) if self.active_recipe.is_none() => Some(
                 if self.selected_harness.is_terminal() {
-                    "Enter a command to start a terminal session."
+                    t("launcher.needs_command")
                 } else {
-                    "Describe a task to start your session."
+                    t("launcher.needs_task")
                 }
                 .to_owned(),
             ),
@@ -1621,9 +1622,8 @@ impl LauncherOverlay {
                             this.close(cx);
                         }
                         Err(error) => {
-                            this.fallback_notice = Some(format!(
-                                "The handoff was not sent: {error}. Review it and try again."
-                            ));
+                            this.fallback_notice =
+                                Some(tf("launcher.handoff_failed", &[("error", &error)]));
                             cx.notify();
                         }
                     }
@@ -1689,8 +1689,7 @@ impl LauncherOverlay {
                 return true;
             }
             self.delivery.settle(ticket);
-            self.fallback_notice =
-                Some("Launch was not requested. Review pending launches and try again.".into());
+            self.fallback_notice = Some(t("launcher.launch_not_requested").into());
             cx.notify();
             return false;
         }
@@ -1770,9 +1769,9 @@ impl LauncherOverlay {
             }
             Err(error) => {
                 let message = if error.contains("initial_prompt_delivery_failed") {
-                    "Session opened. Check its terminal before sending again. Your draft is saved."
+                    t("launcher.delivery.opened_unconfirmed")
                 } else {
-                    "Couldn’t confirm delivery. Check the session before sending again. Your draft is saved."
+                    t("launcher.delivery.unconfirmed")
                 };
                 self.fallback_notice = Some(message.into());
                 self.services
@@ -1918,10 +1917,7 @@ impl LauncherOverlay {
                 "space" => {
                     if let Some(recipe) = recipes.get(self.highlight) {
                         self.preview_recipe(recipe);
-                        self.fallback_notice = Some(
-                            "Previewing — changes apply once unless you update the recipe"
-                                .to_owned(),
-                        );
+                        self.fallback_notice = Some(t("launcher.recipe.previewing").to_owned());
                         self.picker = None;
                         window.focus(&self.focus, cx);
                     }
@@ -2152,7 +2148,7 @@ impl LauncherOverlay {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Start Here".into()),
+            prompt: Some(t("launcher.start_here").into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let selected = match paths.await {
@@ -2260,7 +2256,7 @@ impl LauncherOverlay {
                     div()
                         .text_size(px(11.0))
                         .text_color(colors.secondary)
-                        .child("Manage Agents…"),
+                        .child(t("launcher.manage_agents")),
                 ),
         );
         list
@@ -2373,7 +2369,7 @@ impl LauncherOverlay {
                     div()
                         .text_size(px(12.0))
                         .text_color(colors.primary)
-                        .child("Choose Folder…"),
+                        .child(t("launcher.choose_folder")),
                 ),
         );
         list
@@ -2417,14 +2413,14 @@ impl LauncherOverlay {
                             .text_size(px(12.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.primary)
-                            .child("Make this task repeatable"),
+                            .child(t("launcher.recipes.empty_title")),
                     )
                     .child(
                         div()
                             .text_size(px(10.0))
                             .line_height(px(14.0))
                             .text_color(colors.secondary)
-                            .child("Recipes remember the Agent, project, destination, and prompt."),
+                            .child(t("launcher.recipes.empty_detail")),
                     ),
             );
         }
@@ -2466,10 +2462,8 @@ impl LauncherOverlay {
                     .group(RECIPE_ROW_GROUP)
                     .rounded(px(Radius::ROW))
                     .role(Role::Button)
-                    .aria_label(format!("Launch recipe {}", recipe.name))
-                    .aria_description(
-                        "Enter launches, Space previews, E edits, Command-D duplicates, Command-Up or Command-Down reorders, Delete removes",
-                    )
+                    .aria_label(tf("launcher.recipes.launch", &[("name", &recipe.name)]))
+                    .aria_description(t("launcher.recipes.row_keys"))
                     .cursor_pointer()
                     .bg(Fill::selected(colors, active && !highlighted))
                     .glass_menu_row(colors, highlighted)
@@ -2534,7 +2528,7 @@ impl LauncherOverlay {
                             .child(recipe_action(
                                 format!("recipe-preview-{preview_id}"),
                                 "cursorarrow.rays",
-                                "Preview and override recipe",
+                                t("launcher.recipes.preview"),
                                 colors,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
@@ -2544,10 +2538,8 @@ impl LauncherOverlay {
                                         .find(|recipe| recipe.id == preview_id)
                                     {
                                         this.preview_recipe(&recipe);
-                                        this.fallback_notice = Some(
-                                            "Previewing — changes apply once unless you update the recipe"
-                                                .to_owned(),
-                                        );
+                                        this.fallback_notice =
+                                            Some(t("launcher.recipe.previewing").to_owned());
                                         this.picker = None;
                                         cx.notify();
                                     }
@@ -2556,7 +2548,7 @@ impl LauncherOverlay {
                             .child(recipe_action(
                                 format!("recipe-edit-{edit_id}"),
                                 "gearshape",
-                                "Edit recipe details",
+                                t("launcher.recipes.edit"),
                                 colors,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
@@ -2566,7 +2558,7 @@ impl LauncherOverlay {
                             .child(recipe_action(
                                 format!("recipe-duplicate-{duplicate_id}"),
                                 "square.stack.3d.up",
-                                "Duplicate recipe",
+                                t("launcher.recipes.duplicate"),
                                 colors,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
@@ -2576,7 +2568,7 @@ impl LauncherOverlay {
                             .child(recipe_action(
                                 format!("recipe-up-{up_id}"),
                                 "chevron.up",
-                                "Move recipe up",
+                                t("launcher.recipes.move_up"),
                                 colors,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
@@ -2586,7 +2578,7 @@ impl LauncherOverlay {
                             .child(recipe_action(
                                 format!("recipe-down-{down_id}"),
                                 "chevron.down",
-                                "Move recipe down",
+                                t("launcher.recipes.move_down"),
                                 colors,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
@@ -2596,7 +2588,7 @@ impl LauncherOverlay {
                             .child(recipe_action(
                                 format!("recipe-delete-{delete_id}"),
                                 "trash",
-                                "Delete recipe",
+                                t("launcher.recipes.delete"),
                                 colors,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
@@ -2624,9 +2616,9 @@ impl LauncherOverlay {
                 .rounded(px(Radius::ROW))
                 .role(Role::Button)
                 .aria_label(if update {
-                    "Update active recipe"
+                    t("launcher.recipes.update_active")
                 } else {
-                    "Save current fields as a recipe"
+                    t("launcher.recipes.save_fields")
                 })
                 .cursor_pointer()
                 .hover(move |row| row.bg(colors.primary.alpha(0.06)))
@@ -2647,9 +2639,9 @@ impl LauncherOverlay {
                         .text_size(px(11.0))
                         .text_color(colors.secondary)
                         .child(if update {
-                            "Update recipe with these fields"
+                            t("launcher.recipes.update_fields")
                         } else {
-                            "Save current fields as a recipe"
+                            t("launcher.recipes.save_fields")
                         }),
                 ),
         );
@@ -2696,9 +2688,9 @@ impl LauncherOverlay {
                             .text_color(colors.secondary)
                             .child(notice.unwrap_or_else(|| {
                                 if saved {
-                                    "Saved with this prompt, Agent and destination.".to_owned()
+                                    t("launcher.recipes.saved_detail").to_owned()
                                 } else {
-                                    "Save this setup to run it again in one click.".to_owned()
+                                    t("launcher.recipes.save_detail").to_owned()
                                 }
                             })),
                     )
@@ -2714,7 +2706,7 @@ impl LauncherOverlay {
                             .items_center()
                             .gap(px(6.0))
                             .role(Role::Button)
-                            .aria_label("Save recipe")
+                            .aria_label(t("launcher.recipes.save"))
                             .aria_keyshortcuts("Meta+S")
                             .text_size(px(10.0))
                             .text_color(colors.secondary)
@@ -2737,11 +2729,11 @@ impl LauncherOverlay {
                                 Palette::CLAY,
                             ))
                             .child(if saved {
-                                "Saved"
+                                t("launcher.recipes.saved")
                             } else if self.active_recipe.is_some() {
-                                "Update recipe"
+                                t("launcher.recipes.update")
                             } else {
-                                "Save recipe"
+                                t("launcher.recipes.save")
                             }),
                     ),
             );
@@ -2751,7 +2743,7 @@ impl LauncherOverlay {
             if let Some(notice) = self.fallback_notice.clone().or_else(|| {
                 recipes
                     .is_empty()
-                    .then(|| "Describe a task, then save it here to run again.".to_owned())
+                    .then(|| t("launcher.recipes.empty_hint").to_owned())
             }) {
                 section = section.child(
                     div()
@@ -2767,7 +2759,7 @@ impl LauncherOverlay {
                         .mb(px(2.0))
                         .text_size(px(10.0))
                         .text_color(colors.secondary)
-                        .child("Saved tasks · a fresh session each run"),
+                        .child(t("launcher.recipes.saved_tasks")),
                 );
             }
             for (index, (recipe, (issue, destination))) in
@@ -2803,7 +2795,7 @@ impl LauncherOverlay {
                         .items_center()
                         .gap(px(10.0))
                         .role(Role::Button)
-                        .aria_label(format!("Run saved task {}", recipe.name))
+                        .aria_label(tf("launcher.recipes.run_saved", &[("name", &recipe.name)]))
                         .aria_keyshortcuts(format!("Meta+{}", index + 1))
                         .cursor_pointer()
                         .hover(move |row| row.bg(colors.primary.alpha(0.07)))
@@ -2851,9 +2843,9 @@ impl LauncherOverlay {
                                 .text_size(px(10.0))
                                 .text_color(colors.secondary)
                                 .child(if needs_repair {
-                                    "Review".to_owned()
+                                    t("launcher.recipes.review").to_owned()
                                 } else {
-                                    format!("Run  ⌘{}", index + 1)
+                                    tf("launcher.recipes.run_key", &[("key", &(index + 1))])
                                 }),
                         ),
                 );
@@ -2885,18 +2877,18 @@ impl LauncherOverlay {
                             .text_size(px(12.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.primary)
-                            .child("Recipe details"),
+                            .child(t("launcher.editor.title")),
                     )
                     .child(
                         div()
                             .text_size(px(9.0))
                             .text_color(colors.tertiary)
-                            .child("Tab fields · Return saves · Esc cancels"),
+                            .child(t("launcher.editor.keys")),
                     ),
             )
             .child(self.recipe_text_field(
-                "Name",
-                "Review this PR",
+                t("launcher.editor.name"),
+                t("launcher.editor.name_placeholder"),
                 editor,
                 RecipeMetadataField::Name,
                 colors,
@@ -2907,16 +2899,16 @@ impl LauncherOverlay {
                     .flex()
                     .gap(px(8.0))
                     .child(div().min_w(px(0.0)).flex_1().child(self.recipe_text_field(
-                        "Session title",
-                        "Optional",
+                        t("launcher.editor.session_title"),
+                        t("launcher.editor.optional"),
                         editor,
                         RecipeMetadataField::Title,
                         colors,
                         cx,
                     )))
                     .child(div().min_w(px(0.0)).flex_1().child(self.recipe_text_field(
-                        "Branch prefix",
-                        "Optional · unique suffix added",
+                        t("launcher.editor.branch_prefix"),
+                        t("launcher.editor.branch_placeholder"),
                         editor,
                         RecipeMetadataField::Branch,
                         colors,
@@ -2953,7 +2945,7 @@ impl LauncherOverlay {
                             this.recipe_editor = None;
                             cx.notify();
                         }))
-                        .child("Cancel"),
+                        .child(t("launcher.cancel")),
                 )
                 .child(
                     div()
@@ -2970,7 +2962,7 @@ impl LauncherOverlay {
                         .items_center()
                         .hover(move |button| button.opacity(0.86))
                         .on_click(cx.listener(|this, _, _, cx| this.save_recipe_editor(cx)))
-                        .child("Save details"),
+                        .child(t("launcher.editor.save")),
                 ),
         );
         FloatingSurface::new(colors, form).into_any_element()
@@ -3047,42 +3039,83 @@ impl LauncherOverlay {
     fn render_folder_step(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("launcher-folder-step")
-            .w_full().max_w(px(420.0)).mx(px(28.0))
-            .flex().flex_col().gap(px(22.0))
+            .w_full()
+            .max_w(px(420.0))
+            .mx(px(28.0))
+            .flex()
+            .flex_col()
+            .gap(px(22.0))
             .child(sf_symbol("folder", 32.0, Palette::CLAY))
             .child(
-                div().flex().flex_col().gap(px(10.0))
-                    .child(div().text_size(px(26.0)).font_weight(FontWeight::MEDIUM)
-                        .text_color(colors.primary).child("Where are we working?"))
-                    .child(div().text_size(px(14.0)).line_height(px(22.0))
-                        .text_color(colors.secondary)
-                        .child("Pick the folder that holds your project. The agent works on the files inside it. Next you choose an agent and describe the task.")),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .text_size(px(26.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.primary)
+                            .child(t("launcher.folder_step.title")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .line_height(px(22.0))
+                            .text_color(colors.secondary)
+                            .child(t("launcher.folder_step.body")),
+                    ),
             )
             .child(
-                div().flex().items_center().gap(px(14.0))
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(14.0))
                     .child(
-                        div().id("launcher-choose-first-folder")
+                        div()
+                            .id("launcher-choose-first-folder")
                             .debug_selector(|| "launcher-choose-first-folder".into())
-                            .role(Role::Button).aria_label("Choose a project folder")
-                            .h(px(40.0)).px(px(16.0)).rounded(px(Radius::ROW))
-                            .bg(colors.primary).text_color(colors.background)
-                            .text_size(px(13.0)).font_weight(FontWeight::MEDIUM)
-                            .flex().items_center().gap(px(10.0)).cursor_pointer()
+                            .role(Role::Button)
+                            .aria_label(t("launcher.folder_step.choose_aria"))
+                            .h(px(40.0))
+                            .px(px(16.0))
+                            .rounded(px(Radius::ROW))
+                            .bg(colors.primary)
+                            .text_color(colors.background)
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .cursor_pointer()
                             .hover(|button| button.opacity(0.88))
                             .active(|button| button.opacity(0.74))
-                            .on_click(cx.listener(|this, _, window, cx| this.choose_folder(window, cx)))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.choose_folder(window, cx)),
+                            )
                             .child(sf_symbol("folder", 14.0, colors.background))
-                            .child("Choose folder"),
+                            .child(t("launcher.folder_step.choose")),
                     )
-                    .child(div().text_size(px(12.0)).text_color(colors.secondary).child("↵")),
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(colors.secondary)
+                            .child("↵"),
+                    ),
             )
-            .child(div().text_size(px(12.0)).line_height(px(18.0)).text_color(colors.secondary)
-                .child("Nothing runs until you start the session."))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(colors.secondary)
+                    .child(t("launcher.folder_step.nothing_runs")),
+            )
             // Saved tasks already carry their own destination, so they remain
             // runnable even when a new one-off task still needs a folder.
-            .when(self.prompt.is_empty() && !self.recipes().is_empty(), |panel| {
-                panel.child(self.render_recipe_shortcuts(colors, cx))
-            })
+            .when(
+                self.prompt.is_empty() && !self.recipes().is_empty(),
+                |panel| panel.child(self.render_recipe_shortcuts(colors, cx)),
+            )
             .into_any_element()
     }
 
@@ -3128,7 +3161,7 @@ impl LauncherOverlay {
             .unwrap_or(&project_label)
             .to_owned();
         let branch = if fresh_worktree {
-            "New worktree".to_owned()
+            t("launcher.new_worktree").to_owned()
         } else {
             let store = self.services.store.store.read().expect("store lock");
             store
@@ -3138,7 +3171,7 @@ impl LauncherOverlay {
                     session.cwd == self.selected_root && session.host == self.selected_host
                 })
                 .and_then(|session| session.git_branch.clone())
-                .unwrap_or_else(|| "Current folder".to_owned())
+                .unwrap_or_else(|| t("launcher.current_folder").to_owned())
         };
         let context_item = |id: &'static str, symbol: &'static str, label: String| {
             div()
@@ -3178,9 +3211,9 @@ impl LauncherOverlay {
                 })
                 .child(div().text_color(colors.tertiary).child(
                     if self.selected_harness.is_terminal() {
-                        "Enter a shell command…"
+                        t("launcher.placeholder.command")
                     } else {
-                        "Do anything…"
+                        t("launcher.placeholder.task")
                     },
                 ))
                 .into_any_element()
@@ -3233,7 +3266,7 @@ impl LauncherOverlay {
                             "launcher-host-button",
                             "desktopcomputer",
                             if self.selected_host.is_none() {
-                                "Local".into()
+                                t("launcher.local").into()
                             } else {
                                 host_label
                             },
@@ -3246,9 +3279,9 @@ impl LauncherOverlay {
                     .child(
                         context_item("launcher-worktree-button", "arrow.branch", branch)
                             .aria_label(if fresh_worktree {
-                                "Use current folder"
+                                t("launcher.use_current_folder")
                             } else {
-                                "Create a new worktree"
+                                t("launcher.create_worktree")
                             })
                             .when(worktree_enabled, |button| {
                                 button.on_click(cx.listener(|this, _, _, cx| {
@@ -3308,7 +3341,7 @@ impl LauncherOverlay {
                                             .rounded(px(8.0))
                                             .cursor_pointer()
                                             .role(Role::Button)
-                                            .aria_label("Open launch recipes")
+                                            .aria_label(t("launcher.recipes.open"))
                                             .aria_keyshortcuts("Meta+R")
                                             .hover(move |button| {
                                                 button.bg(colors.primary.alpha(0.07))
@@ -3322,7 +3355,7 @@ impl LauncherOverlay {
                                                 div()
                                                     .text_size(px(12.0))
                                                     .text_color(colors.secondary)
-                                                    .child("Recipes"),
+                                                    .child(t("launcher.recipes.button")),
                                             ),
                                     )
                                     .child(
@@ -3334,7 +3367,7 @@ impl LauncherOverlay {
                                             .justify_center()
                                             .rounded(px(8.0))
                                             .role(Role::Button)
-                                            .aria_label("Session title and worktree options")
+                                            .aria_label(t("launcher.details_options"))
                                             .cursor_pointer()
                                             .hover(move |button| {
                                                 button.bg(colors.primary.alpha(0.07))
@@ -3363,7 +3396,7 @@ impl LauncherOverlay {
                                             .gap(px(7.0))
                                             .rounded(px(8.0))
                                             .role(Role::Button)
-                                            .aria_label("Choose agent")
+                                            .aria_label(t("launcher.choose_agent"))
                                             .cursor_pointer()
                                             .text_size(px(13.0))
                                             .text_color(colors.primary)
@@ -3387,9 +3420,9 @@ impl LauncherOverlay {
                                             .justify_center()
                                             .role(Role::Button)
                                             .aria_label(if self.selected_harness.is_terminal() {
-                                                "Run command"
+                                                t("launcher.run_command")
                                             } else {
-                                                "Start session"
+                                                t("launcher.start_session")
                                             })
                                             .bg(if ready {
                                                 colors.primary
@@ -3473,9 +3506,12 @@ impl LauncherOverlay {
                                         .text_size(px(13.0))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(colors.primary)
-                                        .child(format!(
-                                            "No coding agent on {} yet",
-                                            crate::platform::local_machine_label_lowercase()
+                                        .child(tf(
+                                            "launcher.no_agent_title",
+                                            &[(
+                                                "place",
+                                                &crate::platform::local_machine_label_lowercase(),
+                                            )],
                                         )),
                                 )
                                 .child(
@@ -3483,10 +3519,7 @@ impl LauncherOverlay {
                                         .text_size(px(12.0))
                                         .line_height(px(17.0))
                                         .text_color(colors.secondary)
-                                        .child(
-                                            "This session is a plain terminal. Install an agent \
-                                             to give it tasks in plain English.",
-                                        ),
+                                        .child(t("launcher.no_agent_body")),
                                 ),
                         )
                         .child(crate::agent_setup::setup_list(
@@ -3513,13 +3546,13 @@ impl LauncherOverlay {
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(colors.secondary)
-                                    .child("Terminal runs shell commands."),
+                                    .child(t("launcher.terminal_runs_commands")),
                             )
                             .child(
                                 div()
                                     .id("launcher-setup-agents")
                                     .role(Role::Button)
-                                    .aria_label("Set up a coding agent")
+                                    .aria_label(t("launcher.set_up_agent_aria"))
                                     .text_size(px(11.0))
                                     .text_color(colors.primary)
                                     .cursor_pointer()
@@ -3531,7 +3564,7 @@ impl LauncherOverlay {
                                         ));
                                         cx.notify();
                                     }))
-                                    .child("Set up an agent…"),
+                                    .child(t("launcher.set_up_agent")),
                             ),
                     )
                 },
@@ -3613,7 +3646,12 @@ impl LauncherOverlay {
                 .sessions()
                 .get(&proposal.target_id)
                 .and_then(|target| target.host.as_deref())
-                .map(|host| format!("Remote · {}", store.host_display_name(host)))
+                .map(|host| {
+                    tf(
+                        "launcher.handoff.remote",
+                        &[("host", &store.host_display_name(host))],
+                    )
+                })
         };
         let prompt = if self.prompt.is_empty() {
             div()
@@ -3626,7 +3664,7 @@ impl LauncherOverlay {
                 .child(
                     div()
                         .text_color(colors.tertiary)
-                        .child("Describe the handoff…"),
+                        .child(t("launcher.handoff.placeholder")),
                 )
                 .into_any_element()
         } else {
@@ -3665,7 +3703,7 @@ impl LauncherOverlay {
                             .text_size(px(22.0))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(colors.primary.alpha(0.94))
-                            .child("Review handoff"),
+                            .child(t("launcher.handoff.title")),
                     )
                     .child(
                         div()
@@ -3745,8 +3783,7 @@ impl LauncherOverlay {
                                         blocker
                                             .or_else(|| self.fallback_notice.clone())
                                             .unwrap_or_else(|| {
-                                                "Review and edit before sending · ⇧↵ new line"
-                                                    .to_owned()
+                                                t("launcher.handoff.hint").to_owned()
                                             }),
                                     ),
                             )
@@ -3779,7 +3816,7 @@ impl LauncherOverlay {
                                                         this.close(cx);
                                                     }))
                                             })
-                                            .child("Cancel"),
+                                            .child(t("launcher.cancel")),
                                     )
                                     .child(
                                         div()
@@ -3822,9 +3859,9 @@ impl LauncherOverlay {
                                                 },
                                             ))
                                             .child(if sending {
-                                                "Sending…"
+                                                t("launcher.handoff.sending")
                                             } else {
-                                                "Send handoff"
+                                                t("launcher.handoff.send")
                                             }),
                                     ),
                             ),
@@ -3852,24 +3889,26 @@ impl LauncherOverlay {
             LauncherTarget::NewSession => None,
         };
         let title = session.as_ref().map_or_else(
-            || "Unavailable session".to_owned(),
+            || t("launcher.composer.unavailable").to_owned(),
             |session| session.title.clone(),
         );
         let cwd = session.as_ref().map_or_else(
-            || "Session no longer available".to_owned(),
+            || t("launcher.composer.gone").to_owned(),
             |session| session.cwd.clone(),
         );
         let logo = session.as_ref().map_or(UiAgentKind::Generic, |session| {
             ui_agent_kind(session.effective_kind())
         });
         let can_submit = self.can_submit();
-        let draft_state = session.as_ref().map_or("Local draft", |session| {
-            if session.hibernation.is_some() {
-                "Local draft · sleeping agent untouched"
-            } else {
-                "Local draft · nothing sent"
-            }
-        });
+        let draft_state = session
+            .as_ref()
+            .map_or(t("launcher.composer.draft"), |session| {
+                if session.hibernation.is_some() {
+                    t("launcher.composer.draft_sleeping")
+                } else {
+                    t("launcher.composer.draft_unsent")
+                }
+            });
         let text_height = composer_text_height(self.prompt.line_count());
         let composer_height = text_height + COMPOSER_CONTROLS_HEIGHT;
         let fills = launcher_surface_fills(colors);
@@ -3884,7 +3923,7 @@ impl LauncherOverlay {
                 .child(
                     div()
                         .text_color(colors.tertiary)
-                        .child("Add context or instructions…"),
+                        .child(t("launcher.composer.placeholder")),
                 )
                 .into_any_element()
         } else {
@@ -3926,7 +3965,7 @@ impl LauncherOverlay {
                             .text_size(px(20.0))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(colors.primary.alpha(0.94))
-                            .child(format!("Add context to {title}")),
+                            .child(tf("launcher.composer.title", &[("title", &title)])),
                     ),
             )
             .child(
@@ -3969,7 +4008,7 @@ impl LauncherOverlay {
                             .justify_between()
                             .child(div().text_size(px(10.0)).text_color(colors.tertiary).child(
                                 self.blocker().unwrap_or_else(|| {
-                                    "Review first — dropping sent nothing".to_owned()
+                                    t("launcher.composer.review_first").to_owned()
                                 }),
                             ))
                             .child(
@@ -4260,7 +4299,7 @@ impl Render for LauncherOverlay {
                     .px(px(10.0))
                     .rounded(px(Radius::ROW))
                     .role(Role::Button)
-                    .aria_label("Back to workspace")
+                    .aria_label(t("launcher.back_to_workspace"))
                     .flex()
                     .items_center()
                     .gap(px(7.0))
@@ -4270,7 +4309,7 @@ impl Render for LauncherOverlay {
                     .hover(move |button| button.bg(Fill::subtle(colors)))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
-                    .child("Back")
+                    .child(t("launcher.back"))
                     .child(div().text_color(colors.tertiary).child("esc")),
             )
             .child(

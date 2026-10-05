@@ -736,9 +736,23 @@ impl Render for NoteGraphView {
 
         let links = self.graph.edges.len();
         let summary = format!(
-            "{count} {} · {links} {}",
-            if count == 1 { "note" } else { "notes" },
-            if links == 1 { "link" } else { "links" }
+            "{} · {}",
+            crate::i18n::tf(
+                if count == 1 {
+                    "notes.graph.notes_one"
+                } else {
+                    "notes.graph.notes_other"
+                },
+                &[("count", &count)],
+            ),
+            crate::i18n::tf(
+                if links == 1 {
+                    "notes.graph.links_one"
+                } else {
+                    "notes.graph.links_other"
+                },
+                &[("count", &links)],
+            )
         );
         let cursor_pointer = self.hover.is_some();
         let header = div()
@@ -759,7 +773,7 @@ impl Render for NoteGraphView {
                             .text_size(px(diri_ui::Typo::TITLE.size))
                             .font_weight(diri_ui::Typo::TITLE.weight)
                             .text_color(colors.primary)
-                            .child("Graph"),
+                            .child(crate::i18n::t("notes.graph.title")),
                     )
                     .child(
                         div()
@@ -781,8 +795,16 @@ impl Render for NoteGraphView {
                             .rounded(px(8.0))
                             .border_1()
                             .border_color(fade(colors.primary, 0.08))
-                            .child(self.scope_button(Scope::Local, "This note", cx))
-                            .child(self.scope_button(Scope::All, "All notes", cx)),
+                            .child(self.scope_button(
+                                Scope::Local,
+                                crate::i18n::t("notes.graph.this_note"),
+                                cx,
+                            ))
+                            .child(self.scope_button(
+                                Scope::All,
+                                crate::i18n::t("notes.graph.all_notes"),
+                                cx,
+                            )),
                     )
                     .child(
                         div()
@@ -815,8 +837,8 @@ impl Render for NoteGraphView {
                 .text_size(px(diri_ui::Typo::ROW.size))
                 .text_color(colors.tertiary)
                 .child(match self.scope {
-                    Scope::Local => "No links yet. Type [[ or @ in a note to link another note.",
-                    Scope::All => "No notes yet.",
+                    Scope::Local => crate::i18n::t("notes.graph.no_links"),
+                    Scope::All => crate::i18n::t("notes.graph.no_notes"),
                 })
         });
         let hint = div()
@@ -825,7 +847,7 @@ impl Render for NoteGraphView {
             .left(px(16.0))
             .text_size(px(diri_ui::Typo::META.size))
             .text_color(colors.tertiary)
-            .child("Click a note to open it · drag to move · scroll to zoom");
+            .child(crate::i18n::t("notes.graph.hint"));
 
         div()
             .id("note-graph")

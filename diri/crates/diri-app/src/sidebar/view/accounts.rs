@@ -46,7 +46,7 @@ impl Sidebar {
         self.accounts.busy = true;
         if profile.is_some() {
             self.accounts.failed = false;
-            self.accounts.message = Some("Switching login and resuming conversations…".into());
+            self.accounts.message = Some(t("sidebar.account.switching").into());
         }
         let client = services.store.client().clone();
         let runtime = services.tokio.clone();
@@ -104,12 +104,25 @@ impl Sidebar {
                             }
                             this.accounts.failed = !errors.is_empty() || !result.default_changed;
                             this.accounts.message = Some(if this.accounts.failed {
-                                format!("{count} conversations switched. {}", errors.join("\n"))
+                                tf(
+                                    "sidebar.account.switched_with_errors",
+                                    &[("count", &count), ("errors", &errors.join("\n"))],
+                                )
                             } else {
                                 if deferred > 0 {
-                                    format!("Switched {count} conversations; {unchanged} separate-home tabs unchanged; {deferred} unidentified tab(s) keep the previous login until restarted. Default account updated.")
+                                    tf(
+                                        "sidebar.account.switched_deferred",
+                                        &[
+                                            ("count", &count),
+                                            ("unchanged", &unchanged),
+                                            ("deferred", &deferred),
+                                        ],
+                                    )
                                 } else {
-                                    format!("Switched {count} conversations; {unchanged} separate-home tabs unchanged. Default account updated.")
+                                    tf(
+                                        "sidebar.account.switched",
+                                        &[("count", &count), ("unchanged", &unchanged)],
+                                    )
                                 }
                             });
                             drop(store);
@@ -124,7 +137,11 @@ impl Sidebar {
                             Err(error) => {
                                 this.accounts.failed = true;
                                 let message = this.accounts.message.get_or_insert_default();
-                                message.push_str(&format!("\nCould not refresh accounts: {error}"));
+                                message.push('\n');
+                                message.push_str(&tf(
+                                    "sidebar.account.refresh_failed",
+                                    &[("error", &error)],
+                                ));
                             }
                         }
                     }
@@ -222,7 +239,7 @@ impl Sidebar {
             );
         }
         if !self.accounts.loaded && !self.accounts.failed {
-            section = section.child(menu_note("Loading accounts…", colors));
+            section = section.child(menu_note(t("sidebar.account.loading"), colors));
         }
         if let Some(message) = &self.accounts.message {
             section = section.child(
@@ -254,7 +271,7 @@ impl Sidebar {
                     .glass_menu_row(colors, false)
                     .text_size(px(Typo::ROW.size))
                     .text_color(colors.secondary)
-                    .child("Manage accounts…")
+                    .child(t("sidebar.account.manage"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.ui.popover = None;
                         cx.emit(SidebarEvent::ManageAccounts);

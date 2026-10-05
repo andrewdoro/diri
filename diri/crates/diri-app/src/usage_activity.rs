@@ -24,18 +24,49 @@ const GUTTER: f32 = 30.0;
 const TOP: f32 = 18.0;
 const GRID_H: f32 = TOP + PITCH * 6.0 + CELL;
 
-const WEEKDAYS: [&str; 7] = [
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-    "Sunday",
-];
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
+/// Short weekday name, Monday first.
+fn weekday_short(weekday: usize) -> &'static str {
+    t(match weekday {
+        0 => "settings.usage.weekday_mon",
+        1 => "settings.usage.weekday_tue",
+        2 => "settings.usage.weekday_wed",
+        3 => "settings.usage.weekday_thu",
+        4 => "settings.usage.weekday_fri",
+        5 => "settings.usage.weekday_sat",
+        _ => "settings.usage.weekday_sun",
+    })
+}
+
+/// "Mondays": every such weekday, Monday first.
+fn weekday_every(weekday: usize) -> &'static str {
+    t(match weekday {
+        0 => "settings.usage.weekday_every_mon",
+        1 => "settings.usage.weekday_every_tue",
+        2 => "settings.usage.weekday_every_wed",
+        3 => "settings.usage.weekday_every_thu",
+        4 => "settings.usage.weekday_every_fri",
+        5 => "settings.usage.weekday_every_sat",
+        _ => "settings.usage.weekday_every_sun",
+    })
+}
+
+/// Short month name for a 1-based month.
+fn month_short(month: usize) -> &'static str {
+    t(match month {
+        1 => "settings.usage.month_jan",
+        2 => "settings.usage.month_feb",
+        3 => "settings.usage.month_mar",
+        4 => "settings.usage.month_apr",
+        5 => "settings.usage.month_may",
+        6 => "settings.usage.month_jun",
+        7 => "settings.usage.month_jul",
+        8 => "settings.usage.month_aug",
+        9 => "settings.usage.month_sep",
+        10 => "settings.usage.month_oct",
+        11 => "settings.usage.month_nov",
+        _ => "settings.usage.month_dec",
+    })
+}
 const PROVIDERS: [&str; 3] = ["Claude Code", "Codex", "Cursor"];
 
 /// The part of the activity charts under the pointer.
@@ -141,10 +172,17 @@ pub(super) fn slot_at((x, y): (f32, f32), width: f32) -> Option<usize> {
 
 fn date_title(day: i64) -> String {
     let (year, month, date) = activity::civil(day);
-    format!(
-        "{}, {} {date}, {year}",
-        &WEEKDAYS[usize::from(activity::weekday(day))][..3],
-        MONTHS[(month - 1) as usize]
+    tf(
+        "settings.usage.date_title",
+        &[
+            (
+                "weekday",
+                &weekday_short(usize::from(activity::weekday(day))),
+            ),
+            ("month", &month_short(month as usize)),
+            ("day", &date),
+            ("year", &year),
+        ],
     )
 }
 
@@ -153,19 +191,25 @@ fn money(value: f64) -> String {
 }
 
 fn hours_text(hours: u32) -> String {
-    if hours == 1 {
-        "1 hour".into()
-    } else {
-        format!("{hours} hours")
-    }
+    tf(
+        if hours == 1 {
+            "settings.usage.hours_one"
+        } else {
+            "settings.usage.hours_other"
+        },
+        &[("count", &hours)],
+    )
 }
 
 fn days_text(days: usize) -> String {
-    if days == 1 {
-        "1 day".into()
-    } else {
-        format!("{days} days")
-    }
+    tf(
+        if days == 1 {
+            "settings.usage.days_one"
+        } else {
+            "settings.usage.days_other"
+        },
+        &[("count", &days)],
+    )
 }
 
 fn text(content: impl Into<SharedString>, size: f32, color: Rgba) -> gpui::Div {
@@ -241,9 +285,9 @@ fn key(steps: [Rgba; 5], colors: SemanticColors) -> impl IntoElement {
         .flex()
         .items_center()
         .gap(px(3.0))
-        .child(text("Less", 10.0, colors.tertiary).mr(px(2.0)))
+        .child(text(t("settings.usage.key_less"), 10.0, colors.tertiary).mr(px(2.0)))
         .children(steps.map(|step| div().size(px(CELL - 1.0)).rounded(px(CELL_RADIUS)).bg(step)))
-        .child(text("More", 10.0, colors.tertiary).ml(px(2.0)))
+        .child(text(t("settings.usage.key_more"), 10.0, colors.tertiary).ml(px(2.0)))
 }
 
 impl UtilitySurfaces {
@@ -326,22 +370,31 @@ impl UtilitySurfaces {
         };
         let steps = steps(colors);
         let streaks = activity.streaks();
-        let mut summary = vec![format!("{} active", days_text(activity.active_days()))];
+        let mut summary = vec![tf(
+            "settings.usage.activity_active_days",
+            &[("days", &days_text(activity.active_days()))],
+        )];
         if activity.hourly {
-            summary.push(format!(
-                "{} with agents at work",
-                hours_text(activity.active_hours())
+            summary.push(tf(
+                "settings.usage.activity_agent_hours",
+                &[("hours", &hours_text(activity.active_hours()))],
             ));
         }
-        summary.push(format!("longest streak {}", days_text(streaks.longest)));
+        summary.push(tf(
+            "settings.usage.activity_longest_streak",
+            &[("days", &days_text(streaks.longest))],
+        ));
         if streaks.current > 0 {
-            summary.push(format!("current {}", days_text(streaks.current)));
+            summary.push(tf(
+                "settings.usage.activity_current_streak",
+                &[("days", &days_text(streaks.current))],
+            ));
         }
         let mut metrics = div().flex().gap(px(3.0));
-        for (option, name) in [
-            (ActivityMetric::Hours, "Hours"),
-            (ActivityMetric::Tokens, "Tokens"),
-            (ActivityMetric::Cost, "Cost"),
+        for (option, name, label) in [
+            (ActivityMetric::Hours, "Hours", t("settings.usage.hours")),
+            (ActivityMetric::Tokens, "Tokens", t("settings.usage.tokens")),
+            (ActivityMetric::Cost, "Cost", t("settings.usage.cost")),
         ] {
             if option == ActivityMetric::Hours && !activity.hourly {
                 continue;
@@ -349,7 +402,7 @@ impl UtilitySurfaces {
             metrics = metrics.child(
                 usage_control(
                     format!("usage-activity-{}", name.to_lowercase()),
-                    name,
+                    label,
                     metric == option,
                     colors,
                 )
@@ -370,7 +423,10 @@ impl UtilitySurfaces {
                     .flex()
                     .flex_col()
                     .gap(px(3.0))
-                    .child(text("Activity", 13.0, colors.primary).font_weight(FontWeight::MEDIUM))
+                    .child(
+                        text(t("settings.usage.activity"), 13.0, colors.primary)
+                            .font_weight(FontWeight::MEDIUM),
+                    )
                     .child(text(summary.join(" · "), 11.0, colors.secondary)),
             )
             .child(metrics);
@@ -404,15 +460,18 @@ impl UtilitySurfaces {
             .child(header)
             .child(charts)
             .when(remote, |section| {
-                section.child(text(
-                    if activity.hourly {
-                        "Remote machines report daily totals: they add tokens and cost on their UTC date, not active hours."
-                    } else {
-                        "Remote machines report daily totals on their UTC date, so hours and the weekly rhythm are available for this Mac only."
-                    },
-                    11.0,
-                    colors.tertiary,
-                ).whitespace_normal())
+                section.child(
+                    text(
+                        if activity.hourly {
+                            t("settings.usage.activity_remote_hourly")
+                        } else {
+                            t("settings.usage.activity_remote_daily")
+                        },
+                        11.0,
+                        colors.tertiary,
+                    )
+                    .whitespace_normal(),
+                )
             })
     }
 
@@ -451,7 +510,7 @@ impl UtilitySurfaces {
                 .absolute()
                 .left(px(GUTTER + PITCH * week as f32))
                 .top(px(0.0))
-                .child(text(MONTHS[(month - 1) as usize], 10.0, colors.tertiary))
+                .child(text(month_short(month as usize), 10.0, colors.tertiary))
         });
         let weekdays = (0..7)
             .filter(|row| {
@@ -469,20 +528,28 @@ impl UtilitySurfaces {
                     .flex()
                     .items_center()
                     .justify_end()
-                    .child(text(&WEEKDAYS[weekday][..3], 10.0, colors.tertiary))
+                    .child(text(weekday_short(weekday), 10.0, colors.tertiary))
             });
         let tip = hover.map(|index| {
             let day = activity.days[index];
             let mut rows = Vec::new();
             if activity.hourly {
-                rows.push((None, "Active".to_owned(), hours_text(u32::from(day.hours))));
+                rows.push((
+                    None,
+                    t("settings.usage.active").to_owned(),
+                    hours_text(u32::from(day.hours)),
+                ));
             }
             rows.push((
                 None,
-                "Tokens".to_owned(),
+                t("settings.usage.tokens").to_owned(),
                 UsageFormat::tokens(day.total_tokens()),
             ));
-            rows.push((None, "Cost".to_owned(), money(day.total_cost())));
+            rows.push((
+                None,
+                t("settings.usage.cost").to_owned(),
+                money(day.total_cost()),
+            ));
             for (provider, name) in PROVIDERS.iter().enumerate() {
                 let (tokens, cost) = (day.tokens[provider], day.cost[provider]);
                 if tokens > 0 || cost > 0.0 {
@@ -499,7 +566,10 @@ impl UtilitySurfaces {
             let title = if activity.retained(index) {
                 date_title(day.day)
             } else {
-                format!("{} · not kept", date_title(day.day))
+                tf(
+                    "settings.usage.activity_not_kept",
+                    &[("date", &date_title(day.day))],
+                )
             };
             let (x, y) = day_origin(index);
             anchored(
@@ -580,9 +650,9 @@ impl UtilitySurfaces {
                     .gap(px(12.0))
                     .child(text(
                         match metric {
-                            ActivityMetric::Hours => "Active hours a day",
-                            ActivityMetric::Tokens => "Tokens a day",
-                            ActivityMetric::Cost => "Estimated cost a day",
+                            ActivityMetric::Hours => t("settings.usage.activity_legend_hours"),
+                            ActivityMetric::Tokens => t("settings.usage.activity_legend_tokens"),
+                            ActivityMetric::Cost => t("settings.usage.activity_legend_cost"),
                         },
                         10.0,
                         colors.tertiary,
@@ -637,7 +707,7 @@ impl UtilitySurfaces {
                 .flex()
                 .items_center()
                 .justify_end()
-                .child(text(&WEEKDAYS[weekday][..3], 10.0, colors.tertiary))
+                .child(text(weekday_short(weekday), 10.0, colors.tertiary))
         });
         let hours = [0, 6, 12, 18].map(|hour| {
             div()
@@ -648,7 +718,7 @@ impl UtilitySurfaces {
         });
         let tip = hover.map(|slot| {
             let (row, hour) = (slot / 24, slot % 24);
-            let weekday = WEEKDAYS[(row + usize::from(activity.week_start)) % 7];
+            let weekday = weekday_every((row + usize::from(activity.week_start)) % 7);
             let cell = activity.rhythm[row][hour];
             let x = GUTTER + pitch * hour as f32;
             let y = TOP + PITCH * row as f32;
@@ -657,14 +727,28 @@ impl UtilitySurfaces {
                 (if flip { x } else { x + pitch - 3.0 }, y + CELL * 0.5),
                 flip,
                 tooltip(
-                    format!("{weekday}s · {hour:02}:00–{:02}:00", (hour + 1) % 24),
+                    tf(
+                        "settings.usage.rhythm_title",
+                        &[
+                            ("weekday", &weekday),
+                            ("start", &format!("{hour:02}:00")),
+                            ("end", &format!("{:02}:00", (hour + 1) % 24)),
+                        ],
+                    ),
                     vec![
                         (
                             Some(strength(cell.hours)),
-                            "Active".to_owned(),
-                            format!("{} of {}", cell.hours, activity.rhythm_days[row]),
+                            t("settings.usage.active").to_owned(),
+                            tf(
+                                "settings.usage.rhythm_days",
+                                &[("hours", &cell.hours), ("days", &activity.rhythm_days[row])],
+                            ),
                         ),
-                        (None, "Tokens".to_owned(), UsageFormat::tokens(cell.tokens)),
+                        (
+                            None,
+                            t("settings.usage.tokens").to_owned(),
+                            UsageFormat::tokens(cell.tokens),
+                        ),
                     ],
                     colors,
                 ),
@@ -747,7 +831,7 @@ impl UtilitySurfaces {
             .min_w(px(300.0))
             .child(chart)
             .child(div().pl(px(GUTTER)).child(text(
-                "When you work · active hours by weekday and local hour",
+                t("settings.usage.rhythm_caption"),
                 10.0,
                 colors.tertiary,
             )))
