@@ -653,6 +653,8 @@ struct BlankReport {
     state: &'static str,
     got_grid: bool,
     content: bool,
+    /// Grid updates that changed the screen ([`TerminalElement::grid_changes`]).
+    changes: u64,
     frames: u64,
     ms: Duration,
     /// The element's paint count once the frame was requested; unchanged
@@ -2418,6 +2420,7 @@ impl TerminalPane {
             state,
             got_grid: resident.trace.first_grid.get().is_some(),
             content: resident.element.has_content(),
+            changes: resident.element.grid_changes(),
             frames: resident.element.stats().frames,
             ms: resident.trace.mounted_at.elapsed(),
             paints: resident.element.paint_count(),
@@ -2459,6 +2462,7 @@ impl TerminalPane {
                 state = report.state,
                 got_grid = report.got_grid,
                 content = report.content,
+                changes = report.changes,
                 frames = report.frames,
                 ms = report.ms
             );
@@ -2471,6 +2475,7 @@ impl TerminalPane {
                 got_grid = report.got_grid,
                 content = report.content,
                 redrawn = report.redrawn,
+                changes = report.changes,
                 frames = report.frames,
                 ms = report.ms
             );

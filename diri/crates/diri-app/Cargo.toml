@@ -161,6 +161,7 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = [
     "NSTimer",
     "NSURL",
     "NSUserDefaults",
+    "NSValue",
     "block2",
 ] }
 objc2-user-notifications = { version = "=0.3.2", default-features = false, features = [
