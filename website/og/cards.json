@@ -387,6 +387,13 @@
     "hash": "95d83fb2062b62b7"
   },
   {
+    "key": "guides-scheduled-tasks",
+    "url": "/guides/scheduled-tasks/",
+    "eyebrow": "Guide",
+    "title": "Run agents on a schedule",
+    "hash": "a8806532dd633c22"
+  },
+  {
     "key": "guides-shortcuts",
     "url": "/guides/shortcuts/",
     "eyebrow": "Guide",
