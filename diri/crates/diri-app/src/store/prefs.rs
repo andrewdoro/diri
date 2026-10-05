@@ -265,7 +265,8 @@ pub struct Prefs {
     #[serde(alias = "lastSpawnHost")]
     pub default_spawn_host: Option<String>,
     pub start_at_login: bool,
-    /// Interface language, persisted as `"system"`, `"en"` or `"zh-Hans"`.
+    /// Interface language, persisted as `"system"` or a catalog tag such as
+    /// `"en"`, `"zh-Hans"` or `"es"`.
     pub ui_language: UiLanguage,
     pub confirm_before_closing_session: bool,
     pub status_sounds: bool,

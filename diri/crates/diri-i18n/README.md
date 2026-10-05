@@ -7,6 +7,7 @@ text lives in JSON catalogs, so translating never touches UI code.
 locales/
   en/<area>.json        canonical English, one file per UI area
   zh-Hans/<area>.json   Simplified Chinese, same files, same ids
+  es/<area>.json        Spanish, same files, same ids
 ```
 
 `build.rs` compiles every file into the binary; a new area file needs no registration.
@@ -20,12 +21,16 @@ locales/
 
 ## Translating
 
-- Edit `locales/zh-Hans/*.json` only; keep ids and `{placeholders}` as they are.
+- Edit `locales/<tag>/*.json` only; keep ids and `{placeholders}` as they are.
 - Translate app chrome. Agent output, terminal text, file paths, commands and product names
   (diri, Claude Code, Codex, GitHub, SSH, …) stay as written.
 - Simplified Chinese: full-width punctuation, one space between Chinese and Latin text or digits,
   no trailing `。` on buttons and short labels. Terms in use: agent 智能体, session 会话,
   worktree 工作树, recipe 模板, conversation 对话, Copy 拷贝, Duplicate 复制.
+- Spanish: neutral international Spanish addressed with "tú", sentence case as in macOS menus,
+  short labels (sidebars and menus are narrow). Terms in use: agent agente, session sesión,
+  worktree árbol de trabajo, recipe plantilla, settings Ajustes, shortcut atajo, skill habilidad,
+  Pin Fijar, Resume Reanudar, What's New Novedades, Quick Open Apertura rápida.
 
 ## Adding a language
 

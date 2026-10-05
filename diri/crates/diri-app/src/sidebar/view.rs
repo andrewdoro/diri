@@ -6491,14 +6491,21 @@ impl Sidebar {
                     this.close_project_sessions(&id, cx);
                 }),
             ));
+        // Wide enough for the longest entry ("New Agents: Fresh Worktree" and
+        // its translations); 184 clipped it even in English.
         match position {
-            Some(position) => {
-                self.popover_shell_at(position, Anchor::TopLeft, 184.0, content, colors, cx)
-            }
+            Some(position) => self.popover_shell_at(
+                position,
+                Anchor::TopLeft,
+                PROJECT_MENU_WIDTH,
+                content,
+                colors,
+                cx,
+            ),
             None => self.popover_shell_at(
                 point(px(12.0), px(96.0)),
                 Anchor::TopLeft,
-                184.0,
+                PROJECT_MENU_WIDTH,
                 content,
                 colors,
                 cx,
@@ -9370,6 +9377,7 @@ fn account_avatar(label: &str, size: f32, colors: SemanticColors) -> AnyElement 
 }
 
 /// Height of the plain action rows at the bottom of the account menu.
+const PROJECT_MENU_WIDTH: f32 = 252.0;
 const ACCOUNT_MENU_ACTION_ROW_HEIGHT: f32 = 28.0;
 
 /// Height of the single-line stat rows in the account menu.
@@ -13083,7 +13091,7 @@ mod tests {
             popover.top() > menu.bottom(),
             "project actions must open below their trigger"
         );
-        assert_eq!(popover.size.width, px(184.0));
+        assert_eq!(popover.size.width, px(PROJECT_MENU_WIDTH));
     }
 
     #[gpui::test]

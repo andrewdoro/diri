@@ -23,16 +23,18 @@ pub enum Language {
     #[default]
     English,
     SimplifiedChinese,
+    Spanish,
 }
 
 impl Language {
-    pub const ALL: [Self; 2] = [Self::English, Self::SimplifiedChinese];
+    pub const ALL: [Self; 3] = [Self::English, Self::SimplifiedChinese, Self::Spanish];
 
     /// The BCP 47 tag, as persisted in preferences.
     pub const fn tag(self) -> &'static str {
         match self {
             Self::English => "en",
             Self::SimplifiedChinese => "zh-Hans",
+            Self::Spanish => "es",
         }
     }
 
@@ -42,6 +44,7 @@ impl Language {
         match self {
             Self::English => "English",
             Self::SimplifiedChinese => "简体中文",
+            Self::Spanish => "Español",
         }
     }
 
@@ -63,6 +66,7 @@ impl Language {
         let mut parts = identifier.split('-');
         match parts.next()? {
             "en" => Some(Self::English),
+            "es" => Some(Self::Spanish),
             "zh" => {
                 let rest: Vec<&str> = parts.collect();
                 let traditional = rest
@@ -88,12 +92,14 @@ impl Language {
         match self {
             Self::English => 0,
             Self::SimplifiedChinese => 1,
+            Self::Spanish => 2,
         }
     }
 
     fn from_index(index: u8) -> Self {
         match index {
             1 => Self::SimplifiedChinese,
+            2 => Self::Spanish,
             _ => Self::English,
         }
     }
@@ -143,7 +149,7 @@ fn parse_area(json: &str) -> Result<Vec<(String, String)>, String> {
         .collect()
 }
 
-static CATALOGS: LazyLock<[Catalog; 2]> = LazyLock::new(|| Language::ALL.map(parse));
+static CATALOGS: LazyLock<[Catalog; 3]> = LazyLock::new(|| Language::ALL.map(parse));
 
 static CURRENT: AtomicU8 = AtomicU8::new(0);
 
@@ -369,6 +375,9 @@ mod tests {
             ("zh_HK.UTF-8", None),
             ("en-GB", Some(Language::English)),
             ("en_US.UTF-8", Some(Language::English)),
+            ("es-ES", Some(Language::Spanish)),
+            ("es-419", Some(Language::Spanish)),
+            ("es_MX.UTF-8", Some(Language::Spanish)),
             ("de-DE", None),
             ("C", None),
             ("", None),

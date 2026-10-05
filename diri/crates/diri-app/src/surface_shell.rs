@@ -160,10 +160,11 @@ fn file_editor_label(choice: crate::store::FileEditor) -> String {
 }
 
 /// Interface language choices, in menu order.
-const UI_LANGUAGE_OPTIONS: [crate::store::UiLanguage; 3] = [
+const UI_LANGUAGE_OPTIONS: [crate::store::UiLanguage; 4] = [
     crate::store::UiLanguage::System,
     crate::store::UiLanguage::Fixed(crate::i18n::Language::English),
     crate::store::UiLanguage::Fixed(crate::i18n::Language::SimplifiedChinese),
+    crate::store::UiLanguage::Fixed(crate::i18n::Language::Spanish),
 ];
 
 /// A language reads in its own name, so a reader can find theirs from any

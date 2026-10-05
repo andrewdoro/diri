@@ -189,7 +189,7 @@ cat > "${contents}/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
-    <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
+    <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string><string>es</string></array>
     <key>CFBundleDisplayName</key><string>${display_name}</string>
     <key>CFBundleExecutable</key><string>diri</string>
     <key>CFBundleIconFile</key><string>dev-icon.icns</string>
