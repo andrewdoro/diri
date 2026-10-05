@@ -104,9 +104,7 @@ impl UtilitySurfaces {
                 true
             }
             Err(error) => {
-                self.privacy.save_error = Some(
-                    "Could not save. Your previous privacy settings are still active. Try again.",
-                );
+                self.privacy.save_error = Some(t("settings.privacy.save_failed"));
                 diri_telemetry::error_event!(
                     "settings.privacy_save_failed",
                     io = diri_telemetry::io_error(&error)
@@ -170,19 +168,26 @@ impl UtilitySurfaces {
             .settings
             .support_id
             .clone()
-            .unwrap_or_else(|| "Unavailable".to_owned());
+            .unwrap_or_else(|| t("settings.privacy.unavailable").to_owned());
         setting_section(
-            "Privacy",
+            t("settings.privacy.title"),
             div()
                 .flex()
                 .flex_col()
                 .when_some(privacy.save_error, |column, error| {
-                    column.child(div().id("privacy-save-error").px(px(12.0)).py(px(8.0))
-                        .text_size(px(12.0)).text_color(Ink::DANGER).child(error))
+                    column.child(
+                        div()
+                            .id("privacy-save-error")
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .text_size(px(12.0))
+                            .text_color(Ink::DANGER)
+                            .child(error),
+                    )
                 })
                 .child(toggle_row(
-                    "Share diagnostics to help fix bugs",
-                    "Crashes, hangs, errors and timings. Never terminal contents, prompts or files.",
+                    t("settings.privacy.share"),
+                    t("settings.privacy.share_detail"),
                     privacy.settings.config.upload,
                     "toggle-share-diagnostics",
                     colors,
@@ -191,15 +196,15 @@ impl UtilitySurfaces {
                 ))
                 .child(setting_divider(colors))
                 .child(setting_row(
-                    "Name for bug reports",
-                    "Sent with diagnostics so a report can be found. Leave it empty to stay anonymous.",
+                    t("settings.privacy.name"),
+                    t("settings.privacy.name_detail"),
                     self.privacy_name_field(cx),
                     colors,
                 ))
                 .child(setting_divider(colors))
                 .child(setting_row(
-                    "Support ID",
-                    "Quote it when you report a problem.",
+                    t("settings.privacy.support_id"),
+                    t("settings.privacy.support_id_detail"),
                     div()
                         .flex_none()
                         .flex()
@@ -215,7 +220,11 @@ impl UtilitySurfaces {
                         )
                         .when(privacy.settings.support_id.is_some(), |row| {
                             row.child(surface_button(
-                                if privacy.copied { "Copied" } else { "Copy" },
+                                if privacy.copied {
+                                    t("settings.privacy.copied")
+                                } else {
+                                    t("settings.privacy.copy")
+                                },
                                 "copy-support-id",
                                 colors,
                                 cx,
@@ -232,16 +241,16 @@ impl UtilitySurfaces {
                 ))
                 .child(setting_divider(colors))
                 .child(setting_row(
-                    "Send diagnostics now",
+                    t("settings.privacy.send_now_title"),
                     match privacy.send {
                         SendState::Done(summary) => summary,
-                        _ => "Uploads what's been recorded so far, even with sharing off.",
+                        _ => t("settings.privacy.send_now_detail"),
                     },
                     surface_button(
                         if privacy.send == SendState::Sending {
-                            "Sending…"
+                            t("settings.privacy.sending")
                         } else {
-                            "Send now"
+                            t("settings.privacy.send_now")
                         },
                         "send-diagnostics-now",
                         colors,
@@ -252,10 +261,10 @@ impl UtilitySurfaces {
                 ))
                 .child(setting_divider(colors))
                 .child(setting_row(
-                    "Diagnostics on this Mac",
-                    "What diri has recorded, before anything is shared.",
+                    t("settings.privacy.local"),
+                    t("settings.privacy.local_detail"),
                     surface_button(
-                        "Show in Finder",
+                        t("settings.privacy.show_in_finder"),
                         "show-diagnostics-folder",
                         colors,
                         cx,
@@ -280,7 +289,7 @@ impl UtilitySurfaces {
         } else if self.privacy.name.is_empty() {
             div()
                 .text_color(colors.tertiary)
-                .child("Anonymous")
+                .child(t("settings.privacy.anonymous"))
                 .into_any_element()
         } else {
             div()

@@ -44,7 +44,7 @@ impl UtilitySurfaces {
                 .child(start_option(
                     &project.id,
                     NewAgentStart::CurrentCheckout,
-                    "Current checkout",
+                    "settings.general.start_current_checkout",
                     start,
                     colors,
                     cx,
@@ -52,7 +52,7 @@ impl UtilitySurfaces {
                 .child(start_option(
                     &project.id,
                     NewAgentStart::FreshWorktree,
-                    "Fresh worktree",
+                    "settings.general.start_fresh_worktree",
                     start,
                     colors,
                     cx,
@@ -60,12 +60,12 @@ impl UtilitySurfaces {
             let detail = match start {
                 NewAgentStart::CurrentCheckout => project.root.clone(),
                 NewAgentStart::FreshWorktree => {
-                    "New branch from the latest origin default branch".to_owned()
+                    t("settings.general.start_fresh_worktree_detail").to_owned()
                 }
             };
             rows = rows.child(setting_row(project.name.clone(), detail, control, colors));
         }
-        setting_section("New agents start in", rows, colors).into_any_element()
+        setting_section(t("settings.general.new_agents_start_in"), rows, colors).into_any_element()
     }
 }
 
@@ -99,7 +99,7 @@ fn start_option(
                 .cursor_pointer()
                 .hover(move |option| option.text_color(colors.secondary))
         })
-        .child(label)
+        .child(t(label))
         .on_click(cx.listener(move |this, _, _, cx| {
             let project = project.clone();
             this.update_prefs(move |prefs| prefs.set_new_agent_start(&project, option));

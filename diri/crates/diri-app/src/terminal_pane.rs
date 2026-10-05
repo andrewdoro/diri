@@ -68,6 +68,7 @@ use crate::commands::{
 };
 use crate::external_drop::{TerminalDropAction, plan_terminal_drop, terminal_drop_text};
 use crate::haptics::{self, Haptic};
+use crate::i18n::{t, tf};
 use crate::icons::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::NavigationOverlay;
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
@@ -364,12 +365,15 @@ enum UploadedPaste {
     DroppedFiles(String),
 }
 
-const UPLOAD_HELD_FOR_RETURN: &str =
-    "Upload finished. It will be pasted when you return to its session";
-const UPLOAD_HELD_FOR_RECONNECT: &str =
-    "Upload finished. It will be pasted when the terminal reconnects";
-const UPLOAD_TARGET_CHANGED: &str =
-    "The session changed or ended while a file was uploading, so nothing was pasted";
+fn upload_held_for_return() -> &'static str {
+    t("terminal.upload.held_for_return")
+}
+fn upload_held_for_reconnect() -> &'static str {
+    t("terminal.upload.held_for_reconnect")
+}
+fn upload_target_changed() -> &'static str {
+    t("terminal.upload.target_changed")
+}
 
 /// The id still names the run the upload was started for, on the host the
 /// files were copied to. A resume keeps the id and `created_at`, so having
@@ -2085,11 +2089,7 @@ impl TerminalPane {
                         "clipboard.image_upload_failed",
                         session = diri_telemetry::id(&target.id.0)
                     );
-                    self.show_terminal_feedback(
-                        "Couldn’t copy the image to the remote host",
-                        window,
-                        cx,
-                    );
+                    self.show_terminal_feedback(t("terminal.upload.image_failed"), window, cx);
                 }
             },
             PaneEvent::DroppedFilesUploaded(target, result) => match result {
@@ -2104,7 +2104,7 @@ impl TerminalPane {
                         session = diri_telemetry::id(&target.id.0)
                     );
                     cx.emit(TerminalPaneEvent::ExternalDropFeedback {
-                        message: format!("Couldn’t copy the files to the remote host: {error}"),
+                        message: tf("terminal.upload.files_failed", &[("error", &error)]),
                     });
                 }
             },
@@ -2122,7 +2122,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         if !self.upload_target_is_current(&target) {
-            self.show_terminal_feedback(UPLOAD_TARGET_CHANGED, window, cx);
+            self.show_terminal_feedback(upload_target_changed(), window, cx);
             return;
         }
         match self.residents.get(&target.id) {
@@ -2133,9 +2133,9 @@ impl TerminalPane {
             }
             resident => {
                 let held = if resident.is_some() {
-                    UPLOAD_HELD_FOR_RECONNECT
+                    upload_held_for_reconnect()
                 } else {
-                    UPLOAD_HELD_FOR_RETURN
+                    upload_held_for_return()
                 };
                 self.held_uploads.push((target, paste));
                 self.show_terminal_feedback(held, window, cx);
@@ -2161,7 +2161,7 @@ impl TerminalPane {
         let due: Vec<(UploadTarget, UploadedPaste)> = due;
         for (target, paste) in due {
             if !self.upload_target_is_current(&target) {
-                self.show_terminal_feedback(UPLOAD_TARGET_CHANGED, window, cx);
+                self.show_terminal_feedback(upload_target_changed(), window, cx);
             } else if self.paste_upload(id, &paste) {
                 cx.notify();
             }
@@ -2198,7 +2198,7 @@ impl TerminalPane {
             changed
         };
         if changed {
-            self.show_terminal_feedback(UPLOAD_TARGET_CHANGED, window, cx);
+            self.show_terminal_feedback(upload_target_changed(), window, cx);
         }
     }
 
@@ -2666,27 +2666,27 @@ impl TerminalPane {
                                     }
                                 })
                                 .await
-                                .unwrap_or_else(|_| FindSnapshot::failure("Search interrupted")),
+                                .unwrap_or_else(|_| {
+                                    FindSnapshot::failure(t("terminal.find.interrupted"))
+                                }),
                             ),
-                            Ok(_) => Some(FindSnapshot::failure("Search session changed")),
+                            Ok(_) => {
+                                Some(FindSnapshot::failure(t("terminal.find.session_changed")))
+                            }
                             // A remote Helper that cannot serve its history
                             // still has a screen to search; see `apply_result`.
                             Err(_) if remote => {
                                 client.read_scrollback(&id).await.ok().map(Into::into)
                             }
-                            Err(_) => Some(FindSnapshot::failure(
-                                "Search unavailable. Refresh results to retry",
-                            )),
+                            Err(_) => Some(FindSnapshot::failure(t("terminal.find.unavailable"))),
                         }
                     } else {
-                        Some(FindSnapshot::failure(
-                            "Search busy. Refresh results to retry",
-                        ))
+                        Some(FindSnapshot::failure(t("terminal.find.busy")))
                     }
                 }
-                Some((true, None, None)) => Some(FindSnapshot::failure(
-                    "Close another Find view to search here",
-                )),
+                Some((true, None, None)) => {
+                    Some(FindSnapshot::failure(t("terminal.find.another_view")))
+                }
                 Some((false, _, _)) => client.read_scrollback(&id).await.ok().map(Into::into),
                 None => None,
             };
@@ -2773,7 +2773,7 @@ impl TerminalPane {
                 files: false,
                 directories: true,
                 multiple: false,
-                prompt: Some("Start Here".into()),
+                prompt: Some(t("terminal.start_here").into()),
             });
             let canonical = Arc::clone(&canonical);
             let window_store = window_store.clone();
@@ -3608,7 +3608,7 @@ impl TerminalPane {
             ms = started.elapsed(),
             session = diri_telemetry::id(&id.0)
         );
-        self.show_terminal_feedback("Copied", window, cx);
+        self.show_terminal_feedback(t("terminal.copied"), window, cx);
     }
 
     /// Captures terminal text together with the stable absolute scrollback
@@ -3636,7 +3636,7 @@ impl TerminalPane {
                 // The kind says what went wrong ("storage full") without the
                 // temp path the full error may carry.
                 self.show_terminal_feedback(
-                    format!("Couldn't paste the clipboard image: {}", error.kind()),
+                    tf("terminal.paste_image_failed", &[("error", &error.kind())]),
                     window,
                     cx,
                 );
@@ -3677,7 +3677,7 @@ impl TerminalPane {
         };
         if self.qol.copy_mode.is_some() {
             record("copy_mode", "none", 0, false);
-            self.show_terminal_feedback("Exit copy mode before pasting", window, cx);
+            self.show_terminal_feedback(t("terminal.copy_mode.exit_before_paste"), window, cx);
             cx.stop_propagation();
             return;
         }
@@ -4284,9 +4284,9 @@ impl TerminalPane {
                     .debug_selector(|| "show-sidebar".into())
                     .role(gpui::Role::Button)
                     .aria_label(if horizontal {
-                        "Toggle top bar"
+                        t("terminal.toggle_top_bar")
                     } else {
-                        "Show sidebar"
+                        t("terminal.show_sidebar")
                     })
                     .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
                     .flex_none()
@@ -4413,7 +4413,7 @@ impl TerminalPane {
             let note = store.sessions().get(&parent).filter(|p| p.is_note())?;
             let title = note.title.trim();
             if title.is_empty() {
-                "Untitled".to_owned()
+                t("nav.title.untitled").to_owned()
             } else {
                 title.to_owned()
             }
@@ -4471,7 +4471,7 @@ impl TerminalPane {
             .id("notification-inbox-button")
             .debug_selector(|| "notification-inbox-button".into())
             .role(gpui::Role::Button)
-            .aria_label("Notifications")
+            .aria_label(t("terminal.notifications"))
             .relative()
             .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
             .flex_none()
@@ -4597,7 +4597,7 @@ impl TerminalPane {
             if closing {
                 return div().size_full().into_any_element();
             }
-            return centered_message("Preparing terminal…", "", colors).into_any_element();
+            return centered_message(t("terminal.preparing"), "", colors).into_any_element();
         };
         let element = resident
             .element
@@ -4751,7 +4751,7 @@ impl TerminalPane {
                     .items_center()
                     .gap(px(5.0))
                     .child(sf_symbol("arrow.down", 11.5, colors.secondary))
-                    .child(format!("{view_offset} lines · Return to live"))
+                    .child(tf("terminal.return_to_live", &[("lines", &view_offset)]))
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.return_to_live(&return_id, cx);
                     })),
@@ -4763,9 +4763,9 @@ impl TerminalPane {
             && (show_attaching || attachment_state == AttachmentState::Reconnecting || unavailable)
         {
             let message = match attachment_state {
-                AttachmentState::Reconnecting => "Reconnecting terminal…",
-                AttachmentState::Unavailable => "Terminal unavailable",
-                _ => "Attaching…",
+                AttachmentState::Reconnecting => t("terminal.attach.reconnecting"),
+                AttachmentState::Unavailable => t("terminal.attach.unavailable"),
+                _ => t("terminal.attach.attaching"),
             };
             body = body.child(
                 div()
@@ -4801,9 +4801,9 @@ impl TerminalPane {
     /// facility, does not.
     fn render_secret_input_badge(&self, colors: SemanticColors) -> AnyElement {
         let label = if self.secure_input.is_held() {
-            "Secure input"
+            t("terminal.secure_input")
         } else {
-            "Password prompt"
+            t("terminal.password_prompt")
         };
         div()
             .debug_selector(|| "terminal-secret-input".into())
@@ -4865,9 +4865,9 @@ impl TerminalPane {
                     .cursor_pointer()
                     .text_color(colors.primary)
                     .child(if is_local_shell(session) {
-                        "Restart"
+                        t("terminal.exit.restart")
                     } else {
-                        "Resume"
+                        t("terminal.exit.resume")
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.runtime
@@ -4893,7 +4893,11 @@ impl TerminalPane {
                 );
             }
         } else if session.resumability == Resumability::TranscriptMissing {
-            pill = pill.child(div().text_color(colors.tertiary).child("· transcript gone"));
+            pill = pill.child(
+                div()
+                    .text_color(colors.tertiary)
+                    .child(t("terminal.exit.transcript_gone")),
+            );
         }
         // Centered by a full-width row rather than a guessed half-width offset,
         // since the description's length varies with the exit reason.
@@ -4921,7 +4925,7 @@ impl TerminalPane {
             if find.query().is_empty() {
                 String::new()
             } else {
-                "No matches".to_owned()
+                t("nav.no_matches").to_owned()
             }
         } else {
             format!("{}/{}", find.current_index() + 1, find.matches().len())
@@ -4931,16 +4935,16 @@ impl TerminalPane {
         let search_status = find.error().map(str::to_owned).or_else(|| {
             if find.is_paused() {
                 Some(
-                    match (find.is_partial(), find.has_newer_output()) {
-                        (true, true) => "Paused · Recent output · New output",
-                        (true, false) => "Paused · Recent output",
-                        (false, true) => "Paused · New output available",
-                        (false, false) => "Paused",
-                    }
+                    t(match (find.is_partial(), find.has_newer_output()) {
+                        (true, true) => "terminal.find.paused_recent_new",
+                        (true, false) => "terminal.find.paused_recent",
+                        (false, true) => "terminal.find.paused_new",
+                        (false, false) => "terminal.find.paused",
+                    })
                     .to_owned(),
                 )
             } else if find.is_partial() {
-                Some("Searching recent output".to_owned())
+                Some(t("terminal.find.searching_recent").to_owned())
             } else {
                 None
             }
@@ -4980,7 +4984,7 @@ impl TerminalPane {
                                     FindButtonSpec {
                                         id: "find-previous",
                                         system_image: "chevron.up",
-                                        label: "Previous match",
+                                        label: t("terminal.find.previous"),
                                         shortcut: "Shift+Enter",
                                     },
                                     colors,
@@ -4994,7 +4998,7 @@ impl TerminalPane {
                                     FindButtonSpec {
                                         id: "find-next",
                                         system_image: "chevron.down",
-                                        label: "Next match",
+                                        label: t("terminal.find.next"),
                                         shortcut: "Enter",
                                     },
                                     colors,
@@ -5009,7 +5013,7 @@ impl TerminalPane {
                                         FindButtonSpec {
                                             id: "find-refresh",
                                             system_image: "arrow.clockwise.circle",
-                                            label: "Refresh results",
+                                            label: t("terminal.find.refresh"),
                                             shortcut: "",
                                         },
                                         colors,
@@ -5022,7 +5026,7 @@ impl TerminalPane {
                                     FindButtonSpec {
                                         id: "find-close",
                                         system_image: "xmark",
-                                        label: "Close find",
+                                        label: t("terminal.find.close"),
                                         shortcut: "Escape",
                                     },
                                     colors,
@@ -5050,7 +5054,7 @@ impl TerminalPane {
                                     .pl(px(20.0))
                                     .text_size(px(Typo::META.size))
                                     .text_color(colors.tertiary)
-                                    .child("full-screen app — screen only"),
+                                    .child(t("terminal.find.screen_only")),
                             )
                         }),
                 ))
@@ -5106,15 +5110,20 @@ impl TerminalPane {
         // Mid-migration the source agent is briefly down; show the busy state
         // instead of an exit card with a doomed Resume button.
         if migrating {
-            return Some(centered_message("◌", "Moving session…", colors).into_any_element());
+            return Some(
+                centered_message("◌", t("terminal.moving_session"), colors).into_any_element(),
+            );
         }
         if auto_resuming {
             let message = if let Some(batch) = batch {
-                format!("Resuming all — {} of {} back", batch.finished, batch.total)
+                tf(
+                    "terminal.resuming_all",
+                    &[("finished", &batch.finished), ("total", &batch.total)],
+                )
             } else if is_local_shell(session) {
-                "Restarting terminal…".to_owned()
+                t("terminal.restarting").to_owned()
             } else {
-                "Resuming conversation…".to_owned()
+                t("terminal.resuming_conversation").to_owned()
             };
             return Some(centered_message("◌", &message, colors).into_any_element());
         }
@@ -5141,9 +5150,9 @@ impl TerminalPane {
             let resume = primary_button(
                 "resume-conversation",
                 if is_local_shell(session) {
-                    "Restart Terminal"
+                    t("terminal.exit.restart_terminal")
                 } else {
-                    "Resume Conversation"
+                    t("terminal.exit.resume_conversation")
                 },
                 colors,
                 cx,
@@ -5181,7 +5190,7 @@ impl TerminalPane {
                     div()
                         .text_size(px(11.5))
                         .text_color(colors.tertiary)
-                        .child("Transcript is gone — start a fresh session in the same folder."),
+                        .child(t("terminal.exit.transcript_gone_detail")),
                 )
                 .into_any_element()
         } else {
@@ -5201,7 +5210,7 @@ impl TerminalPane {
                 div()
                     .text_size(px(13.0))
                     .text_color(colors.secondary)
-                    .child("Archived"),
+                    .child(t("terminal.archived")),
             );
         if session.resumability == Resumability::NotResumable {
             content = content.child(
@@ -5209,15 +5218,13 @@ impl TerminalPane {
                     .max_w(px(320.0))
                     .text_size(px(11.5))
                     .text_color(colors.tertiary)
-                    .child(
-                        "This session can't resume its conversation; revive restores it as ended.",
-                    ),
+                    .child(t("terminal.archived.not_resumable")),
             );
         }
         content
             .child(primary_button(
                 "revive-session",
-                "Revive Session",
+                t("terminal.archived.revive"),
                 colors,
                 cx,
                 move |this, cx| {
@@ -5596,9 +5603,9 @@ fn find_icon_button(
         .aria_label(spec.label)
         .aria_keyshortcuts(spec.shortcut)
         .aria_description(if enabled {
-            "Activate this terminal find action"
+            t("terminal.find.activate")
         } else {
-            "Unavailable because there are no matches"
+            t("terminal.find.no_matches_unavailable")
         })
         .text_size(px(11.0))
         .text_color(if enabled {
@@ -5678,7 +5685,7 @@ fn secondary_button(
 }
 
 pub(crate) fn resume_all_label(count: usize) -> String {
-    format!("Resume All ({count})")
+    tf("terminal.resume_all", &[("count", &count)])
 }
 
 fn centered_message(icon: &str, message: &str, colors: SemanticColors) -> gpui::Div {
@@ -6019,7 +6026,7 @@ fn is_local_shell(session: &SessionRecord) -> bool {
 
 fn exit_description(session: &SessionRecord) -> String {
     let SessionStatus::Exited(info) = &session.status else {
-        return "Session ended".to_owned();
+        return t("terminal.exit.session_ended").to_owned();
     };
     if info.interrupted {
         // Killed from outside (a force-quit, memory pressure), not finished:
@@ -6028,15 +6035,22 @@ fn exit_description(session: &SessionRecord) -> String {
     }
     match info.reason {
         ExitReason::DaemonRestart if info.system_restart => {
-            format!("Ended when {} restarted", crate::platform::your_machine())
+            if cfg!(target_os = "macos") {
+                t("terminal.exit.mac_restarted").to_owned()
+            } else {
+                t("terminal.exit.computer_restarted").to_owned()
+            }
         }
-        ExitReason::DaemonRestart => "Session ended when the daemon restarted".to_owned(),
-        ExitReason::Signaled => "Agent was stopped".to_owned(),
-        ExitReason::Exited if info.code == Some(0) => "Agent exited".to_owned(),
-        ExitReason::Exited => format!("Agent exited (code {})", info.code.unwrap_or(-1)),
-        ExitReason::External => "Imported session — not started yet".to_owned(),
-        ExitReason::Archived => "Archived".to_owned(),
-        ExitReason::Unknown => "Session ended".to_owned(),
+        ExitReason::DaemonRestart => t("terminal.exit.daemon_restarted").to_owned(),
+        ExitReason::Signaled => t("terminal.exit.stopped").to_owned(),
+        ExitReason::Exited if info.code == Some(0) => t("terminal.exit.exited").to_owned(),
+        ExitReason::Exited => tf(
+            "terminal.exit.exited_code",
+            &[("code", &info.code.unwrap_or(-1))],
+        ),
+        ExitReason::External => t("terminal.exit.imported").to_owned(),
+        ExitReason::Archived => t("terminal.archived").to_owned(),
+        ExitReason::Unknown => t("terminal.exit.session_ended").to_owned(),
     }
 }
 
@@ -7360,6 +7374,13 @@ mod tests {
         use diri_proto::grid::{ChangedRow, GridCell, LinkSpan};
         use gpui::{AppContext as _, HeadlessAppContext};
         let output = std::env::var("DIRI_QOL_SCREENSHOT").expect("output path");
+        // DIRI_VISUAL_LANGUAGE=zh-Hans renders the page in that catalog.
+        if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+            .ok()
+            .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+        {
+            diri_i18n::set_language(language);
+        }
         let scene = std::env::var("DIRI_QOL_SCENE").unwrap_or_default();
         let width: f32 = std::env::var("DIRI_QOL_WIDTH")
             .ok()
@@ -9070,7 +9091,7 @@ mod tests {
         });
         assert_eq!(
             &*shown.lock().unwrap(),
-            &[UPLOAD_HELD_FOR_RETURN],
+            &[upload_held_for_return()],
             "a held paste is announced rather than lost"
         );
 
@@ -9121,7 +9142,7 @@ mod tests {
         pane.update_in(cx, |pane, window, cx| {
             pane.reconcile_store_change(window, cx)
         });
-        assert_eq!(&*shown.lock().unwrap(), &[UPLOAD_TARGET_CHANGED]);
+        assert_eq!(&*shown.lock().unwrap(), &[upload_target_changed()]);
         store_runtime
             .store
             .write()
@@ -9165,7 +9186,7 @@ mod tests {
                 "an upload was replayed into a restarted session"
             );
         });
-        assert_eq!(&*shown.lock().unwrap(), &[UPLOAD_TARGET_CHANGED],);
+        assert_eq!(&*shown.lock().unwrap(), &[upload_target_changed()],);
 
         let mut migrated = uploading.clone();
         migrated.host = Some("anvil".into());
@@ -9189,7 +9210,7 @@ mod tests {
                 "an upload was pasted into a migrated session"
             );
         });
-        assert_eq!(&*shown.lock().unwrap(), &[UPLOAD_TARGET_CHANGED],);
+        assert_eq!(&*shown.lock().unwrap(), &[upload_target_changed()],);
     }
 
     #[gpui::test]

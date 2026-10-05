@@ -10,6 +10,7 @@ use gpui::{
     uniform_list,
 };
 
+use crate::i18n::{t, tf};
 use crate::markdown::MarkdownDocument;
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
 use crate::skills_catalog::{self, Catalog, Scope};
@@ -162,20 +163,25 @@ impl SkillsPage {
         self.detail_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         let generation = self.generation;
         self.detail_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move {
-                skills_catalog::read(&path).map(|text| {
-                    let instructions = skills_catalog::body(&text).to_owned();
-                    (MarkdownDocument::parse(&instructions), instructions)
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    skills_catalog::read(&path).map(|text| {
+                        let instructions = skills_catalog::body(&text).to_owned();
+                        (MarkdownDocument::parse(&instructions), instructions)
+                    })
                 })
-            }).await;
+                .await;
             let _ = this.update(cx, |this, cx| {
-                if this.generation != generation || this.selected != Some(index) { return; }
+                if this.generation != generation || this.selected != Some(index) {
+                    return;
+                }
                 match result {
                     Ok((document, instructions)) => {
                         this.document = Some(document);
                         this.instructions = Some(instructions);
                     }
-                    Err(_) => this.detail_error = Some("This skill could not be read. Refresh the catalogue if it was moved or removed.".into()),
+                    Err(_) => this.detail_error = Some(t("settings.skills.read_failed").into()),
                 }
                 cx.notify();
             });
@@ -347,7 +353,7 @@ impl Render for SkillsPage {
                 div()
                     .text_size(px(20.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Skills"),
+                    .child(t("settings.tab.skills")),
             );
         if let Some(index) = self.selected {
             let skill = &self.catalog.skills[index];
@@ -356,11 +362,11 @@ impl Render for SkillsPage {
                 .flex()
                 .gap(px(8.0))
                 .child(
-                    self.button("skills-back", "Back to skills", 0, colors)
+                    self.button("skills-back", t("settings.skills.back"), 0, colors)
                         .on_click(cx.listener(|this, _, _, cx| this.back(cx))),
                 )
                 .child(
-                    self.button("skills-copy", "Copy instructions", 1, colors)
+                    self.button("skills-copy", t("settings.skills.copy"), 1, colors)
                         .when(self.document.is_none(), |button| button.opacity(0.45))
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(instructions) = &this.instructions {
@@ -371,7 +377,7 @@ impl Render for SkillsPage {
                         })),
                 )
                 .child(
-                    self.button("skills-reveal", "Show file", 2, colors)
+                    self.button("skills-reveal", t("settings.skills.show_file"), 2, colors)
                         .on_click(move |_, _, cx| cx.reveal_path(&path)),
                 );
             page = page.child(controls).child(
@@ -413,7 +419,7 @@ impl Render for SkillsPage {
                     .child(
                         self.detail_error
                             .clone()
-                            .unwrap_or_else(|| "Reading skill…".into()),
+                            .unwrap_or_else(|| t("settings.skills.reading").into()),
                     )
                     .into_any_element()
             };
@@ -430,12 +436,12 @@ impl Render for SkillsPage {
             div()
                 .text_size(px(13.0))
                 .text_color(colors.secondary)
-                .child("Browse skills on this Mac and in the current local project."),
+                .child(t("settings.skills.intro")),
         );
         let search_label = if self.query.is_empty() && self.keyboard_target != 0 {
             div()
                 .text_color(colors.tertiary)
-                .child("Search skills…")
+                .child(t("settings.skills.search_placeholder"))
                 .into_any_element()
         } else {
             crate::navigation::query_label(&self.query)
@@ -444,7 +450,7 @@ impl Render for SkillsPage {
             div()
                 .id("skills-search")
                 .role(gpui::Role::TextInput)
-                .aria_label("Search skills")
+                .aria_label(t("settings.skills.search"))
                 .h(px(36.0))
                 .px(px(10.0))
                 .flex()
@@ -507,9 +513,9 @@ impl Render for SkillsPage {
                     self.button(
                         "skills-refresh",
                         if self.loading {
-                            "Refreshing…"
+                            t("settings.skills.refreshing")
                         } else {
-                            "Refresh"
+                            t("settings.skills.refresh")
                         },
                         5,
                         colors,
@@ -521,17 +527,23 @@ impl Render for SkillsPage {
                 ),
         );
         let message = if self.loading && !self.loaded {
-            "Looking for skills…".to_owned()
+            t("settings.skills.looking").to_owned()
         } else if self.matches.is_empty() && self.scope == Scope::Project && self.project.is_none()
         {
-            "Select a local project to browse its skills.".into()
+            t("settings.skills.select_project").into()
         } else if self.matches.is_empty() && (!self.query.is_empty() || self.scope != Scope::All) {
-            "No skills match these filters.".into()
+            t("settings.skills.no_match").into()
         } else if self.matches.is_empty() {
-            "No skills found. Add a SKILL.md folder to your agent’s skills directory, then refresh."
-                .into()
+            t("settings.skills.none_found").into()
         } else {
-            format!("{} skills", self.matches.len())
+            tf(
+                if self.matches.len() == 1 {
+                    "settings.skills.count_one"
+                } else {
+                    "settings.skills.count_other"
+                },
+                &[("count", &self.matches.len())],
+            )
         };
         page = page.child(
             div()
@@ -552,9 +564,12 @@ impl Render for SkillsPage {
                                 div()
                                     .id(("skill", index))
                                     .role(gpui::Role::Button)
-                                    .aria_label(format!(
-                                        "Open skill {}. {}",
-                                        skill.name, skill.description
+                                    .aria_label(tf(
+                                        "settings.skills.open_skill",
+                                        &[
+                                            ("name", &skill.name),
+                                            ("description", &skill.description),
+                                        ],
                                     ))
                                     .w_full()
                                     .h(px(82.0))
@@ -598,7 +613,7 @@ impl Render for SkillsPage {
                                             .text_size(px(12.0))
                                             .text_color(colors.secondary)
                                             .child(if skill.description.is_empty() {
-                                                "Open to read instructions".into()
+                                                t("settings.skills.open_to_read").into()
                                             } else {
                                                 skill.description.clone()
                                             }),
@@ -628,18 +643,24 @@ impl Render for SkillsPage {
                     .text_size(px(12.0))
                     .text_color(colors.secondary)
                     .child(format!(
-                        "{} files or folders could not be read.{}",
-                        self.catalog.unreadable,
+                        "{}{}",
+                        tf(
+                            "settings.skills.unreadable",
+                            &[("count", &self.catalog.unreadable)],
+                        ),
                         if self.catalog.limited {
-                            " Discovery reached its size limit."
+                            t("settings.skills.size_limit")
                         } else {
                             ""
                         }
                     )),
             );
         }
-        page.child(div().text_size(px(11.0)).text_color(colors.tertiary).child(
-            "Plugin entries include cached versions. Each agent controls which skills are active.",
-        ))
+        page.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.tertiary)
+                .child(t("settings.skills.plugin_note")),
+        )
     }
 }

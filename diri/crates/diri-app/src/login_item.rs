@@ -5,6 +5,8 @@
 //! a mirror of that, so every path here ends by reading the registration back
 //! and reporting what macOS says, never what was asked for.
 
+use crate::i18n::{t, tf};
+
 /// What macOS reports for the main app's login item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LoginItemStatus {
@@ -81,26 +83,20 @@ impl LoginItemState {
     pub(crate) fn detail(self) -> String {
         if let Some(error) = self.failure {
             return match error.code {
-                ERROR_INVALID_SIGNATURE => {
-                    "macOS only starts a signed copy of diri at login.".to_owned()
-                }
-                ERROR_LAUNCH_DENIED_BY_USER => APPROVAL_DETAIL.to_owned(),
-                code => format!("macOS could not update Login Items (error {code})."),
+                ERROR_INVALID_SIGNATURE => t("settings.general.login_unsigned").to_owned(),
+                ERROR_LAUNCH_DENIED_BY_USER => t("settings.general.login_approval").to_owned(),
+                code => tf("settings.general.login_error", &[("code", &code)]),
             };
         }
         match self.status {
             LoginItemStatus::Enabled | LoginItemStatus::NotRegistered => {
-                "Open diri automatically after you sign in.".to_owned()
+                t("settings.general.login_detail").to_owned()
             }
-            LoginItemStatus::RequiresApproval => APPROVAL_DETAIL.to_owned(),
-            LoginItemStatus::Unavailable => {
-                "Available when diri runs from the installed app.".to_owned()
-            }
+            LoginItemStatus::RequiresApproval => t("settings.general.login_approval").to_owned(),
+            LoginItemStatus::Unavailable => t("settings.general.login_unavailable").to_owned(),
         }
     }
 }
-
-const APPROVAL_DETAIL: &str = "Allow diri in System Settings > General > Login Items to finish.";
 
 pub(crate) struct LoginItem {
     backend: Box<dyn LoginItemBackend>,

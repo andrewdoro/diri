@@ -2,8 +2,10 @@
 //!
 //! A Session's `cwd` is where it was launched. Agents leave it: Claude's
 //! worktree isolation, `git worktree add ../fix && cd ../fix`, or edits to
-//! another checkout by absolute path. The right panel and ⌘T used to stay on
-//! the launch directory, so the Agent's changes were invisible there.
+//! another checkout by absolute path. The right panel used to stay on the
+//! launch directory, so the Agent's changes were invisible there. New
+//! Sessions (⌘T) still start in the launch directory: following is a view of
+//! where the Agent works, not a move of the project.
 //!
 //! The "effective workspace" is resolved from evidence the app already has,
 //! mapped into the launch repository's own `git worktree list`:
@@ -631,14 +633,6 @@ impl FollowState {
         self.chosen(id, launch_cwd).map(|c| c.directory.clone())
     }
 
-    /// The directory ⌘T should start in, only when it differs from today's
-    /// launch-directory behavior.
-    pub(crate) fn followed_directory(&self, id: &SessionId, launch_cwd: &Path) -> Option<PathBuf> {
-        self.chosen(id, launch_cwd)
-            .filter(|candidate| !candidate.launch)
-            .map(|candidate| candidate.directory.clone())
-    }
-
     /// The cached staleness for `root`, if it was computed for that root.
     pub(crate) fn staleness(&self, id: &SessionId, root: &Path) -> Option<Option<&Staleness>> {
         let (cached, staleness) = self.entries.get(id)?.staleness.as_ref()?;
@@ -705,23 +699,6 @@ impl FollowController {
     pub(crate) fn forget_staleness(&mut self, id: &SessionId) {
         self.state.clear_staleness(id);
         self.staleness_task = None;
-    }
-
-    /// Tells the store where ⌘T from `session` should start: the followed
-    /// checkout when it is not the launch one, else nothing.
-    pub(crate) fn publish(
-        &self,
-        session: &SessionRecord,
-        store: &std::sync::RwLock<crate::store::SessionStore>,
-    ) {
-        let followed = self
-            .state
-            .followed_directory(&session.id, Path::new(&session.cwd))
-            .map(|path| path.to_string_lossy().into_owned());
-        store
-            .write()
-            .expect("session store lock poisoned")
-            .set_followed_directory(&session.id, followed);
     }
 }
 

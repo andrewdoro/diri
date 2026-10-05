@@ -3,6 +3,7 @@
 use diri_proto::{SessionReparentWorktreeParams, WorktreeCleanupParams, WorktreeOverviewEntry};
 
 use crate::delegation::WorktreeMoveProposal;
+use crate::i18n::t;
 
 #[derive(Clone, Debug, Default)]
 pub struct WorktreesSheet {
@@ -44,7 +45,7 @@ impl WorktreesSheet {
                     if entry.health.head.is_none() {
                         entry.stale_suggestion = false;
                         entry.health.protection =
-                            Some("Update the engine to inspect cleanup safety".into());
+                            Some(t("settings.worktrees.update_engine").into());
                         entry.health.pr_state = "Unavailable".into();
                     }
                 }

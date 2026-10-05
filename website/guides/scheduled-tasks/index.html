@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191724">
+  <title>Run agents on a schedule · Diri</title>
+  <meta name="description" content="Schedule AI agents in diri: ask any agent in plain words to run a task every weekday or once later, catch up after sleep, wake the Mac, and manage schedules.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://diri.sh/guides/scheduled-tasks/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Diri">
+  <meta property="og:title" content="Run agents on a schedule">
+  <meta property="og:description" content="Schedule AI agents in diri: ask any agent in plain words to run a task every weekday or once later, catch up after sleep, wake the Mac, and manage schedules.">
+  <meta property="og:url" content="https://diri.sh/guides/scheduled-tasks/">
+  <meta property="og:image" content="https://diri.sh/og/guides-scheduled-tasks.jpg">
+  <meta property="og:image:alt" content="Diri: the best way to work with coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guides.css">
+  <script src="/guides.js" defer></script>
+  <script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Run agents on a schedule", "description": "Schedule AI agents in diri: ask any agent in plain words to run a task every weekday or once later, catch up after sleep, wake the Mac, and manage schedules.", "url": "https://diri.sh/guides/scheduled-tasks/", "inLanguage": "en", "publisher": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}, "datePublished": "2026-10-05", "dateModified": "2026-10-05", "image": "https://diri.sh/assets/social-card.jpg", "author": {"@type": "Organization", "name": "Diri", "url": "https://diri.sh/"}, "isPartOf": {"@type": "CollectionPage", "url": "https://diri.sh/guides/"}}</script>
+  <script type="module" src="/stats.js"></script>
+</head>
+<body class="guide-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-wrap">
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+      <nav class="site-nav" aria-label="Main"><a href="/#features">Features</a><a href="/guides/" aria-current="page">Guides</a><a href="/docs/">Docs</a></nav>
+      <div class="header-actions"><a class="github-link" href="https://github.com/cristicretu/diri" aria-label="Diri on GitHub" title="Diri on GitHub"><span class="icon" data-icon="github" aria-hidden="true"></span><span class="star-count" aria-hidden="true"></span></a><a class="nav-download" href="https://github.com/cristicretu/diri/releases/latest">Download</a></div>
+    </header>
+    <main id="main">
+      <header class="guide-heading"><a class="eyebrow" href="/guides/">Guides · Go further</a><h1>Run agents on a schedule</h1><p>Have an agent start at a set time, every weekday or just once tomorrow morning. Ask for it in plain words, and it runs even if the Mac was asleep.</p>
+        <div class="guide-meta"><span>7 min read</span><span>Everyone</span></div></header>
+      <div class="guide-layout"><nav class="guide-toc" aria-label="On this page"><span>On this page</span><a href="#how-it-works">1. How it works</a><a href="#ask-an-agent">2. Ask an agent for a schedule</a><a href="#set-one-up-yourself">3. Or set one up yourself</a><a href="#what-a-run-does">4. What each run does</a><a href="#when-the-mac-sleeps">5. When the Mac is asleep</a><a href="#check-and-change">6. Check, pause and remove</a><a href="#under-the-hood">7. For developers: the MCP tools</a></nav>
+        <article class="guide-content"><div class="learn"><strong>You will learn</strong><ul><li>How to ask any agent in diri to schedule work for later</li><li>What each run does, and how to write a prompt that works unattended</li><li>How runs catch up after sleep, and how to wake the Mac for them</li></ul></div><section id="how-it-works" class="step"><h2><span class="step-n">1</span>How it works</h2>
+<p>A schedule is a prompt, an agent, a folder and a time. When the time comes, diri opens the agent in that folder and sends it the prompt, just as if you had typed it.</p>
+<p>diri keeps the schedule, not the agent that made it. It keeps working after you close that conversation, quit the app window or restart diri. The only thing it needs is diri running on your Mac at the time, and even that has a fallback: a run the Mac slept through starts as soon as it is back.</p></section><section id="ask-an-agent" class="step"><h2><span class="step-n">2</span>Ask an agent for a schedule</h2>
+<p>The quickest way is to ask the agent you are already talking to. Say what to do, when, and where the result should go. Starting with <strong>“Use diri to…”</strong> makes sure it uses diri’s schedule instead of a timer of its own.</p>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Use diri to schedule a Claude agent in this project every weekday at 9:00. It should read the GitHub issues opened since the last run, label each one, and add a short triage summary to triage.md. Wake the Mac if it is asleep.</p><button class="prompt-copy" type="button">Copy</button></div>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Use diri to run a Codex agent every night at 2:00 in a fresh worktree from origin/main. It runs the full test suite, fixes any flaky test it can, and opens a pull request with what it changed.</p><button class="prompt-copy" type="button">Copy</button></div>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Use diri to check in two hours whether the staging deploy finished, and write what you find to deploy-notes.md.</p><button class="prompt-copy" type="button">Copy</button></div>
+<p>The agent answers with the schedule in plain words, for example <em>“Weekdays at 09:00, next run Monday at 09:00. It will wake the Mac.”</em> If that is not what you meant, say so and it will fix it.</p>
+<aside class="note"><strong>If the agent asks for permission</strong><p>Depending on its settings, the agent may ask you to approve diri’s schedule tool the first time it uses it. Approve it once and it carries on.</p></aside></section><section id="set-one-up-yourself" class="step"><h2><span class="step-n">3</span>Or set one up yourself</h2>
+<ol>
+<li>Open <strong>Settings → Schedules</strong> and click <strong>New schedule</strong>.</li>
+<li>Under <strong>Prompt</strong>, write what the agent should do.</li>
+<li>Pick the <strong>Agent</strong>, and click <strong>Choose…</strong> to pick the <strong>Folder</strong> it works in.</li>
+<li>Under <strong>When</strong>, pick <strong>Once</strong>, <strong>Every day</strong>, <strong>Weekdays</strong> or <strong>Every hour</strong>, and type a time such as <code>9:00</code> or <code>17:30</code>.</li>
+<li>Click <strong>Create schedule</strong>.</li>
+</ol>
+<p>Agents can set up any timing, such as Mondays and Thursdays at 8:30 or every 15 minutes. The form keeps it simple; schedules made by agents show up in the same list either way.</p></section><section id="what-a-run-does" class="step"><h2><span class="step-n">4</span>What each run does</h2>
+<p>The first run opens a new tab with the agent, in the chosen folder, and sends the prompt. Later runs send the prompt again <strong>into that same tab</strong>, so a daily schedule is one ongoing conversation instead of a pile of tabs. If the agent had quit, diri resumes it first. If it is still busy with the last run, the new one waits for it to finish.</p>
+<p>Close the tab and the next run simply opens a new one. Schedules that use a fresh worktree are different: every run gets its own clean copy of the project and its own tab, so one night’s work never mixes with the next.</p>
+<p>A session started by a schedule shows a small clock after its title in the sidebar. Hover it to see which schedule started it and when the run was due. The clock is indigo when diri woke the Mac for that run.</p>
+<ul>
+<li><strong>Write a prompt that stands on its own.</strong> The first run cannot see the conversation where you made the schedule. Say what to do, where things are, and what to produce.</li>
+<li><strong>Say where the result goes.</strong> A file, a pull request or a note is easy to find in the morning. “Tell me” only works if you read that tab.</li>
+<li><strong>Use a fresh worktree for code changes.</strong> Each run then starts from a clean checkout and leaves its work on its own branch.</li>
+</ul>
+<aside class="note"><strong>diri only starts the agent</strong><p>If the task needs your email, calendar or another service, the agent needs its own tools or connectors for it, the same as when you ask it by hand.</p></aside></section><section id="when-the-mac-sleeps" class="step"><h2><span class="step-n">5</span>When the Mac is asleep</h2>
+<p>If the Mac was asleep or diri was closed at the due time, the run starts once as soon as both are back, up to 12 hours late. Older missed runs do not pile up: a whole closed weekend becomes one run on Monday, and nothing ever runs twice for the same time. Turn off <strong>Catch up if missed</strong> on a schedule if a late run would be useless.</p>
+<p>Two switches in <strong>Settings → Schedules</strong>, under <strong>When the Mac is asleep or restarts</strong>, cover the rest:</p>
+<dl class="defs">
+<div><dt>Open diri at login</dt><dd>Schedules run only while diri is open. With this on, a run missed during a restart catches up after you log in.</dd></div>
+<div><dt>Allow diri to wake the Mac</dt><dd>Installs a small helper that can only set wakes for your runs. macOS asks an administrator to approve it once in System Settings → General → Login Items.</dd></div>
+</dl>
+<p>Then turn on <strong>Wake the Mac</strong> for a schedule, or ask the agent to. diri wakes the Mac 2 minutes early, keeps it awake while the agent works, and puts it back to sleep afterwards, unless you started using it or another agent still needs you.</p>
+<aside class="note"><strong>Keep the lid open</strong><p>A laptop with its lid closed, or a Mac that is turned off, cannot be woken. Catch-up covers those runs once it is back. Both switches need diri installed in Applications.</p></aside></section><section id="check-and-change" class="step"><h2><span class="step-n">6</span>Check, pause and remove</h2>
+<p><strong>Settings → Schedules</strong> lists every schedule with its next run and one line about the last one, such as “Last ran today at 09:00” or “Ran late because the Mac was asleep”. Each row has <strong>Open</strong> to jump to the tab its last run used, <strong>Run now</strong>, <strong>Delete</strong>, and a switch to pause it.</p>
+<p>You can also ask:</p>
+<div class="prompt"><span class="prompt-label">Try saying</span><p>Use diri to list my schedules, tell me which ones ran late this week, and delete the one that triages issues.</p><button class="prompt-copy" type="button">Copy</button></div>
+<p>Deleting a schedule stops future runs. Tabs its earlier runs opened stay where they are.</p></section><section id="under-the-hood" class="step"><h2><span class="step-n">7</span>For developers: the MCP tools</h2>
+<p>Agents make schedules through diri’s MCP server, <code>dirijor</code>. Claude Code, Codex and Cursor get it automatically when diri starts them; other agents can <a href="/docs/mcp/#set-up">connect to it</a> in a minute. The server tells agents to use these tools instead of their own cron or loop features, which stop when their session closes and skip runs the Mac slept through.</p>
+<dl class="defs">
+<div><dt><code>schedule_agent</code></dt><dd>Creates a schedule. Returns the next due time.</dd></div>
+<div><dt><code>list_schedules</code></dt><dd>Every schedule with its next run, recent runs (on time, late, missed, failed or by hand) and the session each run used.</dd></div>
+<div><dt><code>delete_schedule</code></dt><dd>Removes a schedule by id. Its sessions stay.</dd></div>
+</dl>
+<p>A typical <code>schedule_agent</code> call from the first example above:</p>
+<pre><code>{
+  "name": "Morning issue triage",
+  "kind": "claude",
+  "cwd": "/Users/you/code/app",
+  "prompt": "Read the GitHub issues opened since the last run, label each one, and add a short triage summary to triage.md.",
+  "cron": "0 9 * * 1-5",
+  "wake_mac": true
+}</code></pre>
+<p><code>kind</code>, <code>cwd</code> and <code>prompt</code> are required. For the time, pass exactly one of:</p>
+<dl class="defs">
+<div><dt><code>cron</code></dt><dd>Five fields in the Mac’s local time. <code>0 9 * * 1-5</code> is weekdays at 9:00, <code>30 8 * * *</code> every day at 8:30, <code>*/15 * * * *</code> every 15 minutes.</dd></div>
+<div><dt><code>in_minutes</code></dt><dd>Once, this many minutes from now.</dd></div>
+<div><dt><code>at_ms</code></dt><dd>Once, at an exact moment in epoch milliseconds.</dd></div>
+</dl>
+<p>The optional arguments match the switches in Settings: <code>catch_up_hours</code> (0 to 168, default 12, 0 never catches up), <code>keep_awake</code>, <code>wake_mac</code>, and <code>worktree</code> with <code>base</code> (for example <code>origin/main</code>) for a clean checkout every run. If <code>list_schedules</code> reports a <code>wakeHelperError</code>, the wake helper has not been approved yet.</p>
+<p>You can call the same tools from a terminal with the <a href="/docs/cli/">dirijor CLI</a>:</p>
+<pre><code>echo '{}' | dirijor mcp-call --tool list_schedules</code></pre>
+<p>Every argument is in the <a href="/docs/mcp-tools/#schedules">MCP tool reference</a>, and every setting in the <a href="/docs/scheduled-tasks/">schedules docs</a>.</p></section><nav class="guide-pager" aria-label="More guides"><a class="prev" href="/guides/review-changes/"><span>Previous</span>Review what changed</a><a class="next" href="/guides/remote-sessions/"><span>Next</span>Run agents on your own server</a></nav></article>
+      </div>
+    </main>
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a class="footer-brand" href="/" aria-label="Diri home"><img class="app-mark" src="/assets/brand/diri-icon.svg" width="26" height="26" alt="">diri</a>
+          <p>The best way to work with coding agents.</p>
+        </div>
+        <nav class="footer-columns" aria-label="Resources">
+          <div><h3>Product</h3><a href="https://github.com/cristicretu/diri/releases/latest">Download</a><a href="/whats-new/">What's new</a><a href="https://github.com/cristicretu/diri/releases">Release notes</a><a href="/guides/">Guides</a><a href="/agents/">Agents</a><a href="/compare/">Compare</a></div>
+          <div><h3>Project</h3><a href="https://github.com/cristicretu/diri">GitHub</a><a href="/docs/">Documentation</a><a href="https://github.com/cristicretu/diri/blob/main/ROADMAP.md">Roadmap</a></div>
+          <div><h3>Legal</h3><a href="https://github.com/cristicretu/diri/blob/main/LICENSE">Apache 2.0</a><a href="https://github.com/cristicretu/diri/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/cristicretu/diri/blob/main/SECURITY.md">Security</a></div>
+        </nav>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

@@ -23,6 +23,7 @@ use crate::details_ui::{
     self, MERGED, avatar, avatar_group, diff_stat, ghost_button, hairline, icon, icon_tag, ref_tag,
     relative_time, selection_fill, selection_hover, selection_stroke, tag,
 };
+use crate::i18n::{english, t, tf};
 use crate::markdown::MarkdownDocument;
 use crate::markdown_view::render_markdown;
 use crate::quote::QuoteSource;
@@ -60,10 +61,10 @@ impl PullState {
 
     pub fn look(self, colors: SemanticColors) -> (IconName, gpui::Rgba, &'static str) {
         match self {
-            Self::Open => (IconName::PullRequest, Ink::FRESH, "Open"),
-            Self::Draft => (IconName::PullRequest, colors.secondary, "Draft"),
-            Self::Merged => (IconName::Merge, MERGED, "Merged"),
-            Self::Closed => (IconName::PullRequest, Ink::DANGER, "Closed"),
+            Self::Open => (IconName::PullRequest, Ink::FRESH, t("git.pr.open")),
+            Self::Draft => (IconName::PullRequest, colors.secondary, t("git.pr.draft")),
+            Self::Merged => (IconName::Merge, MERGED, t("git.pr.merged")),
+            Self::Closed => (IconName::PullRequest, Ink::DANGER, t("git.pr.closed")),
         }
     }
 }
@@ -93,25 +94,26 @@ impl ReviewVerdict {
 
     pub fn label(&self) -> String {
         match self {
-            Self::Approved => "Approved".to_owned(),
-            Self::ChangesRequested => "Changes requested".to_owned(),
-            Self::Commented => "Reviewed".to_owned(),
-            Self::Dismissed => "Dismissed".to_owned(),
-            Self::Pending => "Pending".to_owned(),
+            Self::Approved => t("git.review.approved").to_owned(),
+            Self::ChangesRequested => t("git.review.changes_requested").to_owned(),
+            Self::Commented => t("git.review.reviewed").to_owned(),
+            Self::Dismissed => t("git.review.dismissed").to_owned(),
+            Self::Pending => t("git.review.pending").to_owned(),
             Self::Other(label) => label.clone(),
         }
     }
 
-    /// The verb phrase of a timeline event without a body.
-    pub fn event_phrase(&self) -> String {
-        match self {
-            Self::Approved => "approved these changes".to_owned(),
-            Self::ChangesRequested => "requested changes".to_owned(),
-            Self::Commented => "reviewed".to_owned(),
-            Self::Dismissed => "had a review dismissed".to_owned(),
-            Self::Pending => "started a review".to_owned(),
-            Self::Other(label) => label.to_ascii_lowercase(),
-        }
+    /// The line of a timeline event without a body: who did what.
+    pub fn event_line(&self, author: &str) -> String {
+        let id = match self {
+            Self::Approved => "git.review.event.approved",
+            Self::ChangesRequested => "git.review.event.changes_requested",
+            Self::Commented => "git.review.event.reviewed",
+            Self::Dismissed => "git.review.event.dismissed",
+            Self::Pending => "git.review.event.pending",
+            Self::Other(label) => return format!("{author} {}", label.to_ascii_lowercase()),
+        };
+        tf(id, &[("author", &author)])
     }
 
     /// Whether this verdict outranks an earlier one by the same reviewer.
@@ -143,9 +145,9 @@ impl ReviewVerdict {
 /// The repository's overall review requirement, when GitHub reports one.
 pub fn review_decision(pull_request: &PullRequestStatus) -> Option<(&'static str, gpui::Rgba)> {
     match pull_request.review_decision.as_deref()? {
-        "APPROVED" => Some(("Approved", Ink::FRESH)),
-        "CHANGES_REQUESTED" => Some(("Changes requested", Ink::DANGER)),
-        "REVIEW_REQUIRED" => Some(("Review required", Ink::ATTENTION)),
+        "APPROVED" => Some((t("git.review.approved"), Ink::FRESH)),
+        "CHANGES_REQUESTED" => Some((t("git.review.changes_requested"), Ink::DANGER)),
+        "REVIEW_REQUIRED" => Some((t("git.review.required"), Ink::ATTENTION)),
         _ => None,
     }
 }
@@ -200,19 +202,19 @@ impl ChecksRollup {
     pub fn summary(self) -> String {
         if self.total() > 0 && self.failed == 0 && self.running == 0 {
             return if self.passed == 1 {
-                "Check passed".to_owned()
+                t("git.checks.passed_one").to_owned()
             } else {
-                format!("All {} checks passed", self.passed)
+                tf("git.checks.passed_all", &[("count", &self.passed)])
             };
         }
         [
-            (self.failed, "failed"),
-            (self.running, "running"),
-            (self.passed, "passed"),
+            (self.failed, "git.checks.failed_count"),
+            (self.running, "git.checks.running_count"),
+            (self.passed, "git.checks.passed_count"),
         ]
         .iter()
         .filter(|(count, _)| *count > 0)
-        .map(|(count, word)| format!("{count} {word}"))
+        .map(|(count, id)| tf(id, &[("count", count)]))
         .collect::<Vec<_>>()
         .join(" · ")
     }
@@ -354,19 +356,19 @@ pub fn pull_request_can_merge(pull_request: &PullRequestStatus) -> bool {
 
 pub fn merge_blocker_label(pull_request: &PullRequestStatus) -> &'static str {
     if pull_request.is_draft {
-        "Still a draft"
+        t("git.merge.draft")
     } else if pull_request.checks_failed > 0 {
-        "Checks are failing"
+        t("git.merge.checks_failing")
     } else if pull_request.checks_pending > 0 {
-        "Checks are still running"
+        t("git.merge.checks_running")
     } else if pull_request.mergeable.as_deref() == Some("CONFLICTING") {
-        "Resolve merge conflicts"
+        t("git.merge.conflicts")
     } else if pull_request.review_decision.as_deref() == Some("CHANGES_REQUESTED") {
-        "Changes were requested"
+        t("git.merge.changes_requested")
     } else if pull_request.review_decision.as_deref() == Some("REVIEW_REQUIRED") {
-        "Review is required"
+        t("git.merge.review_required")
     } else {
-        "GitHub is blocking the merge"
+        t("git.merge.blocked")
     }
 }
 
@@ -382,20 +384,31 @@ pub fn humanize_github_state(value: &str) -> String {
 /// Comment and review counts with thread resolution, for a card whose
 /// discussion items were not fetched.
 pub fn pull_request_discussion(pull_request: &PullRequestStatus) -> Option<String> {
-    let plural = |count: i64, one: &str, many: &str| {
-        format!("{count} {}", if count == 1 { one } else { many })
+    let plural = |count: i64, one: &'static str, many: &'static str| {
+        tf(if count == 1 { one } else { many }, &[("count", &count)])
     };
     let mut parts = Vec::new();
     if pull_request.comment_count > 0 {
-        parts.push(plural(pull_request.comment_count, "comment", "comments"));
+        parts.push(plural(
+            pull_request.comment_count,
+            "git.discussion.comments_one",
+            "git.discussion.comments_other",
+        ));
     }
     if pull_request.review_count > 0 {
-        parts.push(plural(pull_request.review_count, "review", "reviews"));
+        parts.push(plural(
+            pull_request.review_count,
+            "git.discussion.reviews_one",
+            "git.discussion.reviews_other",
+        ));
     }
     if let Some(total) = pull_request.total_threads.filter(|total| *total > 0) {
-        parts.push(format!(
-            "{} of {total} threads resolved",
-            pull_request.resolved_threads.unwrap_or(0)
+        parts.push(tf(
+            "git.discussion.threads_resolved",
+            &[
+                ("resolved", &pull_request.resolved_threads.unwrap_or(0)),
+                ("total", &total),
+            ],
         ));
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
@@ -432,7 +445,7 @@ impl PullRequestCard<'_> {
         let number_label = if number > 0 {
             format!("PR #{number}")
         } else {
-            "Pull request".to_owned()
+            t("panel.pull_request").to_owned()
         };
         let title = pull_request
             .title
@@ -455,8 +468,11 @@ impl PullRequestCard<'_> {
 
         // Title row: state glyph, title with its number and author, actions.
         let byline = match pull_request.author.as_deref() {
-            Some(author) if number > 0 => format!("#{number} by {author}"),
-            Some(author) => format!("by {author}"),
+            Some(author) if number > 0 => tf(
+                "git.pr.byline_number",
+                &[("number", &number), ("author", &author)],
+            ),
+            Some(author) => tf("git.pr.byline", &[("author", &author)]),
             None => number_label.clone(),
         };
         let title_row = div()
@@ -577,9 +593,13 @@ impl PullRequestCard<'_> {
                 pull_request.deletions.max(0) as u64,
                 colors,
             ))
-            .child(div().flex_none().child(format!(
-                "{files} {}",
-                if files == 1 { "file" } else { "files" }
+            .child(div().flex_none().child(tf(
+                if files == 1 {
+                    "panel.review.files_one"
+                } else {
+                    "panel.review.files_other"
+                },
+                &[("count", &files)],
             )))
             .child(div().flex_1())
             .when(!reviewers.is_empty(), |row| {
@@ -757,9 +777,12 @@ impl PullRequestCard<'_> {
             .total_threads
             .filter(|total| *total > 0)
             .map(|total| {
-                format!(
-                    "{}/{total} resolved",
-                    pull_request.resolved_threads.unwrap_or(0)
+                tf(
+                    "git.discussion.resolved",
+                    &[
+                        ("resolved", &pull_request.resolved_threads.unwrap_or(0)),
+                        ("total", &total),
+                    ],
                 )
             });
 
@@ -780,7 +803,7 @@ impl PullRequestCard<'_> {
                         div()
                             .font_weight(Typo::SECTION_HEADER.weight)
                             .text_color(colors.secondary)
-                            .child("Conversation"),
+                            .child(t("git.discussion.title")),
                     )
                     .child(
                         div()
@@ -808,11 +831,15 @@ impl PullRequestCard<'_> {
         if first > 0 || self.discussion_expanded {
             let toggle = self.actions.toggle_discussion.clone();
             let label = if self.discussion_expanded {
-                "Show fewer".to_owned()
+                t("git.discussion.show_fewer").to_owned()
             } else {
-                format!(
-                    "Show {first} earlier {}",
-                    if first == 1 { "entry" } else { "entries" }
+                tf(
+                    if first == 1 {
+                        "git.discussion.show_earlier_one"
+                    } else {
+                        "git.discussion.show_earlier_other"
+                    },
+                    &[("count", &first)],
                 )
             };
             block = block.child(
@@ -1035,7 +1062,7 @@ impl PullRequestCard<'_> {
                     .text_size(px(Typo::META.size))
                     .font_weight(FontWeight::NORMAL)
                     .text_color(colors.secondary)
-                    .child(format!("{} {}", item.author, verdict.event_phrase())),
+                    .child(verdict.event_line(&item.author)),
             )
             .when_some(time, |row, time| {
                 row.child(
@@ -1066,17 +1093,18 @@ fn render_check(
     colors: SemanticColors,
 ) -> AnyElement {
     let (glyph, tint, status) = match check.result.as_str() {
-        "pass" => (IconName::CheckCircle, Ink::FRESH, "Passed"),
-        "fail" => (IconName::CloseCircle, Ink::DANGER, "Failed"),
-        "pending" => (IconName::Clock, Ink::ATTENTION, "Running"),
-        _ => (IconName::Info, colors.tertiary, "Unknown"),
+        "pass" => (IconName::CheckCircle, Ink::FRESH, "git.checks.passed"),
+        "fail" => (IconName::CloseCircle, Ink::DANGER, "git.checks.failed"),
+        "pending" => (IconName::Clock, Ink::ATTENTION, "git.checks.running"),
+        _ => (IconName::Info, colors.tertiary, "git.checks.unknown"),
     };
+    // GitHub's own detail is English; it repeats the status when they agree.
     let detail = check
         .detail
         .as_deref()
         .map(humanize_github_state)
-        .filter(|detail| detail != status && detail != "Success")
-        .unwrap_or_else(|| status.to_owned());
+        .filter(|detail| detail != english(status) && detail != "Success")
+        .unwrap_or_else(|| t(status).to_owned());
     let url = check.url.clone();
     let ask = actions.ask.clone();
     let ask_evidence = ReviewEvidence::Check {
@@ -1148,7 +1176,7 @@ fn render_discussion_fallback(
     colors: SemanticColors,
 ) -> AnyElement {
     let discussion = pull_request_discussion(pull_request)
-        .unwrap_or_else(|| "Open the conversation on GitHub".to_owned());
+        .unwrap_or_else(|| t("git.discussion.open_on_github").to_owned());
     let url = pull_request.url.clone();
     div()
         .id(SharedString::from(format!(
@@ -1181,7 +1209,7 @@ fn render_discussion_fallback(
 fn render_merge_footer(pull_request: &PullRequestStatus, colors: SemanticColors) -> Div {
     let can_merge = pull_request_can_merge(pull_request);
     let (label, tint) = if can_merge {
-        ("Ready to merge", Ink::FRESH)
+        (t("git.merge.ready"), Ink::FRESH)
     } else {
         (merge_blocker_label(pull_request), Ink::ATTENTION)
     };
@@ -1243,7 +1271,7 @@ fn render_merge_footer(pull_request: &PullRequestStatus, colors: SemanticColors)
                 .text_size(px(11.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(button_text)
-                .child("Merge")
+                .child(t("git.merge.button"))
                 .child(icon(IconName::ExternalLink, 11.0, button_text))
                 .on_click(move |_, _, cx| cx.open_url(&merge_url)),
         )

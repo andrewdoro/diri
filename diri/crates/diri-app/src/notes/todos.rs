@@ -59,7 +59,7 @@ pub(crate) struct TodosModel {
     runtime: Arc<StoreRuntime>,
     store: Option<Arc<NoteStore>>,
     groups: Vec<TodoGroup>,
-    /// Every note in the folder, for "Search notes": built in the same
+    /// Every note in the folder, for crate::i18n::t("notes.todos.search"): built in the same
     /// off-thread pass as the to-dos, reusing unchanged files.
     notes: Arc<Vec<super::search::NoteEntry>>,
     /// Links between notes, kept current in the same pass: a write re-links
@@ -268,7 +268,7 @@ fn read_groups(store: &NoteStore, records: &[SessionRecord]) -> Vec<TodoGroup> {
             continue;
         }
         let title = if note.doc.title.trim().is_empty() {
-            "Untitled".to_owned()
+            crate::i18n::t("notes.untitled").to_owned()
         } else {
             note.doc.title.clone()
         };
@@ -452,14 +452,14 @@ impl Render for TodosPage {
                         .line_height(px(38.0))
                         .font_weight(FontWeight::BOLD)
                         .text_color(colors.primary)
-                        .child("To-dos"),
+                        .child(crate::i18n::t("notes.todos.title")),
                 )
                 .when(total > 0, |el| {
                     el.child(
                         div()
                             .text_size(px(15.0))
                             .text_color(colors.tertiary)
-                            .child(format!("{total} open")),
+                            .child(crate::i18n::tf("notes.todos.open", &[("count", &total)])),
                     )
                 })
                 .child(div().flex_1())
@@ -478,13 +478,13 @@ impl Render for TodosPage {
                         div()
                             .text_size(px(15.0))
                             .text_color(colors.secondary)
-                            .child("Nothing left to do"),
+                            .child(crate::i18n::t("notes.todos.empty")),
                     )
                     .child(
                         div()
                             .text_size(px(12.5))
                             .text_color(colors.tertiary)
-                            .child("Type [] in any note to add a to-do"),
+                            .child(crate::i18n::t("notes.todos.empty_hint")),
                     ),
             );
         }
@@ -661,7 +661,7 @@ fn search_notes_button(colors: SemanticColors) -> impl IntoElement {
             div()
                 .text_size(px(12.5))
                 .text_color(colors.secondary)
-                .child("Search notes"),
+                .child(crate::i18n::t("notes.todos.search")),
         )
         .child(
             div()

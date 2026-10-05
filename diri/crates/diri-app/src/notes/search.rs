@@ -54,7 +54,7 @@ pub(crate) struct NoteEntry {
 impl NoteEntry {
     pub(crate) fn new(id: &str, note: &Note, modified_ms: u64) -> Self {
         let title = if note.doc.title.trim().is_empty() {
-            "Untitled".to_owned()
+            crate::i18n::t("notes.untitled").to_owned()
         } else {
             note.doc.title.trim().to_owned()
         };

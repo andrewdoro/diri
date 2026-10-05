@@ -120,29 +120,29 @@ impl MenuAction {
     fn label(self, editor: Option<crate::file_links::Editor>) -> SharedString {
         match self {
             Self::OpenFile => match editor {
-                Some(editor) => format!("Open in {}", editor.name()).into(),
-                None => "Open file".into(),
+                Some(editor) => tf("terminal.menu.open_in", &[("editor", &editor.name())]).into(),
+                None => t("terminal.menu.open_file").into(),
             },
             other => other.static_label().into(),
         }
     }
 
     fn static_label(self) -> &'static str {
-        match self {
-            Self::Open => "Open link",
-            Self::CopyLink => "Copy link",
-            Self::OpenFile => "Open file",
-            Self::CopyPath => "Copy path",
-            Self::Copy => "Copy selection",
-            Self::Paste => "Paste",
-            Self::Find => "Find selection",
-            Self::CopyMode => "Keyboard copy mode",
-            Self::Export => "Open scrollback in editor",
-            Self::PreviousPrompt => "Previous shell prompt",
-            Self::NextPrompt => "Next shell prompt",
-            Self::PreviousMessage => "Previous message",
-            Self::NextMessage => "Next message",
-        }
+        t(match self {
+            Self::Open => "terminal.menu.open_link",
+            Self::CopyLink => "terminal.menu.copy_link",
+            Self::OpenFile => "terminal.menu.open_file",
+            Self::CopyPath => "terminal.menu.copy_path",
+            Self::Copy => "terminal.menu.copy_selection",
+            Self::Paste => "terminal.menu.paste",
+            Self::Find => "terminal.menu.find_selection",
+            Self::CopyMode => "terminal.menu.copy_mode",
+            Self::Export => "terminal.menu.export",
+            Self::PreviousPrompt => "terminal.menu.previous_prompt",
+            Self::NextPrompt => "terminal.menu.next_prompt",
+            Self::PreviousMessage => "terminal.menu.previous_message",
+            Self::NextMessage => "terminal.menu.next_message",
+        })
     }
 }
 
@@ -236,7 +236,7 @@ impl TerminalPane {
                     .and_then(|file| crate::file_links::open_url(&file, self.file_editor()));
                 match opened {
                     Some(url) => cx.open_url(&url),
-                    None => self.show_terminal_feedback("That file is not on this Mac", window, cx),
+                    None => self.show_terminal_feedback(t("terminal.file_not_local"), window, cx),
                 }
             }
         }
@@ -345,7 +345,7 @@ impl TerminalPane {
                 });
                 if let Some(file) = file {
                     cx.write_to_clipboard(ClipboardItem::new_string(file.display()));
-                    self.show_terminal_feedback("Path copied", window, cx);
+                    self.show_terminal_feedback(t("terminal.path_copied"), window, cx);
                 }
             }
             MenuAction::CopyLink => {
@@ -353,7 +353,7 @@ impl TerminalPane {
                     cx.write_to_clipboard(ClipboardItem::new_string(
                         hit.reference.destination().to_owned(),
                     ));
-                    self.show_terminal_feedback("Link copied", window, cx);
+                    self.show_terminal_feedback(t("terminal.link_copied"), window, cx);
                 }
             }
             MenuAction::Copy => self.copy_selection(&CopySelection, window, cx),
@@ -446,11 +446,11 @@ impl TerminalPane {
         let message = native_paste_review_message(&paste.text, paste.secret);
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            PASTE_REVIEW_TITLE,
+            paste_review_title(),
             Some(&message),
             &[
-                gpui::PromptButton::ok("Paste"),
-                gpui::PromptButton::cancel("Cancel"),
+                gpui::PromptButton::ok(t("terminal.menu.paste")),
+                gpui::PromptButton::cancel(t("terminal.paste.cancel")),
             ],
             cx,
         );
@@ -482,7 +482,7 @@ impl TerminalPane {
             || resident.bracketed_paste != pending.bracketed
             || resident.attachment_state != AttachmentState::Live
         {
-            self.show_terminal_feedback("Terminal changed. Paste again to review.", window, cx);
+            self.show_terminal_feedback(t("terminal.paste.changed"), window, cx);
         } else {
             resident.send_user_input(terminal_paste(&pending.text, resident.bracketed_paste));
         }
@@ -634,7 +634,7 @@ impl TerminalPane {
             selecting: false,
         });
         window.focus(&self.focus, cx);
-        self.show_terminal_feedback("Copy mode on. Esc to exit.", window, cx);
+        self.show_terminal_feedback(t("terminal.copy_mode.on"), window, cx);
     }
 
     pub(super) fn handle_qol_key(
@@ -848,16 +848,16 @@ impl TerminalPane {
                 let response = client
                     .read_scrollback_cells(&request_id, first, page_rows)
                     .await
-                    .map_err(|_| "Couldn’t read the terminal history")?;
+                    .map_err(|_| t("terminal.history.read_failed"))?;
                 if sequence.is_some_and(|seq| seq != response.content_seq) {
-                    return Err("Output changed during the read. Try again when it settles.");
+                    return Err(t("terminal.history.changed"));
                 }
                 sequence = Some(response.content_seq);
                 if first == 0 {
                     live_start = response.live_start_row;
                 }
-                let count =
-                    usize::try_from(response.row_count).map_err(|_| "Invalid history response")?;
+                let count = usize::try_from(response.row_count)
+                    .map_err(|_| t("terminal.history.invalid"))?;
                 if count as i64 > page_rows
                     || response.first_row != first
                     || response.total_rows > 1_000_000
@@ -865,7 +865,7 @@ impl TerminalPane {
                     || width.is_some_and(|cols| cols != response.cols)
                     || (!response.metadata.is_empty() && response.metadata.len() != count)
                 {
-                    return Err("Invalid history response");
+                    return Err(t("terminal.history.invalid"));
                 }
                 width = Some(response.cols);
                 // Worst-case RLE plus base64 must fit one control response,
@@ -873,9 +873,9 @@ impl TerminalPane {
                 page_rows =
                     (diri_proto::FIND_CAPTURE_MAX_CELLS as i64 / response.cols).clamp(1, 1024);
                 let rows = GridRowCodec::decode_rows(&response.payload, count)
-                    .map_err(|_| "Invalid history response")?;
+                    .map_err(|_| t("terminal.history.invalid"))?;
                 if rows.iter().any(|row| row.len() as i64 != response.cols) {
-                    return Err("Invalid history response");
+                    return Err(t("terminal.history.invalid"));
                 }
                 for (index, row) in rows.iter().enumerate() {
                     if row
@@ -889,7 +889,7 @@ impl TerminalPane {
                     }
                 }
                 if text.len() > 16 * 1024 * 1024 {
-                    return Err("Retained output is too large to export");
+                    return Err(t("terminal.history.too_large"));
                 }
                 first += count as i64;
                 if count == 0 || first >= response.total_rows {
@@ -905,7 +905,7 @@ impl TerminalPane {
             ))
         });
         self.qol.busy = true;
-        self.show_terminal_feedback("Reading terminal output…", window, cx);
+        self.show_terminal_feedback(t("terminal.history.reading"), window, cx);
         let read_owner = Arc::new(());
         self.qol.read_owner = Some(Arc::clone(&read_owner));
         cx.spawn_in(window, async move |this, cx| {
@@ -926,7 +926,7 @@ impl TerminalPane {
                     resident.attachment_generation != generation
                         || resident.element.view_offset() != top_offset
                 }) {
-                    this.show_terminal_feedback("Terminal changed. Try again.", window, cx);
+                    this.show_terminal_feedback(t("terminal.history.terminal_changed"), window, cx);
                     return;
                 }
                 match result {
@@ -951,7 +951,7 @@ impl TerminalPane {
                             } else {
                                 match miss {
                                     PromptMiss::NeedsMarks => this.show_terminal_feedback(
-                                        "No shell prompt that way (needs OSC 133 marks)",
+                                        t("terminal.prompt.none"),
                                         window,
                                         cx,
                                     ),
@@ -964,7 +964,7 @@ impl TerminalPane {
                                             resident.element.scroll_to_live(rows);
                                         }
                                         this.show_terminal_feedback(
-                                            "Back to the latest output",
+                                            t("terminal.back_to_latest"),
                                             window,
                                             cx,
                                         );
@@ -988,13 +988,13 @@ impl TerminalPane {
                                     }
                                     this.qol.export_files.push(file);
                                     this.show_terminal_feedback(
-                                        "Opened the output in your editor",
+                                        t("terminal.history.opened"),
                                         window,
                                         cx,
                                     );
                                 }
                                 Err(_) => this.show_terminal_feedback(
-                                    "Couldn’t save the terminal output",
+                                    t("terminal.history.save_failed"),
                                     window,
                                     cx,
                                 ),
@@ -1002,11 +1002,9 @@ impl TerminalPane {
                         }
                     }
                     Ok(Err(message)) => this.show_terminal_feedback(message, window, cx),
-                    Err(_) => this.show_terminal_feedback(
-                        "Couldn’t read the terminal history",
-                        window,
-                        cx,
-                    ),
+                    Err(_) => {
+                        this.show_terminal_feedback(t("terminal.history.read_failed"), window, cx)
+                    }
                 }
                 cx.notify();
             });
@@ -1066,7 +1064,7 @@ impl TerminalPane {
                     .bg(colors.floating_surface())
                     .text_size(px(11.0))
                     .text_color(colors.primary)
-                    .child("Copy mode · v select · y copy · Esc exit"),
+                    .child(t("terminal.copy_mode.hint")),
             );
         }
         if let Some(menu) = &self.qol.menu {
@@ -1164,7 +1162,7 @@ impl TerminalPane {
                                     div()
                                         .text_size(px(Typo::DISPLAY_TITLE.size))
                                         .font_weight(Typo::DISPLAY_TITLE.weight)
-                                        .child(PASTE_REVIEW_TITLE),
+                                        .child(paste_review_title()),
                                 )
                                 .child(
                                     div()
@@ -1184,9 +1182,9 @@ impl TerminalPane {
                                         .text_size(px(Typo::META.size))
                                         .text_color(colors.secondary)
                                         .child(if truncated {
-                                            "Clipboard preview · first 4,000 characters"
+                                            t("terminal.paste.preview_truncated")
                                         } else {
-                                            "Clipboard preview"
+                                            t("terminal.paste.preview")
                                         }),
                                 )
                                 .child(
@@ -1236,7 +1234,7 @@ impl TerminalPane {
                                 .text_color(colors.primary)
                                 .hover(move |style| style.bg(colors.primary.alpha(0.06)))
                                 .active(move |style| style.bg(colors.primary.alpha(0.1)))
-                                .child("Cancel")
+                                .child(t("terminal.paste.cancel"))
                                 .child(
                                     div()
                                         .text_size(px(Typo::META.size))
@@ -1265,7 +1263,7 @@ impl TerminalPane {
                                 .text_color(colors.background)
                                 .hover(move |style| style.bg(colors.primary.alpha(0.88)))
                                 .active(move |style| style.bg(colors.primary.alpha(0.75)))
-                                .child("Paste")
+                                .child(t("terminal.menu.paste"))
                                 .child(
                                     div()
                                         .when(paste.cancel_selected, |hint| hint.invisible())
@@ -1296,16 +1294,18 @@ impl TerminalPane {
     }
 }
 
-const PASTE_REVIEW_TITLE: &str = "Paste into terminal?";
+fn paste_review_title() -> &'static str {
+    t("terminal.paste.title")
+}
 
 fn paste_review_message(text: &str) -> &'static str {
     let has_controls = text
         .chars()
         .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'));
     if has_controls {
-        "This text contains control characters. They’ll be replaced with spaces before pasting."
+        t("terminal.paste.controls")
     } else {
-        "This terminal may run each line as a command when you paste."
+        t("terminal.paste.multiline")
     }
 }
 
@@ -1335,9 +1335,13 @@ pub(super) fn native_paste_review_message(text: &str, secret: bool) -> String {
     }
     let hidden = total.saturating_sub(LINES);
     if hidden > 0 {
-        shown.push_str(&format!(
-            "… and {hidden} more line{}",
-            if hidden == 1 { "" } else { "s" }
+        shown.push_str(&tf(
+            if hidden == 1 {
+                "terminal.paste.more_lines_one"
+            } else {
+                "terminal.paste.more_lines_other"
+            },
+            &[("count", &hidden)],
         ));
     }
     format!("{warning}\n\n{}", shown.trim_end())
@@ -1347,9 +1351,9 @@ pub(super) fn native_paste_review_message(text: &str, secret: bool) -> String {
 /// is only its size: the text is most likely the password itself.
 pub(super) fn paste_review_preview(chars: &mut std::str::Chars<'_>, secret: bool) -> String {
     if secret {
-        return format!(
-            "{} characters, hidden while the terminal reads a password.",
-            chars.by_ref().count()
+        return tf(
+            "terminal.paste.secret",
+            &[("count", &chars.by_ref().count())],
         );
     }
     chars

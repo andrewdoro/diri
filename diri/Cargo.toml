@@ -3,6 +3,7 @@ members = [
     "crates/diri-app",
     "crates/diri-client",
     "crates/diri-engine",
+    "crates/diri-i18n",
     "crates/diri-node",
     "crates/diri-notes",
     "crates/dirijor-mcp",
@@ -30,6 +31,7 @@ alacritty_terminal = { path = "vendor/alacritty_terminal", default-features = fa
 base64 = "0.23"
 diri-client = { path = "crates/diri-client" }
 diri-engine = { path = "crates/diri-engine" }
+diri-i18n = { path = "crates/diri-i18n" }
 diri-node = { path = "crates/diri-node" }
 diri-notes = { path = "crates/diri-notes" }
 diri-proto = { path = "crates/diri-proto" }

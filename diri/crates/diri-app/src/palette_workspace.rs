@@ -2,6 +2,7 @@
 //! neither delayed editor submission nor dispatch consults another window.
 use crate::{
     commands::{self, CommandId},
+    i18n::{t, tf},
     palette::{PaletteAction, PaletteCommand},
 };
 use diri_proto::{
@@ -31,7 +32,7 @@ pub(crate) fn actions(
     let mut rows = vec![
         row(
             "new-workspace".into(),
-            "New Workspace".into(),
+            t("palette.workspace.new").into(),
             WorkspaceCommand::Create,
             None,
             None,
@@ -39,7 +40,7 @@ pub(crate) fn actions(
         ),
         row(
             "switch-workspace".into(),
-            "Switch Workspace".into(),
+            t("palette.workspace.switch").into(),
             WorkspaceCommand::Browse,
             None,
             Some(
@@ -53,9 +54,9 @@ pub(crate) fn actions(
                     })
                     .unwrap_or_else(|| {
                         if active.is_some() {
-                            "Unavailable workspace".into()
+                            t("palette.workspace.unavailable").into()
                         } else {
-                            "All sessions".into()
+                            t("palette.workspace.all_sessions").into()
                         }
                     }),
             ),
@@ -64,20 +65,23 @@ pub(crate) fn actions(
     ];
     rows.push(row(
         "workspace-all-sessions".into(),
-        "Switch to All sessions".into(),
+        t("palette.workspace.switch_all").into(),
         WorkspaceCommand::Switch(None),
         None,
-        active.is_none().then(|| "Current".into()),
+        active.is_none().then(|| t("palette.current").into()),
         true,
     ));
     if let Some(snapshot) = snapshot {
         for workspace in &snapshot.workspaces {
             rows.push(row(
                 format!("switch-workspace-{}", workspace.id.0),
-                format!("Switch to {}", workspace.name),
+                tf(
+                    "palette.workspace.switch_to",
+                    &[("workspace", &workspace.name)],
+                ),
                 WorkspaceCommand::Switch(Some(workspace.id.clone())),
                 None,
-                (Some(&workspace.id) == active).then(|| "Current".into()),
+                (Some(&workspace.id) == active).then(|| t("palette.current").into()),
                 true,
             ));
             if Some(&workspace.id) != active {
@@ -85,7 +89,7 @@ pub(crate) fn actions(
             }
             rows.push(row(
                 "rename-workspace".into(),
-                "Rename Workspace".into(),
+                t("palette.workspace.rename").into(),
                 WorkspaceCommand::Rename(workspace.id.clone()),
                 None,
                 Some(workspace.name.clone()),
@@ -108,11 +112,11 @@ pub(crate) fn actions(
                     sessions
                         .get(first_session(&tab.layout))
                         .map(|session| session.title.clone())
-                        .unwrap_or_else(|| "Unavailable session".into())
+                        .unwrap_or_else(|| t("palette.workspace.unavailable_session").into())
                 });
                 rows.push(row(
                     "rename-selected-tab".into(),
-                    "Rename Tab".into(),
+                    t("palette.workspace.rename_tab").into(),
                     WorkspaceCommand::RenameTab(tab.id.clone()),
                     Some(CommandId::RenameSelectedSession),
                     Some(detail.clone()),
@@ -120,7 +124,7 @@ pub(crate) fn actions(
                 ));
                 rows.push(row(
                     "close-selected-tab".into(),
-                    "Close Tab".into(),
+                    t("palette.workspace.close_tab").into(),
                     WorkspaceCommand::CloseTab(tab.id.clone()),
                     Some(CommandId::CloseSession),
                     Some(detail),
@@ -134,7 +138,7 @@ pub(crate) fn actions(
     {
         rows.push(row(
             "rename-selected-session".into(),
-            "Rename Session".into(),
+            t("palette.workspace.rename_session").into(),
             WorkspaceCommand::RenameSession(selected.id.clone()),
             Some(CommandId::RenameSelectedSession),
             Some(selected.title.clone()),
@@ -142,7 +146,7 @@ pub(crate) fn actions(
         ));
         rows.push(row(
             "close-selected-session".into(),
-            "Close Session".into(),
+            t("palette.workspace.close_session").into(),
             WorkspaceCommand::CloseSession(selected.id.clone()),
             Some(CommandId::CloseSession),
             Some(selected.title.clone()),

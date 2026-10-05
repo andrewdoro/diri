@@ -1,5 +1,6 @@
 //! Notification tray. Uses the app's existing type, color and motion tokens.
 use super::*;
+use crate::i18n::{t, tf};
 use crate::notification_feed::{NotificationEntry, NotificationKind};
 use crate::palette_chrome::{PaletteTooltip, keycap, scroll_fades};
 use crate::tooltip_warmth::WarmTooltip;
@@ -119,7 +120,7 @@ impl RootView {
         if !available {
             self.show_feedback(
                 "notification",
-                crate::toast::Toast::info("That session was closed or archived"),
+                crate::toast::Toast::info(t("toast.notification_session_gone")),
                 cx,
             );
             return;
@@ -198,13 +199,31 @@ impl RootView {
             .muted_notification_sessions
             .contains(&entry.session_id.0);
         let (icon, label, tone) = if entry.resolved {
-            (IconName::CheckCircle, "Resolved", colors.secondary)
+            (
+                IconName::CheckCircle,
+                t("notify.kind.resolved"),
+                colors.secondary,
+            )
         } else {
             match entry.kind {
-                NotificationKind::NeedsInput => (IconName::Comment, "Needs you", Ink::ATTENTION),
-                NotificationKind::Done => (IconName::CheckCircle, "Completed", Ink::FRESH),
-                NotificationKind::Failed => (IconName::Warning, "Stopped", Ink::ATTENTION),
-                NotificationKind::Custom => (IconName::Bell, "Notification", colors.secondary),
+                NotificationKind::NeedsInput => (
+                    IconName::Comment,
+                    t("notify.kind.needs_you"),
+                    Ink::ATTENTION,
+                ),
+                NotificationKind::Done => (
+                    IconName::CheckCircle,
+                    t("notify.kind.completed"),
+                    Ink::FRESH,
+                ),
+                NotificationKind::Failed => {
+                    (IconName::Warning, t("notify.kind.stopped"), Ink::ATTENTION)
+                }
+                NotificationKind::Custom => (
+                    IconName::Bell,
+                    t("notify.kind.notification"),
+                    colors.secondary,
+                ),
             }
         };
         let detail = format!(
@@ -329,9 +348,9 @@ impl RootView {
                                                 IconName::Moon
                                             },
                                             if muted {
-                                                "Unmute this chat"
+                                                t("notify.unmute_chat")
                                             } else {
-                                                "Mute this chat"
+                                                t("notify.mute_chat")
                                             },
                                             colors,
                                         )
@@ -357,7 +376,11 @@ impl RootView {
                                             } else {
                                                 IconName::Check
                                             },
-                                            if read { "Mark unread" } else { "Mark read" },
+                                            if read {
+                                                t("notify.mark_unread")
+                                            } else {
+                                                t("notify.mark_read")
+                                            },
                                             colors,
                                         )
                                         .debug_selector(move || {
@@ -453,7 +476,7 @@ impl RootView {
                         div()
                             .flex_1()
                             .text_size(px(Typo::ROW.size))
-                            .child("Notifications"),
+                            .child(t("notify.title")),
                     )
                     .child(
                         div()
@@ -470,17 +493,14 @@ impl RootView {
                             .hover(move |style| style.bg(Fill::hover(colors, true)))
                             .warm_tooltip(move |_, cx| {
                                 cx.new(|_| {
-                                    PaletteTooltip(
-                                        "Show unread or all notifications".into(),
-                                        colors,
-                                    )
+                                    PaletteTooltip(t("notify.filter_tooltip").into(), colors)
                                 })
                                 .into()
                             })
                             .child(if self.notification_filter_unread {
-                                "Unread"
+                                t("notify.filter_unread")
                             } else {
-                                "All"
+                                t("notify.filter_all")
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.notification_filter_unread = !this.notification_filter_unread;
@@ -494,7 +514,7 @@ impl RootView {
                         action_button(
                             "notification-read-all",
                             IconName::CheckCircle,
-                            "Mark all read",
+                            t("notify.mark_all_read"),
                             colors,
                         )
                         .debug_selector(|| "notification-read-all".into())
@@ -511,7 +531,7 @@ impl RootView {
                         action_button(
                             "notification-options",
                             IconName::More,
-                            "Notification options",
+                            t("notify.options"),
                             colors,
                         )
                         .debug_selector(|| "notification-options".into())
@@ -594,9 +614,9 @@ impl RootView {
                                         .text_size(px(Typo::ROW.size))
                                         .text_color(colors.secondary)
                                         .child(if self.notification_filter_unread {
-                                            "You're all caught up"
+                                            t("notify.empty_unread")
                                         } else {
-                                            "No notifications yet"
+                                            t("notify.empty")
                                         }),
                                 ),
                         )
@@ -726,35 +746,91 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let health = self.notification_health.clone();
-        let options = div().border_t_1().border_color(colors.floating_stroke()).h(px(44.0)).px(px(16.0))
-            .flex().items_center().gap(px(8.0))
-            .child(option_button("notification-alerts", if alerts { "Alerts on" } else { "Alerts off" }, colors)
-                .warm_tooltip(move |_, cx| cx.new(|_| PaletteTooltip(health.clone(), colors)).into())
-                .on_click(cx.listener(|this, _, _, cx| { this.window_store.write().expect("store").toggle_notification_alerts(); cx.notify(); })))
-            .child(option_button("notification-sounds", if sounds { "Sounds on" } else { "Sounds off" }, colors)
+        let options = div()
+            .border_t_1()
+            .border_color(colors.floating_stroke())
+            .h(px(44.0))
+            .px(px(16.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                option_button(
+                    "notification-alerts",
+                    if alerts {
+                        t("notify.alerts_on")
+                    } else {
+                        t("notify.alerts_off")
+                    },
+                    colors,
+                )
+                .warm_tooltip(move |_, cx| {
+                    cx.new(|_| PaletteTooltip(health.clone(), colors)).into()
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
-                    let _ = this.window_store.write().expect("store").update_preferences(|prefs| prefs.status_sounds = !prefs.status_sounds); cx.notify();
-                })))
-            .child(div().flex_1())
-            .child(option_button("notification-test", "Test alert", colors)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    #[cfg(target_os = "macos")]
-                    this.notifier.post(&crate::notifications::NotificationRequest {
-                        session_event: false,
-                    guard: None,
-                        identifier: "diri-notification-test".into(), title: "Diri notifications are ready".into(),
-                        body: "You'll find agent updates in Notifications, even when Mac alerts are silenced.".into(),
-                        thread_identifier: None, action_data: None, use_system_sound: false, reply: false,
-                    });
-                    #[cfg(not(target_os = "macos"))]
-                    { this.notification_health = "System alerts are available on macOS. Your inbox works here.".into(); }
+                    this.window_store
+                        .write()
+                        .expect("store")
+                        .toggle_notification_alerts();
                     cx.notify();
-                })))
-            .child(option_button("notification-clear", "Clear all", colors)
+                })),
+            )
+            .child(
+                option_button(
+                    "notification-sounds",
+                    if sounds {
+                        t("notify.sounds_on")
+                    } else {
+                        t("notify.sounds_off")
+                    },
+                    colors,
+                )
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.window_store.write().expect("store").clear_notifications(); this.notification_selected = 0; cx.notify();
-                })))
-            ;
+                    let _ = this
+                        .window_store
+                        .write()
+                        .expect("store")
+                        .update_preferences(|prefs| prefs.status_sounds = !prefs.status_sounds);
+                    cx.notify();
+                })),
+            )
+            .child(div().flex_1())
+            .child(
+                option_button("notification-test", t("notify.test_alert"), colors).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        #[cfg(target_os = "macos")]
+                        this.notifier
+                            .post(&crate::notifications::NotificationRequest {
+                                session_event: false,
+                                guard: None,
+                                identifier: "diri-notification-test".into(),
+                                title: t("notify.test_title").into(),
+                                body: t("notify.test_body").into(),
+                                thread_identifier: None,
+                                action_data: None,
+                                use_system_sound: false,
+                                reply: false,
+                            });
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            this.notification_health = t("notify.health_other_platform").into();
+                        }
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                option_button("notification-clear", t("notify.clear_all"), colors).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.window_store
+                            .write()
+                            .expect("store")
+                            .clear_notifications();
+                        this.notification_selected = 0;
+                        cx.notify();
+                    }),
+                ),
+            );
         if cx.reduce_motion() {
             options.into_any_element()
         } else {
@@ -814,9 +890,9 @@ fn age(ms: u64) -> String {
         .as_millis() as u64;
     let seconds = now.saturating_sub(ms) / 1000;
     match seconds {
-        0..60 => "now".into(),
-        60..3600 => format!("{}m", seconds / 60),
-        3600..86400 => format!("{}h", seconds / 3600),
-        _ => format!("{}d", seconds / 86400),
+        0..60 => t("notify.age_now").into(),
+        60..3600 => tf("notify.age_minutes", &[("n", &(seconds / 60))]),
+        3600..86400 => tf("notify.age_hours", &[("n", &(seconds / 3600))]),
+        _ => tf("notify.age_days", &[("n", &(seconds / 86400))]),
     }
 }

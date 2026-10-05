@@ -22,13 +22,13 @@ pub enum Scope {
 impl Scope {
     pub const ALL: [Self; 4] = [Self::All, Self::Personal, Self::Project, Self::Plugins];
 
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Personal => "Personal",
-            Self::Project => "Project",
-            Self::Plugins => "Plugins",
-        }
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(match self {
+            Self::All => "settings.skills.scope_all",
+            Self::Personal => "settings.skills.scope_personal",
+            Self::Project => "settings.skills.scope_project",
+            Self::Plugins => "settings.skills.scope_plugins",
+        })
     }
 }
 
@@ -79,7 +79,10 @@ pub struct Catalog {
 
 pub fn roots(home: &Path, project: Option<&Path>) -> Vec<SkillRoot> {
     let providers = [
-        (".agents/skills", "Shared"),
+        (
+            ".agents/skills",
+            crate::i18n::t("settings.skills.source_shared"),
+        ),
         (".claude/skills", "Claude"),
         (".codex/skills", "Codex"),
         (".cursor/skills", "Cursor"),
@@ -97,7 +100,7 @@ pub fn roots(home: &Path, project: Option<&Path>) -> Vec<SkillRoot> {
         if let Some(project) = project {
             roots.push(SkillRoot {
                 path: project.join(relative),
-                source: format!("Project · {source}"),
+                source: crate::i18n::tf("settings.skills.source_project", &[("source", &source)]),
                 scope: Scope::Project,
             });
         }
@@ -125,11 +128,13 @@ pub fn roots(home: &Path, project: Option<&Path>) -> Vec<SkillRoot> {
                 for version in directories(&plugin, 32) {
                     roots.push(SkillRoot {
                         path: version.join("skills"),
-                        source: format!(
-                            "{} plugin cache · {} · {}",
-                            provider.trim_start_matches('.'),
-                            basename(&plugin),
-                            basename(&version)
+                        source: crate::i18n::tf(
+                            "settings.skills.source_plugin_cache",
+                            &[
+                                ("provider", &provider.trim_start_matches('.')),
+                                ("plugin", &basename(&plugin)),
+                                ("version", &basename(&version)),
+                            ],
                         ),
                         scope: Scope::Plugins,
                     });

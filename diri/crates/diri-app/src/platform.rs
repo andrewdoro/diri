@@ -1,26 +1,17 @@
 //! User-facing desktop vocabulary that genuinely varies by operating system.
 
 pub fn local_machine_label() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "This Mac"
+    crate::i18n::t(if cfg!(target_os = "macos") {
+        "platform.this_mac"
     } else {
-        "This computer"
-    }
+        "platform.this_computer"
+    })
 }
 
 pub fn local_machine_label_lowercase() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "this Mac"
+    crate::i18n::t(if cfg!(target_os = "macos") {
+        "platform.this_mac_lowercase"
     } else {
-        "this computer"
-    }
-}
-
-/// "your Mac" / "your computer", for sentences about the machine itself.
-pub fn your_machine() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "your Mac"
-    } else {
-        "your computer"
-    }
+        "platform.this_computer_lowercase"
+    })
 }

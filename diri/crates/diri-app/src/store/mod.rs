@@ -39,7 +39,7 @@ use crate::switcher::{
 
 pub use prefs::{
     FileEditor, InspectorTab, NewAgentStart, Prefs, SavedWindow, SidebarGrouping, SidebarOrdering,
-    TabOrientation, WindowMaterial, WindowMode, WindowPlacement,
+    TabOrientation, UiLanguage, WindowMaterial, WindowMode, WindowPlacement,
 };
 pub use projection::{SidebarProject, SidebarProjection, SidebarRow};
 pub use residency::{ResidencyUpdate, TerminalResidency};
@@ -426,10 +426,6 @@ pub struct SessionStore {
     syncing_prefs: HashSet<String>,
     /// Popover repo resolution: host key → state (see `RepoTarget`).
     repo_targets: HashMap<String, RepoTarget>,
-    /// Where a Session's Agent is actually working when that is another
-    /// checkout than its launch directory, as the right panel resolved it
-    /// (`crate::workspace_follow`). ⌘T from that Session starts there.
-    followed_directories: HashMap<SessionId, String>,
     window_targets: HashMap<SpawnOwner, window_navigation::WindowTargets>,
     /// The session whose repo the popover preserves (selected at open time).
     repo_target_session: Option<SessionId>,
@@ -550,7 +546,6 @@ impl SessionStore {
                 migrating: HashSet::new(),
                 syncing_prefs: HashSet::new(),
                 repo_targets: HashMap::new(),
-                followed_directories: HashMap::new(),
                 window_targets: HashMap::new(),
                 repo_target_session: None,
                 directory_request_seq: 0,
@@ -2860,20 +2855,16 @@ impl SessionStore {
             .then(|| self.terminal_to_follow(source.or_else(|| self.selected_session())))
             .flatten();
         let start_directory = followed.and_then(|terminal| terminal.terminal_cwd.clone());
-        let local_context = followed
-            .map(|terminal| (terminal, false))
-            .or(source.map(|session| (session, true)))
-            .map(|(session, follow)| {
-                if session.host.is_none() {
-                    if follow {
-                        self.launch_directory_of(session)
-                    } else {
-                        session.cwd.clone()
-                    }
-                } else {
-                    self.local_fallback_directory_for(Some(session))
-                }
-            });
+        // A new Session starts in its source's launch directory, never the
+        // checkout the right panel followed the Agent into: ⌘T belongs to the
+        // project, and an Agent touching a worktree does not move it there.
+        let local_context = followed.or(source).map(|session| {
+            if session.host.is_none() {
+                session.cwd.clone()
+            } else {
+                self.local_fallback_directory_for(Some(session))
+            }
+        });
         let host = options.host;
         let cwd = if let Some(host_id) = &host {
             // Remote spawn: local directories are meaningless — use the
@@ -2886,11 +2877,6 @@ impl SessionStore {
             options
                 .cwd
                 .or(local_context)
-                .or_else(|| {
-                    self.selected_session()
-                        .filter(|session| session.host.is_none())
-                        .map(|session| self.launch_directory_of(session))
-                })
                 .unwrap_or_else(|| self.active_directory())
         };
         // Worktrees are a local-git feature; drop them for remote spawns (the
@@ -2921,30 +2907,6 @@ impl SessionStore {
             same_repo_as: options.same_repo_as,
             start_directory,
             note_id: None,
-        }
-    }
-
-    /// Where a new Session started from `session` lands: the checkout its
-    /// Agent moved to when the right panel saw it leave, else its launch
-    /// directory (today's behavior for every Session that never left).
-    fn launch_directory_of(&self, session: &SessionRecord) -> String {
-        self.followed_directories
-            .get(&session.id)
-            .filter(|directory| Path::new(directory).is_dir())
-            .cloned()
-            .unwrap_or_else(|| session.cwd.clone())
-    }
-
-    /// Records (or clears) where `id`'s Agent is working when it left its
-    /// launch checkout. Not a store change: nothing renders from it.
-    pub fn set_followed_directory(&mut self, id: &SessionId, directory: Option<String>) {
-        match directory {
-            Some(directory) => {
-                self.followed_directories.insert(id.clone(), directory);
-            }
-            None => {
-                self.followed_directories.remove(id);
-            }
         }
     }
 

@@ -281,6 +281,13 @@ fn render_notification_panel_preview_screenshot() {
     let output = std::path::PathBuf::from(
         std::env::var_os("DIRI_VISUAL_OUTPUT").expect("set DIRI_VISUAL_OUTPUT"),
     );
+    // DIRI_VISUAL_LANGUAGE=zh-Hans renders the panel in that catalog.
+    if let Some(language) = std::env::var("DIRI_VISUAL_LANGUAGE")
+        .ok()
+        .and_then(|tag| crate::i18n::Language::from_tag(&tag))
+    {
+        diri_i18n::set_language(language);
+    }
     let platform = gpui_platform::current_platform(true);
     let mut cx = gpui::HeadlessAppContext::with_platform(
         platform.text_system(),

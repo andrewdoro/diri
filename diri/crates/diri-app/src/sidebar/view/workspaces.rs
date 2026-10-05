@@ -127,7 +127,7 @@ fn tab_title(tab: &diri_proto::workspace::WorkspaceTab, store: &SessionStore) ->
         .sessions()
         .get(focused_agent(tab).unwrap_or_else(|| first_agent(&tab.layout)))
         .map(|session| display_title(session))
-        .unwrap_or_else(|| "Unavailable session".into())
+        .unwrap_or_else(|| t("sidebar.workspace.unavailable_session").into())
 }
 
 fn workspace_menu_targets(
@@ -576,7 +576,7 @@ impl Sidebar {
                 return div()
                     .p(px(14.0))
                     .text_color(colors.secondary)
-                    .child("Loading workspaces…")
+                    .child(t("sidebar.workspace.loading"))
                     .into_any_element();
             };
             project_groups(
@@ -592,7 +592,7 @@ impl Sidebar {
         let mut rows = div()
             .id("workspace-tabs")
             .role(Role::TabList)
-            .aria_label("Workspace tabs")
+            .aria_label(t("sidebar.workspace.tabs"))
             .flex()
             .gap(px(3.0));
         if horizontal {
@@ -782,7 +782,7 @@ impl Sidebar {
                         remove.0
                     )))
                     .role(Role::Button)
-                    .aria_label("Remove tab from workspace")
+                    .aria_label(t("sidebar.workspace.remove_tab"))
                     .size(px(14.0))
                     .flex_none()
                     .flex()
@@ -964,7 +964,7 @@ impl Sidebar {
                     div()
                         .text_size(px(12.0))
                         .text_color(colors.secondary)
-                        .child("Loading workspaces…"),
+                        .child(t("sidebar.workspace.loading")),
                 );
             }
             crate::store::WorkspaceCatalogStatus::Unavailable(detail) => {
@@ -979,11 +979,11 @@ impl Sidebar {
                         div()
                             .id("retry-workspaces")
                             .role(Role::Button)
-                            .aria_label("Retry loading workspaces")
+                            .aria_label(t("sidebar.workspace.retry_aria"))
                             .cursor_pointer()
                             .p(px(6.0))
                             .text_size(px(12.0))
-                            .child("Retry")
+                            .child(t("sidebar.retry"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.store.write().expect("store").refresh_workspaces();
                                 cx.notify();
@@ -1005,13 +1005,13 @@ impl Sidebar {
             self.workspace_nav.editor,
             Some(WorkspaceEditor::RenameTab(_))
         ) {
-            "Tab name"
+            t("sidebar.workspace.tab_name")
         } else if self.workspace_nav.editor.is_some() {
-            "Workspace name"
+            t("sidebar.workspace.name")
         } else if self.workspace_nav.destination.is_some() {
-            "Find a session"
+            t("sidebar.workspace.find_session")
         } else {
-            "Workspaces"
+            t("sidebar.workspace.title")
         };
         panel = panel.child(
             div()
@@ -1048,7 +1048,7 @@ impl Sidebar {
                     .py(px(6.0))
                     .text_size(px(11.0))
                     .text_color(colors.tertiary)
-                    .child("Return to save · Escape to cancel"),
+                    .child(t("sidebar.workspace.edit_keys")),
             );
             return Some(panel);
         }
@@ -1059,7 +1059,7 @@ impl Sidebar {
                     .px(px(5.0))
                     .text_size(px(10.0))
                     .text_color(colors.tertiary)
-                    .child("↑ ↓ to choose · Return to add"),
+                    .child(t("sidebar.workspace.choose_keys")),
             );
         }
         let mut choices = div()
@@ -1079,14 +1079,14 @@ impl Sidebar {
                     div()
                         .id("workspace-split-direction")
                         .role(Role::Button)
-                        .aria_label("Change split direction")
+                        .aria_label(t("sidebar.workspace.split_direction"))
                         .p(px(6.0))
                         .cursor_pointer()
                         .text_size(px(12.0))
                         .child(if right {
-                            "Side by side  ↔"
+                            t("sidebar.workspace.side_by_side")
                         } else {
-                            "Top and bottom  ↕"
+                            t("sidebar.workspace.top_bottom")
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.workspace_nav.destination = Some(SessionDestination::Split {
@@ -1118,7 +1118,7 @@ impl Sidebar {
                         .p(px(7.0))
                         .text_size(px(12.0))
                         .text_color(colors.secondary)
-                        .child("No matching sessions"),
+                        .child(t("sidebar.workspace.no_matches")),
                 );
             }
             for session in sessions {
@@ -1128,14 +1128,17 @@ impl Sidebar {
                 let title = display_title(&session);
                 let detail = format!(
                     "{} · {}",
-                    session.host.as_deref().unwrap_or("Local"),
+                    session
+                        .host
+                        .as_deref()
+                        .unwrap_or(t("sidebar.workspace.local")),
                     session.cwd
                 );
                 choices = choices.child(
                     div()
                         .id(SharedString::from(format!("workspace-session-{}", id.0)))
                         .role(Role::Button)
-                        .aria_label(format!("Add {title}"))
+                        .aria_label(tf("sidebar.workspace.add_session", &[("title", &title)]))
                         .aria_selected(selected)
                         .when(selected, |row| row.bg(colors.primary.alpha(0.08)))
                         .px(px(7.0))
@@ -1178,7 +1181,7 @@ impl Sidebar {
                     div()
                         .id("workspace-all-sessions")
                         .role(Role::Button)
-                        .aria_label("Browse all sessions")
+                        .aria_label(t("sidebar.workspace.browse_all"))
                         .bg(if self.workspace_nav.highlighted_workspace == Some(None) {
                             colors.primary.alpha(0.10)
                         } else {
@@ -1192,7 +1195,7 @@ impl Sidebar {
                         .rounded(px(6.0))
                         .cursor_pointer()
                         .hover(move |row| row.bg(colors.primary.alpha(0.06)))
-                        .child("Projects")
+                        .child(t("sidebar.workspace.projects"))
                         .on_click(cx.listener(|this, _, _, cx| this.activate_workspace(None, cx))),
                 );
             }
@@ -1246,7 +1249,7 @@ impl Sidebar {
                                 div()
                                     .id(SharedString::from(format!("rename-workspace-{}", id.0)))
                                     .role(Role::Button)
-                                    .aria_label("Rename workspace")
+                                    .aria_label(t("sidebar.workspace.rename"))
                                     .size(px(20.0))
                                     .flex()
                                     .items_center()
@@ -1288,7 +1291,7 @@ impl Sidebar {
                 let mut actions = div().flex().items_center().gap(px(4.0)).pt(px(5.0));
                 for (label, icon, mutation, enabled) in [
                     (
-                        "Move workspace up",
+                        "sidebar.workspace.move_up",
                         "arrow.up",
                         WorkspaceMutation::MoveWorkspace {
                             workspace_id: workspace.id.clone(),
@@ -1297,7 +1300,7 @@ impl Sidebar {
                         index > 0,
                     ),
                     (
-                        "Move workspace down",
+                        "sidebar.workspace.move_down",
                         "arrow.down",
                         WorkspaceMutation::MoveWorkspace {
                             workspace_id: workspace.id.clone(),
@@ -1306,7 +1309,7 @@ impl Sidebar {
                         index + 1 < snapshot.workspaces.len(),
                     ),
                     (
-                        "Remove workspace",
+                        "sidebar.workspace.remove",
                         "trash",
                         WorkspaceMutation::RemoveWorkspace {
                             workspace_id: workspace.id.clone(),
@@ -1318,7 +1321,7 @@ impl Sidebar {
                         div()
                             .id(SharedString::from(label))
                             .role(Role::Button)
-                            .aria_label(label)
+                            .aria_label(t(label))
                             .h(px(28.0))
                             .px(px(8.0))
                             .flex()
@@ -1332,8 +1335,12 @@ impl Sidebar {
                                     .hover(move |button| button.bg(colors.primary.alpha(0.07)))
                             })
                             .child(sf_symbol(icon, 11.0, colors.secondary))
-                            .when(label == "Remove workspace", |button| {
-                                button.child(div().text_size(px(11.0)).child("Remove"))
+                            .when(label == "sidebar.workspace.remove", |button| {
+                                button.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .child(t("sidebar.workspace.remove_short")),
+                                )
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if enabled {
@@ -1351,7 +1358,7 @@ impl Sidebar {
                         .px(px(5.0))
                         .text_size(px(10.0))
                         .text_color(colors.tertiary)
-                        .child("Removing a workspace keeps its sessions running."),
+                        .child(t("sidebar.workspace.remove_detail")),
                 );
             }
             if let Some(workspace) = self.workspace_nav.active.clone() {
@@ -1359,14 +1366,14 @@ impl Sidebar {
                     div()
                         .id("workspace-add-existing-agent")
                         .role(Role::Button)
-                        .aria_label("Open existing agent in this layout")
+                        .aria_label(t("sidebar.workspace.open_existing_aria"))
                         .h(px(30.0))
                         .px(px(7.0))
                         .flex()
                         .items_center()
                         .cursor_pointer()
                         .text_size(px(12.0))
-                        .child("Open existing agent…")
+                        .child(t("sidebar.workspace.open_existing"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.workspace_nav.destination =
                                 Some(SessionDestination::Tab(workspace.clone()));
@@ -1380,7 +1387,7 @@ impl Sidebar {
                 div()
                     .id("new-workspace")
                     .role(Role::Button)
-                    .aria_label("Create workspace")
+                    .aria_label(t("sidebar.workspace.create"))
                     .h(px(30.0))
                     .px(px(7.0))
                     .flex()
@@ -1390,7 +1397,7 @@ impl Sidebar {
                     .cursor_pointer()
                     .hover(move |row| row.bg(colors.primary.alpha(0.06)))
                     .child(sf_symbol("plus", 11.0, colors.secondary))
-                    .child(div().text_size(px(12.0)).child("New workspace"))
+                    .child(div().text_size(px(12.0)).child(t("sidebar.workspace.new")))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.begin_workspace_editor(WorkspaceEditor::Create, "", window, cx)
                     })),
@@ -1446,7 +1453,7 @@ impl Sidebar {
                 div()
                     .id("horizontal-workspace-add-tab")
                     .role(Role::Button)
-                    .aria_label("New Agent")
+                    .aria_label(t("sidebar.new_agent"))
                     .size(px(26.0))
                     .flex_none()
                     .flex()

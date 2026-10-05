@@ -491,7 +491,7 @@ impl NotePane {
             }
             Ok((_, false)) => {}
             Err(err) => {
-                self.error = Some(format!("Couldn't link that mention: {err}").into());
+                self.error = Some(crate::i18n::tf("notes.error.link", &[("error", &err)]).into());
                 cx.notify();
             }
         }
@@ -718,14 +718,12 @@ impl NotePane {
                     self.absorb_outside(outside, cx);
                 }
                 Ok(store::SaveOutcome::Conflict { current: None }) => {
-                    self.error = Some(
-                        "This note's file was moved or deleted outside Diri; your text is still here."
-                            .into(),
-                    );
+                    self.error = Some(crate::i18n::t("notes.error.moved_outside").into());
                     return;
                 }
                 Err(err) => {
-                    self.error = Some(format!("Couldn't save this note: {err}").into());
+                    self.error =
+                        Some(crate::i18n::tf("notes.error.save", &[("error", &err)]).into());
                     return;
                 }
             }
@@ -831,13 +829,10 @@ impl NotePane {
                 return;
             }
             Ok(store::SaveOutcome::Conflict { current: None }) => {
-                self.error = Some(
-                    "This note's file was moved or deleted outside Diri; your text is still here."
-                        .into(),
-                );
+                self.error = Some(crate::i18n::t("notes.error.moved_outside").into());
             }
             Err(err) => {
-                self.error = Some(format!("Couldn't save this note: {err}").into());
+                self.error = Some(crate::i18n::tf("notes.error.save", &[("error", &err)]).into());
             }
         }
         if resave {
@@ -879,11 +874,14 @@ impl Render for NotePane {
                         div()
                             .text_size(px(14.0))
                             .text_color(colors.secondary)
-                            .child("This note's file is gone"),
+                            .child(crate::i18n::t("notes.gone.title")),
                     )
-                    .child(div().text_size(px(12.0)).text_color(colors.tertiary).child(
-                        "It may have been deleted outside Diri. Archive this tab to tidy up.",
-                    )),
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(colors.tertiary)
+                            .child(crate::i18n::t("notes.gone.detail")),
+                    ),
             ),
             PaneState::Empty => root.track_focus(&self.focus),
         };

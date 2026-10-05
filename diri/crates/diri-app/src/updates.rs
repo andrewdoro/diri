@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(target_os = "macos", test))]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::i18n::{t, tf};
 use diri_updater::Release;
 #[cfg(target_os = "macos")]
 use diri_updater::UpdaterConfig;
@@ -165,22 +166,34 @@ impl UpdateState {
     /// One line for the account footer and the Settings row.
     pub fn summary(&self) -> String {
         match &self.phase {
-            UpdatePhase::Unsupported(_) => "Updates off for this build".to_owned(),
+            UpdatePhase::Unsupported(_) => t("settings.updates.off").to_owned(),
             UpdatePhase::Idle => format!("diri {}", self.current_version),
-            UpdatePhase::Checking => "Checking for updates…".to_owned(),
-            UpdatePhase::UpToDate => format!("diri {} is up to date", self.current_version),
-            UpdatePhase::Available(release) if self.is_downgrade(&release.version) => {
-                format!("Switch to {}", release.version)
-            }
-            UpdatePhase::Available(release) => format!("Update to {}", release.version),
-            UpdatePhase::Downloading { progress, .. } => {
-                format!("Downloading… {}%", (progress * 100.0).round() as u32)
-            }
-            UpdatePhase::Ready(release) if self.is_downgrade(&release.version) => {
-                format!("Restart to switch to {}", release.version)
-            }
-            UpdatePhase::Ready(release) => format!("Restart to update to {}", release.version),
-            UpdatePhase::Installing => "Restarting…".to_owned(),
+            UpdatePhase::Checking => t("settings.updates.checking").to_owned(),
+            UpdatePhase::UpToDate => tf(
+                "settings.updates.up_to_date",
+                &[("version", &self.current_version)],
+            ),
+            UpdatePhase::Available(release) if self.is_downgrade(&release.version) => tf(
+                "settings.updates.switch_to",
+                &[("version", &release.version)],
+            ),
+            UpdatePhase::Available(release) => tf(
+                "settings.updates.update_to",
+                &[("version", &release.version)],
+            ),
+            UpdatePhase::Downloading { progress, .. } => tf(
+                "settings.updates.downloading",
+                &[("percent", &((progress * 100.0).round() as u32))],
+            ),
+            UpdatePhase::Ready(release) if self.is_downgrade(&release.version) => tf(
+                "settings.updates.restart_to_switch",
+                &[("version", &release.version)],
+            ),
+            UpdatePhase::Ready(release) => tf(
+                "settings.updates.restart_to_update",
+                &[("version", &release.version)],
+            ),
+            UpdatePhase::Installing => t("settings.updates.restarting").to_owned(),
             UpdatePhase::Failed(reason) => reason.clone(),
         }
     }
@@ -338,7 +351,7 @@ pub fn spawn(runtime: &Arc<Runtime>, automatic: bool, skipped: Option<String>) -
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (runtime, automatic, skipped);
-        unsupported("Use the installed package or download a newer Linux release from GitHub")
+        unsupported(t("settings.updates.linux_unsupported"))
     }
 
     #[cfg(target_os = "macos")]
@@ -537,7 +550,7 @@ impl Service {
             }
             Ok(Err(error)) => self.fail(&error, true),
             Err(_) => self.publish(
-                UpdatePhase::Failed("The release list stopped unexpectedly".to_owned()),
+                UpdatePhase::Failed(t("settings.updates.releases_stopped").to_owned()),
                 true,
             ),
         }
@@ -573,7 +586,7 @@ impl Service {
             }
             Err(_) => {
                 self.publish(
-                    UpdatePhase::Failed("The version lookup stopped unexpectedly".to_owned()),
+                    UpdatePhase::Failed(t("settings.updates.lookup_stopped").to_owned()),
                     true,
                 );
                 return;
@@ -646,7 +659,7 @@ impl Service {
             }
             Ok(Err(error)) => self.fail(&error, user_initiated),
             Err(_) => self.publish(
-                UpdatePhase::Failed("The update check stopped unexpectedly".to_owned()),
+                UpdatePhase::Failed(t("settings.updates.check_stopped").to_owned()),
                 user_initiated,
             ),
         }
@@ -730,7 +743,7 @@ impl Service {
             }
             Ok(Err(error)) => self.fail(&error, user_initiated),
             Err(_) => self.publish(
-                UpdatePhase::Failed("The download stopped unexpectedly".to_owned()),
+                UpdatePhase::Failed(t("settings.updates.download_stopped").to_owned()),
                 user_initiated,
             ),
         }
