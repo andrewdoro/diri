@@ -9,7 +9,12 @@ use std::path::{Path, PathBuf};
 /// The manager protocol major. Part of the manager's socket filename, so a
 /// future incompatible holder can start beside an older manager without
 /// taking its live PTYs away.
-pub const MANAGER_PROTOCOL_VERSION: u32 = 1;
+///
+/// 2 (2026-10-04): managers start each Agent as a launchd job of its own on
+/// macOS. A v1 manager, which outlives the update while it hosts sessions,
+/// keeps them until they end; the new Engine starts a v2 manager beside it
+/// instead of launching new sessions through the old one.
+pub const MANAGER_PROTOCOL_VERSION: u32 = 2;
 
 /// Per-session holder endpoints under one holders directory.
 #[derive(Clone, Debug)]
@@ -187,10 +192,15 @@ mod tests {
         let manager = HolderManagerPaths::new(Path::new("/tmp/holders"));
         assert_eq!(
             manager.socket(),
-            Path::new("/tmp/holders/manager-v1.sock"),
+            Path::new("/tmp/holders/manager-v2.sock"),
             "the protocol major is part of the filename"
         );
         assert!(HolderManagerPaths::is_manager_socket(&manager.socket()));
+        // An older manager still running beside it is never taken for a
+        // session during adoption.
+        assert!(HolderManagerPaths::is_manager_socket(Path::new(
+            "/tmp/holders/manager-v1.sock"
+        )));
         assert!(!HolderManagerPaths::is_manager_socket(Path::new(
             "/tmp/holders/s_abc.sock"
         )));

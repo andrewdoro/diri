@@ -577,3 +577,86 @@ fn a_paste_larger_than_one_input_frame_arrives_whole() {
     let _ = server.join();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Opt-in upgrade rehearsal: a manager from the previous release (protocol
+/// v1) still hosting a session when this build's Engine launches a new one.
+/// The new session must get a manager of this version beside the old one,
+/// not be launched through it; the old session stays where it is, and the
+/// old manager retires once its own sessions end.
+///
+/// ```sh
+/// git worktree add --detach /tmp/diri-prev origin/main
+/// (cd /tmp/diri-prev/diri && cargo build -p diri-engine --bin diri-holder)
+/// DIRI_PREVIOUS_HOLDER=<that target>/debug/diri-holder \
+///   cargo test -p diri-engine --test holder an_upgrade -- --ignored
+/// ```
+#[test]
+#[ignore = "needs a previous release's diri-holder; set DIRI_PREVIOUS_HOLDER"]
+fn an_upgrade_starts_a_new_manager_beside_a_running_older_one() {
+    use diri_engine::holder::protocol::HolderManagerRequest;
+    let previous =
+        PathBuf::from(std::env::var_os("DIRI_PREVIOUS_HOLDER").expect("DIRI_PREVIOUS_HOLDER"));
+    let root = holders_dir("upgrade");
+    let logs = root.join("logs");
+    // SAFETY: set before any launch; the managers inherit it.
+    unsafe { std::env::set_var("DIRI_HOLDER_IDLE_SECONDS", "1") };
+
+    // The existing user's manager and session, from before the update.
+    let mut old_manager = std::process::Command::new(&previous)
+        .arg("--manager")
+        .arg(&root)
+        .spawn()
+        .expect("previous manager");
+    let old_socket = HolderPaths::new(&root, "unused")
+        .directory
+        .join("manager-v1.sock");
+    wait_until("previous manager", Duration::from_secs(5), || {
+        UnixStream::connect(&old_socket).is_ok()
+    });
+    let old_paths = HolderPaths::new(&root, "s_before");
+    let mut launch = HolderManagerRequest::launch(spec(&old_paths, &logs, &["/bin/cat"]));
+    launch.version = 1;
+    {
+        let mut stream = UnixStream::connect(&old_socket).expect("connect");
+        serde_json::to_writer(&mut stream, &launch).expect("encode");
+        stream.write_all(b"\n").expect("send");
+        let mut byte = [0_u8; 1];
+        while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
+    }
+    let before = HolderClient::new(old_paths.socket());
+    wait_until("session from before", Duration::from_secs(5), || {
+        before.is_alive()
+    });
+
+    // After the update: this build launches a new session.
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_diri-holder"));
+    let new_paths = HolderPaths::new(&root, "s_after");
+    let new_manager =
+        HolderLauncher::launch(&binary, &new_paths, &spec(&new_paths, &logs, &["/bin/cat"]))
+            .expect("launch after the update");
+    assert_ne!(
+        new_manager as u32,
+        old_manager.id(),
+        "not through the old manager"
+    );
+    assert!(
+        HolderManagerPaths::new(&root)
+            .socket()
+            .ends_with("manager-v2.sock")
+    );
+    let after = HolderClient::new(new_paths.socket());
+    wait_until("session after", Duration::from_secs(5), || after.is_alive());
+    assert!(before.is_alive(), "the session from before keeps running");
+
+    // The old session still works, then ends; its manager retires on its own.
+    before.write(b"still here\n").expect("write");
+    wait_until("echo", Duration::from_secs(5), || {
+        String::from_utf8_lossy(&log_bytes(&logs, "s_before")).contains("still here")
+    });
+    before.kill_tree().expect("end old session");
+    wait_until("previous manager retires", Duration::from_secs(10), || {
+        old_manager.try_wait().unwrap().is_some()
+    });
+    assert!(after.is_alive(), "the new session is untouched");
+    after.kill_tree().expect("end new session");
+}

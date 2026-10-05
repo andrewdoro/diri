@@ -51,6 +51,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 /// argv + environment + cwd: far above any real launch, far below abuse.
 const MAX_PAYLOAD: usize = 8 << 20;
+/// The handoff's version, its first byte. A manager outlives app updates, so
+/// it may meet a newer helper (or, after a downgrade, an older one): a helper
+/// that does not know the version exits without running anything, and the
+/// manager, seeing nothing started, falls back to a direct spawn. Newer
+/// helpers must keep accepting every version a live manager may send.
+const HANDOFF_VERSION: u8 = 1;
 const READY: u8 = 0;
 const SETUP_FAILED: u8 = 1;
 const GO: u8 = 1;
@@ -568,7 +574,8 @@ fn encode(spec: &PtySpec) -> Vec<u8> {
         &mut std::iter::once(spec.cwd.as_os_str().as_bytes()),
         &mut out,
     );
-    let mut framed = (out.len() as u32).to_le_bytes().to_vec();
+    let mut framed = vec![HANDOFF_VERSION];
+    framed.extend_from_slice(&(out.len() as u32).to_le_bytes());
     framed.extend_from_slice(&out);
     framed
 }
@@ -812,9 +819,11 @@ fn receive(stream: &UnixStream) -> Option<(OwnedFd, Vec<u8>)> {
     };
     // SAFETY: SCM_RIGHTS installed a fresh descriptor in this process.
     let slave = unsafe { OwnedFd::from_raw_fd(fd) };
+    if first[0] != HANDOFF_VERSION {
+        return None; // a handoff this helper does not speak: start nothing
+    }
     let mut length = [0u8; 4];
-    length[0] = first[0];
-    (&*stream).read_exact(&mut length[1..]).ok()?;
+    (&*stream).read_exact(&mut length).ok()?;
     let length = u32::from_le_bytes(length) as usize;
     if length > MAX_PAYLOAD {
         return None;
@@ -834,9 +843,10 @@ mod tests {
             .env("PATH", "/opt/bin:/usr/bin")
             .env("EMPTY", "");
         let framed = encode(&spec);
-        let length = u32::from_le_bytes(framed[..4].try_into().unwrap()) as usize;
-        assert_eq!(length, framed.len() - 4);
-        let decoded = decode(&framed[4..]).unwrap();
+        assert_eq!(framed[0], HANDOFF_VERSION, "the version leads");
+        let length = u32::from_le_bytes(framed[1..5].try_into().unwrap()) as usize;
+        assert_eq!(length, framed.len() - 5);
+        let decoded = decode(&framed[5..]).unwrap();
         assert_eq!(decoded.argv[1].as_bytes(), b"--a b");
         assert_eq!(decoded.cwd.as_bytes(), b"/tmp/x y");
         assert_eq!(
@@ -844,7 +854,7 @@ mod tests {
             Some(b"/opt/bin:/usr/bin".as_slice())
         );
         assert_eq!(decoded.env[1].as_bytes(), b"EMPTY=");
-        assert!(decode(&framed[4..framed.len() - 1]).is_none(), "truncated");
+        assert!(decode(&framed[5..framed.len() - 1]).is_none(), "truncated");
     }
 
     #[test]
