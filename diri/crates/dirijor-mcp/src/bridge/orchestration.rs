@@ -292,7 +292,9 @@ impl Bridge {
                 )?;
                 if !transcript.available {
                     let mut fallback = self.read_screen(&id, Some(50))?;
-                    fallback["mode"] = json!("tail");
+                    if fallback.get("mode").is_none() {
+                        fallback["mode"] = json!("tail");
+                    }
                     fallback["transcript_unavailable"] = json!(transcript.reason);
                     return Ok(fallback);
                 }
@@ -319,11 +321,48 @@ impl Bridge {
     }
 
     fn read_screen(&self, id: &str, tail: Option<usize>) -> Result<Value, String> {
-        let mut result: ReadScreenResult = self.request_typed(
+        let raw = match self.request_failure(
             Method::SESSION_READ_SCREEN,
             json!({"sessionID": id}),
             DEFAULT_TIMEOUT,
-        )?;
+        ) {
+            Ok(raw) => raw,
+            // A note has text, not a screen: hand that over instead of an
+            // error the calling Agent would retry.
+            Err(ControlFailure::Daemon(error))
+                if error.code == diri_proto::control::SESSION_HAS_NO_TERMINAL =>
+            {
+                let mut note = self.read_note(&json!({ "note": id }))?;
+                note["mode"] = json!("note");
+                note["note"] = json!(
+                    "This session is a note, which has no terminal; its Markdown is in `markdown`. Use read_note and edit_note for notes."
+                );
+                return Ok(note);
+            }
+            // Ended without a kept screen: say so once, with what is left.
+            Err(ControlFailure::Daemon(error))
+                if error.code == diri_proto::control::TERMINAL_NOT_RETAINED =>
+            {
+                let mut ended = json!({
+                    "mode": "ended",
+                    "text": "",
+                    "screen_unavailable": error.message,
+                });
+                if let Ok(transcript) = self.request_typed::<ReadTranscriptResult>(
+                    Method::SESSION_READ_TRANSCRIPT,
+                    json!({"sessionID": id, "turns": 6}),
+                    DEFAULT_TIMEOUT,
+                ) && transcript.available
+                {
+                    ended["turns"] = json!(transcript.turns);
+                }
+                return Ok(ended);
+            }
+            Err(error) => return Err(render_failure(error)),
+        };
+        let mut result: ReadScreenResult = serde_json::from_value(raw).map_err(|error| {
+            format!("invalid {} response: {error}", Method::SESSION_READ_SCREEN)
+        })?;
         if let Some(lines) = tail {
             let kept: Vec<&str> = result.text.lines().collect();
             result.text = kept[kept.len().saturating_sub(lines)..].join("\n");

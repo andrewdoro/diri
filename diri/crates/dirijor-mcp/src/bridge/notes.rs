@@ -1264,6 +1264,93 @@ mod tests {
         }
     }
 
+    /// An Agent reading a note session's "screen" gets the note itself; the
+    /// Engine's `session_has_no_terminal` would only be retried.
+    #[test]
+    fn read_output_of_a_note_session_returns_the_note() {
+        let notes = tempfile::tempdir().unwrap();
+        let store = NoteStore::open(notes.path()).unwrap();
+        let (note_id, _) = store
+            .create(Document::new("Plan", Vec::new()), None)
+            .unwrap();
+        store
+            .append(&note_id, "ship the fix", &diri_notes::history::Author::Cli)
+            .unwrap();
+        let mut note = super::super::tests::record("s_note", None);
+        note.kind = AgentKind::NOTE;
+        note.note_id = Some(note_id);
+        let mut sessions = sessions();
+        sessions.push(note);
+        let (fixture, _) = Fixture::scripted(sessions, |method| {
+            (method == Method::SESSION_READ_SCREEN).then(|| {
+                json!({"__error": {
+                    "code": diri_proto::control::SESSION_HAS_NO_TERMINAL,
+                    "message": "s_note is a note, which has no terminal",
+                }})
+            })
+        });
+        let fixture = Fixture { notes, ..fixture };
+
+        let output = fixture
+            .bridge("root")
+            .call("read_output", &json!({"session_id": "s_note"}))
+            .unwrap();
+
+        assert_eq!(output["mode"], "note");
+        assert_eq!(output["title"], "Plan");
+        assert!(
+            output["markdown"]
+                .as_str()
+                .unwrap()
+                .contains("ship the fix"),
+            "{output}"
+        );
+    }
+
+    /// An ended session whose screen was never kept answers once, with its
+    /// conversation, instead of `terminal_not_retained` on every call.
+    #[test]
+    fn read_output_of_an_ended_session_without_a_screen_says_so() {
+        let (fixture, calls) = Fixture::scripted(sessions(), |method| match method {
+            Method::SESSION_READ_SCREEN => Some(json!({"__error": {
+                "code": diri_proto::control::TERMINAL_NOT_RETAINED,
+                "message": "other has ended and Diri did not keep its final screen",
+            }})),
+            Method::SESSION_READ_TRANSCRIPT => Some(json!({
+                "available": true,
+                "turns": [{"role": "agent", "text": "all done"}],
+            })),
+            _ => None,
+        });
+
+        for mode in ["screen", "tail", "last_message"] {
+            let output = fixture
+                .bridge("root")
+                .call("read_output", &json!({"session_id": "other", "mode": mode}))
+                .unwrap();
+            if mode == "last_message" {
+                assert_eq!(output["message"], "all done", "{output}");
+                continue;
+            }
+            assert_eq!(output["mode"], "ended", "{mode}: {output}");
+            assert!(
+                output["screen_unavailable"]
+                    .as_str()
+                    .unwrap()
+                    .contains("did not keep"),
+                "{output}"
+            );
+            assert_eq!(output["turns"][0]["text"], "all done", "{output}");
+        }
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == Method::SESSION_READ_TRANSCRIPT)
+        );
+    }
+
     #[test]
     fn read_note_resolves_mentions_and_todo_sessions() {
         let fixture = Fixture::new(sessions());

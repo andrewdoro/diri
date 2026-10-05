@@ -27,6 +27,7 @@
   "settings.accounts.loading": "正在载入账户…",
   "settings.accounts.manage": "管理账户",
   "settings.accounts.name": "名称",
+  "settings.accounts.name_required": "请先为此配置文件输入名称，再保存。",
   "settings.accounts.no_other_account": "这台机器上没有为该智能体设置其他账户。请添加配置并登录，然后回到这里。",
   "settings.accounts.open_agent": "打开智能体",
   "settings.accounts.profile_default": "{profile} · 默认",

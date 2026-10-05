@@ -13,6 +13,16 @@ pub const MAX_CONTROL_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// Error code for a terminal or process request aimed at a note Session.
 pub const SESSION_HAS_NO_TERMINAL: &str = "session_has_no_terminal";
 
+/// Error code for reading the screen of a local session that has ended
+/// without its final terminal being kept (its process was lost, or it ended
+/// across an Engine restart). Expected: there is nothing to read, and asking
+/// again will not change that.
+pub const TERMINAL_NOT_RETAINED: &str = "terminal_not_retained";
+
+/// Error code for `browser.act` / `test.run` on an Engine that has no
+/// browser sidecar or Node.js. A fact about the install: retrying cannot help.
+pub const BROWSER_UNAVAILABLE: &str = "browser_unavailable";
+
 /// Error code for a local launch whose working directory no longer exists
 /// (a deleted project or worktree). Expected, and answered at once: nothing
 /// is spawned, and the Session record is left as it was.

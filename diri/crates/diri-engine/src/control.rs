@@ -1994,6 +1994,14 @@ impl ControlServer {
         params: Option<JsonValue>,
     ) -> Result<JsonValue, ControlError> {
         let params = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
+        // Missing pieces are a fact about this install, not a pool fault:
+        // say so in a code the Agent can stop on.
+        if let Some(reason) = crate::browser::BrowserPool::unavailable_reason() {
+            return Err(ControlError::new(
+                diri_proto::control::BROWSER_UNAVAILABLE,
+                reason,
+            ));
+        }
         let pool = self
             .browser
             .get_or_init(|| crate::browser::BrowserPool::new(&self.logs_dir));
@@ -2675,7 +2683,7 @@ impl ControlServer {
         }
         let screen = self
             .completed_terminal_screen(&p.session_id.0)?
-            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+            .ok_or_else(|| self.no_retained_terminal(&p.session_id.0))?;
         let (cols, rows) = screen.size();
         encode(&diri_proto::ReadScreenResult {
             text: screen.lines().join("\n"),
@@ -2697,6 +2705,33 @@ impl ControlServer {
             .map(|(screen, _)| screen))
     }
 
+    /// Why a terminal read found nothing: an ended session whose final
+    /// screen was never kept says so, so callers stop asking; an unknown id
+    /// is simply not found.
+    fn no_retained_terminal(&self, session_id: &str) -> ControlError {
+        let ended = self.registry.lock().ok().and_then(|registry| {
+            registry
+                .record(session_id)
+                .filter(|record| matches!(record.status, diri_proto::SessionStatus::Exited(_)))
+                .map(|record| record.host.is_some())
+        });
+        match ended {
+            Some(false) => ControlError::new(
+                diri_proto::control::TERMINAL_NOT_RETAINED,
+                format!(
+                    "{session_id} has ended and Diri did not keep its final screen (its process was lost or ended while Diri was not running). Read its conversation with read_output mode \"transcript\" instead; reading the screen again will not change this."
+                ),
+            ),
+            Some(true) => ControlError::new(
+                diri_proto::control::TERMINAL_NOT_RETAINED,
+                format!(
+                    "{session_id} is a remote session that has ended; Diri keeps no final screen for remote sessions."
+                ),
+            ),
+            None => ControlError::not_found(session_id.to_owned()),
+        }
+    }
+
     /// The retained screen and the stable owner identity of its exact run.
     fn completed_terminal(
         &self,
@@ -2709,9 +2744,18 @@ impl ControlServer {
         let Some(handle) = handle else {
             return Ok(None);
         };
-        let terminal = handle.load().map_err(|error| {
-            ControlError::new("completed_terminal_unavailable", error.to_string())
-        })?;
+        let terminal = match handle.load() {
+            Ok(terminal) => terminal,
+            // A lost process or an Engine-restart exit has no exit facts, so
+            // its terminal was never retained: nothing to read, not a fault.
+            Err(crate::completed_terminal::StorageError::UnsupportedRecord) => None,
+            Err(error) => {
+                return Err(ControlError::new(
+                    "completed_terminal_unavailable",
+                    error.to_string(),
+                ));
+            }
+        };
         let Some(terminal) = terminal else {
             return Ok(None);
         };
@@ -2805,7 +2849,7 @@ impl ControlServer {
         }
         let (screen, owner) = self
             .completed_terminal(&p.session_id.0)?
-            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+            .ok_or_else(|| self.no_retained_terminal(&p.session_id.0))?;
         let (cols, visible_rows) = screen.size();
         if cols.saturating_mul(visible_rows) > diri_proto::FIND_CAPTURE_MAX_CELLS {
             return Err(ControlError::new(
@@ -2841,7 +2885,7 @@ impl ControlServer {
         }
         let mut screen = self
             .completed_terminal_screen(&p.session_id.0)?
-            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+            .ok_or_else(|| self.no_retained_terminal(&p.session_id.0))?;
         encode(&screen.scrollback())
     }
 
@@ -2864,7 +2908,7 @@ impl ControlServer {
         }
         let (mut screen, _) = self
             .completed_terminal(&p.session_id.0)?
-            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+            .ok_or_else(|| self.no_retained_terminal(&p.session_id.0))?;
         encode(&screen.scrollback_cells(p.first_row, p.max_rows))
     }
 
@@ -7158,6 +7202,70 @@ mod tests {
         let server = server(temp.path());
         let result = ok_of(call(&server, "account.profiles.list", None));
         assert_eq!(result["profiles"], json!([]));
+    }
+
+    /// A session whose Holder was lost ends without exit facts, so its
+    /// terminal is never retained. Reading it says so in a code callers can
+    /// stop on, instead of `completed_terminal_unavailable` on every ask.
+    #[test]
+    fn reading_a_lost_session_says_its_screen_was_not_kept() {
+        use diri_proto::process::{BootId, ProcessBirth, ProcessIdentity};
+        let temp = tempfile::tempdir().expect("temp");
+        let server = server(temp.path());
+        let mut record = test_record("lost");
+        // The run was bound while it lived; then a restart found it gone.
+        let child = ProcessIdentity::new(
+            4321,
+            ProcessBirth::Macos {
+                boot_session: BootId::parse("0f0e0d0c-0b0a-0908-0706-050403020100").unwrap(),
+                start_seconds: 1_700_000_000,
+                start_microseconds: 1,
+            },
+        )
+        .unwrap();
+        let key = crate::completed_terminal::CompletedRunKey::bind(&record, child, 10).unwrap();
+        record.status = diri_proto::SessionStatus::Exited(diri_proto::ExitInfo::restart(false));
+        let completed_dir = temp
+            .path()
+            .join(crate::registry::COMPLETED_TERMINALS_DIR_NAME);
+        std::fs::create_dir(&completed_dir).unwrap();
+        std::fs::set_permissions(
+            &completed_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        {
+            let mut registry = server.registry.lock().expect("registry");
+            registry.insert_record(record);
+            let recovery = registry.recovery_directory("lost");
+            std::fs::create_dir_all(&recovery).unwrap();
+            diri_proto::recovery::SessionRecoveryStore::new(recovery)
+                .write_completed_run(&key)
+                .unwrap();
+        }
+
+        for (method, params) in [
+            ("session.read_screen", json!({ "sessionID": "lost" })),
+            ("session.read_scrollback", json!({ "sessionID": "lost" })),
+            (
+                "session.read_scrollback_cells",
+                json!({ "sessionID": "lost", "firstRow": 0, "maxRows": 1 }),
+            ),
+        ] {
+            let error = err_of(call(&server, method, Some(params)));
+            assert_eq!(
+                error.code,
+                diri_proto::control::TERMINAL_NOT_RETAINED,
+                "{method}: {error:?}"
+            );
+            assert!(error.message.contains("transcript"), "{error:?}");
+        }
+        let unknown = err_of(call(
+            &server,
+            "session.read_screen",
+            Some(json!({ "sessionID": "never" })),
+        ));
+        assert_eq!(unknown.code, "not_found");
     }
 
     #[test]

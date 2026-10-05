@@ -27,6 +27,7 @@
   "settings.accounts.loading": "Loading accounts…",
   "settings.accounts.manage": "Manage accounts",
   "settings.accounts.name": "Name",
+  "settings.accounts.name_required": "Enter a name for this profile before saving it.",
   "settings.accounts.no_other_account": "No other account is set up for this Agent on this machine. Add a profile and sign in, then return here.",
   "settings.accounts.open_agent": "Open Agent",
   "settings.accounts.profile_default": "{profile} · Default",

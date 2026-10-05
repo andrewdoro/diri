@@ -408,6 +408,9 @@ CLI: `dirijor note edit NOTE --old TEXT --new TEXT [--all]` and
     id without a terminal, and records `attach.note_rejected`.
   - Adding an attach error frame would be a protocol change. It is not
     proposed.
+  - Callers that can do better than the error do: MCP `read_output` on a
+    note returns the note (`mode: "note"`, its Markdown), and the overview
+    never asks a note card for a screen preview.
 - **S7, done.** Adoption keeps each note's id and created date.
   - **Adopting one file:** `SessionSpawnParams.note_id` (additive) adopts an
     existing notes file. It is idempotent per note id: the file's existing

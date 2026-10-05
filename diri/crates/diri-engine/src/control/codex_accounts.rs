@@ -219,11 +219,25 @@ impl ControlServer {
         let title = format!("Codex sign in · {}", profile.label);
         self.ensure_login_finished(&slot)?;
         let binary = self.resolve_local_agent_executable("codex", "codex")?;
-        // Fixed script; profile paths and executable are positional arguments, never shell code.
-        let script = "exec /usr/bin/env -u OPENAI_API_KEY -u OPENAI_BASE_URL -u CODEX_API_KEY CODEX_HOME=\"$1\" \"$2\" -c 'cli_auth_credentials_store=\"file\"' login";
+        let argv = super::account_switch::sign_in_argv(
+            std::env::var("SHELL").ok(),
+            &[
+                "/usr/bin/env".into(),
+                "-u".into(),
+                "OPENAI_API_KEY".into(),
+                "-u".into(),
+                "OPENAI_BASE_URL".into(),
+                "-u".into(),
+                "CODEX_API_KEY".into(),
+                format!("CODEX_HOME={}", slot.display()),
+                binary,
+                "-c".into(),
+                "cli_auth_credentials_store=\"file\"".into(),
+                "login".into(),
+            ],
+        );
         self.session_spawn(Some(
-            json!({"kind": AgentKind::SHELL, "cwd": slot, "title": title,
-            "argv": ["/bin/zsh", "-lc", script, "diri-codex-login", slot, binary]}),
+            json!({"kind": AgentKind::SHELL, "cwd": slot, "title": title, "argv": argv}),
         ))
     }
     pub(super) fn switch_codex(&self, profile: AgentAccountProfile) -> Result<Value, ControlError> {

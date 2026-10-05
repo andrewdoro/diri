@@ -771,7 +771,9 @@ impl WindowWrite<'_> {
     }
 
     pub fn select(&mut self, id: SessionId) {
-        if !self.sessions.contains_key(&id) {
+        // A closing row is already hidden; selecting it would mark a session
+        // the Engine is removing as seen.
+        if !self.canonical.is_open(&id) {
             return;
         }
         self.navigation.sidebar_selection.clear();
@@ -1295,6 +1297,23 @@ mod tests {
                 .window_targets
                 .contains_key(&first.owner())
         );
+    }
+
+    #[test]
+    fn a_window_cannot_select_a_closing_session() {
+        let (first, _, ids) = windows();
+        first.write().unwrap().set_active(true);
+        first.write().unwrap().select(ids[1].clone());
+        first.write().unwrap().remove_sessions(vec![ids[1].clone()]);
+        let selected = first.read().unwrap().selected_session_id().cloned();
+
+        first.write().unwrap().select(ids[1].clone());
+
+        assert_eq!(
+            first.read().unwrap().selected_session_id(),
+            selected.as_ref()
+        );
+        assert_ne!(selected.as_ref(), Some(&ids[1]));
     }
 
     #[test]

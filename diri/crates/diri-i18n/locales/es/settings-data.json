@@ -27,6 +27,7 @@
   "settings.accounts.loading": "Cargando cuentas…",
   "settings.accounts.manage": "Gestionar cuentas",
   "settings.accounts.name": "Nombre",
+  "settings.accounts.name_required": "Escribe un nombre para este perfil antes de guardarlo.",
   "settings.accounts.no_other_account": "No hay otra cuenta configurada para este agente en este equipo. Añade un perfil, inicia sesión y vuelve aquí.",
   "settings.accounts.open_agent": "Abrir agente",
   "settings.accounts.profile_default": "{profile} · Predeterminado",

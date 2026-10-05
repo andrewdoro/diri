@@ -493,11 +493,26 @@ impl ControlServer {
         let profile = self.adopt_claude_slot(profile, &home, &slot)?;
         let binary = self.resolve_local_agent_executable("claude-code", "claude")?;
         let title = format!("Claude sign in · {}", profile.label);
-        // Fixed script; the store path and executable are positional arguments, never shell code.
-        let script = "exec /usr/bin/env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR CLAUDE_SECURESTORAGE_CONFIG_DIR=\"$1\" \"$2\" auth login";
+        let argv = super::account_switch::sign_in_argv(
+            std::env::var("SHELL").ok(),
+            &[
+                "/usr/bin/env".into(),
+                "-u".into(),
+                "ANTHROPIC_API_KEY".into(),
+                "-u".into(),
+                "ANTHROPIC_AUTH_TOKEN".into(),
+                "-u".into(),
+                "CLAUDE_CODE_OAUTH_TOKEN".into(),
+                "-u".into(),
+                "CLAUDE_CONFIG_DIR".into(),
+                format!("CLAUDE_SECURESTORAGE_CONFIG_DIR={}", slot.display()),
+                binary,
+                "auth".into(),
+                "login".into(),
+            ],
+        );
         self.session_spawn(Some(
-            json!({"kind": AgentKind::SHELL, "cwd": slot, "title": title,
-            "argv": ["/bin/zsh", "-lc", script, "diri-claude-login", slot, binary]}),
+            json!({"kind": AgentKind::SHELL, "cwd": slot, "title": title, "argv": argv}),
         ))
     }
 

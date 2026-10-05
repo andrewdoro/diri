@@ -4047,3 +4047,27 @@ fn new_agents_start_in_the_launch_checkout_and_carry_a_worktree_base() {
     assert_eq!(params.new_worktree, Some(true));
     assert_eq!(params.worktree_base.as_deref(), Some("origin/main"));
 }
+
+/// A closed row stays in `sessions` until the Engine confirms the removal.
+/// Selecting it in that window (a late click, a view still pointing at it)
+/// must not focus it or send `session.mark_seen` for a session the Engine has
+/// already dropped.
+#[test]
+fn a_closing_session_cannot_be_selected_or_marked_seen() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("a", "p", 2.0), session("b", "p", 1.0)],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    store.select(id("a"));
+    store.remove_sessions(vec![id("a")]);
+    drain(&mut effects);
+
+    store.select(id("a"));
+
+    assert_ne!(store.selected_session_id(), Some(&id("a")));
+    assert!(
+        !drain(&mut effects).contains(&StoreEffect::MarkSeen(id("a"))),
+        "a closing session must not be marked seen"
+    );
+}

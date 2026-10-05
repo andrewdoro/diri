@@ -79,9 +79,12 @@ pub(crate) fn rpc_finished(method: &str, started: Instant, error: Option<&Client
                 ClientError::Control(control) => Some(id(&control.code)),
                 _ => None,
             };
-            // A deleted project folder is the user's state, not a fault.
-            if matches!(error, ClientError::Control(control) if control.code == diri_proto::control::CWD_MISSING)
-            {
+            // A deleted project folder, or an ended session with no screen
+            // left to read, is the user's state, not a fault.
+            if matches!(error, ClientError::Control(control) if matches!(
+                control.code.as_str(),
+                diri_proto::control::CWD_MISSING | diri_proto::control::TERMINAL_NOT_RETAINED
+            )) {
                 warn_event!(
                     "rpc.error",
                     method = id(method),

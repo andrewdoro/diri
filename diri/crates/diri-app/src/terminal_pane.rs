@@ -9119,7 +9119,8 @@ mod tests {
         });
 
         // The run ends while its upload is held. A resume keeps the id and
-        // `created_at`, so the exit is all that tells the two runs apart.
+        // `created_at`, so the exit is all that tells the two runs apart. (A
+        // failing exit: a clean `exit 0` closes the tab outright.)
         select(&other_id);
         pane.update_in(cx, |pane, window, cx| {
             pane.reconcile_store_change(window, cx);
@@ -9132,7 +9133,7 @@ mod tests {
         let mut exited = uploading.clone();
         exited.status = SessionStatus::Exited(ExitInfo {
             reason: ExitReason::Exited,
-            code: Some(0),
+            code: Some(1),
             signal: None,
             system_restart: false,
             interrupted: false,

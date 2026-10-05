@@ -68,7 +68,13 @@ impl BrowserPool {
     }
 
     pub fn is_available() -> bool {
-        resolve_node().is_some() && locate_sidecar().is_some()
+        Self::unavailable_reason().is_none()
+    }
+
+    /// Why this Engine cannot drive a browser at all, in words an Agent can
+    /// act on; `None` when Node.js and the sidecar are both present.
+    pub fn unavailable_reason() -> Option<&'static str> {
+        unavailable_reason(locate_sidecar().is_some(), resolve_node().is_some())
     }
 
     /// Runs a cross-browser flow; the sidecar's structured result verbatim.
@@ -417,9 +423,35 @@ fn locate_sidecar() -> Option<PathBuf> {
     candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
+fn unavailable_reason(sidecar: bool, node: bool) -> Option<&'static str> {
+    if !sidecar {
+        return Some(
+            "The browser tool is not available in this build of Diri: its Playwright sidecar is not installed with the app. Retrying will not help; check the page another way (for example curl, or ask the person to look).",
+        );
+    }
+    if !node {
+        return Some(
+            "The browser tool needs Node.js, and none was found on PATH. Install Node.js and restart Diri to use it; retrying will not help until then.",
+        );
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing sidecar or Node.js is reported as what to do about it, so an
+    /// Agent stops calling instead of retrying an opaque pool error.
+    #[test]
+    fn a_missing_sidecar_or_node_explains_itself() {
+        assert_eq!(unavailable_reason(true, true), None);
+        let sidecar = unavailable_reason(false, true).unwrap();
+        assert!(sidecar.contains("not installed with the app"), "{sidecar}");
+        assert!(sidecar.contains("Retrying will not help"), "{sidecar}");
+        let node = unavailable_reason(true, false).unwrap();
+        assert!(node.contains("Node.js"), "{node}");
+    }
 
     #[test]
     fn browser_integration_runs_across_engines() {

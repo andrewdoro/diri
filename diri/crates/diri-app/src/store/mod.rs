@@ -2108,7 +2108,9 @@ impl SessionStore {
     }
 
     pub fn select(&mut self, id: SessionId) {
-        if !self.sessions.contains_key(&id) {
+        // A closing row is already hidden; selecting it would mark a session
+        // the Engine is removing as seen.
+        if !self.is_open(&id) {
             return;
         }
         self.sidebar_selection.clear();
@@ -3834,6 +3836,12 @@ async fn run_effects(
                     .expect("store")
                     .finish_workspace_request(generation, true, result);
                 Ok(())
+            }
+            // Queued before a close settled: the Engine no longer has it.
+            StoreEffect::MarkSeen(id) | StoreEffect::MarkUnread(id)
+                if !store.read().expect("store").is_open(&id) =>
+            {
+                continue;
             }
             StoreEffect::MarkSeen(id) => client.mark_seen(&id).await,
             StoreEffect::MarkUnread(id) => client.mark_unread(&id).await,

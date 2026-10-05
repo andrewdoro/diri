@@ -1757,6 +1757,7 @@ impl SessionSurfaces {
             );
         } else {
             let label = match self.screens.get(&id) {
+                _ if session.is_note() => crate::i18n::t("nav.notes.note"),
                 Some(ScreenPreview::Unavailable) => "Preview unavailable",
                 Some(ScreenPreview::Empty) => "No screen output yet",
                 _ => "Loading preview…",
@@ -1781,7 +1782,11 @@ impl SessionSurfaces {
                     ),
             );
         }
-        if self.screens.contains_key(&id) || self.screen_requests.contains_key(&id) {
+        // A note has no terminal to preview.
+        if session.is_note()
+            || self.screens.contains_key(&id)
+            || self.screen_requests.contains_key(&id)
+        {
             return preview.into_any_element();
         }
         // Prepaint receives the scroll viewport's clip. Offscreen sessions do
@@ -2044,6 +2049,50 @@ mod tests {
             surfaces.read_with(cx, |s, _| s.overview_grid_scroll.max_offset().x),
             px(0.0)
         );
+    }
+
+    /// A note card has no terminal: asking for its screen could only fail
+    /// with `session_has_no_terminal`, every time the overview opened.
+    #[gpui::test]
+    fn overview_never_asks_a_note_for_its_screen(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let tokio = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut note = session(1);
+        note.kind = ProtoAgentKind::NOTE;
+        note.note_id = Some("n_plan".into());
+        let (terminal_id, note_id) = (session(0).id, note.id.clone());
+        let runtime = Arc::new(StoreRuntime::inert());
+        runtime.store.write().unwrap().hydrate(SessionListResult {
+            sessions: vec![session(0), note],
+            projects: vec![],
+        });
+        let handle = tokio.handle().clone();
+        let (view, cx) = cx.add_window_view(move |_, cx| OverviewHarness {
+            surfaces: cx.new(|cx| {
+                let mut surfaces = SessionSurfaces::new(runtime, Some(handle), cx);
+                surfaces.overview_variant = OverviewVariant::Current;
+                surfaces.store.write().unwrap().toggle_overview();
+                surfaces
+            }),
+            background_scrolls: Arc::new(AtomicUsize::new(0)),
+        });
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        let surfaces = view.read_with(cx, |h, _| h.surfaces.clone());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        surfaces.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        surfaces.read_with(cx, |s, _| {
+            let asked =
+                |id: &SessionId| s.screen_requests.contains_key(id) || s.screens.contains_key(id);
+            assert!(asked(&terminal_id), "the terminal card asks for its screen");
+            assert!(!asked(&note_id), "the note card must not");
+        });
+        drop(tokio);
     }
 
     #[gpui::test]

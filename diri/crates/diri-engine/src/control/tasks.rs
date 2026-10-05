@@ -28,8 +28,31 @@ fn load(db: &Connection, id: &str) -> Result<TaskRecord, ControlError> {
         })
         .optional()
         .map_err(storage_error)?;
-    serde_json::from_str(&raw.ok_or_else(|| ControlError::not_found("task"))?)
-        .map_err(|_| ControlError::internal("invalid stored task receipt"))
+    let raw = raw.ok_or_else(|| {
+        ControlError::not_found(format!(
+            "no task {id}: task receipts are never expired, so this id was never submitted. Check it for typos, and look a request_id up only from the session that submitted it; list_tasks shows the tasks you sent or were assigned."
+        ))
+    })?;
+    serde_json::from_str(&raw).map_err(|_| ControlError::internal("invalid stored task receipt"))
+}
+/// The wire spelling of a status, for messages an Agent reads.
+fn status_name(status: &TaskStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+/// A finished task never changes; the reply says how it ended so the
+/// caller can stop instead of retrying.
+fn terminal_error(record: &TaskRecord, attempt: &str) -> ControlError {
+    ControlError::new(
+        "task_terminal",
+        format!(
+            "task {} already ended as {}; its result is final, so it cannot {attempt}. Nothing more is needed for this task.",
+            record.task_id,
+            status_name(&record.status)
+        ),
+    )
 }
 fn save(db: &Connection, record: &TaskRecord) -> Result<(), ControlError> {
     let raw =
@@ -129,7 +152,10 @@ fn get(path: &Path, p: &TaskGetParams) -> Result<TaskRecord, ControlError> {
     if p.caller_id != record.sender_id && p.caller_id != record.session_id {
         return Err(ControlError::new(
             "forbidden",
-            "only task participants may inspect this task",
+            format!(
+                "task {id} was sent by session {} to session {}; only those two may inspect it, and you are session {}.",
+                record.sender_id, record.session_id, p.caller_id
+            ),
         ));
     }
     Ok(record)
@@ -146,7 +172,10 @@ fn report(path: &Path, p: &TaskReportParams) -> Result<TaskRecord, ControlError>
     if p.caller_id != record.session_id {
         return Err(ControlError::new(
             "forbidden",
-            "only the assigned Agent may acknowledge or finish this task",
+            format!(
+                "task {} is assigned to session {}; only that session may acknowledge or finish it, and you are session {}.",
+                record.task_id, record.session_id, p.caller_id
+            ),
         ));
     }
     if p.status == TaskStatus::AwaitingAcknowledgement {
@@ -158,10 +187,7 @@ fn report(path: &Path, p: &TaskReportParams) -> Result<TaskRecord, ControlError>
         return Ok(record);
     }
     if record.status.is_terminal() {
-        return Err(ControlError::new(
-            "task_terminal",
-            "a terminal task result is immutable",
-        ));
+        return Err(terminal_error(&record, "be reported again"));
     }
     if record.status == TaskStatus::AwaitingAcknowledgement && p.status != TaskStatus::Acknowledged
     {
@@ -222,14 +248,14 @@ fn sender_update(
     if caller != record.sender_id {
         return Err(ControlError::new(
             "forbidden",
-            "only the session that submitted this task may answer or cancel it",
+            format!(
+                "task {task_id} was submitted by session {}; only that session may answer or cancel it, and you are session {caller}.",
+                record.sender_id
+            ),
         ));
     }
     if record.status.is_terminal() {
-        return Err(ControlError::new(
-            "task_terminal",
-            "a terminal task result is immutable",
-        ));
+        return Err(terminal_error(&record, "be answered or cancelled"));
     }
     record.revision += 1;
     apply(&mut record);
@@ -548,6 +574,82 @@ mod tests {
             )
             .unwrap()
             .is_empty()
+        );
+    }
+
+    /// Orchestrating Agents ask about tasks that ended, that belong to other
+    /// sessions, or that never existed. Each refusal says which, so the
+    /// Agent can stop instead of retrying.
+    #[test]
+    fn refusals_say_what_happened_to_the_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tasks.sqlite");
+        let (task, _) = reserve(&path, &submission()).unwrap();
+        let lookup = |caller: &str, task_id: &str| {
+            get(
+                &path,
+                &TaskGetParams {
+                    caller_id: caller.into(),
+                    task_id: Some(task_id.into()),
+                    request_id: None,
+                },
+            )
+            .unwrap_err()
+        };
+
+        let missing = lookup("parent", "task_nope");
+        assert_eq!(missing.code, "not_found");
+        assert!(missing.message.contains("task_nope"), "{missing:?}");
+        assert!(missing.message.contains("never expired"), "{missing:?}");
+        assert!(missing.message.contains("list_tasks"), "{missing:?}");
+
+        let foreign = lookup("stranger", &task.task_id);
+        assert_eq!(foreign.code, "forbidden");
+        for part in ["parent", "child", "stranger"] {
+            assert!(foreign.message.contains(part), "{foreign:?}");
+        }
+
+        let mut p = TaskReportParams {
+            caller_id: "child".into(),
+            task_id: task.task_id.clone(),
+            status: TaskStatus::Acknowledged,
+            result: None,
+        };
+        report(&path, &p).unwrap();
+        p.status = TaskStatus::Completed;
+        p.result = Some("tested".into());
+        report(&path, &p).unwrap();
+        p.result = Some("tested again".into());
+        let again = report(&path, &p).unwrap_err();
+        assert_eq!(again.code, "task_terminal");
+        assert!(
+            again.message.contains("already ended as completed"),
+            "{again:?}"
+        );
+        let cancelled = cancel(
+            &path,
+            &TaskCancelParams {
+                caller_id: "parent".into(),
+                task_id: task.task_id.clone(),
+                reason: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(cancelled.code, "task_terminal");
+        assert!(cancelled.message.contains("completed"), "{cancelled:?}");
+        let unknown_cancel = cancel(
+            &path,
+            &TaskCancelParams {
+                caller_id: "parent".into(),
+                task_id: "task_gone".into(),
+                reason: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(unknown_cancel.code, "not_found");
+        assert!(
+            unknown_cancel.message.contains("task_gone"),
+            "{unknown_cancel:?}"
         );
     }
 }

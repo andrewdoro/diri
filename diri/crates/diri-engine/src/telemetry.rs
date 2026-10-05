@@ -226,9 +226,13 @@ pub fn record_rpc(
     }
     if let Some(error) = error {
         diri_telemetry::count("rpc.errors", 1);
-        // A folder the user deleted is their state, not a fault: keep it
-        // visible without counting it as an error.
-        if error.code == diri_proto::control::CWD_MISSING {
+        // A folder the user deleted, or an ended session with no screen
+        // left to read, is their state, not a fault: keep it visible without
+        // counting it as an error.
+        if matches!(
+            error.code.as_str(),
+            diri_proto::control::CWD_MISSING | diri_proto::control::TERMINAL_NOT_RETAINED
+        ) {
             diri_telemetry::warn_event!(
                 "rpc.error",
                 method = diri_telemetry::id(method),

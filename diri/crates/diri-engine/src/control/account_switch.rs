@@ -11,6 +11,30 @@ pub(super) struct PreparedTab {
     pub(super) spec: crate::session::SessionSpec,
 }
 
+/// The argv of a sign-in tab: `command` run by the user's own shell as an
+/// interactive login shell, exactly how Agent launches find their binary.
+/// `zsh -lc` reads neither `.zshrc` nor fish/bash config, where nvm, mise
+/// and most npm-global PATHs live, so `claude`/`codex` (or the `node` their
+/// shebang names) was "command not found" and the tab died with 127.
+/// Every argument is single-quoted; the command line is fixed by the caller.
+pub(super) fn sign_in_argv(shell: Option<String>, command: &[String]) -> Vec<String> {
+    let shell = shell
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| default_shell().to_owned());
+    let line = command
+        .iter()
+        .map(|argument| crate::hosts::shell_quote(argument))
+        .collect::<Vec<_>>()
+        .join(" ");
+    vec![
+        shell,
+        "-i".into(),
+        "-l".into(),
+        "-c".into(),
+        format!("exec {line}"),
+    ]
+}
+
 impl ControlServer {
     pub(super) fn account_switch_all(&self, params: Option<Value>) -> Result<Value, ControlError> {
         let p: diri_proto::SwitchAccountParams = decode(params)?;
@@ -141,6 +165,91 @@ fn record_switch(agent: &str, value: &Value) {
                 .get("sessionId")
                 .and_then(Value::as_str)
                 .map(diri_telemetry::id),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sign_in_argv;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    /// An Agent CLI that only the interactive rc file puts on PATH, as nvm's
+    /// installer does with `.zshrc`. The sign-in tab used to run `zsh -lc`,
+    /// which never reads it, so the tab exited 127 within a second of opening.
+    #[test]
+    fn sign_in_finds_an_agent_installed_through_the_interactive_rc() {
+        if !std::path::Path::new("/bin/zsh").exists() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("nvm-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let agent = bin.join("claude");
+        std::fs::write(
+            &agent,
+            "#!/bin/sh\nprintf 'signed-in:%s:%s\\n' \"$*\" \"$STORE\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let store = temp.path().join("store with 'quote");
+        std::fs::write(
+            temp.path().join(".zshrc"),
+            format!("export PATH=\"{}:$PATH\"\n", bin.display()),
+        )
+        .unwrap();
+        let run = |argv: &[String]| {
+            Command::new(&argv[0])
+                .args(&argv[1..])
+                .env_clear()
+                .env("HOME", temp.path())
+                .env("ZDOTDIR", temp.path())
+                .env("PATH", "/usr/bin:/bin")
+                .env("TERM", "dumb")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let command = [
+            "/usr/bin/env".to_owned(),
+            format!("STORE={}", store.display()),
+            "claude".to_owned(),
+            "auth".to_owned(),
+            "login".to_owned(),
+        ];
+
+        let before = run(&[
+            "/bin/zsh".into(),
+            "-lc".into(),
+            "exec /usr/bin/env claude auth login".into(),
+        ]);
+        assert_eq!(
+            before.status.code(),
+            Some(127),
+            "the old launch could not find it"
+        );
+
+        let after = run(&sign_in_argv(Some("/bin/zsh".into()), &command));
+        let stdout = String::from_utf8_lossy(&after.stdout);
+        assert!(after.status.success(), "{after:?}");
+        assert!(
+            stdout.contains(&format!("signed-in:auth login:{}", store.display())),
+            "{stdout:?}"
+        );
+    }
+
+    #[test]
+    fn sign_in_uses_the_users_shell_and_quotes_every_argument() {
+        let argv = sign_in_argv(
+            Some("/opt/homebrew/bin/fish".into()),
+            &["/usr/bin/env".into(), "X=it's".into(), "codex".into()],
+        );
+        assert_eq!(argv[..4], ["/opt/homebrew/bin/fish", "-i", "-l", "-c"]);
+        assert_eq!(argv[4], r"exec '/usr/bin/env' 'X=it'\''s' 'codex'");
+        assert_eq!(
+            sign_in_argv(Some(String::new()), &[])[0],
+            super::default_shell()
         );
     }
 }

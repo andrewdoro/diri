@@ -623,6 +623,15 @@ impl UtilitySurfaces {
         let mut profile = editor.profile.clone();
         profile.label = editor.name.text().trim().into();
         profile.config_home = editor.path.text().trim().into();
+        // The Engine rejects a nameless profile; say so here, without a round trip.
+        if profile.label.is_empty() {
+            self.accounts.error = Some(t("settings.accounts.name_required").into());
+            if let Some(editor) = self.accounts.editor.as_mut() {
+                editor.path_active = false;
+            }
+            cx.notify();
+            return;
+        }
         if shares_login(&profile) {
             profile.is_default = self
                 .accounts
@@ -1201,6 +1210,40 @@ impl UtilitySurfaces {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn saving_a_nameless_profile_asks_for_a_name_without_calling_the_engine(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let (surfaces, cx) = cx.add_window_view(move |window, cx| {
+            let mut surfaces =
+                UtilitySurfaces::new(runtime, tokio, crate::updates::inert(), window, cx);
+            surfaces.open_settings(cx);
+            surfaces.settings_tab = SettingsTab::Accounts;
+            surfaces
+        });
+        surfaces.update_in(cx, |surfaces, window, cx| {
+            surfaces.edit_account(None, window, cx);
+            let enter = KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            };
+            assert!(surfaces.handle_account_key(&enter, cx));
+            assert!(!surfaces.accounts.busy, "nothing may be sent");
+            assert_eq!(
+                surfaces.accounts.error.as_deref(),
+                Some(t("settings.accounts.name_required"))
+            );
+            assert!(surfaces.accounts.editor.is_some(), "the form stays open");
+        });
+    }
     #[gpui::test]
     fn continuation_picker_filters_agent_host_and_current_account(cx: &mut gpui::TestAppContext) {
         let runtime = Arc::new(StoreRuntime::inert());

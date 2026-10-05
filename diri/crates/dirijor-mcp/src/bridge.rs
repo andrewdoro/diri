@@ -162,13 +162,23 @@ impl Bridge {
     }
 
     pub fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        self.request_failure(method, params, timeout)
+            .map_err(render_failure)
+    }
+
+    /// [`Self::request`] keeping the Engine's error code for callers that
+    /// answer some refusals themselves.
+    fn request_failure(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, ControlFailure> {
         let deadline = Instant::now()
             .checked_add(timeout)
-            .ok_or_else(|| "invalid request timeout".to_owned())?;
-        let mut client = self.connect(timeout).map_err(render_failure)?;
-        client
-            .request_until(method.into(), params, deadline)
-            .map_err(render_failure)
+            .ok_or_else(|| ControlFailure::Protocol("invalid request timeout".into()))?;
+        let mut client = self.connect(timeout)?;
+        client.request_until(method.into(), params, deadline)
     }
 
     fn request_typed<T: DeserializeOwned>(
