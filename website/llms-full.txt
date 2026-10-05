@@ -1046,7 +1046,7 @@ Nothing to do. When diri starts an agent whose manifest opts in, it passes the s
 | Codex | `-c mcp_servers.dirijor.url=…` and `bearer_token_env_var` overrides, served by the Engine like Claude Code |
 | Cursor | A session-local plugin directory whose `mcp.json` lists the `dirijor-mcp` stdio server |
 
-If the Engine's HTTP endpoint can't start, Claude Code and Codex fall back to the `dirijor-mcp` stdio server, as do remote sessions. Setting `DIRI_MCP_TRANSPORT=stdio` in the Engine's environment forces the stdio server everywhere.
+HTTP is used only from Claude Code 2.1.289 and Codex 0.160.0, the releases verified to work with it. Older or unrecognized versions, remote sessions, and an Engine whose HTTP endpoint can't start all keep the `dirijor-mcp` stdio server, exactly as before. Setting `DIRI_MCP_TRANSPORT=stdio` in the Engine's environment forces the stdio server everywhere.
 
 Each agent session also gets these environment variables. The server uses them to know which session is calling.
 

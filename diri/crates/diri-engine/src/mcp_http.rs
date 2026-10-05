@@ -25,7 +25,68 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
+use crate::agent::{AgentDescriptor, InjectionSpec};
+use crate::cli_version::{CliVersions, Version};
 use crate::registry::Registry;
+
+/// The oldest Claude Code verified end to end against this endpoint: an
+/// `--mcp-config` server with `"type": "http"` and `${VAR}` expansion in its
+/// headers, listing and calling tools. Older releases keep stdio.
+pub const CLAUDE_CODE_MIN_VERSION: Version = Version::new(2, 1, 289);
+/// The oldest Codex verified end to end: `mcp_servers.<name>.url` with
+/// `bearer_token_env_var`, listing and calling tools. Older releases keep
+/// stdio, since an unknown config key can stop Codex from starting at all.
+pub const CODEX_MIN_VERSION: Version = Version::new(0, 160, 0);
+
+/// The CLI release an Agent needs before it may use the HTTP endpoint, or
+/// `None` when its MCP mechanism never does (Cursor, no MCP).
+pub fn minimum_version(injection: &InjectionSpec) -> Option<Version> {
+    if injection.claude_mcp {
+        Some(CLAUDE_CODE_MIN_VERSION)
+    } else if injection.codex_mcp {
+        Some(CODEX_MIN_VERSION)
+    } else {
+        None
+    }
+}
+
+/// Whether a launch of `descriptor` may be pointed at the endpoint: only
+/// when the CLI the Engine would run is known to be at or above the
+/// verified minimum. An unresolvable binary or a version not probed yet
+/// keeps stdio for this launch; the probe runs in the background.
+pub fn http_allowed(descriptor: &AgentDescriptor, versions: &CliVersions) -> bool {
+    let Some(minimum) = minimum_version(&descriptor.injection) else {
+        return false;
+    };
+    let Some(binary) = descriptor.binary.as_deref() else {
+        return false;
+    };
+    let Some(path) = crate::agent_catalog::resolve_local(binary, None).detected_path else {
+        return false;
+    };
+    versions
+        .get(Path::new(&path))
+        .is_some_and(|version| version >= minimum)
+}
+
+/// Probes every HTTP-capable Agent CLI once, so the first spawn after the
+/// Engine starts already knows its version. One background thread, run once.
+pub fn warm_versions(descriptors: Vec<AgentDescriptor>, versions: CliVersions) {
+    let _ = std::thread::Builder::new()
+        .name("diri-cli-version-warmup".into())
+        .spawn(move || {
+            for descriptor in descriptors {
+                if minimum_version(&descriptor.injection).is_none() {
+                    continue;
+                }
+                if let Some(path) = descriptor.binary.as_deref().and_then(|binary| {
+                    crate::agent_catalog::resolve_local(binary, None).detected_path
+                }) {
+                    let _ = versions.probe_now(Path::new(&path));
+                }
+            }
+        });
+}
 
 /// The PTY environment variable carrying the session's bearer token.
 pub const TOKEN_ENV: &str = crate::inject::MCP_TOKEN_ENV;
@@ -280,6 +341,87 @@ mod tests {
         let (_third_listener, third) = bind(dir.path()).unwrap();
         assert_ne!(third.url(), first.url());
         assert_eq!(third.verify(&token), Some("s-1"));
+    }
+
+    #[cfg(unix)]
+    fn fake_cli(dir: &Path, name: &str, version_line: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\necho '{version_line}'\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn descriptor(binary: Option<String>, injection: InjectionSpec) -> AgentDescriptor {
+        AgentDescriptor {
+            binary,
+            injection,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_is_gated_on_the_verified_cli_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = InjectionSpec {
+            claude_hooks: true,
+            claude_mcp: true,
+            ..Default::default()
+        };
+        let codex = InjectionSpec {
+            codex_notify: true,
+            codex_mcp: true,
+            ..Default::default()
+        };
+        let cases = [
+            ("claude-old", "2.1.288 (Claude Code)", &claude, false),
+            ("claude-at", "2.1.289 (Claude Code)", &claude, true),
+            ("claude-new", "2.2.0 (Claude Code)", &claude, true),
+            ("claude-pre", "2.1.289-beta.1 (Claude Code)", &claude, false),
+            ("claude-odd", "Claude Code (unknown build)", &claude, false),
+            ("codex-old", "codex-cli 0.159.9", &codex, false),
+            ("codex-at", "codex-cli 0.160.0", &codex, true),
+            ("codex-new", "codex-cli 1.0.0", &codex, true),
+            ("codex-odd", "codex-cli dev", &codex, false),
+        ];
+        let versions = CliVersions::default();
+        for (name, line, injection, expected) in cases {
+            let binary = fake_cli(dir.path(), name, line);
+            let agent = descriptor(Some(binary.clone()), *injection);
+            // Never probed: unknown, so stdio, and the spawn path does not wait.
+            assert!(!http_allowed(&agent, &versions), "{name} before probing");
+            versions.probe_now(Path::new(&binary));
+            assert_eq!(http_allowed(&agent, &versions), expected, "{name}: {line}");
+        }
+
+        // Cursor never uses HTTP; neither does a missing or bare-unresolvable CLI.
+        let cursor = InjectionSpec {
+            cursor_mcp: true,
+            ..Default::default()
+        };
+        let new_cli = fake_cli(dir.path(), "cursor-agent", "2099.1.1");
+        versions.probe_now(Path::new(&new_cli));
+        assert!(!http_allowed(&descriptor(Some(new_cli), cursor), &versions));
+        let missing = dir.path().join("gone").to_string_lossy().into_owned();
+        assert!(!http_allowed(&descriptor(Some(missing), claude), &versions));
+        assert!(!http_allowed(
+            &descriptor(Some("diri-no-such-agent-cli".into()), claude),
+            &versions
+        ));
+        assert!(!http_allowed(&descriptor(None, claude), &versions));
+    }
+
+    #[test]
+    fn the_minimums_are_the_releases_verified_end_to_end() {
+        assert_eq!(CLAUDE_CODE_MIN_VERSION, Version::new(2, 1, 289));
+        assert_eq!(CODEX_MIN_VERSION, Version::new(0, 160, 0));
+        let claude = InjectionSpec {
+            claude_mcp: true,
+            ..Default::default()
+        };
+        assert_eq!(minimum_version(&claude), Some(CLAUDE_CODE_MIN_VERSION));
+        assert_eq!(minimum_version(&InjectionSpec::default()), None);
     }
 
     #[test]

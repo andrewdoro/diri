@@ -284,3 +284,95 @@ fn an_agent_reaches_its_own_session_over_http() {
         .unwrap();
     assert_eq!(post(&engine.url, Some(&token), &ping).status, 401);
 }
+
+/// A fake Agent CLI: answers `--version`, and otherwise records the argv and
+/// whether it was handed a token, then idles like a live session.
+fn fake_cli(dir: &Path, name: &str, version_line: &str, out: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{version_line}'; exit 0; fi\n\
+             {{ printf '%s\\n' \"$@\"; echo \"TOKEN=${{DIRIJOR_MCP_TOKEN:+set}}\"; }} > '{}'/\"$DIRIJOR_SESSION_ID.tmp\"\n\
+             mv '{}'/\"$DIRIJOR_SESSION_ID.tmp\" '{}'/\"$DIRIJOR_SESSION_ID\"\n\
+             exec sleep 60\n",
+            out.display(),
+            out.display(),
+            out.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+fn launch(engine: &Engine, cli: &str, cwd: &Path, out: &Path) -> Vec<String> {
+    let bridge = dirijor_mcp::Bridge::new(engine.server.socket_path().to_owned(), None);
+    bridge
+        .request(
+            "agent.configure",
+            json!({"kind": diri_proto::AgentKind::CLAUDE_CODE, "executablePath": cli, "showInQuickCreate": true}),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+    let record = bridge
+        .request(
+            "session.spawn",
+            json!({"kind": diri_proto::AgentKind::CLAUDE_CODE, "cwd": cwd}),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+    let id = record["id"].as_str().unwrap().to_owned();
+    let file = out.join(&id);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !file.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let recorded = std::fs::read_to_string(&file).expect("the fake CLI ran");
+    engine
+        .registry
+        .lock()
+        .unwrap()
+        .terminate(&id, Duration::from_secs(2))
+        .unwrap();
+    recorded.lines().map(str::to_owned).collect()
+}
+
+fn mcp_config(argv: &[String]) -> &str {
+    let at = argv.iter().position(|arg| arg == "--mcp-config").unwrap();
+    argv[at + 1].rsplit('/').next().unwrap()
+}
+
+#[test]
+fn only_a_verified_cli_release_is_pointed_at_the_endpoint() {
+    let engine = start();
+    let work = tempfile::tempdir().unwrap();
+    let out = work.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let cwd = work.path().join("cwd");
+    std::fs::create_dir(&cwd).unwrap();
+
+    // Below the minimum: main's stdio config, and no token in its environment.
+    let old = fake_cli(work.path(), "claude-old", "2.1.288 (Claude Code)", &out);
+    for _ in 0..2 {
+        let argv = launch(&engine, &old, &cwd, &out);
+        assert_eq!(mcp_config(&argv), "claude-mcp.json", "{argv:?}");
+        assert_eq!(argv.last().unwrap(), "TOKEN=", "{argv:?}");
+    }
+
+    // At the minimum: the first launch finds the version unknown and keeps
+    // stdio without waiting for the probe; once probed, it gets HTTP.
+    let new = fake_cli(work.path(), "claude-new", "2.1.289 (Claude Code)", &out);
+    let first = launch(&engine, &new, &cwd, &out);
+    assert_eq!(mcp_config(&first), "claude-mcp.json", "{first:?}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let argv = loop {
+        let argv = launch(&engine, &new, &cwd, &out);
+        if mcp_config(&argv) != "claude-mcp.json" || Instant::now() > deadline {
+            break argv;
+        }
+    };
+    assert_eq!(mcp_config(&argv), "claude-mcp-http.json", "{argv:?}");
+    assert_eq!(argv.last().unwrap(), "TOKEN=set", "{argv:?}");
+}

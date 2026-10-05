@@ -37,6 +37,7 @@ pub mod attention;
 pub mod boot;
 pub mod browser;
 pub mod checkpoint;
+pub mod cli_version;
 #[cfg(unix)]
 pub mod completed_terminal;
 pub mod control;

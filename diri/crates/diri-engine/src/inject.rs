@@ -688,6 +688,75 @@ mod tests {
         assert_eq!(mcp["mcpServers"]["dirijor"]["type"], "stdio");
     }
 
+    /// A launch kept on stdio (endpoint down, or a CLI below the verified
+    /// HTTP minimum) must get exactly what it got before the HTTP endpoint
+    /// existed. The expected values are spelled out as main produced them.
+    #[test]
+    fn gated_out_launches_get_main_s_stdio_injection_byte_for_byte() {
+        let temp = tempfile::tempdir().expect("temp");
+        let dir = temp.path();
+        let cli = dir.join("bin/dirijor");
+        write_claude_hooks_file(dir).expect("hooks");
+        write_claude_mcp_file(dir, &cli).expect("mcp");
+        write_claude_skills_plugin(dir).expect("skills");
+        // The HTTP config sitting beside it must not change anything.
+        write_claude_mcp_http_file(dir, "http://127.0.0.1:1/mcp").expect("http");
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        let cli_text = cli.to_string_lossy().into_owned();
+
+        // main's exact expression for the stdio config (no sibling
+        // dirijor-mcp, so the CLI's `mcp-stdio` subcommand).
+        assert_eq!(
+            std::fs::read(dir.join("claude-mcp.json")).unwrap(),
+            serde_json::to_vec_pretty(&json!({
+                "mcpServers": {
+                    "dirijor": { "type": "stdio", "command": cli_text, "args": ["mcp-stdio"] }
+                }
+            }))
+            .unwrap()
+        );
+
+        let claude = InjectionSpec {
+            claude_hooks: true,
+            claude_mcp: true,
+            ..Default::default()
+        };
+        let injected = injection_args_full(&claude, dir, &cli, None, None);
+        assert!(!injected.mcp_http);
+        assert_eq!(
+            injected.argv,
+            [
+                "--settings".to_owned(),
+                path("claude-hooks.json"),
+                "--mcp-config".to_owned(),
+                path("claude-mcp.json"),
+                "--plugin-dir".to_owned(),
+                path(CLAUDE_SKILLS_PLUGIN_DIR),
+            ]
+        );
+        assert_eq!(injected.argv, injection_args(&claude, dir, &cli));
+
+        let codex = InjectionSpec {
+            codex_notify: true,
+            codex_mcp: true,
+            ..Default::default()
+        };
+        let injected = injection_args_full(&codex, dir, &cli, None, None);
+        assert!(!injected.mcp_http);
+        assert_eq!(
+            injected.argv,
+            [
+                "-c".to_owned(),
+                format!("notify=[\"{cli_text}\", \"notify\"]"),
+                "-c".to_owned(),
+                format!("mcp_servers.dirijor.command=\"{cli_text}\""),
+                "-c".to_owned(),
+                "mcp_servers.dirijor.args=[\"mcp-stdio\"]".to_owned(),
+            ]
+        );
+        assert_eq!(injected.argv, injection_args(&codex, dir, &cli));
+    }
+
     #[test]
     fn cursor_plugin_is_launch_scoped_with_baked_env_and_stop_hook() {
         let temp = tempfile::tempdir().expect("temp");

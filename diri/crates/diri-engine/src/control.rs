@@ -119,6 +119,9 @@ pub struct ControlServer {
     /// The Engine-served MCP endpoint, once [`ControlServer::start_mcp_http`]
     /// bound it. Unset means every Agent keeps the stdio `dirijor-mcp`.
     mcp_http: std::sync::OnceLock<crate::mcp_http::McpHttpEndpoint>,
+    /// Agent CLI versions, so only releases verified to speak HTTP MCP are
+    /// pointed at the endpoint.
+    cli_versions: crate::cli_version::CliVersions,
     governor: std::sync::Arc<Mutex<crate::governor::GovernorConfig>>,
     browser: std::sync::OnceLock<crate::browser::BrowserPool>,
     active_connections: Arc<AtomicUsize>,
@@ -235,6 +238,7 @@ impl ControlServer {
             pr_monitor_wake: crate::pr_monitor::PrMonitorWake::default(),
             injection: None,
             mcp_http: std::sync::OnceLock::new(),
+            cli_versions: Default::default(),
             governor: std::sync::Arc::new(Mutex::new(crate::governor::GovernorConfig::default())),
             browser: std::sync::OnceLock::new(),
             active_connections: Arc::new(AtomicUsize::new(0)),
@@ -286,7 +290,27 @@ impl ControlServer {
         )?;
         let url = endpoint.url().to_owned();
         let _ = self.mcp_http.set(endpoint);
+        let descriptors = self
+            .registry
+            .lock()
+            .map(|registry| {
+                let engine = registry.engine();
+                engine
+                    .ids()
+                    .into_iter()
+                    .filter_map(|id| engine.manifest(id)?.agent.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        crate::mcp_http::warm_versions(descriptors, self.cli_versions.clone());
         Ok(url)
+    }
+
+    /// The endpoint URL a launch of `descriptor` may use: set only when the
+    /// endpoint runs and the Agent's CLI is a release verified to speak it.
+    fn mcp_http_url_for(&self, descriptor: &crate::agent::AgentDescriptor) -> Option<&str> {
+        let endpoint = self.mcp_http.get()?;
+        crate::mcp_http::http_allowed(descriptor, &self.cli_versions).then(|| endpoint.url())
     }
 
     /// The bearer token a local session uses for the Engine-served MCP
@@ -1238,9 +1262,7 @@ impl ControlServer {
                         session_id: &id,
                         socket_path: &self.socket_path,
                     }),
-                    self.mcp_http
-                        .get()
-                        .map(crate::mcp_http::McpHttpEndpoint::url),
+                    self.mcp_http_url_for(&descriptor),
                 );
                 launch_args.extend(injected.argv);
                 mcp_http_token = injected
@@ -3864,9 +3886,7 @@ impl ControlServer {
                     session_id: id,
                     socket_path: &self.socket_path,
                 }),
-                self.mcp_http
-                    .get()
-                    .map(crate::mcp_http::McpHttpEndpoint::url),
+                self.mcp_http_url_for(&descriptor),
             );
             launch_args.extend(injected.argv);
             mcp_http_token = injected
