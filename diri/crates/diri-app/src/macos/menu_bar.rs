@@ -1,10 +1,10 @@
 //! AppKit status-item menu. macOS owns layout, appearance, tracking, scrolling,
 //! keyboard navigation and accessibility; every entry is a standard NSMenuItem.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ops::Deref;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use objc2::rc::Retained;
@@ -26,6 +26,7 @@ use crate::macos::brand_raster;
 use crate::menu_inbox::{InboxModel, InboxRow, InboxSessionRow, TrailingStatus, build_inbox};
 use crate::store::{SessionStore, WindowAction, WindowStore};
 
+/// One window's handle on the shared status item.
 pub struct NativeMenuBar(Rc<NativeMenuBarInner>);
 impl Deref for NativeMenuBar {
     type Target = NativeMenuBarInner;
@@ -33,28 +34,42 @@ impl Deref for NativeMenuBar {
         &self.0
     }
 }
-thread_local! { static SHARED_MENU: RefCell<Weak<NativeMenuBarInner>>=const { RefCell::new(Weak::new()) }; }
+// The status item lives as long as the process. Closing the last window used
+// to remove and free it while the app kept running, and on macOS 15 such
+// closes were followed within seconds by an Objective-C exception out of
+// AppKit's display-cycle observer (`_crashOnException`: SIGTRAP on arm64,
+// SIGILL on x86_64). Quitting, and closing any other window, never was. With
+// no window left the item is hidden instead, and the next window shows it.
+thread_local! { static SHARED_MENU: RefCell<Option<Rc<NativeMenuBarInner>>>=const { RefCell::new(None) }; }
 pub struct NativeMenuBarInner {
     status_item: Retained<NSStatusItem>,
     menu: Retained<NSMenu>,
     // AppKit does not retain delegates or action targets.
     target: Retained<MenuBarTarget>,
+    /// Live `NativeMenuBar` handles, one per open window.
+    windows: Cell<usize>,
 }
 
-impl Drop for NativeMenuBarInner {
+impl Drop for NativeMenuBar {
     fn drop(&mut self) {
-        self.menu.cancelTracking();
-        self.menu.setDelegate(None);
-        self.status_item.setMenu(None);
-        self.menu.removeAllItems();
-        NSStatusBar::systemStatusBar().removeStatusItem(&self.status_item);
+        let windows = self.windows.get().saturating_sub(1);
+        self.windows.set(windows);
+        if windows == 0 {
+            self.menu.cancelTracking();
+            self.status_item.setVisible(false);
+        }
     }
 }
 
 impl NativeMenuBar {
     #[must_use]
     pub fn new(mtm: MainThreadMarker, store: Arc<RwLock<SessionStore>>) -> Option<Self> {
-        if let Some(inner) = SHARED_MENU.with(|menu| menu.borrow().upgrade()) {
+        if let Some(inner) = SHARED_MENU.with(|menu| menu.borrow().clone()) {
+            let windows = inner.windows.get();
+            inner.windows.set(windows + 1);
+            if windows == 0 {
+                inner.status_item.setVisible(true);
+            }
             return Some(Self(inner));
         }
         let status_item =
@@ -76,8 +91,9 @@ impl NativeMenuBar {
             status_item,
             menu,
             target,
+            windows: Cell::new(1),
         });
-        SHARED_MENU.with(|menu| *menu.borrow_mut() = Rc::downgrade(&inner));
+        SHARED_MENU.with(|menu| *menu.borrow_mut() = Some(Rc::clone(&inner)));
         Some(Self(inner))
     }
 
