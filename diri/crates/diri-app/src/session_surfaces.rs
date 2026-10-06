@@ -2056,8 +2056,10 @@ mod tests {
     #[gpui::test]
     fn overview_never_asks_a_note_for_its_screen(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
-        let tokio = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
+        // A current-thread runtime nothing drives: requests are queued (which
+        // is what this test checks) but never run, so no worker thread wakes
+        // the GPUI test scheduler from outside and the test stays deterministic.
+        let tokio = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
