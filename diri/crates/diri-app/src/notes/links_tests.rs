@@ -166,7 +166,12 @@ fn render_note_links_screenshot() {
         let (_, doc) = diri_notes::markdown::parse(md);
         store.create(doc, None).unwrap().0
     };
-    let plan = create("# Q4 launch plan\n\nShip the onboarding emails before the pricing test.\n");
+    let plan = match std::env::var("DIRI_VISUAL_NOTE_FILE") {
+        Ok(path) => create(&std::fs::read_to_string(path).unwrap()),
+        Err(_) => {
+            create("# Q4 launch plan\n\nShip the onboarding emails before the pricing test.\n")
+        }
+    };
     let link =
         |id: &str, title: &str| diri_notes::backlinks::mention_markdown(&format!("@{title}"), id);
     let pricing = create(&format!(
@@ -253,6 +258,16 @@ fn render_note_links_screenshot() {
             .unwrap();
     }
     cx.run_until_parked();
+    if std::env::var_os("DIRI_VISUAL_NOTE_BOTTOM").is_some() {
+        let editor = cx.update(|cx| pane.read(cx).editor_for_test()).unwrap();
+        for _ in 0..200 {
+            cx.update(|cx| editor.update(cx, |view, cx| view.scroll_by_for_test(px(-400.0), cx)));
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+        }
+    }
     cx.capture_screenshot(window.into())
         .unwrap()
         .save(&output)

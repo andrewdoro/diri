@@ -2910,7 +2910,7 @@ impl Render for NoteEditorView {
                 .absolute()
                 .inset_0(),
             );
-            column = column.child(row);
+            column = column.child(row.debug_selector(move || format!("note-row-{id}")));
             if !folded_away && let Some(status) = self.work_status_line(block, indent, colors, cx) {
                 column = column.child(status);
             }
@@ -3182,8 +3182,10 @@ impl Render for NoteEditorView {
             div()
                 .w_full()
                 .max_w(px(MEASURE))
+                .mx_auto()
                 .mt(px(56.0))
                 .cursor_default()
+                .debug_selector(|| "note-footer".into())
                 .child(footer)
         });
 
@@ -3278,11 +3280,13 @@ impl Render for NoteEditorView {
                         }),
                     )
                     .child(
+                        // Block layout, centred by auto margins: as a flex
+                        // column's item the page took its height from wrapped
+                        // text measured wider than it is drawn, ending short
+                        // of its last rows, so the backlinks painted over them
+                        // and the note would not scroll to its end.
                         div()
                             .w_full()
-                            .flex()
-                            .flex_col()
-                            .items_center()
                             .px(px(PAGE_SIDE))
                             .pt(px(PAGE_TOP))
                             .pb(px(240.0))
@@ -3291,6 +3295,7 @@ impl Render for NoteEditorView {
                                     .relative()
                                     .w_full()
                                     .max_w(px(MEASURE))
+                                    .mx_auto()
                                     .child(chip_backdrop)
                                     .child(column)
                                     .child(overlay),
