@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 
 use diri_engine::holder::agent_launcher::AGENT_LAUNCHER_ENV;
 use diri_engine::holder::protocol::DEFAULT_DISK_CAPACITY;
-use diri_engine::holder::{HolderClient, HolderLaunchSpec, HolderLauncher, HolderPaths};
+use diri_engine::holder::{
+    HolderClient, HolderLaunchSpec, HolderLauncher, HolderManagerPaths, HolderPaths,
+};
 
 #[test]
 #[ignore = "real launchd: creates a transient gui/<uid> job"]
@@ -89,6 +91,9 @@ fn a_manager_job_launchd_never_runs_falls_back_to_a_direct_spawn() {
         manager_pid
     );
     assert!(again.elapsed() < Duration::from_secs(1));
+    // Later Engines and managers read it and leave launchd alone too.
+    let manager_dir = HolderManagerPaths::new(&root).directory;
+    assert!(manager_dir.join("launchd-unavailable").exists());
 
     for paths in [&paths, &paths_2] {
         let client = HolderClient::new(paths.socket());
