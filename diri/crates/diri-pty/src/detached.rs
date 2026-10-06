@@ -309,6 +309,82 @@ pub fn bootstrap_job(
     result
 }
 
+/// Removes the job `label`, stopping its process if it has one.
+pub fn bootout_job(label: &str) -> io::Result<()> {
+    launchctl(&["bootout", &format!("{}/{label}", gui_domain())])
+}
+
+/// What launchd says about a job, for diagnosing one that never ran.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JobStatus {
+    /// `launchctl print` knew the job at all.
+    pub known: bool,
+    /// The job's `state = …`, reduced to a fixed vocabulary.
+    pub state: &'static str,
+    /// `last exit code = N`, once its process has run and exited.
+    pub last_exit: Option<i64>,
+    /// `runs = N`: how many times launchd started its process.
+    pub runs: Option<i64>,
+}
+
+/// Reads [`JobStatus`] from `launchctl print gui/<uid>/<label>`.
+#[must_use]
+pub fn job_status(label: &str) -> JobStatus {
+    let Ok(output) = Command::new(LAUNCHCTL)
+        .args(["print", &format!("{}/{label}", gui_domain())])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return JobStatus::default();
+    };
+    if !output.status.success() {
+        return JobStatus::default();
+    }
+    parse_job_status(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_job_status(print: &str) -> JobStatus {
+    let mut status = JobStatus {
+        known: true,
+        state: "unknown",
+        ..JobStatus::default()
+    };
+    // Only the job's own keys: nested blocks indent further and reuse names.
+    for line in print
+        .lines()
+        .filter(|line| line.starts_with('\t') && !line.starts_with("\t\t"))
+    {
+        let Some((key, value)) = line.trim().split_once(" = ") else {
+            continue;
+        };
+        let value = value.trim();
+        match key {
+            "state" => {
+                status.state = match value {
+                    "running" => "running",
+                    "not running" => "not_running",
+                    "spawn scheduled" => "spawn_scheduled",
+                    "spawning" => "spawning",
+                    "exited" => "exited",
+                    "waiting" => "waiting",
+                    _ => "other",
+                };
+            }
+            // "78: EX_CONFIG": the number leads.
+            "last exit code" => {
+                status.last_exit = value
+                    .split(':')
+                    .next()
+                    .and_then(|code| code.trim().parse().ok());
+            }
+            "runs" => status.runs = value.parse().ok(),
+            _ => {}
+        }
+    }
+    status
+}
+
 /// Boots out every job labelled `<prefix><hex millis>` that has finished and
 /// is older than `age`. A running job is never touched, nor one young
 /// enough to be between `bootstrap` and its spawn.
@@ -855,6 +931,26 @@ mod tests {
         );
         assert_eq!(decoded.env[1].as_bytes(), b"EMPTY=");
         assert!(decode(&framed[5..framed.len() - 1]).is_none(), "truncated");
+    }
+
+    #[test]
+    fn job_status_reads_only_the_jobs_own_keys() {
+        let print = "gui/501/com.dirijor.diri.holders.1 = {\n\
+                     \tactive count = 0\n\
+                     \tstate = spawn scheduled\n\
+                     \truns = 3\n\
+                     \tlast exit code = 78: EX_CONFIG\n\
+                     \tenvironment = {\n\
+                     \t\tstate = running\n\
+                     \t}\n\
+                     }\n";
+        let status = parse_job_status(print);
+        assert!(status.known);
+        assert_eq!(status.state, "spawn_scheduled");
+        assert_eq!(status.runs, Some(3));
+        assert_eq!(status.last_exit, Some(78));
+        let status = parse_job_status("x = {\n\tstate = not running\n\tlast exit code = 127\n}\n");
+        assert_eq!((status.state, status.last_exit), ("not_running", Some(127)));
     }
 
     #[test]

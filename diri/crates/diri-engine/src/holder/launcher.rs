@@ -28,6 +28,10 @@ const MANAGER_ENVIRONMENT: [&str; 3] = [
 
 /// How long to wait for a freshly spawned manager: 250 × 20ms = 5s.
 const READINESS_ATTEMPTS: u32 = 250;
+/// Ask launchd whether a manager job already exited every this many waits
+/// (about 0.5 s once the delays settle).
+#[cfg(target_os = "macos")]
+const JOB_CHECK_EVERY: u32 = 25;
 
 pub struct HolderLauncher;
 
@@ -56,21 +60,7 @@ impl HolderLauncher {
 
         let manager = HolderManagerClient::new(manager_paths.socket());
         if !manager.is_alive() {
-            spawn_manager(executable_path, &manager_paths.directory)?;
-            let ready = super::readiness_delays()
-                .take(READINESS_ATTEMPTS as usize)
-                .any(|delay| {
-                    if manager.is_alive() {
-                        return true;
-                    }
-                    std::thread::sleep(delay);
-                    false
-                });
-            if !ready {
-                return Err(HolderError::Launch(
-                    "shared holder manager did not become ready".into(),
-                ));
-            }
+            start_manager(executable_path, &manager_paths.directory, &manager)?;
         }
 
         match manager.launch(spec) {
@@ -83,7 +73,7 @@ impl HolderLauncher {
                 if manager.is_alive() {
                     return Err(error);
                 }
-                spawn_manager(executable_path, &manager_paths.directory)?;
+                start_manager(executable_path, &manager_paths.directory, &manager)?;
                 for delay in super::readiness_delays().take(READINESS_ATTEMPTS as usize) {
                     if let Ok(pid) = manager.launch(spec) {
                         return Ok(pid);
@@ -162,11 +152,111 @@ impl Drop for LaunchLock {
     }
 }
 
+/// Set once a launchd-started manager failed to come up: this Engine spawns
+/// its managers directly from then on rather than charging every new
+/// session the same wait.
+#[cfg(target_os = "macos")]
+static LAUNCHD_MANAGER_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// How a manager was started.
+enum Started {
+    Direct,
+    /// As this launchd job (macOS, bundled).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Launchd(String),
+}
+
+/// Starts a manager and waits until it answers. Must hold the launch lock.
+///
+/// launchd can accept a job and then never run it (or run it far too late):
+/// 0.9.3 failed every new session with exit 127 on such Macs. That job is
+/// booted out, so it cannot come up later beside its replacement, and the
+/// manager is spawned directly instead, as before 0.9.3.
+fn start_manager(
+    executable_path: &Path,
+    directory: &Path,
+    manager: &HolderManagerClient,
+) -> HolderResult<()> {
+    let started = spawn_manager(executable_path, directory)?;
+    // A job whose process already ran and exited will not answer: stop
+    // waiting for it then rather than at the deadline.
+    #[cfg(target_os = "macos")]
+    let mut job_exited = {
+        let label = match &started {
+            Started::Launchd(label) => Some(label.clone()),
+            Started::Direct => None,
+        };
+        let mut checks = 0u32;
+        move || {
+            checks += 1;
+            label.as_deref().is_some_and(|label| {
+                checks.is_multiple_of(JOB_CHECK_EVERY) && {
+                    let status = diri_pty::detached::job_status(label);
+                    status.known && status.state == "not_running" && status.runs >= Some(1)
+                }
+            })
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut job_exited = || false;
+    if wait_until_alive(manager, &mut job_exited) {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    if let Started::Launchd(label) = started {
+        use std::sync::atomic::Ordering;
+        if manager.is_alive() {
+            return Ok(()); // just made it
+        }
+        let status = diri_pty::detached::job_status(&label);
+        let bootout = diri_pty::detached::bootout_job(&label);
+        LAUNCHD_MANAGER_FAILED.store(true, Ordering::Relaxed);
+        eprintln!(
+            "diri-engine: launchd holder manager {label} never answered ({status:?}); spawning it"
+        );
+        diri_telemetry::incident!(
+            "holder.manager_launchd_stuck",
+            known = status.known,
+            state = status.state,
+            runs = status.runs,
+            last_exit = status.last_exit,
+            bootout_ok = bootout.is_ok(),
+        );
+        // Booted out, a late-starting job cannot race the direct one for the
+        // socket; one that came up just now had no sessions yet.
+        spawn_manager(executable_path, directory)?;
+        if wait_until_alive(manager, &mut || false) {
+            return Ok(());
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = started;
+    Err(HolderError::Launch(
+        "shared holder manager did not become ready".into(),
+    ))
+}
+
+/// Waits for the manager to answer, up to the readiness deadline or until
+/// `gave_up` says it never will.
+fn wait_until_alive(manager: &HolderManagerClient, gave_up: &mut dyn FnMut() -> bool) -> bool {
+    for delay in super::readiness_delays().take(READINESS_ATTEMPTS as usize) {
+        if manager.is_alive() {
+            return true;
+        }
+        if gave_up() {
+            return manager.is_alive();
+        }
+        std::thread::sleep(delay);
+    }
+    false
+}
+
 /// Starts the manager fully detached: its own session (no terminal/SIGHUP
 /// coupling to the daemon), stdio on /dev/null, no inherited descriptors.
 /// The OS does not kill it when its daemon parent exits, which is the whole
 /// point: every managed PTY survives daemon crashes and upgrades.
-fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<()> {
+fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<Started> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -194,7 +284,9 @@ fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<()> {
     // the app's coalition at an update, would otherwise take the manager and
     // with it every PTY. One process either way; launchd reaps it.
     #[cfg(target_os = "macos")]
-    if agent_launcher.is_some() {
+    if agent_launcher.is_some()
+        && !LAUNCHD_MANAGER_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+    {
         let label = format!(
             "{MANAGER_LABEL_PREFIX}{}",
             diri_pty::detached::label_suffix()
@@ -217,7 +309,7 @@ fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<()> {
                             std::time::Duration::from_secs(120),
                         );
                     });
-                return Ok(());
+                return Ok(Started::Launchd(label));
             }
             Err(error) => {
                 eprintln!("diri-engine: launchd holder manager unavailable, spawning it: {error}");
@@ -278,7 +370,7 @@ fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<()> {
             }
         })
         .map_err(|error| HolderError::io("spawn reaper", error))?;
-    Ok(())
+    Ok(Started::Direct)
 }
 
 fn read_pid_file(path: &Path) -> Option<i32> {
