@@ -105,9 +105,22 @@ const MOTION_BACKSTOP: Duration = Duration::from_millis(33);
 /// agent mark, and the ✕ that stands on that column when a session or
 /// project row is hovered. One width keeps them on a single vertical line.
 const SIDEBAR_TRAILING_SLOT: f32 = 16.0;
+/// How far a trailing row control's hover square reaches past its 16px slot
+/// on each side. Every row control (⋯, +, ✕, revive, fold) shows the same
+/// 24px square while still sitting on the 16px column, so controls stand on
+/// one 24px pitch and the ✕ stays centred over the agent marks.
+/// Distance from the sidebar's right edge to the centre of the rows'
+/// trailing column (agent marks, ✕). Chrome outside the rows lines up on it.
+const TRAILING_COLUMN_CENTER: f32 = Space::INSET + Space::ROW_H + SIDEBAR_TRAILING_SLOT / 2.0;
+/// Width of the rows' leading column (activity marks, project chevrons).
+const LEADING_SLOT: f32 = 18.0;
+const SIDEBAR_ACTION_OUTSET: f32 = (SIDEBAR_ACTION_SLOT - SIDEBAR_TRAILING_SLOT) / 2.0;
+/// Width of a project header's hover strip: ⋯, +, and ✕ on one 24px pitch.
+const PROJECT_ACTION_STRIP: f32 = SIDEBAR_ACTION_SLOT * 3.0;
 
 /// Which hover control a point in a project header lands on.
-/// The strip sits `Space::ROW_H` in from the header's right edge.
+/// The strip's ✕ is centred on the trailing column `Space::ROW_H` in from
+/// the header's right edge, so its hover square reaches a little past it.
 enum ProjectHoverAction {
     Menu,
     Add,
@@ -121,8 +134,8 @@ fn project_hover_action(
     if !header.contains(&position) {
         return None;
     }
-    let strip_width = px(SIDEBAR_ACTION_SLOT * 2.0 + SIDEBAR_TRAILING_SLOT);
-    let strip_right = header.right() - px(Space::ROW_H);
+    let strip_width = px(PROJECT_ACTION_STRIP);
+    let strip_right = header.right() - px(Space::ROW_H - SIDEBAR_ACTION_OUTSET);
     let strip_left = strip_right - strip_width;
     if position.x < strip_left || position.x >= strip_right {
         return None;
@@ -2017,6 +2030,9 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .justify_center()
+                    // The glyph's badge pokes out top right; its box is
+                    // the visual mass, so centre the box on the column.
+                    .pl(px(2.0))
                     .child(sf_symbol("square.and.pencil", 13.0, colors.secondary)),
             )
             .child(
@@ -2123,7 +2139,10 @@ impl Sidebar {
             .flex()
             .items_center()
             .justify_end()
-            .pr(px(Metrics::TOOLBAR_EDGE_INSET))
+            // The last toolbar control centres on the rows' trailing column.
+            .pr(px(
+                TRAILING_COLUMN_CENTER - Metrics::TOOLBAR_CONTROL_SIZE / 2.0
+            ))
             .gap(px(Metrics::TOOLBAR_COMPACT_GAP))
             .when(!in_settings, |bar| {
                 bar.child(icon_button(
@@ -2880,7 +2899,7 @@ impl Sidebar {
                     .font_weight(Typo::ROW_EMPHASIZED.weight)
                     .text_color(colors.primary.alpha(0.90))
                     .when(is_hovered, |title| {
-                        title.pr(px(SIDEBAR_ACTION_SLOT * 2.0 + SIDEBAR_TRAILING_SLOT))
+                        title.pr(px(PROJECT_ACTION_STRIP - SIDEBAR_ACTION_OUTSET))
                     })
                     .child(group.project.name.clone()),
             )
@@ -2895,8 +2914,8 @@ impl Sidebar {
                     div()
                         .absolute()
                         .top(px(0.0))
-                        .right(px(Space::ROW_H))
-                        .w(px(SIDEBAR_ACTION_SLOT * 2.0 + SIDEBAR_TRAILING_SLOT))
+                        .right(px(Space::ROW_H - SIDEBAR_ACTION_OUTSET))
+                        .w(px(PROJECT_ACTION_STRIP))
                         .h(px(SIDEBAR_NAV_ROW_HEIGHT))
                         .flex()
                         .items_center()
@@ -2915,13 +2934,7 @@ impl Sidebar {
                                     move || format!("PROJECT_MENU_{}", id.0)
                                 })
                                 .size(px(SIDEBAR_ACTION_SLOT))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(Radius::BADGE))
-                                .text_color(colors.secondary)
-                                .hover(|button| button.bg(colors.primary.alpha(0.07)))
-                                .active(|button| button.opacity(0.72))
+                                .row_action(colors)
                                 .child(sf_symbol_weighted(
                                     "ellipsis",
                                     12.0,
@@ -2952,13 +2965,7 @@ impl Sidebar {
                                     move || format!("PROJECT_ADD_{}", id.0)
                                 })
                                 .size(px(SIDEBAR_ACTION_SLOT))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(Radius::BADGE))
-                                .text_color(colors.secondary)
-                                .hover(|button| button.bg(colors.primary.alpha(0.07)))
-                                .active(|button| button.opacity(0.72))
+                                .row_action(colors)
                                 .child(sf_symbol_weighted(
                                     "plus",
                                     12.0,
@@ -2988,15 +2995,8 @@ impl Sidebar {
                                 })
                                 .role(Role::Button)
                                 .aria_label(t("sidebar.close_all_sessions"))
-                                .size(px(SIDEBAR_TRAILING_SLOT))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(Radius::CHIP))
-                                .cursor_pointer()
-                                .text_color(colors.secondary)
-                                .hover(move |button| button.bg(Fill::subtle(colors)))
-                                .active(|button| button.opacity(0.72))
+                                .size(px(SIDEBAR_ACTION_SLOT))
+                                .row_action(colors)
                                 // The row drags; a press that wanders 2px
                                 // becomes a drag that swallows the click.
                                 // Keeping mouse-down off the row makes
@@ -3765,7 +3765,7 @@ impl Sidebar {
         ) - if loading { 60.0 } else { 0.0 }
             - if scheduled_run.is_some() { 18.0 } else { 0.0 }
             - if row.has_children {
-                Space::INDENT + 8.0
+                SIDEBAR_TRAILING_SLOT + 8.0
             } else {
                 0.0
             })
@@ -3857,7 +3857,7 @@ impl Sidebar {
                 // Keep the trailing fold slot inert while editing, preserving
                 // the same title width as the non-editing row.
                 .when(row.has_children, |element| {
-                    element.child(div().w(px(Space::INDENT)).flex_none())
+                    element.child(div().w(px(SIDEBAR_TRAILING_SLOT)).flex_none())
                 })
                 .child(self.status_glyph(session, migrating, colors, window, cx))
                 .into_any_element();
@@ -3895,9 +3895,11 @@ impl Sidebar {
                         .into()
                 })
             })
-            // Account for the selection border when aligning with project icons.
+            // Account for the selection border on both edges, so the leading
+            // mark and the trailing agent mark share columns with unbordered
+            // rows (New Agent, project headers).
             .pl(px(Space::ROW_H - 1.0))
-            .pr(px(Space::ROW_H))
+            .pr(px(Space::ROW_H - 1.0))
             .h(px(SIDEBAR_NAV_ROW_HEIGHT))
             .flex()
             .items_center()
@@ -4155,15 +4157,7 @@ impl Sidebar {
                         })
                         .role(Role::Button)
                         .aria_label(t("session.close_session"))
-                        .size(px(16.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(Radius::CHIP))
-                        .cursor_pointer()
-                        .text_color(colors.secondary)
-                        .hover(move |button| button.bg(Fill::subtle(colors)))
+                        .trailing_row_action(colors)
                         // The row is draggable, and a press that wanders
                         // 2px turns into a drag that swallows the click.
                         // Keeping mouse-down off the row makes every press
@@ -4259,11 +4253,10 @@ impl Sidebar {
         colors: SemanticColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let slot = div().w(px(Space::INDENT)).flex_none().flex().items_center();
         let id = row.id().clone();
-        slot.id(format!("fold:{}", id.0))
-            .justify_center()
-            .cursor_pointer()
+        div()
+            .id(format!("fold:{}", id.0))
+            .trailing_row_action(colors)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -4471,7 +4464,7 @@ impl Sidebar {
             // Same insets as a live row: the archive glyph takes the activity
             // column and the title lands on the title column.
             .pl(px(Space::ROW_H - 1.0))
-            .pr(px(Space::ROW_H))
+            .pr(px(Space::ROW_H - 1.0))
             .h(px(SIDEBAR_NAV_ROW_HEIGHT))
             .flex()
             .items_center()
@@ -4585,15 +4578,7 @@ impl Sidebar {
                     })
                     .role(Role::Button)
                     .aria_label(t("sidebar.revive_session"))
-                    .size(px(SIDEBAR_TRAILING_SLOT))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(Radius::CHIP))
-                    .cursor_pointer()
-                    .text_color(colors.secondary)
-                    .hover(move |button| button.bg(Fill::subtle(colors)))
+                    .trailing_row_action(colors)
                     // The row drags; keep mouse-down off it so a press on
                     // the control is always a revive.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -4834,7 +4819,7 @@ impl Sidebar {
                 div()
                     .id("account")
                     .debug_selector(|| "account".into())
-                    .px(px(8.0))
+                    .px(px(Space::ROW_H))
                     .h(px(SIDEBAR_NAV_ROW_HEIGHT))
                     .flex()
                     .items_center()
@@ -4858,7 +4843,9 @@ impl Sidebar {
                         }
                         cx.notify();
                     }))
-                    .child(account_avatar(&account_label, 20.0, colors))
+                    // The avatar takes the leading column and the name the
+                    // title column, like every row above it.
+                    .child(account_avatar(&account_label, LEADING_SLOT, colors))
                     .child(
                         div()
                             .min_w(px(0.0))
@@ -4881,14 +4868,20 @@ impl Sidebar {
                             Some(SharedString::from(crate::fonts::mono_family())),
                         ))
                     })
-                    .child(div().text_size(px(9.0)).text_color(colors.tertiary).child(
-                        sf_symbol_weighted(
-                            "chevron.up.chevron.down",
-                            8.5,
-                            SymbolWeight::Semibold,
-                            colors.tertiary,
-                        ),
-                    )),
+                    .child(
+                        div()
+                            .size(px(SIDEBAR_TRAILING_SLOT))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(sf_symbol_weighted(
+                                "chevron.up.chevron.down",
+                                8.5,
+                                SymbolWeight::Semibold,
+                                colors.tertiary,
+                            )),
+                    ),
             )
             .into_any_element()
     }
@@ -9031,6 +9024,37 @@ fn indent_rails(row: &crate::store::SidebarRow, colors: SemanticColors) -> Vec<A
         .collect()
 }
 
+/// One look for every hover control on a sidebar row: the same square,
+/// corner, ink, and hover fill, so ⋯, +, and ✕ never differ in size.
+trait RowAction: Sized {
+    fn row_action(self, colors: SemanticColors) -> Self;
+
+    /// A row control standing on the 16px trailing column: its 24px hover
+    /// square overhangs the slot evenly, keeping the glyph on the column
+    /// shared with the agent marks.
+    fn trailing_row_action(self, colors: SemanticColors) -> Self;
+}
+
+impl RowAction for gpui::Stateful<Div> {
+    fn row_action(self, colors: SemanticColors) -> Self {
+        self.flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(Radius::BADGE))
+            .cursor_pointer()
+            .text_color(colors.secondary)
+            .hover(move |button| button.bg(Fill::subtle(colors)))
+            .active(|button| button.opacity(0.72))
+    }
+
+    fn trailing_row_action(self, colors: SemanticColors) -> Self {
+        self.size(px(SIDEBAR_ACTION_SLOT))
+            .mx(px(-SIDEBAR_ACTION_OUTSET))
+            .row_action(colors)
+    }
+}
+
 /// Quiet pin for rows held at the top of their band. It takes the same 16px
 /// slot as the agent glyph beside it, so the two read as one column rather
 /// than a glyph and a straggler.
@@ -10515,7 +10539,14 @@ mod tests {
             cx.debug_bounds("session-agent-logo:preview-codex")
                 .is_none()
         );
-        assert_eq!(cx.debug_bounds("session-close:preview-codex"), Some(logo));
+        // The ✕ stands on the logo's column, with the same hover square as
+        // every other row control.
+        let close = cx.debug_bounds("session-close:preview-codex").unwrap();
+        assert_eq!(close.center(), logo.center());
+        assert_eq!(
+            close.size,
+            size(px(SIDEBAR_ACTION_SLOT), px(SIDEBAR_ACTION_SLOT))
+        );
         cx.simulate_mouse_move(point(px(500.0), px(320.0)), None, Modifiers::default());
         assert_eq!(
             cx.debug_bounds("session-agent-logo:preview-codex"),
@@ -13030,7 +13061,16 @@ mod tests {
             Some(chevron)
         );
         assert!(close.left() > chevron.right());
-        assert_eq!(close.right(), project.right() - px(Space::ROW_H));
+        assert_eq!(
+            close.right(),
+            project.right() - px(Space::ROW_H - SIDEBAR_ACTION_OUTSET)
+        );
+        // ⋯, +, and ✕ share one square and one pitch.
+        let menu = cx.debug_bounds("PROJECT_MENU_preview-dirijor").unwrap();
+        let add = cx.debug_bounds("PROJECT_ADD_preview-dirijor").unwrap();
+        assert_eq!(menu.size, close.size);
+        assert_eq!(add.size, close.size);
+        assert_eq!(add.left() - menu.left(), close.left() - add.left());
 
         cx.simulate_click(close.center(), Modifiers::default());
 
