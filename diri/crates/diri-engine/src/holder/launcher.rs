@@ -159,6 +159,66 @@ impl Drop for LaunchLock {
 static LAUNCHD_MANAGER_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Records, in the managers' directory, that launchd will not run diri's
+/// jobs on this Mac. Every later Engine and manager reads it, so neither the
+/// manager nor any Agent is offered to launchd again until the Holder
+/// executable changes (an update) or `/tmp` is cleared (a restart).
+#[cfg(target_os = "macos")]
+const LAUNCHD_UNAVAILABLE_MARKER: &str = "launchd-unavailable";
+
+/// Identifies the installed Holder executable: an update rewrites it.
+#[cfg(target_os = "macos")]
+fn launchd_marker_key(executable: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(executable).ok()?;
+    Some(format!(
+        "{} {} {}",
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec()
+    ))
+}
+
+/// Whether launchd already failed this build of diri on this Mac.
+#[cfg(target_os = "macos")]
+pub(crate) fn launchd_unavailable(directory: &Path, executable: &Path) -> bool {
+    use std::sync::atomic::Ordering;
+    if LAUNCHD_MANAGER_FAILED.load(Ordering::Relaxed) {
+        return true;
+    }
+    let recorded = std::fs::read_to_string(directory.join(LAUNCHD_UNAVAILABLE_MARKER));
+    let failed = recorded.is_ok_and(|recorded| {
+        launchd_marker_key(executable).is_some_and(|key| recorded.trim() == key)
+    });
+    if failed {
+        LAUNCHD_MANAGER_FAILED.store(true, Ordering::Relaxed);
+    }
+    failed
+}
+
+/// Remembers that launchd failed to run one of diri's jobs (see
+/// [`LAUNCHD_UNAVAILABLE_MARKER`]).
+#[cfg(target_os = "macos")]
+pub(crate) fn mark_launchd_unavailable(directory: &Path, executable: &Path) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    LAUNCHD_MANAGER_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let Some(key) = launchd_marker_key(executable) else {
+        return;
+    };
+    let path = directory.join(LAUNCHD_UNAVAILABLE_MARKER);
+    let written = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| file.write_all(key.as_bytes()));
+    if let Err(error) = written {
+        eprintln!("diri: record {}: {error}", path.display());
+    }
+}
+
 /// How a manager was started.
 enum Started {
     Direct,
@@ -205,13 +265,14 @@ fn start_manager(
     }
     #[cfg(target_os = "macos")]
     if let Started::Launchd(label) = started {
-        use std::sync::atomic::Ordering;
         if manager.is_alive() {
             return Ok(()); // just made it
         }
         let status = diri_pty::detached::job_status(&label);
         let bootout = diri_pty::detached::bootout_job(&label);
-        LAUNCHD_MANAGER_FAILED.store(true, Ordering::Relaxed);
+        // A launchd that never runs the manager does not run the Agents'
+        // jobs either: the direct manager starts them as its children.
+        mark_launchd_unavailable(directory, executable_path);
         eprintln!(
             "diri-engine: launchd holder manager {label} never answered ({status:?}); spawning it"
         );
@@ -273,7 +334,11 @@ fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<Start
         arguments.push(super::manager::ENGINE_PID_FLAG.into());
         arguments.push(std::process::id().to_string().into());
     }
-    let agent_launcher = super::agent_launcher();
+    #[cfg(target_os = "macos")]
+    let launchd_unavailable = launchd_unavailable(directory, executable_path);
+    #[cfg(not(target_os = "macos"))]
+    let launchd_unavailable = false;
+    let agent_launcher = super::agent_launcher().filter(|_| !launchd_unavailable);
     if let Some(launcher) = &agent_launcher {
         arguments.push(super::AGENT_LAUNCHER_FLAG.into());
         arguments.push(launcher.into());
@@ -284,9 +349,7 @@ fn spawn_manager(executable_path: &Path, directory: &Path) -> HolderResult<Start
     // the app's coalition at an update, would otherwise take the manager and
     // with it every PTY. One process either way; launchd reaps it.
     #[cfg(target_os = "macos")]
-    if agent_launcher.is_some()
-        && !LAUNCHD_MANAGER_FAILED.load(std::sync::atomic::Ordering::Relaxed)
-    {
+    if agent_launcher.is_some() {
         let label = format!(
             "{MANAGER_LABEL_PREFIX}{}",
             diri_pty::detached::label_suffix()
@@ -393,5 +456,35 @@ fn is_executable(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         path.is_file()
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_launchd_marker_names_one_build_of_the_holder() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let executable = root.path().join("diri-holder");
+        std::fs::write(&executable, b"build one").expect("executable");
+
+        mark_launchd_unavailable(root.path(), &executable);
+        let marker = root.path().join(LAUNCHD_UNAVAILABLE_MARKER);
+        let recorded = std::fs::read_to_string(&marker).expect("marker");
+        assert_eq!(Some(recorded), launchd_marker_key(&executable));
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&marker)
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // An update rewrites the executable: its key no longer matches.
+        std::fs::write(&executable, b"build two, longer").expect("update");
+        assert_ne!(
+            std::fs::read_to_string(&marker).ok(),
+            launchd_marker_key(&executable)
+        );
     }
 }

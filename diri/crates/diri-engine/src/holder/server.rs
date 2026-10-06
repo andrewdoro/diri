@@ -1165,7 +1165,9 @@ fn spawn_agent(
     session_id: &str,
 ) -> std::io::Result<Pty> {
     #[cfg(target_os = "macos")]
-    if let Some(launcher) = launcher {
+    if let Some(launcher) = launcher.filter(|launcher| {
+        !super::launcher::launchd_unavailable(&launcher.rendezvous, &holder_executable())
+    }) {
         let started = std::time::Instant::now();
         match diri_pty::detached::spawn(spec, launcher) {
             Ok(pty) => {
@@ -1179,6 +1181,14 @@ fn spawn_agent(
             Err(diri_pty::detached::DetachedError::Spawn(error)) => return Err(error),
             Err(diri_pty::detached::DetachedError::Unavailable(error)) => {
                 eprintln!("diri-holder: detached launch unavailable, spawning directly: {error}");
+                // One job launchd never ran is enough: later sessions, in
+                // this manager and the next, skip the wait.
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    super::launcher::mark_launchd_unavailable(
+                        &launcher.rendezvous,
+                        &holder_executable(),
+                    );
+                }
                 diri_telemetry::incident!(
                     "holder.detached_unavailable",
                     session = diri_telemetry::id(session_id),
@@ -1190,6 +1200,14 @@ fn spawn_agent(
     #[cfg(not(target_os = "macos"))]
     let _ = (launcher, session_id);
     Pty::spawn(spec)
+}
+
+/// This Holder's own executable, the one the Engine launched managers from.
+#[cfg(target_os = "macos")]
+fn holder_executable() -> std::path::PathBuf {
+    std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .unwrap_or_default()
 }
 
 /// Whether `pid`, our child, has exited (it stays unreaped). Stops and
