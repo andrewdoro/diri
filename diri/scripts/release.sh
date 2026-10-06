@@ -11,6 +11,12 @@
 # CI run, and publishes. Without the flag the checkout's tree must already be
 # on main.
 #
+# A release promoted from a macOS nightly (scripts/promote-nightly.sh) is cut
+# from origin/stable/<version> instead of main: when that branch exists, it is
+# the source branch for everything below (provenance, CI gate, Linux packages
+# and their signing identity), so commits that landed on main after the
+# nightly do not ride along.
+#
 # Env overrides:
 #   DIRI_SIGN_IDENTITY  "Developer ID Application: ..." (default: auto-detected)
 #   NOTARY_PROFILE      notarytool keychain profile (default: dirijor-notary)
@@ -150,6 +156,14 @@ fi
 # ----------------------------------------------------------------------------
 # 1. Source provenance
 # ----------------------------------------------------------------------------
+# main, or stable/<version> when a promoted nightly created that branch.
+SOURCE_BRANCH=main
+if git -C "$ROOT" ls-remote --exit-code --heads origin "stable/$VERSION" >/dev/null 2>&1; then
+    SOURCE_BRANCH="stable/$VERSION"
+fi
+echo "    Source branch : $SOURCE_BRANCH"
+# The Linux packages must be signed by the Nightly workflow on that exact branch.
+LINUX_SIGNING_IDENTITY="https://github.com/$GH_REPO/.github/workflows/nightly.yml@refs/heads/$SOURCE_BRANCH"
 # The updater compares against CARGO_PKG_VERSION, so the manifest is the single
 # source of truth for what version this build claims to be. Version bumps go
 # through a normal pull request; a release must build the exact remote main
@@ -177,17 +191,17 @@ SOURCE_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 # branch is byte-for-byte the bundle the merge commit would produce.
 export DIRI_REMOTE_BUILD_ID="$SOURCE_TREE"
 find_source_commit() {
-    git -C "$ROOT" fetch --quiet origin main --tags
+    git -C "$ROOT" fetch --quiet origin "$SOURCE_BRANCH" --tags
     # awk reads to the end rather than exiting at the match: an early exit
     # sends git log SIGPIPE, which pipefail turns into a failed lookup, so a
     # found merge looked missing and --wait-for-merge polled forever.
-    git -C "$ROOT" log --first-parent -50 --format='%H %T' origin/main \
+    git -C "$ROOT" log --first-parent -50 --format='%H %T' "origin/$SOURCE_BRANCH" \
         | awk -v tree="$SOURCE_TREE" '$2 == tree && !found { print $1; found = 1 }'
 }
 SOURCE_COMMIT="$(find_source_commit)"
 if [ -z "$SOURCE_COMMIT" ] && [ "$WAIT_FOR_MERGE" != 1 ]; then
     cat >&2 <<EOF
-error: this checkout's tree ($SOURCE_TREE) is not on origin/main
+error: this checkout's tree ($SOURCE_TREE) is not on origin/$SOURCE_BRANCH
 
 Merge the version bump first, or run from the bump PR's branch with
 --wait-for-merge to build while it merges.
@@ -208,7 +222,7 @@ if [ -n "$SOURCE_COMMIT" ]; then
     check_tag
     echo "    source commit : $SOURCE_COMMIT"
 else
-    echo "    source tree   : $SOURCE_TREE (waiting for it to merge to main)"
+    echo "    source tree   : $SOURCE_TREE (waiting for it to merge to $SOURCE_BRANCH)"
 fi
 
 # ----------------------------------------------------------------------------
@@ -272,7 +286,8 @@ start_ci_work() {
     else
         DIRI_LINUX_DIST="$CARGO_TARGET_DIR/linux-packages-$SOURCE_COMMIT"
         echo "==> Fetching Linux packages for $SOURCE_COMMIT (background, log: $LINUX_LOG)"
-        GH_REPO="$GH_REPO" "$WORKSPACE/scripts/await-ci.sh" linux "$SOURCE_COMMIT" \
+        GH_REPO="$GH_REPO" DIRI_CI_REF="$SOURCE_BRANCH" \
+            "$WORKSPACE/scripts/await-ci.sh" linux "$SOURCE_COMMIT" \
             "$DIRI_LINUX_DIST" > "$LINUX_LOG" 2>&1 &
         LINUX_PID=$!
         BACKGROUND_PIDS+=("$LINUX_PID")
@@ -320,11 +335,11 @@ fi
 # 3. Wait for the merge (--wait-for-merge), then the gate
 # ----------------------------------------------------------------------------
 if [ -z "$SOURCE_COMMIT" ]; then
-    echo "==> Built and notarized. Waiting for tree $SOURCE_TREE to merge to main"
+    echo "==> Built and notarized. Waiting for tree $SOURCE_TREE to merge to $SOURCE_BRANCH"
     merge_deadline=$((SECONDS + ${DIRI_MERGE_TIMEOUT_SECONDS:-3600}))
     until SOURCE_COMMIT="$(find_source_commit)" && [ -n "$SOURCE_COMMIT" ]; do
         if [ "$SECONDS" -ge "$merge_deadline" ]; then
-            echo "error: the bump never reached main with this tree; nothing was published" >&2
+            echo "error: the bump never reached $SOURCE_BRANCH with this tree; nothing was published" >&2
             echo "  (a squash merge of a PR that is behind main has a different tree)" >&2
             exit 1
         fi
@@ -340,7 +355,7 @@ if [ -n "$GATES_PID" ]; then
 fi
 
 # Validates the Linux CI artifact, verifies its Sigstore signatures against
-# main's Nightly identity, and stages it in $DIST. Fills LINUX_PACKAGES and
+# the source branch's Nightly identity, and stages it in $DIST. Fills LINUX_PACKAGES and
 # LINUX_ASSETS.
 #
 # The artifact is Nightly's merged release set: an AppImage and a Debian
@@ -396,12 +411,14 @@ for architecture, build in builds.items():
         print(name)
 PYLINUX
 
-    # The packages must carry signatures from main's Nightly workflow. Overrides a
-    # maintainer may have exported for a rehearsal are dropped so the pinned
-    # identity, not the environment, decides what is accepted. This also
-    # refuses any package in the directory that the manifest does not declare.
-    echo "==> Verifying Linux Sigstore signatures"
-    env -u DIRI_COSIGN_PUBLIC_KEY -u DIRI_SIGNING_IDENTITY -u DIRI_SIGNING_OIDC_ISSUER \
+    # The packages must carry signatures from the source branch's Nightly
+    # workflow. Overrides a maintainer may have exported for a rehearsal are
+    # dropped so the identity pinned above, not the environment, decides what is
+    # accepted. This also refuses any package in the directory that the manifest
+    # does not declare.
+    echo "==> Verifying Linux Sigstore signatures ($LINUX_SIGNING_IDENTITY)"
+    env -u DIRI_COSIGN_PUBLIC_KEY -u DIRI_SIGNING_OIDC_ISSUER \
+        DIRI_SIGNING_IDENTITY="$LINUX_SIGNING_IDENTITY" \
         GH_REPO="$GH_REPO" "$WORKSPACE/scripts/linux-signatures.sh" verify "$DIRI_LINUX_DIST"
 
     LINUX_MANIFEST="$DIST/linux-release.json"

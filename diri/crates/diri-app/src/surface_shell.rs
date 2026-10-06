@@ -129,6 +129,20 @@ enum SettingsMenu {
     HibernateAfter,
     MemoryLimit,
     FileEditor,
+    UpdateChannel,
+}
+
+/// Update channels, in menu order.
+const UPDATE_CHANNEL_OPTIONS: [diri_updater::UpdateChannel; 2] = [
+    diri_updater::UpdateChannel::Stable,
+    diri_updater::UpdateChannel::Nightly,
+];
+
+fn update_channel_label(channel: diri_updater::UpdateChannel) -> &'static str {
+    match channel {
+        diri_updater::UpdateChannel::Stable => crate::i18n::t("settings.updates.channel_stable"),
+        diri_updater::UpdateChannel::Nightly => crate::i18n::t("settings.updates.channel_nightly"),
+    }
 }
 
 /// Choices for where terminal file links open, in menu order.
@@ -4424,6 +4438,7 @@ impl UtilitySurfaces {
             SettingsMenu::HibernateAfter => (self.hibernate_options(colors, cx), 172.0),
             SettingsMenu::MemoryLimit => (self.memory_options(colors, cx), 132.0),
             SettingsMenu::FileEditor => (self.file_editor_options(colors, cx), 204.0),
+            SettingsMenu::UpdateChannel => (self.update_channel_options(colors, cx), 132.0),
         })
     }
 
@@ -4685,6 +4700,50 @@ impl UtilitySurfaces {
         control.into_any_element()
     }
 
+    fn update_channel_options(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.prefs.effective_update_channel();
+        let mut options = div().p(px(4.0)).flex().flex_col();
+        for choice in UPDATE_CHANNEL_OPTIONS {
+            options = options.child(settings_choice_row(
+                format!("update-channel-option-{}", choice.as_str()),
+                update_channel_label(choice),
+                choice == current,
+                colors,
+                cx,
+                move |this, cx| {
+                    this.settings_menu = None;
+                    let changed = this.prefs.effective_update_channel() != choice;
+                    this.update_prefs(move |prefs| prefs.update_channel = Some(choice));
+                    if changed {
+                        this.updates.send(UpdateCommand::SetChannel(choice));
+                    }
+                    cx.notify();
+                },
+            ));
+        }
+        options.into_any_element()
+    }
+
+    fn update_channel_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = self.settings_colors();
+        let open = self.settings_menu == Some(SettingsMenu::UpdateChannel);
+        let mut control = div()
+            .relative()
+            .min_w(px(112.0))
+            .child(settings_select_button(
+                update_channel_label(self.prefs.effective_update_channel()),
+                "update-channel-dropdown",
+                open,
+                SettingsMenu::UpdateChannel,
+                colors,
+                cx,
+            ));
+        if open {
+            control = control.child(self.settings_menu_host(cx));
+        }
+        control.into_any_element()
+    }
+
     fn file_editor_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = self.settings_colors();
         let open = self.settings_menu == Some(SettingsMenu::FileEditor);
@@ -4853,6 +4912,12 @@ impl UtilitySurfaces {
                 .child(self.version_picker_rows(&state, colors, cx));
         }
         if !unsupported {
+            rows = rows.child(setting_divider(colors)).child(setting_row(
+                t("settings.updates.channel"),
+                t("settings.updates.channel_detail"),
+                self.update_channel_dropdown(cx),
+                colors,
+            ));
             rows = rows.child(setting_divider(colors)).child(toggle_row(
                 t("settings.updates.automatic"),
                 t("settings.updates.automatic_detail"),

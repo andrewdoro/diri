@@ -23,6 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::UpdateChannel;
 use crate::net::MAX_ARCHIVE_BYTES;
 use crate::version::Version;
 
@@ -46,6 +47,9 @@ pub struct Release {
     pub notes: Option<String>,
     #[serde(default)]
     pub notes_url: Option<String>,
+    /// Source commit, which nightly rows carry so a build can be promoted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 impl Release {
@@ -90,6 +94,20 @@ pub struct Eligibility<'a> {
 impl Feed {
     pub fn parse(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+
+    /// Keeps the rows a channel may offer. The stable channel never offers a
+    /// nightly, even one that strayed into its feed: `0.9.4-nightly.N` outranks
+    /// stable `0.9.3`, so the row would walk stable users onto an untested build.
+    pub fn for_channel(mut self, channel: UpdateChannel) -> Self {
+        if channel == UpdateChannel::Stable {
+            self.releases.retain(|release| {
+                !release
+                    .parsed_version()
+                    .is_some_and(|version| version.is_nightly())
+            });
+        }
+        self
     }
 
     /// The highest release worth offering, or `None` when the running build is
@@ -398,5 +416,72 @@ mod tests {
             Some("0.4.0")
         );
         assert!(feed.find(Version::new(0, 4, 1), SYSTEM).is_none());
+    }
+
+    #[test]
+    fn the_stable_channel_never_offers_a_nightly() {
+        let feed = Feed {
+            feed_version: 1,
+            releases: vec![release("0.4.3-nightly.202610070417"), release("0.4.1")],
+        };
+        let stable = feed.clone().for_channel(UpdateChannel::Stable);
+        assert_eq!(stable.newest_eligible(eligibility()), None);
+        assert!(
+            stable
+                .installable(SYSTEM)
+                .iter()
+                .all(|r| r.version == "0.4.1")
+        );
+
+        let nightly = feed.for_channel(UpdateChannel::Nightly);
+        assert_eq!(
+            nightly
+                .newest_eligible(eligibility())
+                .map(|r| r.version.as_str()),
+            Some("0.4.3-nightly.202610070417")
+        );
+    }
+
+    #[test]
+    fn a_nightly_build_is_offered_the_next_nightly_then_the_promoted_release() {
+        let on_nightly = Eligibility {
+            current: Version::parse("0.4.3-nightly.202610060417").unwrap(),
+            ..eligibility()
+        };
+        let feed = Feed {
+            feed_version: 1,
+            releases: vec![
+                release("0.4.3-nightly.202610050417"),
+                release("0.4.3-nightly.202610070417"),
+            ],
+        };
+        assert_eq!(
+            feed.newest_eligible(on_nightly).map(|r| r.version.as_str()),
+            Some("0.4.3-nightly.202610070417")
+        );
+        // Switched to stable, the promoted 0.4.3 is newer than any 0.4.3 nightly.
+        let stable = Feed {
+            feed_version: 1,
+            releases: vec![release("0.4.3"), release("0.4.2")],
+        }
+        .for_channel(UpdateChannel::Stable);
+        assert_eq!(
+            stable
+                .newest_eligible(on_nightly)
+                .map(|r| r.version.as_str()),
+            Some("0.4.3")
+        );
+    }
+
+    #[test]
+    fn nightly_rows_keep_their_source_commit() {
+        let feed = Feed::parse(
+            r#"{"feed_version":1,"releases":[{"version":"0.9.4-nightly.202610070417","url":"https://example.test/a.zip","commit":"0123456789abcdef0123456789abcdef01234567"}]}"#,
+        )
+        .expect("feed with a commit parses");
+        assert_eq!(
+            feed.releases[0].commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
     }
 }

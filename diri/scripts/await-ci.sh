@@ -11,19 +11,23 @@
 #       macOS queue to re-test code CI already passed.
 #   diri/scripts/await-ci.sh linux <sha> <out-dir>
 #       Downloads the linux-packages-<sha> artifact from a Nightly run on <sha>,
-#       dispatching one against main if none exists. The Linux package jobs
+#       dispatching one against $DIRI_CI_REF (default main) if none exists. The Linux package jobs
 #       must have passed; unrelated Nightly jobs do not gate the download. The
 #       artifact is fetched in parallel byte ranges, since GitHub's artifact
 #       store can throttle one connection to tens of KB/s.
 #
 # Env overrides:
 #   GH_REPO                  default cristicretu/diri
+#   DIRI_CI_REF              branch a missing Nightly is dispatched on (default
+#                            main; release.sh passes stable/<version> for a
+#                            promoted nightly)
 #   DIRI_CI_POLL_SECONDS     default 20
 #   DIRI_CI_TIMEOUT_SECONDS  default 5400 (a fresh Nightly takes ~40 minutes)
 #   DIRI_DOWNLOAD_STREAMS    parallel ranges for artifact downloads (default 16)
 set -euo pipefail
 
 GH_REPO="${GH_REPO:-cristicretu/diri}"
+CI_REF="${DIRI_CI_REF:-main}"
 POLL="${DIRI_CI_POLL_SECONDS:-20}"
 DEADLINE=$((SECONDS + ${DIRI_CI_TIMEOUT_SECONDS:-5400}))
 # Display-name prefix shared by the Nightly Linux jobs: the per-architecture
@@ -124,13 +128,13 @@ await_linux() {
     # commit, so only scheduled and dispatched runs can carry this one.
     run="$(newest_run nightly.yml "$sha" '.event != "pull_request"')"
     if [ -z "$run" ]; then
-        log "no Nightly run on $sha; dispatching one against main"
-        gh workflow run nightly.yml -R "$GH_REPO" --ref main
-        # The dispatched run builds main as of now. release.sh has already
-        # proven main == $sha; if main moved since, no run on $sha appears and
+        log "no Nightly run on $sha; dispatching one against $CI_REF"
+        gh workflow run nightly.yml -R "$GH_REPO" --ref "$CI_REF"
+        # The dispatched run builds $CI_REF as of now. release.sh has already
+        # proven it holds $sha; if it moved since, no run on $sha appears and
         # this times out rather than shipping a different commit's packages.
         while [ -z "$run" ]; do
-            sleep_or_timeout "the dispatched Nightly run never appeared for $sha (did main move?)"
+            sleep_or_timeout "the dispatched Nightly run never appeared for $sha (did $CI_REF move?)"
             run="$(newest_run nightly.yml "$sha" '.event == "workflow_dispatch"')"
         done
     fi

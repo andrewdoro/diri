@@ -13,14 +13,16 @@ name: Nightly
 # runs only the Linux package jobs. diri/scripts/release.sh needs signed
 # Linux packages built by this workflow on main for the exact release commit;
 # starting them when the bump merges means they are ready by the time the
-# macOS build and notarization finish, instead of 40 minutes later.
+# macOS build and notarization finish, instead of 40 minutes later. A
+# release promoted from a macOS nightly is cut from a stable/X.Y.Z branch
+# (scripts/promote-nightly.sh), whose bump commit starts the same jobs there.
 
 on:
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, "stable/**"]
     paths:
       - diri/crates/diri-app/Cargo.toml
   pull_request:
@@ -470,7 +472,7 @@ jobs:
     timeout-minutes: 15
     # id-token lets cosign sign the packages keylessly: Sigstore issues a
     # certificate naming this workflow and ref, so there is no private key to
-    # keep. Only main-branch runs sign (see "Sign Linux release artifacts").
+    # keep. Only main and stable/* runs sign (see "Sign Linux release artifacts").
     permissions:
       contents: read
       id-token: write
@@ -498,16 +500,17 @@ jobs:
             and ([.builds[] | "\(.architecture)/\(.debArchitecture)/\(.artifacts | length)"]
                  == ["x86_64/amd64/2", "aarch64/arm64/2"])' \
             diri/dist/linux/linux-release.json
-      # Release signatures are made only for main, where the certificate
-      # identity is ".../nightly.yml@refs/heads/main" — the identity users and
-      # release.sh pin. Pull-request runs would carry a refs/pull identity that
+      # Release signatures are made only for main and stable/* branches, where
+      # the certificate identity is ".../nightly.yml@refs/heads/<branch>" — the
+      # identity users and release.sh pin (release.sh pins the exact branch it
+      # released from). Pull-request runs would carry a refs/pull identity that
       # verification rejects anyway, and every signature is a public
       # transparency-log entry, so they are not signed at all.
       - name: Install cosign
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/stable/'))
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Sign Linux release artifacts
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/stable/'))
         env:
           GH_REPO: ${{ github.repository }}
         run: diri/scripts/linux-signatures.sh sign diri/dist/linux
@@ -553,12 +556,13 @@ jobs:
             mesa-vulkan-drivers xvfb
       # The user-facing check from LINUX.md, on a machine that did not sign.
       - name: Install cosign
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/stable/'))
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Verify Linux signatures
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/stable/'))
         env:
           GH_REPO: ${{ github.repository }}
+          DIRI_SIGNING_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/nightly.yml@${{ github.ref }}
         run: diri/scripts/linux-signatures.sh verify diri/dist/linux
       # Pick this machine's packages by the names linux-release.json declares
       # for its architecture, as a user (or a script) would.

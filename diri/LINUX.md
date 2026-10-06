@@ -41,14 +41,15 @@ is tested), download the artifact and its bundle, then run:
 ```sh
 cosign verify-blob \
   --bundle diri_<version>_x86_64.AppImage.sigstore.json \
-  --certificate-identity https://github.com/cristicretu/diri/.github/workflows/nightly.yml@refs/heads/main \
+  --certificate-identity-regexp '^https://github\.com/cristicretu/diri/\.github/workflows/nightly\.yml@refs/heads/(main|stable/[0-9]+\.[0-9]+\.[0-9]+)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   diri_<version>_x86_64.AppImage
 ```
 
 `Verified OK` means the file is byte-for-byte what the `nightly.yml` workflow
-on `main` signed, and that the signature is recorded in the public Sigstore
-transparency log. Any other signer, a modified file, or a missing bundle
+signed on `main` or on a `stable/<version>` branch (releases promoted from a
+macOS nightly are cut from one; see `UPDATING.md`), and that the signature is
+recorded in the public Sigstore transparency log. Any other signer, a modified file, or a missing bundle
 fails. Use the same command for `diri_<version>_amd64.deb`, or for the
 aarch64 files `diri_<version>_aarch64.AppImage` and `diri_<version>_arm64.deb`.
 
@@ -59,7 +60,7 @@ architecture; `--ignore-missing` checks the ones you downloaded:
 ```sh
 cosign verify-blob \
   --bundle SHA256SUMS-linux.sigstore.json \
-  --certificate-identity https://github.com/cristicretu/diri/.github/workflows/nightly.yml@refs/heads/main \
+  --certificate-identity-regexp '^https://github\.com/cristicretu/diri/\.github/workflows/nightly\.yml@refs/heads/(main|stable/[0-9]+\.[0-9]+\.[0-9]+)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS-linux
 sha256sum --ignore-missing --check SHA256SUMS-linux

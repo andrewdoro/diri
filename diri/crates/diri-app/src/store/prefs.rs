@@ -239,6 +239,28 @@ fn sidebar_lineage_highlights_default() -> bool {
     true
 }
 
+/// A channel this build does not know (written by a newer one) reads as unset
+/// rather than failing the whole preferences file.
+fn deserialize_update_channel<'de, D>(
+    deserializer: D,
+) -> Result<Option<diri_updater::UpdateChannel>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+impl Prefs {
+    /// The chosen update channel, or the one this build came from: a nightly
+    /// build keeps following nightlies until the user says otherwise.
+    pub fn effective_update_channel(&self) -> diri_updater::UpdateChannel {
+        self.update_channel.unwrap_or_else(|| {
+            diri_updater::UpdateChannel::for_version(crate::updates::CURRENT_VERSION)
+        })
+    }
+}
+
 fn terminal_follows_last_directory_default() -> bool {
     true
 }
@@ -278,6 +300,13 @@ pub struct Prefs {
     /// A release the user chose not to install. Persisted so "Skip" outlives
     /// the session that clicked it; empty means nothing is skipped.
     pub skipped_update_version: String,
+    /// The feed updates follow. `None` until the user picks one; read it
+    /// through [`Prefs::effective_update_channel`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_update_channel"
+    )]
+    pub update_channel: Option<diri_updater::UpdateChannel>,
     pub hibernate_after_minutes: u32,
     pub memory_hard_limit_gb: u64,
     /// Which generation of hibernation defaults this file was last brought
@@ -410,6 +439,7 @@ impl Default for Prefs {
             muted_notification_sessions: Default::default(),
             automatic_updates: true,
             skipped_update_version: String::new(),
+            update_channel: None,
             hibernate_after_minutes: 60,
             memory_hard_limit_gb: 16,
             hibernation_defaults_revision: Self::HIBERNATION_DEFAULTS_REVISION,
@@ -903,6 +933,41 @@ mod tests {
         assert_eq!(
             restored.launch_recipes.items(),
             prefs.launch_recipes.items()
+        );
+    }
+
+    #[test]
+    fn update_channel_defaults_to_the_build_and_persists_a_choice() {
+        use diri_updater::UpdateChannel;
+
+        let legacy: Prefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.update_channel, None);
+        assert_eq!(
+            legacy.effective_update_channel(),
+            UpdateChannel::for_version(crate::updates::CURRENT_VERSION)
+        );
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("updateChannel")
+                .is_none()
+        );
+
+        let prefs = Prefs {
+            update_channel: Some(UpdateChannel::Nightly),
+            ..Prefs::default()
+        };
+        let json = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(json["updateChannel"], "nightly");
+        let restored: Prefs = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.effective_update_channel(), UpdateChannel::Nightly);
+
+        let future: Prefs =
+            serde_json::from_str(r#"{"updateChannel":"beta","automaticUpdates":false}"#).unwrap();
+        assert_eq!(future.update_channel, None);
+        assert!(
+            !future.automatic_updates,
+            "the rest of the file still loads"
         );
     }
 }

@@ -414,7 +414,7 @@ fn main() {
     let updates = if preview {
         updates::inert()
     } else {
-        let (automatic_updates, skipped_update) = {
+        let (automatic_updates, skipped_update, update_channel) = {
             let store = store_runtime
                 .store
                 .read()
@@ -423,9 +423,10 @@ fn main() {
             (
                 prefs.automatic_updates,
                 Some(prefs.skipped_update_version.clone()),
+                prefs.effective_update_channel(),
             )
         };
-        updates::spawn(&tokio, automatic_updates, skipped_update)
+        updates::spawn(&tokio, automatic_updates, skipped_update, update_channel)
     };
     let services = Arc::new(AppServices {
         store: store_runtime,

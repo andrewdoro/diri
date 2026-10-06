@@ -91,6 +91,95 @@ one are swept at launch.
 If the app sits somewhere the user cannot write, the writability check fails
 *before* the download starts rather than after 50 MB.
 
+## Nightly channel
+
+Every stable release used to be whatever was on `main` that day. Bugs reached
+everyone the moment a release went out. Now there are two channels:
+
+| | Stable | Nightly |
+|---|---|---|
+| Built from | a nightly that soaked, promoted | `main`'s newest green commit, nightly |
+| Version | `0.9.4` | `0.9.4-nightly.202610070417` (UTC stamp) |
+| Feed | `releases/latest/download/appcast.json` | `releases/download/nightly/appcast.json` |
+| GitHub release | `v<version>` | one rolling prerelease, tag `nightly` |
+| Platforms | macOS + Linux, Homebrew cask | macOS only |
+| Update mirror | yes | no |
+
+Pick a channel in **Settings → General → Updates → Update channel**. A build
+that is itself a nightly defaults to Nightly. Everything else defaults to Stable.
+
+**Ordering.** A nightly's `X.Y.Z` is the release after the newest stable tag,
+so `0.9.4-nightly.*` sorts after `0.9.3` and before `0.9.4` (semver prerelease
+rules; see `crates/diri-updater/src/version.rs`). The nightly feed lists only
+nightlies, so a nightly user moves from one nightly to the next. When `0.9.4`
+is promoted, the next one is `0.9.5-nightly.*`, which already contains it.
+Switching to Stable offers `0.9.4`, because it outranks every `0.9.4-nightly.*`.
+Before a newer stable exists, you stay on your nightly unless you pick an older
+version in the version picker.
+The stable channel ignores nightly rows in any feed, and GitHub never treats
+a prerelease as `latest`. Stable users and the cask cannot see nightlies.
+Releases before the channel existed cannot see them either.
+
+### Building the nightly
+
+```sh
+diri/scripts/nightly-macos.sh
+```
+
+It runs on the maintainer's Mac, because signing and notarization need the
+Developer ID identity and the notary keychain profile, and neither leaves that
+machine. A Diri schedule runs it every night with `wake_mac` on. Each run:
+
+1. Picks the newest first-parent commit on `origin/main` with a passing CI
+   push run. A red or still-running tip is never shipped; the last green
+   commit is built instead.
+2. Does nothing if that commit is already the newest nightly.
+3. Checks the commit out in `../dirijor-nightly-build`, a persistent worktree
+   with its own `target/release-pipeline` cache, and stamps diri-app's
+   `Cargo.toml`/`Cargo.lock` with the nightly version for that build only.
+4. Packages, signs, notarizes and staples the DMG and update zip, like
+   `release.sh`. The perf gate is off for unattended runs
+   (`NIGHTLY_PERF_GATE=1` turns it on).
+5. Uploads both to the `nightly` prerelease and moves its tag to the commit.
+   It uploads the feed last, so the feed never names a missing file. It
+   rewrites the release notes (the nightlies table plus that night's commit
+   list), prunes nightlies beyond the newest seven, and fails loudly if GitHub
+   ever reports `nightly` as the latest release.
+
+Rehearse without publishing: `NIGHTLY_LOCAL=1` builds this checkout's HEAD, and
+`NIGHTLY_DRY_RUN=1` builds main's pick. Both stop before upload.
+
+### Promoting a nightly to stable
+
+```sh
+diri/scripts/promote-nightly.sh 0.9.4                              # newest nightly
+diri/scripts/promote-nightly.sh 0.9.4 0.9.4-nightly.202610070417  # a specific one
+```
+
+The stable release ships **exactly the commit the nightly was built from**.
+Commits that landed on `main` after that nightly wait for the next one. The
+script:
+
+1. Finds the nightly's commit in the nightly feed. A nightly younger than 24 h
+   is refused (`PROMOTE_MIN_SOAK_HOURS`, or `PROMOTE_FORCE=1`).
+2. Creates `stable/<version>` at that commit plus one version-bump commit, in
+   `../dirijor-stable-<version>`, and pushes it. The push runs CI (`ci.yml`)
+   and the Nightly workflow's signed Linux package jobs on the branch.
+3. Runs `release.sh <version>` there. When `origin/stable/<version>` exists,
+   `release.sh` releases from it instead of `main`: the provenance lookup, the
+   CI gate, the Linux packages, and the pinned Sigstore identity
+   (`nightly.yml@refs/heads/stable/<version>`) all follow the branch.
+4. Opens a PR that bumps `main`'s diri-app version to match.
+
+`release.sh` waits on GitHub Actions, so run the promotion detached if your
+terminal or tool has a time limit:
+`nohup diri/scripts/promote-nightly.sh 0.9.4 > /tmp/promote.log 2>&1 & disown`.
+
+**Hotfixing a promoted release.** Branch `stable/0.9.5` from
+`stable/0.9.4`, cherry-pick the fix from `main`, bump diri-app to `0.9.5`,
+push, then run `release.sh 0.9.5` from that checkout. Releasing straight from
+`main` with a bump PR (below) still works when you mean to ship `main` as it is.
+
 ## Cutting a release
 
 One-time setup is the Developer ID cert and notary profile described in

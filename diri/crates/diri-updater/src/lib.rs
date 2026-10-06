@@ -53,6 +53,11 @@ pub const RELEASES_HOST: &str = "github.com";
 /// URL that always resolves to the newest one.
 pub const DEFAULT_FEED_URL: &str =
     "https://github.com/cristicretu/diri/releases/latest/download/appcast.json";
+/// The nightly channel's feed: an asset on the rolling `nightly` prerelease,
+/// which GitHub's `latest` alias never resolves to, so stable installs (and
+/// builds that predate channels) cannot see it.
+pub const NIGHTLY_FEED_URL: &str =
+    "https://github.com/cristicretu/diri/releases/download/nightly/appcast.json";
 /// Canonical release metadata. The update feed deliberately stays small and
 /// archive-focused; GitHub owns the human-written release body shown by the
 /// app's What's New page.
@@ -69,6 +74,40 @@ pub const ALLOW_UNSIGNED_ENV: &str = "DIRI_UPDATER_ALLOW_UNSIGNED";
 pub const FEED_URL_ENV: &str = "DIRI_UPDATE_FEED";
 /// Overrides the mirror host (`host[:port]`), or `off` to use GitHub only.
 pub const MIRROR_ENV: &str = "DIRI_UPDATE_MIRROR";
+
+/// Which feed the updater follows.
+///
+/// Stable reads the release feed (with the mirror as a fallback route).
+/// Nightly reads the nightly feed, GitHub only: `main` built every night,
+/// versioned `X.Y.Z-nightly.N` so a promoted `X.Y.Z` still reads as newer.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Nightly,
+}
+
+impl UpdateChannel {
+    /// The channel a build belongs to when the user has not picked one: a
+    /// nightly build keeps following nightlies, anything else stays stable.
+    pub fn for_version(version: &str) -> Self {
+        if Version::parse(version).is_some_and(Version::is_nightly) {
+            Self::Nightly
+        } else {
+            Self::Stable
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Nightly => "nightly",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq)]
 pub struct ReleaseNotes {
@@ -106,7 +145,10 @@ fn parse_release_notes(body: &str) -> Result<ReleaseNotes> {
 
 #[derive(Clone, Debug)]
 pub struct UpdaterConfig {
+    /// The stable channel's feed.
     pub feed_url: String,
+    /// The nightly channel's feed. Never mirrored.
+    pub nightly_feed_url: String,
     /// Host every archive URL in the feed must name; [`RELEASES_HOST`] outside
     /// tests.
     pub releases_host: String,
@@ -157,6 +199,10 @@ impl UpdaterConfig {
             Err(_) => Some(Mirror::default()),
         };
         Ok(Self {
+            // An explicit override is a staging feed and wins on both channels.
+            nightly_feed_url: feed_override
+                .clone()
+                .unwrap_or_else(|| NIGHTLY_FEED_URL.to_owned()),
             feed_url: feed_override.unwrap_or_else(|| DEFAULT_FEED_URL.to_owned()),
             releases_host: RELEASES_HOST.to_owned(),
             mirror,
@@ -186,6 +232,8 @@ pub struct Updater {
     /// The last feed came from the mirror, so GitHub was just unreachable:
     /// try the mirror first for the archive too.
     prefer_mirror: AtomicBool,
+    /// Following [`UpdateChannel::Nightly`]; switchable while running.
+    nightly: AtomicBool,
 }
 
 impl Updater {
@@ -200,7 +248,37 @@ impl Updater {
             hedge_after,
             last_source: Mutex::new(None),
             prefer_mirror: AtomicBool::new(false),
+            nightly: AtomicBool::new(false),
         }
+    }
+
+    pub fn channel(&self) -> UpdateChannel {
+        if self.nightly.load(Ordering::Relaxed) {
+            UpdateChannel::Nightly
+        } else {
+            UpdateChannel::Stable
+        }
+    }
+
+    /// Switches the feed later checks read. Anything already found or staged
+    /// is the caller's to drop.
+    pub fn set_channel(&self, channel: UpdateChannel) {
+        self.nightly
+            .store(channel == UpdateChannel::Nightly, Ordering::Relaxed);
+        self.prefer_mirror.store(false, Ordering::Relaxed);
+    }
+
+    /// The feed URL and fallback mirror for the current channel.
+    fn feed_route(&self) -> (&str, Option<&Mirror>) {
+        match self.channel() {
+            UpdateChannel::Stable => (&self.config.feed_url, self.config.mirror.as_ref()),
+            UpdateChannel::Nightly => (&self.config.nightly_feed_url, None),
+        }
+    }
+
+    /// The mirror archive downloads may fall back to on this channel.
+    fn archive_mirror(&self) -> Option<&Mirror> {
+        self.feed_route().1
     }
 
     pub fn config(&self) -> &UpdaterConfig {
@@ -227,12 +305,14 @@ impl Updater {
     /// Reads the feed from GitHub, or from the mirror when GitHub's route
     /// fails or has not answered within the hedge delay.
     fn fetch_feed(&self) -> Result<Feed> {
+        let channel = self.channel();
+        let (feed_url, feed_mirror) = self.feed_route();
         let github = {
             let http = self.http.clone();
-            let url = self.config.feed_url.clone();
+            let url = feed_url.to_owned();
             // With a mirror to fall back to, the mirror is the retry: a
             // second try at a blocked GitHub would only delay it.
-            let retry = self.config.mirror.is_none();
+            let retry = feed_mirror.is_none();
             move || {
                 if retry {
                     http.fetch_text(&url)
@@ -241,7 +321,7 @@ impl Updater {
                 }
             }
         };
-        let mirror = self.config.mirror.as_ref().map(|mirror| {
+        let mirror = feed_mirror.map(|mirror| {
             let http = self.http.clone();
             let url = mirror.feed_url();
             move || http.fetch_text(&url)
@@ -251,7 +331,9 @@ impl Updater {
         let body = body?;
         self.prefer_mirror
             .store(report.source == Source::Mirror, Ordering::Relaxed);
-        Feed::parse(&body).map_err(|error| UpdateError::Feed(error.to_string()))
+        Feed::parse(&body)
+            .map(|feed| feed.for_channel(channel))
+            .map_err(|error| UpdateError::Feed(error.to_string()))
     }
 
     /// Fetches the feed and returns the release worth offering, if any.
@@ -307,7 +389,7 @@ impl Updater {
         })?;
 
         let mut routes = vec![(Source::GitHub, release.url.clone())];
-        if let Some(mirror) = &self.config.mirror
+        if let Some(mirror) = self.archive_mirror()
             && let Some(url) = mirror.archive_url(&release.url, &self.config.releases_host)
         {
             net::validated_download_url(&url, &mirror.host)?;
@@ -440,7 +522,12 @@ fn verify_staged_version(app: &Path, release: &Release) -> Result<()> {
             "the staged bundle has no CFBundleShortVersionString".to_owned(),
         ));
     }
-    let found = String::from_utf8_lossy(&output.stdout);
+    staged_version_matches(&String::from_utf8_lossy(&output.stdout), release)
+}
+
+/// Holds the staged bundle to exactly the promised version, nightly stamp
+/// included: one nightly's feed row must not install another night's build.
+fn staged_version_matches(found: &str, release: &Release) -> Result<()> {
     let found = Version::parse(found.trim())
         .ok_or_else(|| UpdateError::Integrity(format!("unparseable staged version {found:?}")))?;
     let promised = release.parsed_version().ok_or_else(|| {
@@ -465,6 +552,7 @@ mod tests {
     fn config() -> UpdaterConfig {
         UpdaterConfig {
             feed_url: DEFAULT_FEED_URL.to_owned(),
+            nightly_feed_url: NIGHTLY_FEED_URL.to_owned(),
             releases_host: RELEASES_HOST.to_owned(),
             mirror: Some(Mirror::default()),
             current_version: Version::new(0, 4, 2),
@@ -633,6 +721,58 @@ mod tests {
     #[test]
     fn the_default_feed_lives_on_the_pinned_host() {
         assert!(DEFAULT_FEED_URL.starts_with(&format!("https://{RELEASES_HOST}/")));
+        assert!(NIGHTLY_FEED_URL.starts_with(&format!("https://{RELEASES_HOST}/")));
+    }
+
+    #[test]
+    fn the_nightly_channel_reads_its_own_feed_without_the_mirror() {
+        let updater = Updater::new(config());
+        assert_eq!(updater.channel(), UpdateChannel::Stable);
+        let (url, mirror) = updater.feed_route();
+        assert_eq!(url, DEFAULT_FEED_URL);
+        assert!(mirror.is_some());
+
+        updater.set_channel(UpdateChannel::Nightly);
+        assert_eq!(updater.channel(), UpdateChannel::Nightly);
+        let (url, mirror) = updater.feed_route();
+        assert_eq!(url, NIGHTLY_FEED_URL);
+        assert!(mirror.is_none());
+        assert!(updater.archive_mirror().is_none());
+
+        updater.set_channel(UpdateChannel::Stable);
+        assert_eq!(updater.feed_route().0, DEFAULT_FEED_URL);
+    }
+
+    #[test]
+    fn a_build_defaults_to_the_channel_its_version_came_from() {
+        assert_eq!(UpdateChannel::for_version("0.9.3"), UpdateChannel::Stable);
+        assert_eq!(
+            UpdateChannel::for_version("0.9.4-nightly.202610070417"),
+            UpdateChannel::Nightly
+        );
+        assert_eq!(
+            UpdateChannel::for_version("0.9.4-beta.1"),
+            UpdateChannel::Stable
+        );
+    }
+
+    #[test]
+    fn a_staged_nightly_must_match_the_promised_stamp() {
+        let release = Release {
+            version: "0.9.4-nightly.202610070417".to_owned(),
+            ..Release::default()
+        };
+        staged_version_matches("0.9.4-nightly.202610070417\n", &release)
+            .expect("the promised nightly");
+        for wrong in ["0.9.4-nightly.202610060417", "0.9.4", "0.9.3"] {
+            let error = staged_version_matches(wrong, &release).expect_err(wrong);
+            assert!(matches!(error, UpdateError::Integrity(_)), "{wrong}");
+        }
+        let stable = Release {
+            version: "0.9.4".to_owned(),
+            ..Release::default()
+        };
+        assert!(staged_version_matches("0.9.4-nightly.202610070417", &stable).is_err());
     }
 
     #[test]

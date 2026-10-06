@@ -18,7 +18,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # stable/* carries releases promoted from a macOS nightly; release.sh
+    # gates on this push run for the branch's bump commit.
+    branches: [main, "stable/**"]
   pull_request:
 
 permissions:

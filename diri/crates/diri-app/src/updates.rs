@@ -17,9 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::i18n::{t, tf};
-use diri_updater::Release;
 #[cfg(target_os = "macos")]
 use diri_updater::UpdaterConfig;
+use diri_updater::{Release, UpdateChannel};
 #[cfg(any(target_os = "macos", test))]
 use diri_updater::{Result as UpdateResult, SourceReport, StagedUpdate, UpdateError, Updater};
 use tokio::runtime::Runtime;
@@ -54,6 +54,8 @@ trait UpdateBackend: Send + Sync {
     fn take_source(&self) -> Option<SourceReport> {
         None
     }
+    /// Points later checks at another channel's feed.
+    fn set_channel(&self, _channel: UpdateChannel) {}
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -89,6 +91,10 @@ impl UpdateBackend for Updater {
 
     fn take_source(&self) -> Option<SourceReport> {
         Updater::take_source(self)
+    }
+
+    fn set_channel(&self, channel: UpdateChannel) {
+        Updater::set_channel(self, channel);
     }
 }
 
@@ -225,6 +231,9 @@ pub enum UpdateCommand {
     /// Unlike a regular update the target may be older than the running build;
     /// the same signature and checksum checks apply.
     InstallVersion(String),
+    /// Follow another channel's feed: drop whatever the old channel offered
+    /// or staged, then check the new one.
+    SetChannel(UpdateChannel),
 }
 
 /// UI-side handle: a state stream plus a command sink.
@@ -360,10 +369,15 @@ fn record_update(
 ///
 /// Never fails: a build that cannot update itself still gets a handle, parked
 /// in [`UpdatePhase::Unsupported`], so no caller needs an `Option`.
-pub fn spawn(runtime: &Arc<Runtime>, automatic: bool, skipped: Option<String>) -> UpdateHandle {
+pub fn spawn(
+    runtime: &Arc<Runtime>,
+    automatic: bool,
+    skipped: Option<String>,
+    channel: UpdateChannel,
+) -> UpdateHandle {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (runtime, automatic, skipped);
+        let _ = (runtime, automatic, skipped, channel);
         unsupported(t("settings.updates.linux_unsupported"))
     }
 
@@ -380,7 +394,11 @@ pub fn spawn(runtime: &Arc<Runtime>, automatic: bool, skipped: Option<String>) -
 
         let updater: Option<Arc<dyn UpdateBackend>> =
             match UpdaterConfig::for_running_app(CURRENT_VERSION) {
-                Ok(config) => Some(Arc::new(Updater::new(config))),
+                Ok(config) => {
+                    let updater = Updater::new(config);
+                    updater.set_channel(channel);
+                    Some(Arc::new(updater))
+                }
                 Err(error) => {
                     state_tx.send_replace(UpdateState {
                         phase: UpdatePhase::Unsupported(error.to_string()),
@@ -547,6 +565,21 @@ impl Service {
             }
             UpdateCommand::ListReleases => self.list_releases().await,
             UpdateCommand::InstallVersion(version) => self.install_version(version).await,
+            UpdateCommand::SetChannel(channel) => {
+                self.updater.set_channel(channel);
+                // Commands run one at a time, so no download is in flight. An
+                // offer or a staged build from the old channel must not
+                // install on quit once the user has left that channel.
+                self.pending = None;
+                self.staged = None;
+                self.ready_install.lock().expect("ready update").take();
+                let previous = self.state.borrow().clone();
+                self.state.send_replace(UpdateState {
+                    releases: Vec::new(),
+                    ..previous
+                });
+                self.check(true).await;
+            }
         }
     }
 
@@ -837,6 +870,7 @@ mod tests {
         offered: Release,
         downloads: AtomicUsize,
         installs: Mutex<Vec<bool>>,
+        channels: Mutex<Vec<UpdateChannel>>,
     }
 
     impl UpdateBackend for FakeUpdater {
@@ -878,6 +912,10 @@ mod tests {
         fn install(&self, _staged: &StagedUpdate, relaunch: bool) -> UpdateResult<()> {
             self.installs.lock().expect("installs").push(relaunch);
             Ok(())
+        }
+
+        fn set_channel(&self, channel: UpdateChannel) {
+            self.channels.lock().expect("channels").push(channel);
         }
     }
 
@@ -973,6 +1011,7 @@ mod tests {
                 offered: release("0.5.0"),
                 downloads: AtomicUsize::new(0),
                 installs: Mutex::new(Vec::new()),
+                channels: Mutex::new(Vec::new()),
             });
             let backend: Arc<dyn UpdateBackend> = updater.clone();
             let (state_tx, mut state_rx) = watch::channel(UpdateState::default());
@@ -1027,6 +1066,7 @@ mod tests {
                 offered: release("0.5.0"),
                 downloads: AtomicUsize::new(0),
                 installs: Mutex::new(Vec::new()),
+                channels: Mutex::new(Vec::new()),
             });
             let backend: Arc<dyn UpdateBackend> = updater.clone();
             let (state_tx, mut state_rx) = watch::channel(UpdateState::default());
@@ -1084,6 +1124,7 @@ mod tests {
                 offered: release("0.5.0"),
                 downloads: AtomicUsize::new(0),
                 installs: Mutex::new(Vec::new()),
+                channels: Mutex::new(Vec::new()),
             });
             let backend: Arc<dyn UpdateBackend> = updater.clone();
             let (state_tx, mut state_rx) = watch::channel(UpdateState::default());
@@ -1134,6 +1175,7 @@ mod tests {
                 offered: release("0.5.0"),
                 downloads: AtomicUsize::new(0),
                 installs: Mutex::new(Vec::new()),
+                channels: Mutex::new(Vec::new()),
             });
             let backend: Arc<dyn UpdateBackend> = updater.clone();
             let (state_tx, mut state_rx) = watch::channel(UpdateState::default());
@@ -1199,6 +1241,7 @@ mod tests {
             offered: release("0.8.0"),
             downloads: AtomicUsize::new(0),
             installs: Mutex::new(Vec::new()),
+            channels: Mutex::new(Vec::new()),
         });
         let phase = drain_service(
             updater.clone(),
@@ -1266,6 +1309,7 @@ mod tests {
             offered: release("0.8.0"),
             downloads: AtomicUsize::new(0),
             installs: Mutex::new(Vec::new()),
+            channels: Mutex::new(Vec::new()),
         }));
         let phase = drain_service(
             updater.clone(),
@@ -1287,6 +1331,7 @@ mod tests {
             offered: release("0.5.0"),
             downloads: AtomicUsize::new(0),
             installs: Mutex::new(Vec::new()),
+            channels: Mutex::new(Vec::new()),
         });
         let backend: Arc<dyn UpdateBackend> = updater.clone();
         let ready_install = Arc::new(Mutex::new(Some(ReadyInstall {
@@ -1326,6 +1371,7 @@ mod tests {
                 offered: release("0.5.0"),
                 downloads: AtomicUsize::new(0),
                 installs: Mutex::new(Vec::new()),
+                channels: Mutex::new(Vec::new()),
             });
             let backend: Arc<dyn UpdateBackend> = updater.clone();
             let (state_tx, state_rx) = watch::channel(UpdateState::default());
@@ -1366,6 +1412,76 @@ mod tests {
                 *updater.installs.lock().expect("installs"),
                 vec![false],
                 "a normal quit must swap the staged app without reopening it"
+            );
+        });
+    }
+
+    #[test]
+    fn switching_channel_drops_the_staged_build_and_checks_the_new_feed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let updater = Arc::new(FakeUpdater {
+                offered: release("0.5.0"),
+                downloads: AtomicUsize::new(0),
+                installs: Mutex::new(Vec::new()),
+                channels: Mutex::new(Vec::new()),
+            });
+            let backend: Arc<dyn UpdateBackend> = updater.clone();
+            let (state_tx, mut state_rx) = watch::channel(UpdateState::default());
+            let (command_tx, command_rx) = mpsc::unbounded_channel();
+            let ready_install = Arc::new(Mutex::new(None));
+            let task = tokio::spawn(service(
+                Some(backend),
+                true,
+                None,
+                state_tx,
+                command_rx,
+                Arc::clone(&ready_install),
+            ));
+
+            command_tx
+                .send(UpdateCommand::Check {
+                    user_initiated: false,
+                })
+                .expect("send check");
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !matches!(state_rx.borrow().phase, UpdatePhase::Ready(_)) {
+                    state_rx.changed().await.expect("service remains alive");
+                }
+            })
+            .await
+            .expect("automatic update reaches ready");
+            assert!(ready_install.lock().unwrap().is_some());
+
+            command_tx
+                .send(UpdateCommand::SetChannel(UpdateChannel::Nightly))
+                .expect("send channel");
+            // The new feed is checked, and its offer downloaded afresh.
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if updater.downloads.load(Ordering::SeqCst) == 2
+                        && matches!(state_rx.borrow().phase, UpdatePhase::Ready(_))
+                    {
+                        return;
+                    }
+                    state_rx.changed().await.expect("service remains alive");
+                }
+            })
+            .await
+            .expect("the new channel is checked");
+            task.abort();
+
+            assert_eq!(
+                *updater.channels.lock().unwrap(),
+                vec![UpdateChannel::Nightly]
+            );
+            assert_eq!(
+                updater.downloads.load(Ordering::SeqCst),
+                2,
+                "the old channel's staged build is not reused"
             );
         });
     }

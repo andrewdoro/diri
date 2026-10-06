@@ -175,6 +175,9 @@ fn fixture(github: &str, feed: &str, archive: &[u8]) -> Fixture {
         feed_url: format!(
             "https://{github}/cristicretu/diri/releases/latest/download/appcast.json"
         ),
+        nightly_feed_url: format!(
+            "https://{github}/cristicretu/diri/releases/download/nightly/appcast.json"
+        ),
         releases_host: github.to_owned(),
         mirror: Some(Mirror::new(&mirror.host).expect("mirror host")),
         current_version: Version::new(0, 1, 0),
@@ -358,6 +361,7 @@ fn a_mirror_feed_cannot_point_downloads_at_another_host() {
     let updater = Updater::with_http(
         UpdaterConfig {
             feed_url: format!("https://{REFUSING_HOST}/appcast.json"),
+            nightly_feed_url: format!("https://{REFUSING_HOST}/nightly/appcast.json"),
             releases_host: REFUSING_HOST.to_owned(),
             mirror: Some(Mirror::new(&mirror.host).expect("host")),
             current_version: Version::new(0, 1, 0),
