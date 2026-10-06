@@ -5413,10 +5413,15 @@ impl Render for TerminalPane {
                     pane.reveal_block(block, window, cx);
                 }
             });
+            // The note sits on the terminal's own fill, painted here once as
+            // the terminal pane paints it; the note pane inside stays nested
+            // so the glass tint does not compound.
+            let colors = crate::app_theme::colors_in(&self.runtime.store.read().expect("store"));
             return div()
                 .id("terminal-note")
                 .track_focus(&self.focus)
                 .size_full()
+                .bg(colors.terminal_surface())
                 .child(pane)
                 .into_any_element();
         }
