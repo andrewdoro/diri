@@ -107,6 +107,12 @@ const MOUSE_MOTION_CADENCE: Duration = Duration::from_millis(8);
 /// whose reflow is held still by [`REFLOW_HOLD`]. Matched to the window the
 /// daemon uses to infer the same thing (`AgentSession.resizeDragWindow`).
 const RESIZE_GESTURE_GAP: Duration = Duration::from_millis(200);
+/// How long the pointer must rest mid seam drag before the PTY hears the size
+/// it rests at. Shorter than this is still the drag; a full-screen TUI (Claude
+/// Code, Codex) clears and repaints on every SIGWINCH, so a resize per frame
+/// strobes the whole pane. Matches [`RESIZE_GESTURE_GAP`]: a pause this long
+/// already counts as the end of a gesture.
+const SEAM_DRAG_SETTLE: Duration = RESIZE_GESTURE_GAP;
 /// Ceiling on how long the grid is held still across a column change.
 ///
 /// A cols-only resize comes back in two stages: the daemon re-wraps its
@@ -127,6 +133,49 @@ const ANCHOR_SLACK: f32 = 1.0;
 /// caches are rebuilt on promotion — so the ceiling is a memory bound, not a
 /// residency one.
 const PARKED_GRID_CAP: usize = 12;
+
+/// The window whose sidebar, inspector, or split seam is being dragged,
+/// published by its `RootView`. Panes in that window keep their PTY at its
+/// current size until the drag ends or rests (see [`SEAM_DRAG_SETTLE`]).
+#[derive(Default)]
+pub(crate) struct SeamDrag {
+    /// Each in-flight drag, by window and by the view that owns its seam: the
+    /// root's panel seams and a workspace's dividers publish independently.
+    active: HashSet<(gpui::WindowId, &'static str)>,
+}
+
+impl gpui::Global for SeamDrag {}
+
+impl SeamDrag {
+    /// Records whether `source` has a seam drag in flight in `window`. Only a
+    /// change is written, since every write wakes every pane.
+    pub(crate) fn publish(
+        window: gpui::WindowId,
+        source: &'static str,
+        dragging: bool,
+        cx: &mut gpui::App,
+    ) {
+        let key = (window, source);
+        let current = cx
+            .try_global::<Self>()
+            .is_some_and(|state| state.active.contains(&key));
+        if current == dragging {
+            return;
+        }
+        let state = cx.default_global::<Self>();
+        if dragging {
+            state.active.insert(key);
+        } else {
+            state.active.remove(&key);
+        }
+    }
+
+    fn active_in(window: &Window, cx: &gpui::App) -> bool {
+        let window = window.window_handle().window_id();
+        cx.try_global::<Self>()
+            .is_some_and(|state| state.active.iter().any(|(owner, _)| *owner == window))
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalPaneEvent {
     ContinueAccount(SessionId),
@@ -653,6 +702,8 @@ struct BlankReport {
     state: &'static str,
     got_grid: bool,
     content: bool,
+    /// Grid updates that changed the screen ([`TerminalElement::grid_changes`]).
+    changes: u64,
     frames: u64,
     ms: Duration,
     /// The element's paint count once the frame was requested; unchanged
@@ -906,6 +957,11 @@ pub struct TerminalPane {
     /// rescheduling (which is what used to starve the flush during a drag).
     resize_flush_armed: bool,
     last_resize_sent: Option<Instant>,
+    /// The size a seam drag is resting at, and the timer that releases it to
+    /// the PTY once the rest outlasts [`SEAM_DRAG_SETTLE`].
+    drag_settle: Option<((u16, u16), Task<()>)>,
+    /// A mid-drag size that has rested long enough to send.
+    drag_settled: Option<(u16, u16)>,
     started_at: Instant,
     session_source: SessionSource,
     /// Last selection observed by the primary pane. Spawn responses select the
@@ -1046,6 +1102,9 @@ impl TerminalPane {
     ) -> Self {
         cx.observe_global::<crate::held_hints::HeldHintsState>(|_, cx| cx.notify())
             .detach();
+        // A drag ending leaves the viewport unchanged, so nothing else would
+        // re-measure and send the size the drag was released at.
+        cx.observe_global::<SeamDrag>(|_, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         if matches!(session_source, SessionSource::FollowSelection) {
             window.focus(&focus, cx);
@@ -1177,6 +1236,8 @@ impl TerminalPane {
             resize_flush: None,
             resize_flush_armed: false,
             last_resize_sent: None,
+            drag_settle: None,
+            drag_settled: None,
             started_at: Instant::now(),
             session_source,
             observed_selected_id,
@@ -2418,6 +2479,7 @@ impl TerminalPane {
             state,
             got_grid: resident.trace.first_grid.get().is_some(),
             content: resident.element.has_content(),
+            changes: resident.element.grid_changes(),
             frames: resident.element.stats().frames,
             ms: resident.trace.mounted_at.elapsed(),
             paints: resident.element.paint_count(),
@@ -2459,6 +2521,7 @@ impl TerminalPane {
                 state = report.state,
                 got_grid = report.got_grid,
                 content = report.content,
+                changes = report.changes,
                 frames = report.frames,
                 ms = report.ms
             );
@@ -2471,6 +2534,7 @@ impl TerminalPane {
                 got_grid = report.got_grid,
                 content = report.content,
                 redrawn = report.redrawn,
+                changes = report.changes,
                 frames = report.frames,
                 ms = report.ms
             );
@@ -4185,6 +4249,9 @@ impl TerminalPane {
             // the lease after another view resized the PTY still sends.
             return;
         }
+        if self.defer_for_seam_drag(&session.id, size, window, cx) {
+            return;
+        }
         if let Some(resident) = self.residents.get_mut(&session.id)
             && resident.attachment.is_controller()
             && (resident.last_size != size || resident.attachment.needs_resize(size))
@@ -4241,6 +4308,59 @@ impl TerminalPane {
                 });
             }));
         }
+    }
+
+    /// Holds a geometry change back while a seam is dragged. Every PTY resize
+    /// makes a full-screen agent clear and repaint, so a drag that resized
+    /// per frame made the pane flash for its whole length. The grid keeps its
+    /// size meanwhile -- clipped or with a margin -- and the PTY hears one
+    /// size when the drag ends or rests.
+    fn defer_for_seam_drag(
+        &mut self,
+        id: &SessionId,
+        size: (u16, u16),
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let sized = self
+            .residents
+            .get(id)
+            .is_some_and(|resident| resident.last_size != (0, 0));
+        if !sized || !SeamDrag::active_in(window, cx) {
+            // A release with a size still held back is one discrete change,
+            // however recently a rest sent another: let it go out now and
+            // hold its reflow into a single paint.
+            if self.drag_settle.take().is_some() {
+                self.last_resize_sent = None;
+            }
+            self.drag_settled = None;
+            return false;
+        }
+        if self.drag_settled == Some(size) {
+            return false;
+        }
+        if self
+            .drag_settle
+            .as_ref()
+            .is_none_or(|(resting, _)| *resting != size)
+        {
+            let timer = cx.background_executor().timer(SEAM_DRAG_SETTLE);
+            let task = cx.spawn(async move |this, cx| {
+                timer.await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some((size, task)) = this.drag_settle.take() {
+                        // A rest is a discrete change: send it now and hold
+                        // its reflow, rather than riding the drag cadence.
+                        this.drag_settled = Some(size);
+                        this.last_resize_sent = None;
+                        task.detach();
+                    }
+                    cx.notify();
+                });
+            });
+            self.drag_settle = Some((size, task));
+        }
+        true
     }
 
     /// The top-left pane owns the native window-button lane when navigation
@@ -10071,6 +10191,101 @@ mod tests {
             assert!(
                 !pane.residents[&id].attachment.needs_resize(a_size),
                 "pane A owns the PTY again, so it must send its own size back"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn seam_drag_sends_one_resize_when_it_rests_or_ends(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+        let session = fixture_session();
+        let id = session.id.clone();
+        {
+            let mut store = runtime.store.write().expect("session store lock poisoned");
+            store.upsert_session(session);
+            store.select(id.clone());
+        }
+        let runtime_for_view = Arc::clone(&runtime);
+        let (pane, cx) = cx.add_window_view(move |window, cx| {
+            TerminalPane::new(runtime_for_view, tokio, window, cx)
+        });
+        let viewport = |width: f32| TerminalViewport {
+            width,
+            height: 600.0,
+            ..Default::default()
+        };
+        pane.update_in(cx, |pane, window, cx| {
+            pane.set_viewport(viewport(900.0), cx);
+            window.activate_window();
+            pane.focus(window, cx);
+            pane.update_selected_geometry(window, cx);
+        });
+        cx.run_until_parked();
+        let (sized, sends) = pane.read_with(cx, |pane, _| {
+            let resident = &pane.residents[&id];
+            (
+                resident.last_size,
+                resident.attachment.resize_sends_for_test(),
+            )
+        });
+        assert_ne!(sized, (0, 0));
+
+        pane.update_in(cx, |pane, window, cx| {
+            SeamDrag::publish(window.window_handle().window_id(), "root", true, cx);
+            for step in 1..=40 {
+                pane.set_viewport(viewport(900.0 - 8.0 * step as f32), cx);
+                pane.update_selected_geometry(window, cx);
+            }
+            let resident = &pane.residents[&id];
+            assert_eq!(
+                resident.attachment.resize_sends_for_test(),
+                sends,
+                "a drag in motion never resizes the PTY: each resize makes a TUI repaint"
+            );
+            assert_eq!(resident.last_size, sized);
+        });
+
+        cx.executor().advance_clock(SEAM_DRAG_SETTLE);
+        cx.run_until_parked();
+        pane.update_in(cx, |pane, window, cx| {
+            pane.update_selected_geometry(window, cx);
+            let resident = &pane.residents[&id];
+            assert_eq!(
+                resident.attachment.resize_sends_for_test(),
+                sends + 1,
+                "a drag at rest sends the size it rests at, once"
+            );
+            assert_ne!(resident.last_size, sized);
+            pane.update_selected_geometry(window, cx);
+            assert_eq!(
+                pane.residents[&id].attachment.resize_sends_for_test(),
+                sends + 1
+            );
+
+            pane.set_viewport(viewport(1200.0), cx);
+            pane.update_selected_geometry(window, cx);
+            assert_eq!(
+                pane.residents[&id].attachment.resize_sends_for_test(),
+                sends + 1,
+                "moving again defers again"
+            );
+            SeamDrag::publish(window.window_handle().window_id(), "root", false, cx);
+            pane.update_selected_geometry(window, cx);
+            let resident = &pane.residents[&id];
+            assert_eq!(
+                resident.attachment.resize_sends_for_test(),
+                sends + 2,
+                "releasing the drag sends the final size"
+            );
+            assert!(
+                resident.controller.reflow_held_for_test(),
+                "the release lands as one held reflow, not a stepped one"
             );
         });
     }

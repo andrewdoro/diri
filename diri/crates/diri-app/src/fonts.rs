@@ -78,68 +78,114 @@ pub fn terminal_font(configured: &str) -> Font {
 }
 
 /// Installed fixed-pitch families, sorted, without private (`.`) families.
-/// Reads the live font catalog, so call it when a picker opens, not per frame.
-pub fn monospace_families(cx: &App) -> Vec<String> {
-    let mut families = platform_monospace_families(cx);
-    families.retain(|family| !family.is_empty() && !family.starts_with('.'));
-    families.sort_by_key(|family| family.to_lowercase());
-    families.dedup();
-    installed()
-        .get_or_insert_with(HashSet::new)
-        .extend(families.iter().cloned());
-    families
+/// Reads the live font catalog, so call it when a picker opens, not per
+/// frame. The returned listing does the reading and is meant for a
+/// background thread: a Mac with a few hundred monospaced faces (Nerd Font
+/// collections) took seconds over it on the main thread.
+pub fn monospace_families(cx: &App) -> impl FnOnce() -> Vec<String> + Send + 'static {
+    let list = platform_monospace_families(cx);
+    move || {
+        let mut families = list();
+        families.retain(|family| !family.is_empty() && !family.starts_with('.'));
+        families.sort_by_key(|family| family.to_lowercase());
+        families.dedup();
+        installed()
+            .get_or_insert_with(HashSet::new)
+            .extend(families.iter().cloned());
+        families
+    }
+}
+
+/// Matches font descriptors by trait and reads their family attribute, so no
+/// face is instantiated (opening each one cost 2-4 ms of the main thread).
+/// `NSFontDescriptor` is safe off the main thread, unlike `NSFontManager`.
+#[cfg(target_os = "macos")]
+fn platform_monospace_families(_cx: &App) -> impl FnOnce() -> Vec<String> + Send + 'static {
+    monospace_descriptor_families
 }
 
 #[cfg(target_os = "macos")]
-fn platform_monospace_families(_cx: &App) -> Vec<String> {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSFont, NSFontManager, NSFontTraitMask};
+fn monospace_descriptor_families() -> Vec<String> {
+    {
+        use objc2::rc::{Retained, autoreleasepool};
+        use objc2::runtime::AnyObject;
+        use objc2_app_kit::{
+            NSFontDescriptor, NSFontDescriptorSymbolicTraits, NSFontFamilyAttribute,
+            NSFontSymbolicTrait, NSFontTraitsAttribute,
+        };
+        use objc2_foundation::{NSDictionary, NSNumber, NSSet, NSString};
 
-    let Some(mtm) = MainThreadMarker::new() else {
-        return Vec::new();
-    };
-    let manager = NSFontManager::sharedFontManager(mtm);
-    let Some(faces) = manager.availableFontNamesWithTraits(NSFontTraitMask::FixedPitchFontMask)
-    else {
-        return Vec::new();
-    };
-    let mut families = HashSet::new();
-    for face in faces.iter() {
-        if let Some(family) = NSFont::fontWithName_size(&face, 12.0).and_then(|f| f.familyName()) {
-            families.insert(family.to_string());
-        }
+        autoreleasepool(|_| {
+            // SAFETY: AppKit's own attribute keys.
+            let (traits_key, symbolic_key, family_key) = unsafe {
+                (
+                    NSFontTraitsAttribute,
+                    NSFontSymbolicTrait,
+                    NSFontFamilyAttribute,
+                )
+            };
+            let monospace: Retained<AnyObject> =
+                NSNumber::new_u32(NSFontDescriptorSymbolicTraits::TraitMonoSpace.0).into();
+            let traits: Retained<AnyObject> =
+                NSDictionary::<NSString, AnyObject>::from_retained_objects(
+                    &[symbolic_key],
+                    &[monospace],
+                )
+                .into();
+            let attributes = NSDictionary::<NSString, AnyObject>::from_retained_objects(
+                &[traits_key],
+                &[traits],
+            );
+            // SAFETY: a traits dictionary holding a symbolic-trait number is
+            // the documented shape of a font attributes query.
+            let query =
+                unsafe { NSFontDescriptor::fontDescriptorWithFontAttributes(Some(&attributes)) };
+            let mandatory = NSSet::from_slice(&[traits_key]);
+            let matches = query.matchingFontDescriptorsWithMandatoryKeys(Some(&mandatory));
+            let mut families = HashSet::new();
+            for descriptor in matches.iter() {
+                if let Some(family) = descriptor
+                    .objectForKey(family_key)
+                    .and_then(|value| value.downcast::<NSString>().ok())
+                {
+                    families.insert(family.to_string());
+                }
+            }
+            families.into_iter().collect()
+        })
     }
-    families.into_iter().collect()
 }
 
 /// Without a fixed-pitch query, offer the well-known coding families that
 /// are installed.
 #[cfg(not(target_os = "macos"))]
-fn platform_monospace_families(cx: &App) -> Vec<String> {
+fn platform_monospace_families(cx: &App) -> impl FnOnce() -> Vec<String> + Send + 'static {
     let names: HashSet<String> = cx.text_system().all_font_names().into_iter().collect();
-    [
-        "monospace",
-        "JetBrains Mono",
-        "Fira Code",
-        "Fira Mono",
-        "Cascadia Code",
-        "Cascadia Mono",
-        "Source Code Pro",
-        "Hack",
-        "Iosevka",
-        "IBM Plex Mono",
-        "Ubuntu Mono",
-        "Noto Sans Mono",
-        "DejaVu Sans Mono",
-        "Liberation Mono",
-        "Inconsolata",
-        "Roboto Mono",
-        "Geist Mono",
-    ]
-    .into_iter()
-    .filter(|family| names.contains(*family))
-    .map(str::to_owned)
-    .collect()
+    move || {
+        [
+            "monospace",
+            "JetBrains Mono",
+            "Fira Code",
+            "Fira Mono",
+            "Cascadia Code",
+            "Cascadia Mono",
+            "Source Code Pro",
+            "Hack",
+            "Iosevka",
+            "IBM Plex Mono",
+            "Ubuntu Mono",
+            "Noto Sans Mono",
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+            "Inconsolata",
+            "Roboto Mono",
+            "Geist Mono",
+        ]
+        .into_iter()
+        .filter(|family| names.contains(*family))
+        .map(str::to_owned)
+        .collect()
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -277,5 +323,32 @@ mod tests {
                 "DejaVu Sans Mono"
             );
         }
+    }
+
+    /// The picker's listing runs on a background thread: it must work there
+    /// and find the fixed-pitch families every Mac ships, without opening
+    /// each face (the old main-thread listing spent 2-4 ms per face).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn monospace_families_are_listed_off_the_main_thread() {
+        use super::monospace_descriptor_families;
+        let (families, took) = std::thread::spawn(|| {
+            let started = std::time::Instant::now();
+            let families = monospace_descriptor_families();
+            (families, started.elapsed())
+        })
+        .join()
+        .unwrap();
+        for family in ["Menlo", "Monaco", "Courier New"] {
+            assert!(
+                families.iter().any(|f| f == family),
+                "{family}: {families:?}"
+            );
+        }
+        assert!(
+            families.iter().all(|f| f != "Helvetica"),
+            "proportional family listed: {families:?}"
+        );
+        eprintln!("{} monospace families in {took:?}", families.len());
     }
 }

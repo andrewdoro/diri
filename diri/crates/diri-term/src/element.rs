@@ -811,6 +811,14 @@ impl TerminalElement {
         !read_lock(&self.buffer).is_blank()
     }
 
+    /// Grid updates that changed the mirrored screen since it was created:
+    /// a blank screen after many tells an agent that draws without glyphs
+    /// from one that printed nothing.
+    #[must_use]
+    pub fn grid_changes(&self) -> u64 {
+        read_lock(&self.buffer).generation()
+    }
+
     /// Rows in the mirrored screen. The daemon owns this number, so it trails
     /// the pane for as long as a resize takes to round-trip; the pane reads it
     /// to place the grid rather than assuming the two already agree.

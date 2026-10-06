@@ -5651,10 +5651,16 @@ impl Render for RootView {
                     })),
             );
         }
-        if self.resize_origin.is_some()
+        let seam_dragging = self.resize_origin.is_some()
             || self.terminal_resize_origin.is_some()
-            || self.inspector_resize_origin.is_some()
-        {
+            || self.inspector_resize_origin.is_some();
+        crate::terminal_pane::SeamDrag::publish(
+            window.window_handle().window_id(),
+            "root",
+            seam_dragging,
+            cx,
+        );
+        if seam_dragging {
             root = root.child(self.resize_shield(cx));
         }
         if let Some(launches) = self.workspace_launches(colors, cx) {

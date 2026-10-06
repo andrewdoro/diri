@@ -45,6 +45,42 @@ impl UpdateError {
         }
     }
 
+    /// Stable telemetry label (`error_kind`): a closed set, never free text.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::NotUpdatable(_) => "not_updatable",
+            Self::Network { failure, .. } => failure.kind(),
+            Self::Feed(_) => "feed",
+            Self::UntrustedUrl(_) => "untrusted_url",
+            Self::Integrity(_) => "integrity",
+            Self::Signature(_) => "signature",
+            Self::NotWritable(_) => "not_writable",
+            Self::Io(_) => "io",
+            Self::Tool { .. } => "tool",
+        }
+    }
+
+    /// The request failed because of the route to a host — blocked,
+    /// throttled, or crawling — rather than as a verdict about the file, so
+    /// the other route (GitHub or the update mirror) may well succeed. A 404
+    /// is the same answer from either, and anything past the network is the
+    /// bytes' fault, not the route's.
+    pub(crate) fn is_route_failure(&self) -> bool {
+        match self {
+            Self::Network { failure, .. } => match failure {
+                NetworkFailure::Dns
+                | NetworkFailure::Connect
+                | NetworkFailure::Timeout
+                | NetworkFailure::Tls
+                | NetworkFailure::RateLimited(_)
+                | NetworkFailure::Other => true,
+                NetworkFailure::Http(status) => *status >= 500,
+                NetworkFailure::NotFound => false,
+            },
+            _ => false,
+        }
+    }
+
     /// One line, safe to show in the sidebar or settings pane.
     pub fn user_facing(&self) -> String {
         match self {
