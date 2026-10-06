@@ -11317,7 +11317,9 @@ mod tests {
             let float = root
                 .sidebar_float_slide
                 .expect("inset and corners ease into the dock");
-            let halfway = Instant::now() + crate::seam::SEAM_SLIDE / 2;
+            // Sampled on the slide's own clock: a runner that deschedules this
+            // thread for half a slide must not turn "halfway" into "done".
+            let halfway = seam.midpoint();
             let occupied = seam.seam_at(width, halfway);
             let floating = float.seam_at(0.0, halfway);
             assert!(occupied > 0.0 && occupied < width);

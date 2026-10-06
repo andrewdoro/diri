@@ -1702,9 +1702,9 @@ mod tests {
             pids = pids.display()
         );
         let spec = held(root.path(), "s_group", &script);
-        let client = HolderClient::new(&spec.socket_path);
         let server = std::thread::spawn(move || HolderServer::run(spec));
-        wait_until("holder ready", || client.is_alive());
+        // No "holder ready" wait: the leader lives 0.3 s, so a loaded runner
+        // can miss the whole window. The pid file proves the session ran.
         let mut straggler = Vec::new();
         wait_until("background job", || {
             straggler = read_pids(&pids).unwrap_or_default();

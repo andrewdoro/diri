@@ -6889,12 +6889,14 @@ mod tests {
             let server = Arc::clone(server);
             std::thread::spawn(move || server.serve(engine_end))
         };
-        let mut line = serde_json::to_vec(&json!({ "attach": id })).expect("line");
-        line.push(b'\n');
-        client.write_all(&line).expect("attach line");
+        // Before the request: macOS rejects SO_RCVTIMEO with EINVAL once the
+        // Engine has already refused and closed its end.
         client
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .expect("timeout");
+        let mut line = serde_json::to_vec(&json!({ "attach": id })).expect("line");
+        line.push(b'\n');
+        client.write_all(&line).expect("attach line");
         let mut bytes = Vec::new();
         client.read_to_end(&mut bytes).expect("engine closes");
         serving.join().expect("serve").expect("served");

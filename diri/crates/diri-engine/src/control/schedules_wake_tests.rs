@@ -27,6 +27,8 @@ impl FakeHelper {
                     std::thread::sleep(Duration::from_millis(2));
                     continue;
                 };
+                // Darwin's accept inherits the listener's O_NONBLOCK.
+                stream.set_nonblocking(false).unwrap();
                 let line = crate::wake::read_frame(&mut stream).unwrap();
                 let request = serde_json::from_str(&line).unwrap();
                 let (reply, response) = mpsc::channel();

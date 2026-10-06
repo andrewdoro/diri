@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -159,15 +160,37 @@ pub fn read_frame(stream: &mut UnixStream) -> Result<String, String> {
             .checked_duration_since(std::time::Instant::now())
             .filter(|time| !time.is_zero())
             .ok_or("wake request timed out")?;
-        // Whole milliseconds avoid timeval rounding up to an invalid 1,000,000
-        // microsecond component on Darwin at a second boundary.
-        let remaining = Duration::from_millis(remaining.as_millis().max(1) as u64);
-        stream
-            .set_read_timeout(Some(remaining))
-            .map_err(|error| error.to_string())?;
-        let count = stream
-            .read(&mut buffer)
-            .map_err(|error| error.to_string())?;
+        // Poll instead of re-arming SO_RCVTIMEO: Darwin rejects that with
+        // EINVAL once the peer has closed, even with its last bytes queued.
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        // SAFETY: one initialized descriptor, live throughout the bounded wait.
+        if unsafe { libc::poll(&mut descriptor, 1, timeout) } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.to_string());
+        }
+        if descriptor.revents == 0 {
+            continue;
+        }
+        let count = match stream.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         if count == 0 {
             return Err("incomplete wake frame".into());
         }

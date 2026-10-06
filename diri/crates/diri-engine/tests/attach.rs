@@ -385,12 +385,21 @@ fn a_held_session_publishes_an_echo_without_waiting_out_the_batch() {
     let mut codec = FrameCodec::new();
     let mut column = None;
     let mut chunk = [0u8; 64 << 10];
-    while let Ok(count) = data.read(&mut chunk) {
-        assert!(count > 0, "data channel closed");
-        for frame in codec.feed(&chunk[..count]).expect("valid frames") {
-            if let Ok(Some(update)) = frame.grid_payload() {
-                column = Some(update.cursor_col);
+    // A quiet period ends the drain only once an echo has arrived: a loaded
+    // runner can hold the first echo back for longer than one quiet period.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match data.read(&mut chunk) {
+            Ok(count) => {
+                assert!(count > 0, "data channel closed");
+                for frame in codec.feed(&chunk[..count]).expect("valid frames") {
+                    if let Ok(Some(update)) = frame.grid_payload() {
+                        column = Some(update.cursor_col);
+                    }
+                }
             }
+            Err(_) if column.is_some() => break,
+            Err(_) => assert!(Instant::now() < deadline, "warm-up echoes"),
         }
     }
     data.set_read_timeout(None).expect("clear timeout");

@@ -332,10 +332,22 @@ mod tests {
         let token = first.token("s-1");
         drop(listener);
 
-        // A restarted Engine answers the same URL and the same tokens.
-        let (_listener, second) = bind(dir.path()).unwrap();
-        assert_eq!(second.url(), first.url());
-        assert_eq!(second.verify(&token), Some("s-1"));
+        // A restarted Engine answers the same URL and the same tokens. Another
+        // process (or a parallel test binding port 0) can take the freed
+        // ephemeral port first; then a fresh port is the right answer, so
+        // restart again from the port it recorded.
+        let mut first = first;
+        let mut attempts = 0;
+        let _listener = loop {
+            let (listener, second) = bind(dir.path()).unwrap();
+            assert_eq!(second.verify(&token), Some("s-1"));
+            if second.url() == first.url() {
+                break listener;
+            }
+            attempts += 1;
+            assert!(attempts < 5, "the recorded port was never reused");
+            first = second;
+        };
 
         // Port taken by someone else: a fresh one, same key.
         let (_third_listener, third) = bind(dir.path()).unwrap();

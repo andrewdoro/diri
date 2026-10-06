@@ -193,14 +193,22 @@ fn remote_scrollback_does_not_block_input_or_screen_reads() {
     assert_eq!(unsafe { libc::kill(cleanup.pid, libc::SIGSTOP) }, 0);
     let started = Instant::now();
     let pid = cleanup.pid;
+    // The Holder stays stopped until requests 2-4 are answered (or a cap
+    // passes). Answers that waited behind the stopped Holder's scrollback
+    // could only arrive after the resume, so the check is causal rather
+    // than a latency budget a loaded runner can exceed.
+    let (unblocked, answered) = std::sync::mpsc::channel::<()>();
     let resume = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(800));
+        let _ = answered.recv_timeout(Duration::from_secs(3));
+        let resumed = Instant::now();
         // SAFETY: Cleanup keeps this fixture process alive until join.
         unsafe {
             libc::kill(pid, libc::SIGCONT);
         }
+        resumed
     });
     let mut attach_input_elapsed = Duration::ZERO;
+    let mut sent = std::collections::HashMap::new();
     for (id, method, params) in [
         (
             1,
@@ -230,6 +238,7 @@ fn remote_scrollback_does_not_block_input_or_screen_reads() {
         })
         .unwrap();
         bytes.push(b'\n');
+        sent.insert(id, Instant::now());
         stream.write_all(&bytes).unwrap();
         if id == 1 {
             // Give the history worker time to send its request to the stopped
@@ -264,9 +273,12 @@ fn remote_scrollback_does_not_block_input_or_screen_reads() {
                 "fixture must have real scrollback"
             );
         }
-        timings.insert(id, started.elapsed());
+        timings.insert(id, Instant::now());
+        if [2, 3, 4].iter().all(|id| timings.contains_key(id)) {
+            let _ = unblocked.send(());
+        }
     }
-    resume.join().unwrap();
+    let resumed = resume.join().unwrap();
     wait_for_grid(
         registry.lock().unwrap().get("scroll-latency").unwrap(),
         "received:pigeons",
@@ -281,16 +293,24 @@ fn remote_scrollback_does_not_block_input_or_screen_reads() {
         attach_input_elapsed < Duration::from_millis(400),
         "terminal input waited behind history: {attach_input_elapsed:?}"
     );
-    assert!(timings[&1] >= Duration::from_millis(750));
+    let since = |id: u64| timings[&id].duration_since(sent[&id]);
     eprintln!(
-        "delayed scrollback: {:?}; hello: {:?}; input: {:?}; screen: {:?}",
-        timings[&1], timings[&2], timings[&3], timings[&4]
+        "scrollback: {:?}; hello: {:?}; input: {:?}; screen: {:?}; resumed after {:?}",
+        since(1),
+        since(2),
+        since(3),
+        since(4),
+        resumed.duration_since(started)
+    );
+    assert!(
+        timings[&1] > resumed,
+        "scrollback must wait for the stopped Holder"
     );
     for id in [2, 3, 4] {
         assert!(
-            timings[&id] < Duration::from_millis(400),
+            timings[&id] < resumed,
             "request {id} waited behind remote scrollback: {:?}",
-            timings[&id]
+            since(id)
         );
     }
 }

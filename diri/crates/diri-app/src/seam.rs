@@ -69,6 +69,13 @@ impl SeamSlide {
     pub fn seam_at(&self, to: f32, now: Instant) -> f32 {
         self.from + (to - self.from) * motion::settle(self.progress(now))
     }
+
+    /// The instant halfway through, for tests that sample mid-slide without
+    /// racing the wall clock.
+    #[cfg(test)]
+    pub fn midpoint(&self) -> Instant {
+        self.started_at + self.duration / 2
+    }
 }
 
 #[cfg(test)]

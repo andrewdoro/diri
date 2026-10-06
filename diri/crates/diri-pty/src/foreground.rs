@@ -555,8 +555,17 @@ mod tests {
             "{ports:?}"
         );
         drop(listener);
-        let ports = listening_ports(group).unwrap();
-        assert!(ports.iter().all(|info| info.port != port), "{ports:?}");
+        // A sibling test's fork holds a copy of the descriptor until its exec,
+        // so the port can outlive the drop briefly; it must then go away.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let ports = listening_ports(group).unwrap();
+            if ports.iter().all(|info| info.port != port) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{ports:?}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]

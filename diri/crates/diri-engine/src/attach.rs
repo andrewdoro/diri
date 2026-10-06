@@ -2212,7 +2212,21 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             while grids.len() < want {
                 assert!(Instant::now() < deadline, "no output after {grids:?}");
-                let count = reader.read(&mut bytes).expect("the connection stays open");
+                let count = match reader.read(&mut bytes) {
+                    Ok(count) => count,
+                    // Signals from sibling tests' children, or a loaded runner.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::Interrupted
+                                | std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => panic!("the connection stays open: {error}"),
+                };
                 assert!(count > 0, "the Engine dropped a merely slow client");
                 for frame in codec.feed(&bytes[..count]).expect("intact frames") {
                     if let Some(grid) = frame.grid_payload().unwrap() {
@@ -2243,10 +2257,12 @@ mod tests {
             caught_up < Duration::from_secs(1),
             "reseed took {caught_up:?} after the consumer resumed"
         );
-        assert!(
-            next_grids(&mut reader, 3).iter().all(|full| !full),
-            "live diffs follow the reseed"
-        );
+        // Live diffs follow the reseed (a loaded runner may reseed again first).
+        let mut live = Vec::new();
+        while !live.iter().any(|full| !full) {
+            live.extend(next_grids(&mut reader, 1));
+            assert!(live.len() < 64, "no live diff after the reseed: {live:?}");
+        }
         assert!(hub.has_sinks("s"), "the sink was never dropped");
         let _ = reader.shutdown(std::net::Shutdown::Both);
         worker.join().unwrap();

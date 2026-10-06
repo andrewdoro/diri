@@ -1906,12 +1906,37 @@ mod tests {
     fn failing_ssh_manager(script: &str, askpass: bool) -> (tempfile::TempDir, RemoteManager) {
         let temporary = tempfile::tempdir().expect("temp");
         let fake_ssh = temporary.path().join("ssh");
+        let script = script.replace("$TMP", &temporary.path().display().to_string());
+        let (shebang, body) = script.split_once('\n').expect("shebang");
         fs::write(
             &fake_ssh,
-            script.replace("$TMP", &temporary.path().display().to_string()),
+            format!("{shebang}\n[ \"$1\" = --exec-probe ] && exit 0\n{body}"),
         )
         .expect("fake ssh");
         fs::set_permissions(&fake_ssh, fs::Permissions::from_mode(0o700)).expect("mode");
+        // Linux refuses to exec a file while any process holds it open for
+        // writing; a sibling test's fork can inherit our write descriptor
+        // until its own exec (ETXTBSY). Once one exec succeeds, no copy of
+        // that descriptor is left, so the fixture's real calls cannot fail.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::process::Command::new(&fake_ssh)
+                .arg("--exec-probe")
+                .status()
+            {
+                Ok(status) => {
+                    assert!(status.success(), "fake ssh probe: {status}");
+                    break;
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("fake ssh probe: {error}"),
+            }
+        }
         let mut executor = ProcessExecutor::new(&fake_ssh);
         if askpass {
             executor = executor.with_askpass("/fixture/diri-ssh-askpass");

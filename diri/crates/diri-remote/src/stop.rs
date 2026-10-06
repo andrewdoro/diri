@@ -2,7 +2,7 @@
 //! management process never signals a numeric PID or holds a metadata lock
 //! while waiting for the Holder to record its child's actual exit.
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -71,7 +71,16 @@ pub(crate) fn kill(selector: &SessionSelector) -> io::Result<SessionInspection> 
         break expected;
     };
 
-    let mut stream = connect_until(&paths.socket, deadline)?;
+    // A concurrent stop can finish first: the Holder records the exit, closes
+    // and unlinks its socket. Losing that race is not a failure; only the
+    // authenticated recorded exit decides the outcome.
+    let stream = match connect_until(&paths.socket, deadline) {
+        Ok(stream) => stream,
+        Err(error) if peer_gone(&error) => {
+            return wait_stopped(&paths, selector, &expected, deadline);
+        }
+        Err(error) => return Err(error),
+    };
     let hello = RemoteMessage::Hello(Hello {
         protocol: ProtocolVersion::CURRENT,
         local_build_id: crate::BUILD_ID.into(),
@@ -88,7 +97,13 @@ pub(crate) fn kill(selector: &SessionSelector) -> io::Result<SessionInspection> 
         last_acknowledged_output_offset: Some(expected.output_offset),
         last_acknowledged_grid_sequence: None,
     });
-    write_message(&mut stream, &hello, deadline)?;
+    match write_message(&stream, &hello, deadline) {
+        Ok(()) => {}
+        Err(error) if peer_gone(&error) => {
+            return wait_stopped(&paths, selector, &expected, deadline);
+        }
+        Err(error) => return Err(error),
+    }
     let mut codec = RemoteCodec::new();
     let mut buffer = [0u8; 64 * 1024];
     let mut requested = false;
@@ -100,14 +115,17 @@ pub(crate) fn kill(selector: &SessionSelector) -> io::Result<SessionInspection> 
                     match message {
                         RemoteMessage::HelloAck(ack) if !requested => {
                             validate_ack(&expected, &ack)?;
-                            write_message(
-                                &mut stream,
+                            match write_message(
+                                &stream,
                                 &RemoteMessage::StopSession(StopSession {
                                     controller_epoch: ack.controller_epoch,
                                 }),
                                 deadline,
-                            )?;
-                            requested = true;
+                            ) {
+                                Ok(()) => requested = true,
+                                Err(error) if peer_gone(&error) => break 'connection,
+                                Err(error) => return Err(error),
+                            }
                         }
                         RemoteMessage::Error(error) if error.code == "session_stopping" => {
                             break 'connection;
@@ -242,18 +260,86 @@ fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     })
 }
 
+/// The Holder closed or never accepted this connection.
+fn peer_gone(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::NotFound
+    )
+}
+
+// macOS rejects SO_SNDTIMEO/SO_RCVTIMEO with EINVAL once the peer has closed,
+// which a concurrent stop makes routine. Both directions therefore poll
+// against the absolute stop deadline without changing socket options.
 fn write_message(
-    stream: &mut UnixStream,
+    stream: &UnixStream,
     message: &RemoteMessage,
     deadline: Instant,
 ) -> io::Result<()> {
-    stream.set_write_timeout(Some(remaining(deadline)?))?;
-    stream.write_all(&RemoteCodec::encode(message).map_err(io::Error::other)?)
+    let bytes = RemoteCodec::encode(message).map_err(io::Error::other)?;
+    let mut written = 0;
+    while written < bytes.len() {
+        remaining(deadline)?;
+        // SAFETY: stream owns a live socket and the slice is readable for its length.
+        let count = unsafe {
+            libc::send(
+                stream.as_raw_fd(),
+                bytes[written..].as_ptr().cast(),
+                bytes.len() - written,
+                SEND_FLAGS,
+            )
+        };
+        if count >= 0 {
+            written += count as usize;
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        match error.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::WouldBlock => wait_for(stream, libc::POLLOUT, deadline)?,
+            _ => return Err(error),
+        }
+    }
+    Ok(())
 }
 
-// macOS can reject SO_RCVTIMEO after peer close while final frames remain
-// queued. Read without changing socket options, preserving the absolute stop
-// deadline and leaving the bounded blocking write path unchanged.
+#[cfg(target_os = "linux")]
+const SEND_FLAGS: libc::c_int = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+// macOS has no MSG_NOSIGNAL; Rust binaries already ignore SIGPIPE, so a
+// closed peer surfaces as EPIPE.
+#[cfg(not(target_os = "linux"))]
+const SEND_FLAGS: libc::c_int = libc::MSG_DONTWAIT;
+
+fn wait_for(stream: &UnixStream, events: libc::c_short, deadline: Instant) -> io::Result<()> {
+    let mut descriptor = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events,
+        revents: 0,
+    };
+    let timeout = remaining(deadline)?.as_millis().clamp(1, i32::MAX as u128) as i32;
+    // SAFETY: one initialized descriptor, live throughout the bounded wait.
+    if unsafe { libc::poll(&mut descriptor, 1, timeout) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    if descriptor.revents & libc::POLLNVAL != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "stop socket invalid",
+        ));
+    }
+    // HUP/ERR surface from the next send or recv (reads may still drain
+    // final bytes before EOF).
+    Ok(())
+}
+
 fn read_until(stream: &UnixStream, buffer: &mut [u8], deadline: Instant) -> io::Result<usize> {
     loop {
         remaining(deadline)?;
@@ -275,26 +361,7 @@ fn read_until(stream: &UnixStream, buffer: &mut [u8], deadline: Instant) -> io::
             io::ErrorKind::WouldBlock => {}
             _ => return Err(error),
         }
-        let mut descriptor = libc::pollfd {
-            fd: stream.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let timeout = remaining(deadline)?.as_millis().clamp(1, i32::MAX as u128) as i32;
-        // SAFETY: one initialized descriptor, live throughout the bounded wait.
-        if unsafe { libc::poll(&mut descriptor, 1, timeout) } < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
-        }
-        if descriptor.revents & libc::POLLNVAL != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "stop socket invalid",
-            ));
-        }
-        // HUP/ERR may still have final bytes to drain before EOF.
+        wait_for(stream, libc::POLLIN, deadline)?;
     }
 }
 
@@ -335,6 +402,7 @@ mod tests {
     use super::*;
     use diri_proto::process::{BootId, ProcessBirth, ProcessIdentity};
     use diri_proto::remote_pty::{ANNOTATED_HOLDER_CAPABILITIES, SessionToken};
+    use std::io::Write;
 
     #[test]
     fn stop_reads_queued_frames_after_peer_close_and_bounds_silent_reads() {
