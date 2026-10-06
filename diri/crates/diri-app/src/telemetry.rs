@@ -39,6 +39,9 @@ static LOCAL_CATALOG_SEEN: AtomicBool = AtomicBool::new(false);
 const SLOW_FRAME: Duration = Duration::from_millis(50);
 /// Main-thread unresponsiveness recorded as `ui.stall`.
 const STALL: Duration = Duration::from_secs(1);
+/// A ping unanswered this long has the main thread's stack sampled once,
+/// so the `ui.stall` it becomes names the code it was stuck in.
+const STALL_SAMPLE_AFTER: Duration = Duration::from_secs(2);
 /// A stall this long is something the user noticed: an incident.
 const STALL_INCIDENT: Duration = Duration::from_secs(3);
 /// A stall still going after this long is recorded (and flushed) before it
@@ -225,7 +228,19 @@ fn finished_since(last: Option<(&'static str, u64)>, since: u64) -> Option<&'sta
 #[cfg(target_os = "macos")]
 static MAIN_THREAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// The main thread, for the stall watchdog's stack sample.
+static MAIN_STACK: OnceLock<crate::stall_stack::SampledThread> = OnceLock::new();
+/// The main thread's stack sampled during the outstanding stall, keyed by
+/// that stall's ping ([`Sent::at`]).
+static STALL_STACK: Mutex<Option<(u64, Vec<String>)>> = Mutex::new(None);
+/// The surface the last main-window frame showed (`ui.slow_frame`'s
+/// `surface`), for `ui.stall`.
+static LAST_SURFACE: Mutex<&'static str> = Mutex::new("none");
+
 fn remember_main_thread() {
+    if let Some(thread) = crate::stall_stack::SampledThread::current() {
+        let _ = MAIN_STACK.set(thread);
+    }
     #[cfg(target_os = "macos")]
     {
         // SAFETY: returns the calling thread's port without taking a
@@ -577,6 +592,9 @@ pub(crate) fn frame_probe(started: FrameStart, context: FrameContext) -> impl In
             if !diri_telemetry::is_enabled() {
                 return;
             }
+            if let Ok(mut surface) = LAST_SURFACE.lock() {
+                *surface = context.surface;
+            }
             let window_id = window.window_handle().window_id().as_u64();
             let previous_end =
                 LAST_FRAME_END.with(|ends| ends.borrow_mut().insert(window_id, Instant::now()));
@@ -809,6 +827,9 @@ fn start_stall_watchdog(cx: &mut App) {
                     continue;
                 };
                 let stalled = Duration::from_millis(mono_ms().saturating_sub(sent.at));
+                if stalled >= STALL_SAMPLE_AFTER {
+                    sample_stall_stack(sent.at);
+                }
                 if stalled >= STALL_ONGOING && !reported_ongoing {
                     reported_ongoing = true;
                     record_stall(stalled, true, &sent);
@@ -877,15 +898,60 @@ impl Ping {
     }
 }
 
+/// Samples the main thread's stack once per stall, from the watchdog
+/// thread while the main thread is still stuck.
+fn sample_stall_stack(ping_at: u64) {
+    let Some(thread) = MAIN_STACK.get().copied() else {
+        return;
+    };
+    if STALL_STACK
+        .lock()
+        .is_ok_and(|stack| stack.as_ref().is_some_and(|(at, _)| *at == ping_at))
+    {
+        return;
+    }
+    let frames = thread.sample();
+    if let Ok(mut stack) = STALL_STACK.lock() {
+        *stack = Some((ping_at, frames));
+    }
+}
+
+/// The stack sampled during the stall that began with `ping_at`; an ended
+/// stall takes it, an ongoing one leaves it for the final record.
+fn stall_stack(ping_at: u64, ongoing: bool) -> Option<Value> {
+    let mut stack = STALL_STACK.lock().ok()?;
+    if stack.as_ref().is_none_or(|(at, _)| *at != ping_at) {
+        return None;
+    }
+    let frames = if ongoing {
+        stack.as_ref().map(|(_, frames)| frames.clone())?
+    } else {
+        stack.take().map(|(_, frames)| frames)?
+    };
+    Some(Value::List(
+        frames
+            .iter()
+            .map(|frame| Value::from(diri_telemetry::text(frame)))
+            .collect(),
+    ))
+}
+
+fn last_surface() -> &'static str {
+    LAST_SURFACE.lock().map_or("none", |surface| *surface)
+}
+
 /// `was_active` is whether diri was frontmost when the stall began, `active`
 /// whether it is now; `cpu_ms` is the main thread's own CPU time over the
 /// stall (≈ `ms`: busy; ≈ 0: blocked or not scheduled), `faults` the
-/// process's page faults, and `action` a named action that finished inside
-/// it.
+/// process's page faults, `action` a named action that finished inside it,
+/// `surface` what the last frame before it showed, and `stack` the main
+/// thread's call stack sampled 2 s in (macOS; innermost first).
 fn record_stall(duration: Duration, ongoing: bool, sent: &Sent) {
     let active = APP_ACTIVE.load(Ordering::Relaxed);
     let (cpu, faults) = sent.usage.since();
     let action = action_since(sent.at);
+    let surface = last_surface();
+    let stack = stall_stack(sent.at, ongoing);
     if duration >= STALL_INCIDENT {
         incident!(
             "ui.stall",
@@ -895,7 +961,9 @@ fn record_stall(duration: Duration, ongoing: bool, sent: &Sent) {
             was_active = sent.active,
             cpu_ms = cpu,
             faults = faults,
-            action = action
+            action = action,
+            surface = surface,
+            stack = stack
         );
     } else {
         diri_telemetry::warn_event!(
@@ -906,7 +974,9 @@ fn record_stall(duration: Duration, ongoing: bool, sent: &Sent) {
             was_active = sent.active,
             cpu_ms = cpu,
             faults = faults,
-            action = action
+            action = action,
+            surface = surface,
+            stack = stack
         );
     }
 }
@@ -1556,6 +1626,21 @@ mod tests {
             finished_since(Some(("diri::Paste", 1_000)), stall_began),
             Some("diri::Paste")
         );
+    }
+
+    #[test]
+    fn a_stall_carries_only_the_stack_sampled_during_it() {
+        let frames = |value: Option<Value>| match value {
+            Some(Value::List(frames)) => frames.len(),
+            _ => 0,
+        };
+        *STALL_STACK.lock().unwrap() = Some((7, vec!["diri a".to_owned(), "diri b".to_owned()]));
+        // Another stall's record never borrows this one's sample.
+        assert_eq!(frames(stall_stack(6, false)), 0);
+        // The 5 s ongoing record shows it and leaves it for the final one.
+        assert_eq!(frames(stall_stack(7, true)), 2);
+        assert_eq!(frames(stall_stack(7, false)), 2);
+        assert_eq!(frames(stall_stack(7, false)), 0);
     }
 
     #[test]

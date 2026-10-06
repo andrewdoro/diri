@@ -80,6 +80,7 @@ pub mod sidebar;
 mod skills_catalog;
 mod skills_page;
 pub mod sounds;
+mod stall_stack;
 mod status_debug;
 mod surface_shell;
 pub mod switcher;

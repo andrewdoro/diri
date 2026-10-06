@@ -447,15 +447,25 @@ impl DaemonClient {
     }
 
     /// Starts the connect/reconnect loop. Repeated calls are idempotent.
+    ///
+    /// Runs on the calling thread's runtime, else on the one an earlier call
+    /// ran on. With neither it does nothing: a panic here would come from a
+    /// GPUI callback, where it cannot unwind and aborts the app.
     pub fn connect(&self) {
         let mut lifecycle = self.lifecycle.lock().expect("lifecycle mutex poisoned");
         if lifecycle.as_ref().is_some_and(|task| !task.is_finished()) {
             return;
         }
+        let mut stored = self.runtime.lock().expect("runtime mutex poisoned");
+        let Some(runtime) = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| stored.clone())
+        else {
+            return;
+        };
         let core = Arc::clone(&self.core);
-        let runtime = tokio::runtime::Handle::current();
         *lifecycle = Some(runtime.spawn(async move { run_lifecycle(core).await }));
-        *self.runtime.lock().expect("runtime mutex poisoned") = Some(runtime);
+        *stored = Some(runtime);
     }
 
     /// Synchronously asks the connect/reconnect loop to close its control
@@ -1647,6 +1657,25 @@ mod tests {
 
         assert_eq!(engine.next_subscription().await.since_seq, None);
         drain_events(&mut events, 2).await;
+    }
+
+    /// `connect` from a GPUI callback, off any runtime, must not panic: the
+    /// panic could not unwind out of the Objective-C callback and would abort.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connect_from_a_thread_without_a_runtime_never_panics() {
+        let engine = FakeEngine::start(Some("engine-a"), 0);
+        let client = Arc::new(DaemonClient::with_socket_path(&engine.socket));
+        let off_runtime = Arc::clone(&client);
+        std::thread::spawn(move || off_runtime.connect())
+            .join()
+            .expect("connect() must not panic off the runtime");
+        assert!(!client.connection_state().borrow().is_connected());
+
+        client.connect();
+        client
+            .wait_until_connected(Duration::from_secs(5))
+            .await
+            .expect("a later connect on a runtime still starts the client");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

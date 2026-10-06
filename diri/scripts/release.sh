@@ -24,6 +24,10 @@
 #                       (it must carry CI's .sigstore.json signature bundles)
 #   DIRI_MERGE_TIMEOUT_SECONDS  how long --wait-for-merge waits (default 3600)
 #   DIRI_RELEASE_TARGET_DIR  build cache (default: diri/target/release-pipeline)
+#   NEW_FEED=1          start a brand-new update feed; only for a repo with no
+#                       published appcast.json (otherwise a failed fetch aborts)
+#   UPDATE_MIRROR       update mirror host checked after publishing
+#                       (default: updates.diri.sh; "off" skips the check)
 #
 # Speed: the macOS build runs locally while GitHub Actions work is awaited in
 # the background: the gate (a passing CI run on the release's exact tree) and
@@ -76,6 +80,8 @@ INVENTORY="$DIST/THIRD-PARTY-LICENSES.json"
 MINIMUM_SYSTEM="15.0"
 # Old builds stay downloadable but the repo should not grow without bound.
 KEEP_RELEASES=5
+# Fallback route the app uses when GitHub is unreachable (updates-mirror/).
+UPDATE_MIRROR="${UPDATE_MIRROR:-updates.diri.sh}"
 
 # See package.sh: prefer the persistent home toolchain over the /tmp one, which
 # macOS sweeps out from under us.
@@ -460,11 +466,43 @@ DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
 PUBLISHED="$(date -u +%Y-%m-%d)"
 
 # Start from the published feed so releases people skipped stay offerable.
+# A fetch that fails must stop the release: starting a fresh feed here would
+# publish one that lists only this version and silently drop every older one
+# (and with them the version picker's downgrade targets). Only an explicit
+# NEW_FEED=1 starts over, and only when GitHub says there is no feed (404).
 echo "==> Fetching the current feed"
-if ! curl -fsSL "https://github.com/$GH_REPO/releases/latest/download/appcast.json" -o "$FEED" 2>/dev/null; then
-    echo "    (no published feed yet — starting a new one)"
+FEED_SOURCE="https://github.com/$GH_REPO/releases/latest/download/appcast.json"
+FEED_STATUS=""
+for attempt in 1 2 3 4; do
     rm -f "$FEED"
-fi
+    FEED_STATUS="$(curl -sSL --connect-timeout 15 --max-time 60 -o "$FEED" \
+        -w '%{http_code}' "$FEED_SOURCE" || true)"
+    case "$FEED_STATUS" in
+        200|404) break ;;
+    esac
+    echo "    feed fetch failed (HTTP ${FEED_STATUS:-none}), attempt $attempt of 4" >&2
+    if [ "$attempt" -lt 4 ]; then sleep $((attempt * 5)); fi
+done
+case "$FEED_STATUS" in
+    200) ;;
+    404)
+        rm -f "$FEED"
+        if [ "${NEW_FEED:-0}" = 1 ]; then
+            echo "    (NEW_FEED=1 and no published feed — starting a new one)"
+        else
+            echo "error: $FEED_SOURCE is 404. If this repo has never published a feed," >&2
+            echo "       re-run with NEW_FEED=1; otherwise the latest release lost its" >&2
+            echo "       appcast.json and must be fixed before publishing." >&2
+            exit 1
+        fi
+        ;;
+    *)
+        rm -f "$FEED"
+        echo "error: could not fetch the published feed (HTTP ${FEED_STATUS:-none})." >&2
+        echo "       Refusing to start a new one, which would drop every older release." >&2
+        exit 1
+        ;;
+esac
 
 echo "==> Writing $FEED"
 VERSION="$VERSION" \
@@ -478,13 +516,15 @@ import json, os, pathlib
 feed_path = pathlib.Path(os.environ["FEED"])
 feed = {"feed_version": 1, "releases": []}
 if feed_path.exists():
+    # The same rule as the fetch: an unreadable published feed is a stop, not
+    # a reason to publish one with the older releases missing.
     try:
         feed = json.loads(feed_path.read_text())
-    except json.JSONDecodeError:
-        print("    (published feed did not parse — starting a new one)")
-        feed = {"feed_version": 1, "releases": []}
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"error: the published feed did not parse ({error}); refusing to replace it")
+    if not isinstance(feed, dict) or not isinstance(feed.get("releases"), list) or not feed["releases"]:
+        raise SystemExit("error: the published feed lists no releases; refusing to replace it")
     feed.setdefault("feed_version", 1)
-    feed.setdefault("releases", [])
 
 version = os.environ["VERSION"]
 entry = {
@@ -588,6 +628,32 @@ else
 fi
 
 echo "==> macOS release, feed and cask are live: https://github.com/$GH_REPO/releases/tag/$TAG"
+
+# ----------------------------------------------------------------------------
+# 6b. Check the update mirror
+# ----------------------------------------------------------------------------
+# The mirror (updates-mirror/) proxies GitHub, so there is nothing to upload.
+# Fetching the new archive through it warms its edge cache and proves it
+# serves the exact bytes GitHub has. GitHub stays the source of truth: a
+# mirror problem is a warning to fix, not a failed release.
+if [ "$UPDATE_MIRROR" = off ]; then
+    echo "==> Skipping the update mirror check (UPDATE_MIRROR=off)"
+else
+    MIRROR_ZIP="https://$UPDATE_MIRROR/releases/download/$TAG/$(basename "$ZIP")"
+    echo "==> Checking the update mirror: $MIRROR_ZIP"
+    MIRROR_SHA="$(curl -fsSL --connect-timeout 15 --max-time 600 "$MIRROR_ZIP" \
+        | shasum -a 256 | awk '{print $1}' || true)"
+    if [ "$MIRROR_SHA" = "$SHA256" ] \
+        && curl -fsS --connect-timeout 15 --max-time 60 "https://$UPDATE_MIRROR/appcast.json" \
+            | python3 -c 'import json, sys; json.load(sys.stdin)["releases"][0]' 2>/dev/null; then
+        echo "    mirror serves the release archive byte for byte"
+    else
+        echo "warning: the update mirror at $UPDATE_MIRROR does not serve $TAG correctly" >&2
+        echo "         (archive sha256 ${MIRROR_SHA:-none}, expected $SHA256)." >&2
+        echo "         Users who cannot reach GitHub will not get this update until it does;" >&2
+        echo "         see updates-mirror/README.md." >&2
+    fi
+fi
 
 # ----------------------------------------------------------------------------
 # 7. Attach the Linux packages if they were still building

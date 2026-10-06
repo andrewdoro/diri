@@ -426,7 +426,9 @@ impl gpui::EventEmitter<UtilitySurfacesEvent> for UtilitySurfaces {}
 
 pub struct UtilitySurfaces {
     /// Installed monospace families, read when the font picker opens.
-    terminal_font_families: Vec<String>,
+    terminal_font_families: std::rc::Rc<[String]>,
+    /// The listing that picker opening started, off the main thread.
+    terminal_font_listing: Option<Task<()>>,
     skills: gpui::Entity<crate::skills_page::SkillsPage>,
     schedules: gpui::Entity<crate::schedules_page::SchedulesPage>,
     accounts: AccountsState,
@@ -740,7 +742,8 @@ impl UtilitySurfaces {
             runtime,
             updates,
             show_version_picker: false,
-            terminal_font_families: Vec::new(),
+            terminal_font_families: std::rc::Rc::from([]),
+            terminal_font_listing: None,
             activity: "Connected client · shared daemon remains untouched".to_owned(),
             diagnostics_report,
             privacy: Default::default(),
@@ -6001,63 +6004,43 @@ impl UtilitySurfaces {
             })
     }
 
+    /// Lists the installed monospace families on a background thread and
+    /// shows them when done; until then the picker keeps the last listing.
+    fn refresh_terminal_font_families(&mut self, cx: &mut Context<Self>) {
+        let list = crate::fonts::monospace_families(cx);
+        let listing = cx.background_executor().spawn(async move { list() });
+        self.terminal_font_listing = Some(cx.spawn(async move |this, cx| {
+            let families = listing.await;
+            let _ = this.update(cx, |this, cx| {
+                this.terminal_font_listing = None;
+                if *this.terminal_font_families != *families {
+                    this.terminal_font_families = families.into();
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// The font picker's rows. Each family is named in its own face, so a
+    /// row costs loading that font: only the rows in view are built.
     fn terminal_font_options(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
-        let configured = self.prefs.terminal_font_family.clone();
-        let mut options = div()
-            .id("terminal-font-options")
-            .max_h(px(300.0))
-            .overflow_y_scroll()
-            .p(px(4.0))
-            .flex()
-            .flex_col();
-        let choices = std::iter::once(None).chain(self.terminal_font_families.iter().map(Some));
-        for (index, family) in choices.enumerate() {
-            let is_selected = family.map_or(configured.is_empty(), |family| *family == configured);
-            let stored = family.cloned().unwrap_or_default();
-            let label = family.map_or_else(
-                || {
-                    tf(
-                        "settings.appearance.font_default",
-                        &[("font", &crate::fonts::mono_family())],
-                    )
-                },
-                Clone::clone,
-            );
-            // Each family is named in its own face, so the list is the preview.
-            let face = family.map_or(crate::fonts::mono_family(), String::as_str);
-            options = options.child(
-                div()
-                    .id(SharedString::from(format!("terminal-font-option-{index}")))
-                    .h(px(Metrics::ROW_HEIGHT))
-                    .px(px(8.0))
-                    .rounded(px(Radius::inner(crate::floating::MENU_RADIUS, 4.0)))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .bg(Fill::selected(colors, is_selected))
-                    .cursor_pointer()
-                    .glass_menu_row(colors, false)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings_menu = None;
-                        let family = stored.clone();
-                        this.update_prefs(move |prefs| prefs.terminal_font_family = family);
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(SharedString::from(face.to_owned()))
-                            .text_size(px(Typo::ROW.size))
-                            .child(label),
-                    )
-                    .when(is_selected, |row| {
-                        row.child(sf_symbol("checkmark", 10.0, colors.secondary))
-                    }),
-            );
-        }
-        options.into_any_element()
+        const LIST_PADDING: f32 = 4.0;
+        const MAX_HEIGHT: f32 = 300.0;
+        let configured: SharedString = self.prefs.terminal_font_family.clone().into();
+        let families = std::rc::Rc::clone(&self.terminal_font_families);
+        let count = families.len() + 1;
+        let height = (count as f32 * Metrics::ROW_HEIGHT).min(MAX_HEIGHT - 2.0 * LIST_PADDING);
+        let entity = cx.entity();
+        let list = gpui::uniform_list("terminal-font-options", count, move |range, _, _| {
+            range
+                .map(|index| {
+                    let family = index.checked_sub(1).and_then(|index| families.get(index));
+                    terminal_font_option(index, family, &configured, colors, entity.clone())
+                })
+                .collect()
+        })
+        .h(px(height));
+        div().p(px(LIST_PADDING)).child(list).into_any_element()
     }
 
     fn terminal_font_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -7690,8 +7673,9 @@ fn settings_select_button(
                 Some(menu)
             };
             if this.settings_menu == Some(SettingsMenu::TerminalFont) {
-                // Read on open, so a font installed while diri runs shows up.
-                this.terminal_font_families = crate::fonts::monospace_families(cx);
+                // Read on open, so a font installed while diri runs shows up;
+                // the last listing shows meanwhile.
+                this.refresh_terminal_font_families(cx);
             }
             cx.notify();
         }))
@@ -7758,6 +7742,62 @@ fn settings_choice_row(
         .when(selected, |row| {
             row.child(sf_symbol("checkmark", 10.0, colors.secondary))
         })
+}
+
+/// One font picker row: `family` named in its own face, `None` for the
+/// platform default.
+fn terminal_font_option(
+    index: usize,
+    family: Option<&String>,
+    configured: &str,
+    colors: SemanticColors,
+    entity: gpui::Entity<UtilitySurfaces>,
+) -> AnyElement {
+    let is_selected = family.map_or(configured.is_empty(), |family| family == configured);
+    let stored = family.cloned().unwrap_or_default();
+    let label = family.map_or_else(
+        || {
+            tf(
+                "settings.appearance.font_default",
+                &[("font", &crate::fonts::mono_family())],
+            )
+        },
+        Clone::clone,
+    );
+    let face = family.map_or(crate::fonts::mono_family(), String::as_str);
+    div()
+        .id(SharedString::from(format!("terminal-font-option-{index}")))
+        .debug_selector(move || format!("terminal-font-option-{index}"))
+        .h(px(Metrics::ROW_HEIGHT))
+        .px(px(8.0))
+        .rounded(px(Radius::inner(crate::floating::MENU_RADIUS, 4.0)))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .bg(Fill::selected(colors, is_selected))
+        .cursor_pointer()
+        .glass_menu_row(colors, false)
+        .on_click(move |_, _, cx| {
+            let family = stored.clone();
+            entity.update(cx, |this, cx| {
+                this.settings_menu = None;
+                this.update_prefs(move |prefs| prefs.terminal_font_family = family);
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_family(SharedString::from(face.to_owned()))
+                .text_size(px(Typo::ROW.size))
+                .child(label),
+        )
+        .when(is_selected, |row| {
+            row.child(sf_symbol("checkmark", 10.0, colors.secondary))
+        })
+        .into_any_element()
 }
 
 fn appearance_mode_card(
@@ -8501,6 +8541,31 @@ mod tests {
     }
 
     #[gpui::test]
+    fn font_picker_builds_only_the_rows_in_view(cx: &mut TestAppContext) {
+        let (harness, cx) = open_settings_workbench(cx);
+        let surfaces = harness.read_with(cx, |harness, _| harness.surfaces.clone());
+        surfaces.update(cx, |surfaces, cx| {
+            surfaces.settings_tab = SettingsTab::Terminal;
+            // A Nerd Font collection: every row names its family in that
+            // face, so building them all loaded every font at once.
+            surfaces.terminal_font_families = (0..500)
+                .map(|index| format!("Mono {index:03}"))
+                .collect::<Vec<_>>()
+                .into();
+            surfaces.settings_menu = Some(SettingsMenu::TerminalFont);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("terminal-font-option-0").is_some());
+        assert!(cx.debug_bounds("terminal-font-option-2").is_some());
+        assert!(
+            cx.debug_bounds("terminal-font-option-400").is_none(),
+            "rows out of view must not be built"
+        );
+    }
+
+    #[gpui::test]
     fn whats_new_is_searchable_and_renders_release_markdown(cx: &mut TestAppContext) {
         let (harness, cx) = open_settings_workbench(cx);
         let surfaces = harness.read_with(cx, |harness, _| harness.surfaces.clone());
@@ -9184,7 +9249,7 @@ mod tests {
                             surfaces.terminal_font_families =
                                 ["Andale Mono", "Courier New", "Menlo", "Monaco", "PT Mono"]
                                     .map(str::to_owned)
-                                    .to_vec();
+                                    .into();
                             surfaces.settings_menu = Some(SettingsMenu::TerminalFont);
                             cx.notify();
                         });

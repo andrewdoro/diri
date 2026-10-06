@@ -794,6 +794,12 @@ impl Render for WorkspaceWorkbench {
         if !cx.has_active_drag() {
             self.drag_haptic.reset();
         }
+        crate::terminal_pane::SeamDrag::publish(
+            window.window_handle().window_id(),
+            "workspace",
+            self.resize.as_ref().is_some_and(|resize| !resize.submitted),
+            cx,
+        );
         let mut root = div()
             .id("workspace-workbench")
             .debug_selector(|| "workspace-workbench".into())
