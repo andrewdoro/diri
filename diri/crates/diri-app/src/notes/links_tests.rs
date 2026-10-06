@@ -108,9 +108,21 @@ fn backlinks_and_unlinked_mentions_show_under_the_note(cx: &mut gpui::TestAppCon
 fn the_graph_shows_the_neighbourhood_or_every_note_and_settles(cx: &mut gpui::TestAppContext) {
     let fixture = fixture();
     let (pane, cx) = open(cx, &fixture, &fixture.plan);
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("note-footer").is_some(),
+        "the note is drawn"
+    );
     pane.update_in(cx, |pane, window, cx| {
         pane.show_graph(graph::Scope::Local, window, cx)
     });
+    cx.run_until_parked();
+    // Under glass the graph's fill is clear: the note must not be drawn
+    // beneath it, or its text shows through the graph.
+    assert!(
+        cx.debug_bounds("note-footer").is_none(),
+        "the graph replaces the note"
+    );
     let graph = pane
         .read_with(cx, |pane, _| pane.graph_for_test())
         .expect("graph shown");

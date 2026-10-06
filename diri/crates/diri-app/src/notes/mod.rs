@@ -87,8 +87,10 @@ pub(crate) struct NotePane {
     versions: Option<versions::VersionPanel>,
     /// The open note's linked and unlinked mentions, shown under it.
     backlinks: Option<(Entity<backlinks::BacklinksView>, Subscription)>,
-    /// The notes graph, while it is shown over the note.
+    /// The notes graph, while it is shown in place of the note.
     graph: Option<Entity<graph::NoteGraphView>>,
+    /// Room the host keeps at the top-right for its pane controls.
+    trailing_inset: f32,
     /// A note to put the caret in once it is shown: (note id, block), from a
     /// backlink or the graph.
     pending_reveal: Option<(String, usize)>,
@@ -167,6 +169,7 @@ impl NotePane {
             versions: None,
             backlinks: None,
             graph: None,
+            trailing_inset: 0.0,
             pending_reveal: None,
 
             colors_override: None,
@@ -548,6 +551,15 @@ impl NotePane {
         cx.notify();
     }
 
+    /// Keeps the graph header clear of controls the host draws over the
+    /// pane's top-right corner.
+    pub(crate) fn set_trailing_inset(&mut self, inset: f32, cx: &mut Context<Self>) {
+        if (self.trailing_inset - inset).abs() >= f32::EPSILON {
+            self.trailing_inset = inset;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn close_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.graph.take().is_some() {
             let handle = self.focus_handle(cx);
@@ -855,6 +867,9 @@ impl Render for NotePane {
             .bg(colors.work_surface_nested())
             .font_family(crate::fonts::ui_family());
         let root = match &self.state {
+            // The graph replaces the note rather than covering it: under glass
+            // the nested surface is clear, so the note would show through.
+            PaneState::Open(_) if self.graph.is_some() => root,
             PaneState::Open(open) => {
                 open.editor.update(cx, |view, _| view.set_colors(colors));
                 if let Some((footer, _)) = &self.backlinks {
@@ -887,7 +902,11 @@ impl Render for NotePane {
         };
         let root = match &self.graph {
             Some(graph) => {
-                graph.update(cx, |graph, _| graph.set_colors(colors));
+                let inset = self.trailing_inset;
+                graph.update(cx, |graph, _| {
+                    graph.set_colors(colors);
+                    graph.set_trailing_inset(inset);
+                });
                 root.child(div().absolute().inset_0().child(graph.clone()))
             }
             None => root,

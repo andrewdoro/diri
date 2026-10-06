@@ -279,6 +279,8 @@ pub(crate) struct NoteGraphView {
     bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     focus: FocusHandle,
     colors: SemanticColors,
+    /// Room the host keeps at the top-right for its own pane controls.
+    trailing_inset: f32,
     _observe: gpui::Subscription,
 }
 
@@ -337,6 +339,7 @@ impl NoteGraphView {
             bounds: Default::default(),
             focus: cx.focus_handle(),
             colors,
+            trailing_inset: 0.0,
             _observe: observe,
         };
         view.rebuild(cx);
@@ -345,6 +348,10 @@ impl NoteGraphView {
 
     pub(crate) fn set_colors(&mut self, colors: SemanticColors) {
         self.colors = colors;
+    }
+
+    pub(crate) fn set_trailing_inset(&mut self, inset: f32) {
+        self.trailing_inset = inset.max(0.0);
     }
 
     pub(crate) fn set_center(&mut self, center: &str, cx: &mut Context<Self>) {
@@ -759,7 +766,7 @@ impl Render for NoteGraphView {
             .absolute()
             .top(px(12.0))
             .left(px(16.0))
-            .right(px(12.0))
+            .right(px(12.0 + self.trailing_inset))
             .flex()
             .items_center()
             .justify_between()

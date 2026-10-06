@@ -5407,7 +5407,9 @@ impl Render for TerminalPane {
                 Some((Some(wanted), _)) if *wanted != note_id => None,
                 _ => self.pending_note_block.take().map(|(_, block)| block),
             };
+            let inset = self.header_trailing_inset;
             pane.update(cx, |pane, cx| {
+                pane.set_trailing_inset(inset, cx);
                 pane.show(&session, &note_id, window, cx);
                 if let Some(block) = reveal {
                     pane.reveal_block(block, window, cx);
