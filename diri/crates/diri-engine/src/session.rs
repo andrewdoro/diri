@@ -105,6 +105,13 @@ const LAUNCH_FALLBACK: Duration = Duration::from_millis(400);
 /// width. The Swift daemon's `scheduleDebouncedLaunch` delay.
 const LAUNCH_DEBOUNCE: Duration = Duration::from_millis(120);
 
+/// Outlasts the Holder's 10 s wait for a launchd job to call back
+/// (`diri_pty::detached`), after which it starts the Agent directly.
+const HOLDER_READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long a launch given up on still watches for its Holder to come up.
+const LATE_HOLDER_WATCH: Duration = Duration::from_secs(60);
+
 /// Quiet time between a submitted prompt's paste and its Enter. Gemini CLI
 /// turns an Enter that lands within 40 ms of an untrusted paste into a
 /// newline (paste protection, re-armed on its next React render), so at the
@@ -2026,6 +2033,7 @@ impl Session {
                             Ok(ready) => ready,
                             Err(error) => {
                                 mark_launch_failed(&shared, "holder_wait", &error);
+                                stop_late_holder(&shared, &client);
                                 return;
                             }
                         };
@@ -3438,7 +3446,11 @@ fn wait_for_holder(
     session_id: &str,
     pre_spawn_tail: u64,
 ) -> Result<(u64, Option<HolderStat>), crate::holder::HolderError> {
-    for delay in crate::holder::readiness_delays().take(300) {
+    let deadline = Instant::now() + HOLDER_READY_TIMEOUT;
+    for delay in crate::holder::readiness_delays() {
+        if Instant::now() >= deadline {
+            break;
+        }
         if let Ok(stat) = client.stat() {
             return Ok((stat.epoch_offset.unwrap_or(pre_spawn_tail), Some(stat)));
         }
@@ -3453,6 +3465,24 @@ fn wait_for_holder(
     Err(crate::holder::HolderError::Launch(
         "holder did not become ready".into(),
     ))
+}
+
+/// A Holder that answers after its launch was given up on runs an Agent no
+/// tab shows: stop it, unless the session was dropped or replaced first.
+fn stop_late_holder(shared: &Shared, client: &HolderClient) {
+    let deadline = Instant::now() + LATE_HOLDER_WATCH;
+    while Instant::now() < deadline && !shared.stop.load(Ordering::SeqCst) {
+        if client.is_alive() {
+            let stopped = client.kill_tree().is_ok();
+            diri_telemetry::incident!(
+                "session.late_holder_stopped",
+                session = diri_telemetry::id(&shared.id),
+                stopped = stopped,
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn holder_io_error(error: crate::holder::HolderError) -> std::io::Error {

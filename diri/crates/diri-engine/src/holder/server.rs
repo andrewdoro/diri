@@ -1157,6 +1157,19 @@ fn wait_for_detached_exit(leader: &DetachedLeader, pid: i32) -> diri_pty::Exit {
     diri_pty::Exit::Code(255)
 }
 
+/// How long Agents start directly after a launchd handoff timed out, so a
+/// launchd that stopped running jobs costs one tab the wait, not every tab.
+#[cfg(target_os = "macos")]
+const DETACHED_RETRY_AFTER: Duration = Duration::from_secs(600);
+
+#[cfg(target_os = "macos")]
+static DETACHED_TIMED_OUT_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+fn detached_allowed(timed_out_at: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    timed_out_at.is_none_or(|at| now.saturating_duration_since(at) >= DETACHED_RETRY_AFTER)
+}
+
 /// Starts the Agent through `launcher` when there is one, else (and whenever
 /// the launcher provably started nothing) as this process's child.
 fn spawn_agent(
@@ -1167,6 +1180,14 @@ fn spawn_agent(
     #[cfg(target_os = "macos")]
     if let Some(launcher) = launcher {
         let started = std::time::Instant::now();
+        let timed_out_at = *DETACHED_TIMED_OUT_AT.lock().expect("detached timeout");
+        if !detached_allowed(timed_out_at, started) {
+            diri_telemetry::debug_event!(
+                "holder.detached_skipped",
+                session = diri_telemetry::id(session_id),
+            );
+            return Pty::spawn(spec);
+        }
         match diri_pty::detached::spawn(spec, launcher) {
             Ok(pty) => {
                 diri_telemetry::event!(
@@ -1179,10 +1200,15 @@ fn spawn_agent(
             Err(diri_pty::detached::DetachedError::Spawn(error)) => return Err(error),
             Err(diri_pty::detached::DetachedError::Unavailable(error)) => {
                 eprintln!("diri-holder: detached launch unavailable, spawning directly: {error}");
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    *DETACHED_TIMED_OUT_AT.lock().expect("detached timeout") =
+                        Some(std::time::Instant::now());
+                }
                 diri_telemetry::incident!(
                     "holder.detached_unavailable",
                     session = diri_telemetry::id(session_id),
                     io = diri_telemetry::io_error(&error),
+                    ms = started.elapsed(),
                 );
             }
         }
@@ -1236,6 +1262,16 @@ fn set_nonblocking(fd: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_timed_out_launchd_handoff_starts_agents_directly_until_the_retry() {
+        let at = std::time::Instant::now();
+        assert!(detached_allowed(None, at));
+        assert!(!detached_allowed(Some(at), at));
+        assert!(!detached_allowed(Some(at), at + DETACHED_RETRY_AFTER / 2));
+        assert!(detached_allowed(Some(at), at + DETACHED_RETRY_AFTER));
+    }
 
     #[test]
     fn a_missing_exit_watcher_never_reads_a_live_agent_as_exited() {

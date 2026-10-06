@@ -157,6 +157,7 @@ recorded by the Engine, not the Holder.
 | `session.resume` | info | `session, agent, decision, conv, recorded_conv, transcript, host, status, exit_reason, archived` | resume decisions: `resume_verified` (transcript found), `resume` (id not verified), `fresh_unwritten` (Claude never wrote it; started fresh), `no_conversation`, `remote`, `already_live`; `exit_reason` is `system_restart` for a session a reboot ended |
 | `session.launch` | info | `session, agent, transport: held_deferred\|held\|direct\|remote, ms` | every Session start, including resume, fork and account relaunches |
 | `session.launch_failed` | incident | `session, agent, transport, stage: spawn\|holder_launch\|holder_wait, io\|kind, ms` | spawns that never produced a child (holder missing, manager down, exec errno) |
+| `session.late_holder_stopped` | incident | `session, stopped` | a Holder that came up within 60 s after its `holder_wait` launch failure was stopped, so its Agent does not run with no tab |
 | `session.exec` | debug | `session, defer_ms, ms, cols, rows` | a deferred launch waiting on the first client size |
 | `session.status` | debug | `session, from, to` | status transitions (`starting, idle, working, needs_input, exited, unknown`) |
 | `session.exit` | info | `session, agent, code, signal, requested, runtime_s, adopted, modes` | how every PTY child ended; `requested` distinguishes kills from crashes |
@@ -232,7 +233,8 @@ recorded by the Engine, not the Holder.
 | `holder.spawn` | info | `session, cols, rows, ms` | the PTY child the Holder started |
 | `holder.spawn_failed` | incident | `session, io` | PTY spawn/exec failures with errno |
 | `holder.detached_spawn` | info | `session, ms` | macOS: an Agent started as a launchd job of its own (its own process coalition) and how long the handoff took |
-| `holder.detached_unavailable` | incident | `session, io` | macOS: the launchd handoff provably started nothing, so the Agent became the manager's child (and shares its coalition) |
+| `holder.detached_unavailable` | incident | `session, io, ms` | macOS: the launchd handoff provably started nothing, so the Agent became the manager's child (and shares its coalition); a timeout (`io` TimedOut) starts Agents directly for the next 10 min |
+| `holder.detached_skipped` | debug | `session` | macOS: an Agent started directly because a launchd handoff timed out in the last 10 min |
 | `holder.exit` | info | `session, code, signal, runtime_s` | the child's exit as the Holder reaped it |
 | `holder.subscriber_dropped` | warn | `session, offset` | an Engine output subscriber too slow to keep up (it falls back to the log) |
 
