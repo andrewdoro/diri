@@ -11,7 +11,8 @@
 //! only the process-listing syscalls differ per platform (libproc on macOS,
 //! `/proc` on Linux).
 
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use super::protocol::HolderProcessSample;
@@ -136,8 +137,7 @@ fn walk(all: &[Observed], seeds: Vec<i32>) -> Vec<HolderProcessSample> {
 ///
 /// `SIGSTOP` converges: stopping the root can race children that fork before
 /// the stop lands, so the walk repeats until every member is observed stopped.
-/// `SIGCONT` resumes children before their parents and the root's group
-/// last (see [`children_first`]).
+/// `SIGCONT` is [`resume`] with nothing frozen.
 pub fn signal(root: i32, signal: i32) -> Vec<HolderProcessSample> {
     if signal == libc::SIGSTOP {
         // SAFETY: plain kill(2).
@@ -164,16 +164,7 @@ pub fn signal(root: i32, signal: i32) -> Vec<HolderProcessSample> {
     }
 
     if signal == libc::SIGCONT {
-        let table = ProcessTable::capture();
-        let tree = enumerate_in(&table, root);
-        for sample in children_first(&table.0, root, &tree) {
-            if start_time(sample.pid) == Some(sample.start_sec) {
-                // SAFETY: identity just re-verified; plain kill(2).
-                unsafe { libc::kill(sample.pid, signal) };
-            }
-        }
-        signal_group(root, signal);
-        return tree;
+        return resume(root, &[]);
     }
 
     let tree = enumerate(root);
@@ -187,13 +178,44 @@ pub fn signal(root: i32, signal: i32) -> Vec<HolderProcessSample> {
     tree
 }
 
-/// The order a hibernated tree resumes in: deepest first, the root last.
+/// Continues the tree under `root`, children before parents and the root's
+/// group last; returns the processes continued.
 ///
 /// A job-control shell resumed while its foreground job is still stopped
 /// reaps that job as suspended (`zsh: suspended (signal)`), takes the
 /// terminal back and prints its prompt; the agent, continued a moment later,
 /// is then a background job that stops again on its next terminal write, and
 /// any mouse tracking it enabled keeps reporting into the shell's line.
+///
+/// `frozen` is what the hibernation stopped. Members of it the walk no longer
+/// reaches — their parent died while they were stopped, and they left the
+/// group — are continued first: nothing else would ever continue them.
+///
+/// Stopping keeps the opposite order, the root first: a shell still running
+/// while its job stops would take the terminal at once rather than on wake.
+pub fn resume(root: i32, frozen: &[HolderProcessSample]) -> Vec<HolderProcessSample> {
+    let table = ProcessTable::capture();
+    let tree = enumerate_in(&table, root);
+    let members: HashSet<i32> = tree.iter().map(|sample| sample.pid).collect();
+    let mut order: Vec<HolderProcessSample> = frozen
+        .iter()
+        .filter(|sample| !members.contains(&sample.pid))
+        .copied()
+        .collect();
+    order.sort_by_key(|sample| Reverse(sample.start_sec));
+    order.extend(children_first(&table.0, root, &tree));
+    for sample in &order {
+        if start_time(sample.pid) == Some(sample.start_sec) {
+            // SAFETY: identity just re-verified; plain kill(2).
+            unsafe { libc::kill(sample.pid, libc::SIGCONT) };
+        }
+    }
+    signal_group(root, libc::SIGCONT);
+    order.extend(tree.iter().filter(|sample| sample.pid == root));
+    order
+}
+
+/// `tree` without the root, deepest first; newest first within a depth.
 /// Depth comes from parentage, not start time: a shell and the agent it
 /// launches usually share a start second.
 fn children_first(
@@ -202,7 +224,7 @@ fn children_first(
     tree: &[HolderProcessSample],
 ) -> Vec<HolderProcessSample> {
     let members: HashSet<i32> = tree.iter().map(|sample| sample.pid).collect();
-    let parents: std::collections::HashMap<i32, i32> = all
+    let parents: HashMap<i32, i32> = all
         .iter()
         .filter(|process| members.contains(&process.pid) && members.contains(&process.ppid))
         .map(|process| (process.pid, process.ppid))
@@ -218,8 +240,12 @@ fn children_first(
         }
         depth
     };
-    let mut ordered = tree.to_vec();
-    ordered.sort_by_cached_key(|sample| (sample.pid == root, std::cmp::Reverse(depth(sample.pid))));
+    let mut ordered: Vec<HolderProcessSample> = tree
+        .iter()
+        .filter(|sample| sample.pid != root)
+        .copied()
+        .collect();
+    ordered.sort_by_cached_key(|sample| (Reverse(depth(sample.pid)), Reverse(sample.start_sec)));
     ordered
 }
 
@@ -612,16 +638,18 @@ mod tests {
             stopped: true,
         };
         // `zsh -i` (root) running `claude` as its own job, Claude's MCP
-        // server under it, and a background job of the shell's. The shell
-        // and Claude share a start second, as they do in practice.
+        // server under it, and two background jobs of the shell's, one
+        // started later. The shell and Claude share a start second, as they
+        // do in practice.
         let table = [
             process(100, 1, 100, 5),
             process(101, 100, 101, 5),
             process(102, 101, 101, 6),
-            process(103, 100, 100, 5),
+            process(103, 100, 100, 6),
+            process(104, 100, 104, 9),
             process(200, 1, 200, 7),
         ];
-        let tree: Vec<HolderProcessSample> = [100, 103, 101, 102]
+        let tree: Vec<HolderProcessSample> = [100, 103, 104, 101, 102]
             .into_iter()
             .map(|pid| HolderProcessSample {
                 pid,
@@ -633,17 +661,9 @@ mod tests {
             .iter()
             .map(|sample| sample.pid)
             .collect();
-        let position = |pid| order.iter().position(|&p| p == pid).unwrap();
 
-        assert_eq!(order.len(), 4, "{order:?}");
-        assert_eq!(
-            order.last(),
-            Some(&100),
-            "the shell resumes last: {order:?}"
-        );
-        assert!(position(102) < position(101), "{order:?}");
-        assert!(position(101) < position(100), "{order:?}");
-        assert!(position(103) < position(100), "{order:?}");
+        // The shell itself is left to `resume`, which continues its group last.
+        assert_eq!(order, [102, 104, 103, 101], "deepest, then newest, first");
     }
 
     #[test]

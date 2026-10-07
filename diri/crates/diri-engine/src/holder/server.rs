@@ -880,7 +880,12 @@ fn handle(shared: &Shared, request: &HolderRequest) -> HolderResult<HolderRespon
                     "signal requires a valid sig".into(),
                 ));
             }
-            let tree = process_tree::signal(shared.child_pid, signal);
+            let tree = if signal == libc::SIGCONT {
+                let frozen = shared.frozen.lock().expect("frozen").clone();
+                process_tree::resume(shared.child_pid, &frozen)
+            } else {
+                process_tree::signal(shared.child_pid, signal)
+            };
             if matches!(signal, libc::SIGSTOP | libc::SIGCONT) {
                 let mut frozen = shared.frozen.lock().expect("frozen");
                 if let Some(guard) = &shared.guard {
@@ -1669,6 +1674,8 @@ mod tests {
         spec.argv = vec!["/bin/zsh".into(), "-f".into(), "-i".into()];
         let client = HolderClient::new(&spec.socket_path);
         let server = std::thread::spawn(move || HolderServer::run(spec));
+        // A timed-out wait must not leave zsh and 150 stopped sleeps behind.
+        let _cleanup = KillTreeOnDrop(&client);
         wait_until("holder ready", || client.is_alive());
         client
             .write(
@@ -1691,15 +1698,109 @@ mod tests {
                 process_state(job).is_some_and(|state| state.starts_with('T'))
             });
             client.signal(libc::SIGCONT).expect("wake");
-            std::thread::sleep(Duration::from_millis(50));
-            let state = process_state(job).unwrap_or_default();
-            (!state.contains('+') || state.starts_with('T')).then_some((round, state))
+            // There is no event for "zsh left it alone", so watch long
+            // enough for a loaded zsh to have reaped the job and taken the
+            // terminal if it was going to.
+            let deadline = std::time::Instant::now() + Duration::from_millis(250);
+            loop {
+                let state = process_state(job).unwrap_or_default();
+                if !state.contains('+') || state.starts_with('T') {
+                    break Some((round, state));
+                }
+                if std::time::Instant::now() >= deadline {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
         });
 
         client.kill_tree().expect("kill-tree");
         wait_until("holder finished", || server.is_finished());
         server.join().expect("join").expect("clean holder exit");
         assert_eq!(taken, None, "the shell took the terminal from its job");
+    }
+
+    /// A hibernated agent's helper that left the group (an MCP watchdog in
+    /// its own session) loses its parent while stopped, so the wake's walk
+    /// from the leader no longer reaches it. The wake must still continue
+    /// it: it was frozen, and after the wake nothing remembers it.
+    #[test]
+    fn a_wake_continues_a_frozen_process_the_tree_lost() {
+        let root = tempfile::tempdir().unwrap();
+        let pids = root.path().join("pids");
+        let agent = root.path().join("agent.sh");
+        std::fs::write(
+            &agent,
+            format!(
+                "perl -e 'use POSIX; POSIX::setsid(); sleep 1000' &\n\
+                 echo $$ $! > {pids}.tmp && mv {pids}.tmp {pids}\n\
+                 wait\n",
+                pids = pids.display()
+            ),
+        )
+        .unwrap();
+        let spec = held(
+            root.path(),
+            "s_lost",
+            &format!("/bin/sh {}", agent.display()),
+        );
+        let client = HolderClient::new(&spec.socket_path);
+        let server = std::thread::spawn(move || HolderServer::run(spec));
+        let _cleanup = KillTreeOnDrop(&client);
+        wait_until("holder ready", || client.is_alive());
+        let mut tree = Vec::new();
+        wait_until("agent tree", || {
+            tree = read_pids(&pids).unwrap_or_default();
+            tree.len() == 2
+        });
+        let (agent, helper) = (tree[0], tree[1]);
+        let _helper = KillOnDrop(helper);
+        wait_until("helper in its own session", || {
+            // SAFETY: getpgid on a pid we started; read-only.
+            unsafe { libc::getpgid(helper) == helper }
+        });
+
+        client.signal(libc::SIGSTOP).expect("hibernate");
+        wait_until("helper stopped", || {
+            process_state(helper).is_some_and(|state| state.starts_with('T'))
+        });
+        // SAFETY: plain kill(2) on this test's own process.
+        unsafe { libc::kill(agent, libc::SIGKILL) };
+        wait_until("helper orphaned", || {
+            // SAFETY: plain kill(2) probe of this test's own process.
+            dead(agent) && unsafe { libc::kill(helper, 0) } == 0
+        });
+
+        client.signal(libc::SIGCONT).expect("wake");
+        wait_until("helper continued", || {
+            process_state(helper).is_some_and(|state| !state.starts_with('T'))
+        });
+
+        client.kill_tree().expect("kill-tree");
+        wait_until("holder finished", || server.is_finished());
+        server.join().expect("join").expect("clean holder exit");
+    }
+
+    /// Kills a test's held tree if the test panics before its own cleanup.
+    struct KillTreeOnDrop<'a>(&'a HolderClient);
+
+    impl Drop for KillTreeOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.kill_tree();
+        }
+    }
+
+    /// Kills a process the held tree no longer reaches.
+    struct KillOnDrop(i32);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            // SAFETY: cleanup of this test's own process.
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+                libc::kill(self.0, libc::SIGCONT);
+            }
+        }
     }
 
     /// The Codex shape that leaked on a real machine: `fish -c codex` leads the
