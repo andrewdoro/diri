@@ -1654,6 +1654,54 @@ mod tests {
         }
     }
 
+    /// A terminal tab: interactive zsh running an agent as its foreground
+    /// job, and the agent's own children (MCP servers, tool shells) started
+    /// after it. Every wake must leave the agent in the foreground; a zsh
+    /// that resumes first reaps it as suspended and takes the tab, and the
+    /// agent's mouse tracking then types into the prompt. macOS-only because
+    /// `/bin/zsh` is the default shell there.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_woken_job_control_shell_keeps_its_job_in_the_foreground() {
+        let root = tempfile::tempdir().unwrap();
+        let pids = root.path().join("pids");
+        let mut spec = held(root.path(), "s_job", "");
+        spec.argv = vec!["/bin/zsh".into(), "-f".into(), "-i".into()];
+        let client = HolderClient::new(&spec.socket_path);
+        let server = std::thread::spawn(move || HolderServer::run(spec));
+        wait_until("holder ready", || client.is_alive());
+        client
+            .write(
+                format!(
+                    "/bin/sh -c 'i=0; while [ $i -lt 150 ]; do sleep 1000 & i=$((i+1)); done; echo $$ > {pids}.tmp && mv {pids}.tmp {pids} && wait'\n",
+                    pids = pids.display()
+                )
+                .as_bytes(),
+            )
+            .expect("start the job");
+        let mut job = 0;
+        wait_until("job running", || {
+            job = read_pids(&pids).map_or(0, |pids| pids[0]);
+            job > 0 && process_state(job).is_some_and(|state| state.contains('+'))
+        });
+
+        let taken = (0..20).find_map(|round| {
+            client.signal(libc::SIGSTOP).expect("hibernate");
+            wait_until("job stopped", || {
+                process_state(job).is_some_and(|state| state.starts_with('T'))
+            });
+            client.signal(libc::SIGCONT).expect("wake");
+            std::thread::sleep(Duration::from_millis(50));
+            let state = process_state(job).unwrap_or_default();
+            (!state.contains('+') || state.starts_with('T')).then_some((round, state))
+        });
+
+        client.kill_tree().expect("kill-tree");
+        wait_until("holder finished", || server.is_finished());
+        server.join().expect("join").expect("clean holder exit");
+        assert_eq!(taken, None, "the shell took the terminal from its job");
+    }
+
     /// The Codex shape that leaked on a real machine: `fish -c codex` leads the
     /// session, codex's node wrapper forwards TERM/HUP to the native binary and
     /// waits for it, and the agent has a helper that left the group (Codex's

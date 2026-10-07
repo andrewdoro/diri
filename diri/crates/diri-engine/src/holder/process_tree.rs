@@ -136,8 +136,8 @@ fn walk(all: &[Observed], seeds: Vec<i32>) -> Vec<HolderProcessSample> {
 ///
 /// `SIGSTOP` converges: stopping the root can race children that fork before
 /// the stop lands, so the walk repeats until every member is observed stopped.
-/// `SIGCONT` resumes newest-first so children are running before their
-/// parents resume and observe them.
+/// `SIGCONT` resumes children before their parents and the root's group
+/// last (see [`children_first`]).
 pub fn signal(root: i32, signal: i32) -> Vec<HolderProcessSample> {
     if signal == libc::SIGSTOP {
         // SAFETY: plain kill(2).
@@ -163,19 +163,64 @@ pub fn signal(root: i32, signal: i32) -> Vec<HolderProcessSample> {
             .collect();
     }
 
-    let tree = enumerate(root);
-    let mut ordered = tree.clone();
     if signal == libc::SIGCONT {
-        ordered.sort_by_key(|sample| std::cmp::Reverse(sample.start_sec));
+        let table = ProcessTable::capture();
+        let tree = enumerate_in(&table, root);
+        for sample in children_first(&table.0, root, &tree) {
+            if start_time(sample.pid) == Some(sample.start_sec) {
+                // SAFETY: identity just re-verified; plain kill(2).
+                unsafe { libc::kill(sample.pid, signal) };
+            }
+        }
+        signal_group(root, signal);
+        return tree;
     }
+
+    let tree = enumerate(root);
     signal_group(root, signal);
-    for sample in &ordered {
+    for sample in &tree {
         if start_time(sample.pid) == Some(sample.start_sec) {
             // SAFETY: identity just re-verified; plain kill(2).
             unsafe { libc::kill(sample.pid, signal) };
         }
     }
     tree
+}
+
+/// The order a hibernated tree resumes in: deepest first, the root last.
+///
+/// A job-control shell resumed while its foreground job is still stopped
+/// reaps that job as suspended (`zsh: suspended (signal)`), takes the
+/// terminal back and prints its prompt; the agent, continued a moment later,
+/// is then a background job that stops again on its next terminal write, and
+/// any mouse tracking it enabled keeps reporting into the shell's line.
+/// Depth comes from parentage, not start time: a shell and the agent it
+/// launches usually share a start second.
+fn children_first(
+    all: &[Observed],
+    root: i32,
+    tree: &[HolderProcessSample],
+) -> Vec<HolderProcessSample> {
+    let members: HashSet<i32> = tree.iter().map(|sample| sample.pid).collect();
+    let parents: std::collections::HashMap<i32, i32> = all
+        .iter()
+        .filter(|process| members.contains(&process.pid) && members.contains(&process.ppid))
+        .map(|process| (process.pid, process.ppid))
+        .collect();
+    let depth = |pid: i32| {
+        let mut depth = 0;
+        let mut current = pid;
+        while let Some(&parent) = parents.get(&current)
+            && depth < members.len()
+        {
+            depth += 1;
+            current = parent;
+        }
+        depth
+    };
+    let mut ordered = tree.to_vec();
+    ordered.sort_by_cached_key(|sample| (sample.pid == root, std::cmp::Reverse(depth(sample.pid))));
+    ordered
 }
 
 /// Kills whatever outlived the session leader. Call it after the leader has
@@ -555,6 +600,50 @@ mod tests {
             kill_tree(root);
             let _ = child.wait();
         }
+    }
+
+    #[test]
+    fn a_hibernated_shell_resumes_after_the_job_it_is_waiting_on() {
+        let process = |pid, ppid, pgid, start_sec| Observed {
+            pid,
+            ppid,
+            pgid,
+            start_sec,
+            stopped: true,
+        };
+        // `zsh -i` (root) running `claude` as its own job, Claude's MCP
+        // server under it, and a background job of the shell's. The shell
+        // and Claude share a start second, as they do in practice.
+        let table = [
+            process(100, 1, 100, 5),
+            process(101, 100, 101, 5),
+            process(102, 101, 101, 6),
+            process(103, 100, 100, 5),
+            process(200, 1, 200, 7),
+        ];
+        let tree: Vec<HolderProcessSample> = [100, 103, 101, 102]
+            .into_iter()
+            .map(|pid| HolderProcessSample {
+                pid,
+                start_sec: table.iter().find(|p| p.pid == pid).unwrap().start_sec,
+            })
+            .collect();
+
+        let order: Vec<i32> = children_first(&table, 100, &tree)
+            .iter()
+            .map(|sample| sample.pid)
+            .collect();
+        let position = |pid| order.iter().position(|&p| p == pid).unwrap();
+
+        assert_eq!(order.len(), 4, "{order:?}");
+        assert_eq!(
+            order.last(),
+            Some(&100),
+            "the shell resumes last: {order:?}"
+        );
+        assert!(position(102) < position(101), "{order:?}");
+        assert!(position(101) < position(100), "{order:?}");
+        assert!(position(103) < position(100), "{order:?}");
     }
 
     #[test]
